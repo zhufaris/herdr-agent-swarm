@@ -67,6 +67,8 @@ Lark long connection
         +----> HerdrAdapter ----> local Herdr CLI/socket API
         |
         +----> TraexRuntime ----> traex in a Herdr pane
+        |
+        +----> Node EventEmitter -> TopicViewReducer -> CardRenderer
 ```
 
 ### 4.1 `LarkAdapter`
@@ -116,6 +118,7 @@ SQLite is the durable coordination source. It runs in WAL mode and stores:
 - Per-binding prompt queue and delivery state.
 - Bridge-originated Lark message IDs for loop prevention.
 - Audit events with Lark user identity, action, target, outcome, and timestamp.
+- A persisted snapshot of each topic's current card projection.
 
 ### 4.5 `SyncCoordinator`
 
@@ -126,6 +129,22 @@ Responsibilities:
 - Recover pending work after restart.
 - Attach an origin to every mutation (`lark`, `herdr`, or `bridge`) to prevent rename and message loops.
 - Reconcile persisted state before accepting new events.
+
+### 4.6 Unified Events and Card Projection
+
+Every meaningful Lark, Herdr, TraeX, queue, and lifecycle change is normalized into one `BridgeEvent` union and published through a typed Node.js `EventEmitter`. Event payloads carry `eventId`, `bindingId`, `occurredAt`, `origin`, and a type-specific payload.
+
+The Lark card is an event projection, not coordinator-owned mutable JSON:
+
+```text
+external input -> BridgeEvent -> Node.js EventEmitter -> TopicViewReducer
+                                                        -> TopicViewState
+                                                        -> SQLite snapshot
+                                                        -> CardRenderer
+                                                        -> Lark card upsert
+```
+
+`TopicViewReducer` is pure and deterministic. `CardRenderer` is also pure and only converts that state into CardKit 2.0 JSON. Neither component calls Lark, Herdr, SQLite, clocks, or random generators. SQLite does not implement event sourcing: it stores the latest topic-view snapshot together with bindings, queues, deduplication records, card message IDs, and audit data. At restart, the snapshot is loaded and then corrected against current Herdr state.
 
 ## 5. Binding State Model
 
@@ -189,7 +208,11 @@ For each turn:
 5. Mark the queue item complete only after its Lark response has been acknowledged or a durable delivery failure has been recorded.
 6. Submit the next queued prompt.
 
+Each step emits a domain event such as `PromptQueued`, `TurnStarted`, `AgentStateChanged`, `TurnCompleted`, `TurnFailed`, `BindingArchived`, or `BindingOrphaned`. The current run card is re-rendered only from the reducer's projected state.
+
 The MVP publishes final responses rather than terminal output streams. ANSI escape sequences, spinners, tool progress, and duplicated terminal history are never forwarded as the answer. If the runtime cannot identify a reliable final response, it posts a short fallback telling the user to inspect the Herdr pane instead of publishing guessed or truncated content.
+
+The card uses CardKit 2.0 and follows a single-card lifecycle: the same status card is updated for queued, running, blocked, done, error, archived, and orphaned states. Its compact metadata row shows workspace, pane, and queue depth; the primary body contains only a reliable final answer or actionable status. This interaction shape is informed by `lark-coding-agent-bridge`, but the MVP does not expose a remote stop button or render guessed tool-call details.
 
 Prompts entered locally in a managed Herdr pane are also observed. Their settled final response is published to the bound topic, with deduplication based on the TraeX turn/session identity or a stored output fingerprint.
 
