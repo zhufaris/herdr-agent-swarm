@@ -37,7 +37,7 @@ export function renderProjectSelectorCard(input: { selectionId: string; projects
   };
 }
 
-export function renderProjectSelectionStatusCard(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; topicUrl?: string; message?: string }): object {
+export function renderProjectSelectionStatusCard(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; bindingId?: string; message?: string }): object {
   const views = {
     processing: { title: "正在创建项目 Pane", template: "blue", icon: "⏳" },
     recoverable: { title: "项目创建已暂停", template: "orange", icon: "⚠" },
@@ -49,17 +49,17 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
   const view = views[input.status];
   const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请打开群里的新项目卡片，并在其话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
   const elements: object[] = [{ tag: "markdown", content: details || view.title }];
-  if (input.status === "completed" && input.topicUrl) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", url: input.topicUrl });
+  if (input.status === "completed" && input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
-export function renderAttachStatusCard(input: { spaceName: string; paneId: string; topicUrl?: string; alreadyAttached?: boolean }): object {
+export function renderAttachStatusCard(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean }): object {
   const title = input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
   const elements: object[] = [{
     tag: "markdown",
     content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。"}`
   }];
-  if (input.topicUrl) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", url: input.topicUrl });
+  if (input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: title } },

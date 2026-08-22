@@ -1,15 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const createMessage = vi.fn();
+const getMessage = vi.fn();
+const forwardThread = vi.fn();
 vi.mock("@larksuiteoapi/node-sdk", () => ({
-  Client: class { im = { v1: { message: { create: createMessage } } }; },
+  Client: class { im = { v1: { message: { create: createMessage, get: getMessage }, thread: { forward: forwardThread } } }; },
   WSClient: class { async start() {} close() {} },
   EventDispatcher: class { register() { return this; } }
 }));
 
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
-beforeEach(() => createMessage.mockReset());
+beforeEach(() => { createMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); });
 
 describe("Lark topic creation", () => {
   it("passes a stable idempotency key to message.create", async () => {
@@ -21,6 +23,30 @@ describe("Lark topic creation", () => {
       params: { receive_id_type: "chat_id" },
       data: { receive_id: "chat", msg_type: "interactive", content: JSON.stringify({ schema: "2.0" }), uuid: "binding-1" }
     });
+  });
+});
+
+describe("Lark topic sharing", () => {
+  it("resolves a root message to its thread and forwards the native topic card", async () => {
+    getMessage.mockResolvedValue({ data: { items: [{ message_id: "om_root", thread_id: "omt_thread" }] } });
+    forwardThread.mockResolvedValue({ data: { message_id: "om_forwarded" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.shareThread("om_root", "oc_target")).resolves.toEqual({ messageId: "om_forwarded" });
+    expect(getMessage).toHaveBeenCalledWith({ path: { message_id: "om_root" } });
+    expect(forwardThread).toHaveBeenCalledWith({
+      path: { thread_id: "omt_thread" }, params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_target" }
+    });
+  });
+
+  it("forwards a persisted thread id without another lookup", async () => {
+    forwardThread.mockResolvedValue({ data: { message_id: "om_forwarded" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await adapter.shareThread("omt_thread", "oc_target");
+
+    expect(getMessage).not.toHaveBeenCalled();
+    expect(forwardThread).toHaveBeenCalledWith(expect.objectContaining({ path: { thread_id: "omt_thread" } }));
   });
 });
 

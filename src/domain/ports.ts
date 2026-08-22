@@ -1,4 +1,4 @@
-import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
+import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -11,6 +11,7 @@ export interface LarkPort {
   createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }>;
   replyText(rootMessageId: string, text: string): Promise<{ messageId: string }>;
   replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }>;
+  shareThread(topicOrRootMessageId: string, chatId: string): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
 }
 
@@ -33,6 +34,9 @@ export interface HerdrPort {
 
 export interface BindingStorePort {
   close(): void;
+  acquireInstanceLease(ownerId: string, now: string, expiresAt: string): InstanceLease | null;
+  renewInstanceLease(ownerId: string, fencingToken: number, now: string, expiresAt: string): InstanceLease | null;
+  releaseInstanceLease(ownerId: string, fencingToken: number): boolean;
   recordInboundMessage(message: IncomingLarkMessage): boolean;
   claimNextInboundMessage(): IncomingLarkMessage | null;
   markInboundMessageAccepted(eventId: string): void;

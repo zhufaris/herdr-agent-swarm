@@ -37,17 +37,20 @@ describe("attach existing pane command", () => {
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active" });
     expect(createTopic).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(replyCards.at(-1))).toContain("打开项目话题");
-    expect(JSON.stringify(replyCards.at(-1))).toContain("openMessageId=root-attached");
+    expect(JSON.stringify(replyCards.at(-1))).toContain('\"action\":\"open_project_thread\"');
+    expect(JSON.stringify(replyCards.at(-1))).not.toContain("openMessageId");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
   it("attaches an eligible pane without mutating or starting it and is idempotent", async () => {
     let exposePane = false;
+    let onAction: Parameters<LarkPort["start"]>[1];
     const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    const shareThread = vi.fn(async () => ({ messageId: "forwarded-topic" }));
     const replyCards: object[] = [];
     const lark: LarkPort = {
-      async start() {}, async stop() {}, isReady: () => true, createTopic,
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true, createTopic, shareThread,
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { replyCards.push(card); return { messageId: `reply-${replyCards.length}` }; },
       async updateCard() {}
@@ -84,8 +87,15 @@ describe("attach existing pane command", () => {
     expect(JSON.stringify(replyCards.at(-1))).toContain("已经连接");
     expect(JSON.stringify(replyCards.at(-1))).toContain("w5:p3G");
     expect(JSON.stringify(replyCards.at(-1))).toContain("打开项目话题");
-    expect(JSON.stringify(replyCards.at(-1))).toContain("openMessageId=root-attached");
+    const response = JSON.stringify(replyCards.at(-1));
+    expect(response).toContain('\"action\":\"open_project_thread\"');
+    expect(response).not.toContain("openMessageId");
+    expect(response).not.toContain("client/chat/open");
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ statusMessageId: "root-attached" });
+
+    const button = findActionButton(replyCards.at(-1)!, "open_project_thread");
+    await onAction!({ messageId: "reply-2", chatId: "chat", operatorOpenId: "user-1", value: button.value });
+    expect(shareThread).toHaveBeenCalledWith("topic-attached", "chat");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -263,4 +273,11 @@ function config(): BridgeConfig {
 
 function command(index: number, pane = "w5:p3G") {
   return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId: "user", text: `/herdr attach datasage_semantic_knowledge ${pane}`, mentionsBot: true, isRootMessage: true };
+}
+
+function findActionButton(card: object, action: string): { value: unknown } {
+  const elements = (card as { body: { elements: Array<{ value?: { action?: string } }> } }).body.elements;
+  const button = elements.find((element) => element.value?.action === action);
+  if (!button) throw new Error(`Missing action button: ${action}`);
+  return { value: button.value };
 }

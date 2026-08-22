@@ -114,6 +114,16 @@ export class SyncCoordinator {
 
   async handleCardAction(action: IncomingLarkCardAction): Promise<void> {
     if (action.chatId !== this.config.lark.chatId) return;
+    const openThread = parseOpenThreadAction(action.value);
+    if (openThread) {
+      const binding = this.store.listBindings().find((item) => item.id === openThread.bindingId);
+      if (!binding || binding.chatId !== action.chatId) return;
+      const topicOrRootMessageId = binding.topicId ?? binding.rootMessageId;
+      if (!topicOrRootMessageId) return;
+      await this.lark.shareThread(topicOrRootMessageId, action.chatId);
+      this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
+      return;
+    }
     const value = parseProjectAction(action.value);
     if (!value) return;
     const claim = this.store.claimProjectSelection({
@@ -536,7 +546,7 @@ export class SyncCoordinator {
 
   private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> {
     const pane = binding.paneId ? { paneId: binding.paneId } : {};
-    const navigation = binding.rootMessageId ? { topicUrl: larkTopicUrl(binding.chatId, binding.rootMessageId) } : {};
+    const navigation = binding.rootMessageId ? { bindingId: binding.id } : {};
     await this.channelPublisher.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, renderProjectSelectionStatusCard({
       status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...navigation, ...pane
     }));
@@ -831,11 +841,11 @@ export class SyncCoordinator {
 
   private async publishAttachSuccess(message: IncomingLarkMessage, binding: Binding, spaceName: string, alreadyAttached: boolean): Promise<void> {
     if (!binding.paneId) return;
-    const topicUrl = binding.rootMessageId ? larkTopicUrl(binding.chatId, binding.rootMessageId) : undefined;
+    const bindingId = binding.rootMessageId ? binding.id : undefined;
     await this.channelPublisher.enqueueCard(
       message.rootMessageId ?? message.messageId,
       `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`,
-      renderAttachStatusCard({ spaceName, paneId: binding.paneId, ...(topicUrl ? { topicUrl } : {}), alreadyAttached })
+      renderAttachStatusCard({ spaceName, paneId: binding.paneId, ...(bindingId ? { bindingId } : {}), alreadyAttached })
     );
   }
 
@@ -937,8 +947,11 @@ function provisioningRecoveryMessage(error: unknown): string {
     : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`;
 }
 function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }
-function larkTopicUrl(chatId: string, rootMessageId: string): string {
-  return `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(chatId)}&openMessageId=${encodeURIComponent(rootMessageId)}`;
+function parseOpenThreadAction(value: unknown): { bindingId: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.action !== "open_project_thread" || typeof candidate.bindingId !== "string") return null;
+  return { bindingId: candidate.bindingId };
 }
 function parseProjectAction(value: unknown): { selectionId: string; projectId: string } | null {
   if (!value || typeof value !== "object") return null;

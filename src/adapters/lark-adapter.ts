@@ -91,11 +91,30 @@ export class LarkSdkAdapter implements LarkPort {
     return { messageId: requireMessageId(response.data?.message_id) };
   }
 
+  async shareThread(topicOrRootMessageId: string, chatId: string): Promise<{ messageId: string }> {
+    const threadId = topicOrRootMessageId.startsWith("omt_")
+      ? topicOrRootMessageId
+      : await this.resolveThreadId(topicOrRootMessageId);
+    const response = await this.client.im.v1.thread.forward({
+      path: { thread_id: threadId },
+      params: { receive_id_type: "chat_id" },
+      data: { receive_id: chatId }
+    });
+    return { messageId: requireMessageId(response.data?.message_id) };
+  }
+
   async updateCard(messageId: string, card: object): Promise<void> {
     await this.client.im.v1.message.patch({
       path: { message_id: messageId },
       data: { content: JSON.stringify(card) }
     });
+  }
+
+  private async resolveThreadId(rootMessageId: string): Promise<string> {
+    const response = await this.client.im.v1.message.get({ path: { message_id: rootMessageId } });
+    const threadId = response.data?.items?.[0]?.thread_id;
+    if (!threadId) throw new Error(`Lark message ${rootMessageId} does not belong to a thread`);
+    return threadId;
   }
 }
 

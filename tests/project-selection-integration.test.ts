@@ -1,5 +1,5 @@
 import pino from "pino";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
@@ -53,12 +53,13 @@ describe("project selection flow", () => {
     const cards: object[] = [];
     const groupCards: object[] = [];
     const updates: object[] = [];
+    const shareThread = vi.fn(async () => ({ messageId: "forwarded-topic-1" }));
     const lark: LarkPort = {
       async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
       async createTopic(card) { groupCards.push(card); return { topicId: "project-topic-1", rootMessageId: "project-root-1" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { cards.push(card); return { messageId: "selector-card-1" }; },
-      async updateCard(_messageId, card) { updates.push(card); }
+      async updateCard(_messageId, card) { updates.push(card); }, shareThread
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
@@ -113,9 +114,16 @@ describe("project selection flow", () => {
     expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
     expect(JSON.stringify(updates.at(-1))).toContain("datasage_semantic_knowledge");
     expect(JSON.stringify(updates.at(-1))).toContain("打开项目话题");
-    expect(JSON.stringify(updates.at(-1))).toContain("openMessageId=project-root-1");
+    const completedCard = updates.at(-1)!;
+    expect(JSON.stringify(completedCard)).toContain('\"action\":\"open_project_thread\"');
+    expect(JSON.stringify(completedCard)).not.toContain("openMessageId");
+    expect(JSON.stringify(completedCard)).not.toContain("client/chat/open");
     expect(JSON.stringify(updates.at(-1))).not.toContain("当前话题");
     expect(JSON.stringify(updates.at(-1))).not.toContain("**Workspace**");
+
+    const openButton = findActionButton(completedCard, "open_project_thread");
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value: openButton.value });
+    expect(shareThread).toHaveBeenCalledWith("project-topic-1", "chat");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -209,5 +217,12 @@ function findProjectButton(card: object, projectId: string): { value: unknown } 
   const elements = (card as { body: { elements: Array<{ value?: { projectId?: string } }> } }).body.elements;
   const button = elements.find((element) => element.value?.projectId === projectId);
   if (!button) throw new Error(`Missing project button: ${projectId}`);
+  return { value: button.value };
+}
+
+function findActionButton(card: object, action: string): { value: unknown } {
+  const elements = (card as { body: { elements: Array<{ value?: { action?: string } }> } }).body.elements;
+  const button = elements.find((element) => element.value?.action === action);
+  if (!button) throw new Error(`Missing action button: ${action}`);
   return { value: button.value };
 }
