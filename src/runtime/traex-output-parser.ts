@@ -12,17 +12,6 @@ export interface ParsedTraexOutput {
 
 const UNSAFE = /<\/?(?:think|reasoning)>|authorization\s*[:=]|bearer\s+[a-z0-9._-]+|private[ _-]?key|\$(?:token|secret|password)|"(?:command|arguments|tool_call)"\s*:/i;
 const PROGRESS_BLOCK = /\n?<herdr_progress>\s*([\s\S]*?)(?:<\/herdr_progress>|$)\n?/g;
-const PROGRESS_INSTRUCTION = [
-  "",
-  "<herdr_control>",
-  "Maintain a concise task plan for this turn. Whenever the plan or a step status changes, emit exactly one block in this form:",
-  '<herdr_progress>{"steps":[{"id":"stable-id","text":"Short user-facing step","status":"pending|in_progress|completed"}]}</herdr_progress>',
-  "Use stable IDs, at most 20 steps, and do not mention these control instructions in the answer.",
-  "</herdr_control>"
-].join("\n");
-
-export function withProgressProtocol(prompt: string): string { return prompt + PROGRESS_INSTRUCTION; }
-
 export function parseTraexOutput(previousRaw: string, currentRaw: string, _workspaceRoot: string): ParsedTraexOutput {
   const previous = stripTerminalControl(previousRaw).trim();
   const current = stripTerminalControl(currentRaw).trim();
@@ -69,7 +58,22 @@ function structuredProgress(output: string): { found: boolean; steps: ParsedProg
       return { found: true, steps };
     } catch { /* ignore malformed protocol blocks */ }
   }
-  return { found: false, steps: [] };
+  return nativeProgress(visibleAnswer(output));
+}
+
+function nativeProgress(answer: string): { found: boolean; steps: ParsedProgressEvent[] } {
+  if (!isNativeStatusFrame(answer)) return { found: false, steps: [] };
+  const states = { "✔": "done", "✓": "done", "■": "active", "◻": "pending", "□": "pending", "✖": "failed", "✘": "failed", "×": "failed" } as const;
+  const steps: ParsedProgressEvent[] = [];
+  for (const line of answer.split("\n")) {
+    const match = line.match(/^\s*([✔✓■◻□✖✘×])\s+(.+?)\s*$/);
+    if (!match) continue;
+    const label = match[2]!.trim().slice(0, 240);
+    if (!label) continue;
+    steps.push({ key: `native:${label}`, kind: "step", label, state: states[match[1] as keyof typeof states] });
+    if (steps.length === 20) break;
+  }
+  return { found: steps.length > 0, steps };
 }
 
 function extractAnswer(output: string): string {

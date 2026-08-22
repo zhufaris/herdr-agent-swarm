@@ -71,7 +71,7 @@ describe("active-turn steering", () => {
     expect(JSON.stringify(info.mock.calls)).not.toContain("steer one");
 
     expect(turns).toHaveLength(1);
-    expect(turns[0]).toMatch(/^parent\n<herdr_control>/);
+    expect(turns[0]).toBe("parent");
     expect(store.listRunCards(bindingId).slice(1)).toMatchObject([
       { phase: "completed", answer: "", notice: "已加入当前执行" },
       { phase: "completed", answer: "", notice: "已加入当前执行" }
@@ -117,10 +117,10 @@ describe("active-turn steering", () => {
     await send(1, "parent");
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
     await send(2, "later turn");
-    expect(steering).toEqual([]); expect(turns).toHaveLength(1); expect(turns[0]).toMatch(/^parent\n<herdr_control>/);
+    expect(steering).toEqual([]); expect(turns).toEqual(["parent"]);
     release();
     await vi.waitFor(() => expect(turns).toHaveLength(2));
-    expect(turns[1]).toMatch(/^later turn\n<herdr_control>/);
+    expect(turns[1]).toBe("later turn");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

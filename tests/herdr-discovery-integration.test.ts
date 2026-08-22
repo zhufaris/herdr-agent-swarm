@@ -51,6 +51,7 @@ describe("Herdr discovery", () => {
 
   it("publishes repeated working state once while preserving distinct output observations", async () => {
     let output = "initial terminal";
+    const submittedPrompts: string[] = [];
     const events: string[] = [];
     const answerSnapshots: string[] = [];
     const answerUpdates: string[] = [];
@@ -63,7 +64,8 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt(_paneId, _text, _timeoutMs, onObservation) {
+      async runPrompt(_paneId, text, _timeoutMs, onObservation) {
+        submittedPrompts.push(text);
         output += "\n✧ Working";
         await onObservation?.({ state: "working", output });
         output += "\n◆ Ran first";
@@ -107,6 +109,7 @@ describe("Herdr discovery", () => {
     expect(answerSnapshots).toEqual(["Ran first", "Ran second", "done"]);
     expect(answerUpdates).toEqual(["replace", "append", "append"]);
     expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("Ran first\n\nRan second\n\ndone");
+    expect(submittedPrompts).toEqual(["run"]);
 
     await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
   });
@@ -377,12 +380,12 @@ describe("Herdr discovery", () => {
     await coordinator.handleMessage({ eventId: "event-2", messageId: "message-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toMatch(/^first\n<herdr_control>/);
+    expect(prompts[0]).toBe("first");
     expect(store.countPendingPrompts(bindingId)).toBe(2);
 
     releaseApproval();
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
-    expect(prompts[1]).toMatch(/^second\n<herdr_control>/);
+    expect(prompts[1]).toBe("second");
     await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: "answer 2" }));
     expect(replies).toEqual([]);
 
@@ -438,7 +441,7 @@ describe("Herdr discovery", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toMatch(/^first\n<herdr_control>/);
+    expect(prompts[0]).toBe("first");
     expect(store.countPendingPrompts(bindingId)).toBe(1);
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();

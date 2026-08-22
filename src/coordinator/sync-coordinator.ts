@@ -14,7 +14,7 @@ import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage,
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
 import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
 import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
-import { extractFinalTraexAnswer, parseTraexOutput, withProgressProtocol } from "../runtime/traex-output-parser.js";
+import { extractFinalTraexAnswer, parseTraexOutput } from "../runtime/traex-output-parser.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 export class SyncCoordinator {
@@ -759,7 +759,7 @@ export class SyncCoordinator {
         this.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
-        const state = await this.herdr.runPrompt(paneId, withProgressProtocol(prompt.body), this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
+        const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
           const projectCwd = this.config.projects.find((project) => project.id === binding?.projectId)?.cwd ?? this.config.herdr.workspaceCwd;
           const parsed = parseTraexOutput(previousObservation, output, projectCwd);
           previousObservation = output;
