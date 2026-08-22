@@ -36,7 +36,7 @@ describe("attach existing pane command", () => {
 
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active" });
     expect(createTopic).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(replyCards.at(-1))).toContain("打开项目话题");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
     expect(JSON.stringify(replyCards.at(-1))).toContain('\"action\":\"open_project_thread\"');
     expect(JSON.stringify(replyCards.at(-1))).not.toContain("openMessageId");
 
@@ -86,7 +86,7 @@ describe("attach existing pane command", () => {
     expect(store.listBindings()).toHaveLength(1);
     expect(JSON.stringify(replyCards.at(-1))).toContain("已经连接");
     expect(JSON.stringify(replyCards.at(-1))).toContain("w5:p3G");
-    expect(JSON.stringify(replyCards.at(-1))).toContain("打开项目话题");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
     const response = JSON.stringify(replyCards.at(-1));
     expect(response).toContain('\"action\":\"open_project_thread\"');
     expect(response).not.toContain("openMessageId");

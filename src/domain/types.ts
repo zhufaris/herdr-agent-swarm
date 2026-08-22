@@ -39,12 +39,13 @@ export interface WorkspaceCacheStatus {
 export interface SessionSummary {
   binding: Binding;
   queueDepth: number;
+  spaceName?: string;
 }
 
 export type FailureSummary =
-  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string }
-  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string }
-  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string };
+  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
+  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
+  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string };
 
 export type DeadLetterActionOutcome = "retried" | "dismissed" | "missing" | "unauthorized" | "stale";
 

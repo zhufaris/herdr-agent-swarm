@@ -47,9 +47,9 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
     unauthorized: { title: "无法使用此选择器", template: "orange", icon: "🔒" }
   } as const;
   const view = views[input.status];
-  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请打开群里的新项目卡片，并在其话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
+  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "点击“发送话题入口”后，请打开群里随后出现的话题卡片，并在其中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
   const elements: object[] = [{ tag: "markdown", content: details || view.title }];
-  if (input.status === "completed" && input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
+  if (input.status === "completed" && input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "发送话题入口" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
@@ -57,9 +57,9 @@ export function renderAttachStatusCard(input: { spaceName: string; paneId: strin
   const title = input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
   const elements: object[] = [{
     tag: "markdown",
-    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。"}`
+    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。"}${input.bindingId ? " 点击“发送话题入口”后，请打开群里随后出现的话题卡片。" : ""}`
   }];
-  if (input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
+  if (input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "发送话题入口" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: title } },
@@ -147,33 +147,37 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 
 export function renderRequestRunCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
-  const visibleProgress = input.progressEvents.filter((event) => event.kind === "step").slice(0, 20);
+  const allSteps = input.progressEvents.filter((event) => event.kind === "step");
+  const visibleProgress = allSteps.slice(0, 20);
+  const completedSteps = allSteps.filter((event) => event.state === "done").length;
   const lifecycleLine = input.phase === "queued"
     ? `⏳ 已进入队列 · 当前第 ${input.queuePosition} 位`
     : input.phase === "running" && visibleProgress.length === 0 ? "正在等待 TraeX 提供任务计划"
       : input.phase === "blocked" ? "⚠️ 等待用户处理"
         : input.phase === "completed" ? "✅ 任务完成"
           : input.phase === "failed" ? "❌ 执行失败" : null;
-  const progressContent = [
-    "📩 **已接收请求**", truncateLarkMarkdown(input.requestText, 2_000), "",
-    lifecycleLine, ...visibleProgress.map(progressLine)
-  ].filter((line) => line !== null).join("\n");
+  const planContent = [lifecycleLine, ...visibleProgress.map(progressLine)].filter((line) => line !== null).join("\n");
   const elements: object[] = [
     { tag: "column_set", horizontal_spacing: "8px", columns: [
       metric("SPACE", input.spaceName), metric("PANE", input.paneId ?? "provisioning"),
-      metric("QUEUE", input.queuePosition > 0 ? String(input.queuePosition) : "—")
+      input.phase === "queued"
+        ? metric("QUEUE", String(input.queuePosition))
+        : metric("STATUS", requestStatusLabel(input.phase))
     ] },
     { tag: "hr" },
-    { tag: "markdown", content: "**任务步骤**" },
+    { tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
+      header: { title: { tag: "plain_text", content: "原始请求" } },
+      elements: [{ tag: "markdown", content: `📩 **已接收请求**\n${truncateLarkMarkdown(input.requestText, 2_000)}` }] },
     { tag: "collapsible_panel", expanded: true, border: { color: input.phase === "failed" ? "red" : "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: visibleProgress.length ? `共 ${visibleProgress.length} 项` : "请求详情" } },
-      elements: [{ tag: "markdown", content: progressContent }] }
+      header: { title: { tag: "plain_text", content: allSteps.length ? `执行计划 · ${completedSteps}/${allSteps.length}` : "执行计划" } },
+      elements: [{ tag: "markdown", content: planContent || "正在等待 TraeX 提供任务计划" }] }
   ];
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  elements.push({ tag: "markdown", content: `${state.icon} ${state.label}` });
+  const duration = formatRunDuration(input);
+  if (duration) elements.push({ tag: "markdown", content: `用时 ${duration}` });
   return {
-    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: state.label } },
+    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: "HERDR REQUEST" }, template: state.color },
     body: { elements }
   };
@@ -181,19 +185,19 @@ export function renderRequestRunCard(input: RunCardView): object {
 
 export function renderRequestAnswerCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
-  const content = input.answer.trim()
-    ? truncateLarkMarkdownTail(normalizeLarkPreview(input.answer), 12_000)
+  const prose = stripNativeTraexStatus(input.answer);
+  const content = prose
+    ? truncateLarkMarkdownTail(normalizeLarkPreview(prose), 12_000)
+    : input.phase === "running" && input.progressEvents.some((event) => event.kind === "step")
+      ? `TraeX 正在执行 · ${input.progressEvents.filter((event) => event.kind === "step" && event.state === "done").length}/${input.progressEvents.filter((event) => event.kind === "step").length}`
     : input.phase === "running" ? "正在生成…"
       : input.phase === "queued" ? "等待任务开始…"
         : input.phase === "failed" ? "本次执行未产生回答。"
           : "暂无回答。";
   return {
-    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `回答 · ${state.label}` } },
-    header: { title: { tag: "plain_text", content: "TraeX 回答" }, subtitle: { tag: "plain_text", content: "HERDR ANSWER" }, template: state.color },
-    body: { elements: [
-      { tag: "markdown", content },
-      { tag: "markdown", content: `${state.icon} ${state.label}` }
-    ] }
+    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
+    header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: `HERDR ANSWER · ${boundedTitle(input.title)}` }, template: state.color },
+    body: { elements: [{ tag: "markdown", content }] }
   };
 }
 
@@ -264,6 +268,37 @@ function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
 function agentPaneTitle(spaceName: string, paneId: string | null): string {
   return truncate(`TraeX · ${spaceName} / ${paneId ?? "provisioning"}`, 96);
+}
+function boundedTitle(title: string): string { return truncate(title.replace(/\s+/g, " " ).trim() || "未命名任务", 64); }
+function requestStatusLabel(phase: RunCardView["phase"]): string {
+  return { queued: "已排队", running: "运行中", blocked: "等待处理", completed: "已完成", failed: "失败" }[phase];
+}
+function requestSummaryLabel(phase: RunCardView["phase"]): string {
+  return { queued: "排队中", running: "执行中", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
+}
+function formatRunDuration(input: RunCardView): string | null {
+  if (!input.startedAt || !input.finishedAt) return null;
+  const elapsed = Date.parse(input.finishedAt) - Date.parse(input.startedAt);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return null;
+  const seconds = Math.floor(elapsed / 1_000);
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return [hours ? `${hours}h` : null, minutes ? `${minutes}m` : null, `${remainder}s`].filter(Boolean).join(" " );
+}
+function stripNativeTraexStatus(source: string): string {
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const taskCount = lines.findIndex((line) => /^\s*\d+\s+tasks?\s*\(.*\)\s*$/i.test(line));
+  if (taskCount < 0) return source.trim();
+
+  let start = taskCount;
+  while (start > 0 && !lines[start - 1]!.trim()) start -= 1;
+  if (start > 0 && /(?:\([^)]*(?:tokens?|esc to|[smh]\s*[•·])[^)]*\)|^[◆◇]\s*)/i.test(lines[start - 1]!)) start -= 1;
+  if (start > 0 && /^\s*(?:traex|codex)\s*$/i.test(lines[start - 1]!)) start -= 1;
+
+  let end = taskCount + 1;
+  while (end < lines.length && /^(?:\s*[■◻✔□✓✕✖▪▫]\s+|\s*\d+[.)]\s+)/.test(lines[end]!)) end += 1;
+  return [...lines.slice(0, start), ...lines.slice(end)].join("\n").replace(/^\s+|\s+$/g, "");
 }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${event.label}`;

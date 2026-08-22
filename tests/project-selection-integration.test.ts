@@ -113,7 +113,7 @@ describe("project selection flow", () => {
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
     expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
     expect(JSON.stringify(updates.at(-1))).toContain("datasage_semantic_knowledge");
-    expect(JSON.stringify(updates.at(-1))).toContain("打开项目话题");
+    expect(JSON.stringify(updates.at(-1))).toContain("发送话题入口");
     const completedCard = updates.at(-1)!;
     expect(JSON.stringify(completedCard)).toContain('\"action\":\"open_project_thread\"');
     expect(JSON.stringify(completedCard)).not.toContain("openMessageId");

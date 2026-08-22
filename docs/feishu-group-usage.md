@@ -45,7 +45,7 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、非 TraeX Pane
 以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
-仍会正常显示。已绑定到当前群的 Pane 提供“打开项目话题”；符合条件且未绑定的
+仍会正常显示。已绑定到当前群的 Pane 提供“发送入口”；符合条件且未绑定的
 TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
 校验。卡片不会提供关闭或删除动作。
 
@@ -73,7 +73,7 @@ prompt。失败任务只用于诊断。
 也可以是该 Space 中唯一的精确 Pane 名称；名称重名时会返回候选 ID。Bridge 只会在该项目的
 Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
 不会创建第二个绑定，而会返回已有连接信息。首次连接成功和重复连接的结果卡都会提供
-“打开项目话题”按钮；点击后 Bridge 会在当前群发送飞书原生的话题转发卡片，再点击该卡片
+“发送话题入口”按钮；点击后 Bridge 会在当前群发送飞书原生的话题转发卡片，再点击该卡片
 即可进入项目话题。飞书公开 AppLink 不支持通过 Open API 的消息 ID 直达消息，因此 Bridge
 不会再生成无效的 `openMessageId` 链接。如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题。
 未知或重复的 space、其他 workspace

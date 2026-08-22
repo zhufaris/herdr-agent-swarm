@@ -107,7 +107,6 @@ describe("run card", () => {
     const task = JSON.stringify(taskCard);
     const answer = JSON.stringify(answerCard);
     expect(taskCard).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "green" } });
-    expect(task).toContain("任务步骤");
     expect(task).toContain("📩 **已接收请求**");
     expect(task).toContain("## Request\\nFix **login**");
     expect(task).not.toContain("bad()");
@@ -116,6 +115,50 @@ describe("run card", () => {
     expect(answer).toContain("Fixed.");
     expect(answer).not.toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
+    const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
+    expect(panels).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tag: "collapsible_panel", expanded: false, header: expect.objectContaining({ title: expect.objectContaining({ content: "原始请求" }) }) }),
+      expect.objectContaining({ tag: "collapsible_panel", expanded: true, header: expect.objectContaining({ title: expect.objectContaining({ content: "执行计划 · 1/1" }) }) })
+    ]));
+    expect(answerCard).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" }, subtitle: { content: "HERDR ANSWER · Fix login" } } });
+    expect(answerCard).toMatchObject({ config: { summary: { content: "完成 · Fix login" } } });
+  });
+
+  it("keeps native TraeX task status out of the answer card", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Replay Query Log", workspaceId: "w1", spaceName: "datasage", paneId: "w1:p1", requestText: "Replay", queuePosition: 0, occurredAt: "start" });
+    const running = { ...view, phase: "running" as const, answer: "重新构建部署… (35m 10s • ↓ 30.8K tokens)\n9 tasks (7 done, 1 in progress, 1 open)\n■ 重放 Query Log\n◻ 更新 PROGRESS.md", progressEvents: [
+      { key: "one", kind: "step" as const, label: "重放 Query Log", state: "active" as const, occurredAt: "now" },
+      ...Array.from({ length: 6 }, (_, index) => ({ key: `done-${index}`, kind: "step" as const, label: `完成 ${index}`, state: "done" as const, occurredAt: "now" })),
+      { key: "open", kind: "step" as const, label: "更新 PROGRESS.md", state: "pending" as const, occurredAt: "now" }
+    ] };
+    const serialized = JSON.stringify(renderRequestAnswerCard(running));
+
+    expect(serialized).toContain("TraeX 正在执行 · 6/8");
+    expect(serialized).not.toContain("30.8K tokens");
+    expect(serialized).not.toContain("■ 重放 Query Log");
+  });
+
+  it("removes an embedded native task frame without dropping surrounding prose", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Replay", workspaceId: "w1", paneId: "w1:p1", requestText: "Replay", queuePosition: 0, occurredAt: "start" });
+    const serialized = JSON.stringify(renderRequestAnswerCard({
+      ...view, phase: "running", answer: "已完成部署。\n\n◆ 执行任务… (2m 1s • 2K tokens)\n2 tasks (1 done, 1 open)\n✔ 部署\n◻ 验证\n\n正在检查健康状态。"
+    }));
+
+    expect(serialized).toContain("已完成部署。");
+    expect(serialized).toContain("正在检查健康状态。");
+    expect(serialized).not.toContain("2 tasks");
+    expect(serialized).not.toContain("✔ 部署");
+  });
+
+  it("shows phase-aware status and elapsed duration instead of a queue dash", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "Run", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
+    const completed = { ...view, phase: "completed" as const, queuePosition: 0, startedAt: "2026-08-22T10:00:10Z", finishedAt: "2026-08-22T10:02:15Z" };
+    const serialized = JSON.stringify(renderRequestRunCard(completed));
+
+    expect(serialized).toContain("STATUS");
+    expect(serialized).toContain("已完成");
+    expect(serialized).toContain("用时 2m 5s");
+    expect(serialized).not.toContain('**QUEUE**\n`—`');
   });
 
   it("identifies the agent, space, and pane in request card headers", () => {

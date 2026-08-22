@@ -107,7 +107,7 @@ function paneRow(group: SpaceDirectoryGroup, pane: SpaceDirectoryPane): object {
 }
 
 function actionColumn(group: SpaceDirectoryGroup, pane: SpaceDirectoryPane): object {
-  if (pane.bindingId) return buttonColumn("打开话题", { action: "open_project_thread", bindingId: pane.bindingId });
+  if (pane.bindingId) return buttonColumn("发送入口", { action: "open_project_thread", bindingId: pane.bindingId });
   if (pane.claimProjectId) return buttonColumn("认领", {
     action: "claim_pane", projectId: pane.claimProjectId, workspaceId: group.workspaceId, paneId: pane.paneId
   });

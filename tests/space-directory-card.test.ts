@@ -33,7 +33,7 @@ describe("space directory card", () => {
     expect(columnText(rows[0]!)).toEqual(["**Pane**", "**状态**", "**前台进程**", "**话题**"]);
     expect(columnText(rows[1]!)).toEqual(expect.arrayContaining([expect.stringContaining("p21"), "idle", "traex", "认领"]));
     expect(columnText(rows[2]!)).toEqual(expect.arrayContaining([expect.stringContaining("p22"), "idle", "bash", "—"]));
-    expect(columnText(rows[3]!)).toEqual(expect.arrayContaining([expect.stringContaining("p20"), "working", "traex", "打开话题"]));
+    expect(columnText(rows[3]!)).toEqual(expect.arrayContaining([expect.stringContaining("p20"), "working", "traex", "发送入口"]));
     expect(JSON.stringify(rows[3])).toContain('"bindingId":"binding-20"');
     expect(JSON.stringify(rows[1])).toContain('"paneId":"w5:p21"');
   });

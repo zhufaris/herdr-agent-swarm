@@ -73,7 +73,11 @@ describe("event-driven card projection", () => {
     expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
     expect(JSON.stringify(latestPrimary.card)).not.toContain("更新主卡片");
     expect(updates.some((update) => update.messageId === "request-task-card" && JSON.stringify(update.card).includes("等待用户处理") && !JSON.stringify(update.card).includes("live answer"))).toBe(true);
-    expect(updates.some((update) => update.messageId === "request-answer-card" && JSON.stringify(update.card).includes("live answer") && !JSON.stringify(update.card).includes("Do work"))).toBe(true);
+    expect(updates.some((update) => {
+      if (update.messageId !== "request-answer-card") return false;
+      const elements = (update.card as { body?: { elements?: Array<{ content?: string }> } }).body?.elements ?? [];
+      return elements[0]?.content === "live answer";
+    })).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
   });
