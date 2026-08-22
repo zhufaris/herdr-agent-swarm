@@ -66,16 +66,15 @@ export class HerdrCliAdapter implements HerdrPort {
     onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
   ): Promise<AgentState> {
     const before = await this.readOutput(paneId, 240);
-    await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
-    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+    await this.submitPromptText(paneId, text, before);
     return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation);
   }
 
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
     const pane = await this.getPane(paneId);
     if (!pane || pane.agentState !== "working") return "not_working";
-    await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
-    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+    const before = await this.readOutput(paneId, 240);
+    await this.submitPromptText(paneId, text, before);
     return "injected";
   }
 
@@ -116,6 +115,21 @@ export class HerdrCliAdapter implements HerdrPort {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new Error(`TraeX did not become ready in pane ${paneId}`);
+  }
+
+  private async submitPromptText(paneId: string, text: string, before: string): Promise<void> {
+    const previousOccurrences = countOccurrences(before, text);
+    await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
+    const deadline = Date.now() + this.commandTimeoutMs;
+    while (Date.now() < deadline) {
+      const output = await this.readOutput(paneId, 240);
+      if (countOccurrences(output, text) > previousOccurrences) {
+        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`Timed out waiting for prompt text in pane ${paneId}`);
   }
 
   private async waitForTraexTurn(
@@ -207,4 +221,15 @@ function unwrapText(stdout: string): string {
 
 function isTraexWorking(output: string): boolean {
   return /[✧◆]\s*Work(?:ing|i…)/u.test(output);
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let offset = 0;
+  while ((offset = haystack.indexOf(needle, offset)) !== -1) {
+    count += 1;
+    offset += needle.length;
+  }
+  return count;
 }
