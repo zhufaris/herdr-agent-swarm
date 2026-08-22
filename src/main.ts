@@ -9,11 +9,12 @@ import { LarkChannelPublisher } from "./events/lark-channel-publisher.js";
 import { startHealthServer } from "./health/server.js";
 import { ExecFileCommandRunner } from "./infra/command-runner.js";
 import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
+import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
 const config = loadConfig();
 validateProjectDirectories(config.projects);
-const logger = pino({ level: config.logLevel, redact: [
+const logger = pino({ level: config.logLevel, serializers: { err: safeLogError }, redact: [
   "lark.appSecret", "appSecret", "*.appSecret", "token", "*.token", "authorization", "*.authorization",
   "cookie", "*.cookie", "password", "*.password", "privateKey", "*.privateKey"
 ] });
@@ -39,7 +40,7 @@ try {
   await coordinator.start();
   logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");
 } catch (error) {
-  logger.fatal({ event: "bridge-startup-failed", err: error, durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");
+  logger.fatal({ event: "bridge-startup-failed", err: safeLogError(error), durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");
   await runtimeShutdown.shutdown("startup-failure");
   process.exitCode = 1;
 }

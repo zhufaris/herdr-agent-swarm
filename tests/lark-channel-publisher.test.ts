@@ -43,6 +43,29 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("does not serialize Axios request details into delivery failure logs", async () => {
+    const warn = vi.fn();
+    const logger = { warn, error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+    const failure = Object.assign(new Error("Request failed with status code 400"), {
+      code: "ERR_BAD_REQUEST",
+      config: { headers: { Authorization: "Bearer top-secret" }, data: "private card payload" },
+      request: { _header: "Authorization: Bearer top-secret" },
+      response: { status: 400, data: { code: 230099, msg: "card action is lock", private: "response body" } }
+    });
+    const lark = fakeLark({ async updateCard() { throw failure; } });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, logger);
+
+    await publisher.enqueueCardUpdate(null, "card-1", "failure:safe-error", { secret: "private card payload" });
+
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({
+      event: "lark-outbox-retry-scheduled",
+      err: { name: "Error", message: "Request failed with status code 400", code: "ERR_BAD_REQUEST", status: 400, larkCode: 230099 }
+    }), expect.any(String));
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/top-secret|private card payload|response body|Authorization|config|request|response/);
+    store.close();
+  });
+
   it("waits for an in-flight card delivery before stopping", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -69,8 +92,8 @@ describe("Lark channel publisher", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
-    await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 2, { version: 2 });
-    await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 3, { version: 3 });
+    await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 2, "task", { version: 2 });
+    await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 3, "task", { version: 3 });
     expect(versions).toEqual([JSON.stringify({ version: 2 }), JSON.stringify({ version: 3 })]);
     store.close();
   });
@@ -78,9 +101,9 @@ describe("Lark channel publisher", () => {
   it("supersedes an older failed pending version with the latest view", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.enqueueOutboundReply({ id: "old", idempotencyKey: "run-card:update:p1:2", bindingId: "b1", promptId: "p1", viewVersion: 2, rootMessageId: "card-1", kind: "card_update", payload: "old" });
+    store.enqueueOutboundReply({ id: "old", idempotencyKey: "run-card:update:p1:task:2", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "task", rootMessageId: "card-1", kind: "card_update", payload: "old" });
     store.markOutboundReplyFailed("old", "temporary");
-    store.enqueueOutboundReply({ id: "new", idempotencyKey: "run-card:update:p1:3", bindingId: "b1", promptId: "p1", viewVersion: 3, rootMessageId: "card-1", kind: "card_update", payload: "new" });
+    store.enqueueOutboundReply({ id: "new", idempotencyKey: "run-card:update:p1:task:3", bindingId: "b1", promptId: "p1", viewVersion: 3, cardRole: "task", rootMessageId: "card-1", kind: "card_update", payload: "new" });
     expect(store.listPendingOutboundReplies()).toMatchObject([{ id: "new", viewVersion: 3, payload: "new" }]);
     store.close();
   });

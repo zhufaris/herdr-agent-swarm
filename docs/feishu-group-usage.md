@@ -86,6 +86,27 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 /herdr close
 ```
 
+### Pane 恢复命令
+
+当状态显示 `orphaned` 时，可以使用：
+
+```text
+/herdr reattach wA:p3
+/herdr replace
+```
+
+`reattach` 只接受同一 Space、同一项目目录且 terminal identity 匹配、TraeX
+仍在运行的原 Pane。`replace` 会新建一个 generation。两者都不会自动重放
+结果不确定的任务；验证或替换后会保持归档，确认后再发送：
+
+```text
+/herdr resume
+```
+
+如果项目创建在 Pane ID 落库前中断，Bridge 不会在重启后自动新建第二个
+Pane。请先检查对应 Space；已有 Pane 时发送
+`/herdr attach <space> <pane-id>`，确认不存在时再发送 `/herdr new`。
+
 ### `/herdr help`
 
 显示 Bridge 帮助卡片。

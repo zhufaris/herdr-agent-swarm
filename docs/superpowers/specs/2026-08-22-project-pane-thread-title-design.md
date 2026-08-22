@@ -6,11 +6,11 @@ Name Lark threads and their status cards with enough context to identify both
 the project and the Herdr pane. The canonical display format is:
 
 ```text
-project-name / pane-name
+space-name / pane-name
 ```
 
-For example, a pane labeled `card-markdown` whose working directory is
-`/data00/home/feiyu.zhu/work/herdr-lark-bridge` is displayed as:
+For example, a pane labeled `card-markdown` whose project has `spaceName` set
+to `herdr-lark-bridge` is displayed as:
 
 ```text
 herdr-lark-bridge / card-markdown
@@ -18,17 +18,16 @@ herdr-lark-bridge / card-markdown
 
 ## Name sources
 
-For a pane discovered from Herdr, the project name is the basename of the
-pane's `cwd`. The pane name is its non-empty label. If the label is absent, the
-pane ID is used. If `cwd` is absent, only the pane name is displayed.
+For a pane discovered from Herdr, the prefix is the project's configured
+`spaceName`. If it is absent, the basename of the project's `cwd` is used. The
+pane name is its non-empty label; if the label is absent, the pane ID is used.
 
-For a binding created from Lark with `/herdr new`, the project name is the
-basename of `HERDR_WORKSPACE_CWD`, and the pane name is the title supplied by
-the user. If the configured working directory has no usable basename, only the
-user-supplied title is displayed.
+For a binding created from Lark with `/herdr new`, the prefix follows the same
+configured `spaceName`, then project `cwd` basename fallback. The pane name is
+the title supplied by the user.
 
 `/herdr rename <name>` renames the Herdr pane to `<name>` and updates the
-binding's Lark-facing title to `project-name / <name>`. The project prefix is
+binding's Lark-facing title to `space-name / <name>`. The space prefix is
 not written into the actual Herdr pane label.
 
 ## Normalization and limits
@@ -45,8 +44,9 @@ The binding title remains the canonical 80-character thread title.
 
 ## Component boundary
 
-A pure title-formatting helper accepts a working directory and pane name and
-returns the canonical display title. The coordinator uses this helper in three
+A pure title-formatting helper accepts a space name, fallback working directory,
+and pane name and returns the canonical display title. The coordinator uses it
+in three
 places: Herdr discovery, Lark-originated binding creation, and `/herdr rename`.
 No database migration is required because bindings already persist a title.
 
@@ -65,12 +65,13 @@ the new format.
 
 Automated tests cover:
 
-1. formatting `cwd basename / pane label`;
-2. whitespace normalization and the 80-character bound;
-3. missing `cwd` and missing label fallbacks;
-4. Herdr discovery using the pane's actual `cwd` and label;
-5. Lark-originated creation using `HERDR_WORKSPACE_CWD`; and
-6. rename preserving the project prefix while sending only the requested name
+1. formatting `spaceName / pane label`;
+2. falling back to `cwd basename` when `spaceName` is absent;
+3. whitespace normalization and the 80-character bound;
+4. missing `cwd` and missing label fallbacks;
+5. Herdr discovery using the configured project space and pane label;
+6. Lark-originated creation using the configured project space; and
+7. rename preserving the space prefix while sending only the requested name
    to Herdr.
 
 ## Non-goals

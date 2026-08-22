@@ -9,6 +9,46 @@ import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("Herdr discovery", () => {
+  it("logs an unchanged skipped pane once and reports when it becomes routable", async () => {
+    let cwd = "/unregistered";
+    const warn = vi.fn();
+    const info = vi.fn();
+    const logger = { warn, info, error: vi.fn(), debug: vi.fn() } as unknown as import("pino").Logger;
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "reply-1" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd, label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const config = {
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
+      databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
+      commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, logger);
+
+    await coordinator.start();
+    await coordinator.reconcile();
+    expect(warn.mock.calls.filter(([context]) => context.event === "herdr-pane-skipped")).toHaveLength(1);
+
+    cwd = "/repo";
+    await coordinator.reconcile();
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "herdr-pane-skip-resolved", paneId: "w1:p1", projectId: "default" }), expect.any(String));
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ projectId: "default", state: "active" });
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("publishes repeated working state once while preserving distinct output observations", async () => {
     let output = "initial terminal";
     const events: string[] = [];
@@ -78,7 +118,7 @@ describe("Herdr discovery", () => {
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
       herdr: { workspaceId: "w1", workspaceCwd: "/work/repo", executable: "herdr" },
-      projects: [{ id: "repo", displayName: "Repo", description: "Test project", workspaceId: "w1", cwd: "/work/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
+      projects: [{ id: "repo", displayName: "Repo", spaceName: "configured-space", description: "Test project", workspaceId: "w1", cwd: "/work/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -92,8 +132,8 @@ describe("Herdr discovery", () => {
 
     await publisher.drain();
     expect({ created, replied, updated }).toEqual({ created: 1, replied: 0, updated: 2 });
-    expect(store.findBindingByPane("w1:p1")).toMatchObject({ title: "repo / task", statusMessageId: "root-1", state: "active" });
-    expect(JSON.stringify(rootCard)).toContain("TraeX · repo / w1:p1");
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ title: "configured-space / task", statusMessageId: "root-1", state: "active" });
+    expect(JSON.stringify(rootCard)).toContain("TraeX · configured-space / w1:p1");
 
     await coordinator.stop(); stopProjector(); stopChannelPublisher(); store.close();
   });
@@ -116,7 +156,7 @@ describe("Herdr discovery", () => {
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
       herdr: { workspaceId: "w1", workspaceCwd: "/work/my-project", executable: "herdr" },
-      projects: [{ id: "my-project", displayName: "My project", description: "Test project", workspaceId: "w1", cwd: "/work/my-project" }], defaultProjectId: "my-project", projectsConfigPath: "test", traex: { executable: "traex" },
+      projects: [{ id: "my-project", displayName: "My project", spaceName: "my-space", description: "Test project", workspaceId: "w1", cwd: "/work/my-project" }], defaultProjectId: "my-project", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -133,11 +173,11 @@ describe("Herdr discovery", () => {
     const selection = (store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("root-2") as { id: string }).id;
     expect(selection).toBeTruthy();
     await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
-    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-project / Initial pane" });
+    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Initial pane" });
 
     await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/herdr rename Better pane", mentionsBot: false, isRootMessage: false });
     expect(renamed).toEqual([["w1:p2", "Better pane"]]);
-    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-project / Better pane" });
+    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Better pane" });
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();
   });
@@ -260,9 +300,9 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: "thread reply", larkMessageId: "request-card-1" }));
+    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: "thread reply", larkMessageId: "request-card-1", answerMessageId: "request-card-1" }));
     await vi.waitFor(() => expect(updates.some((update) => update.messageId === "request-card-1" && JSON.stringify(update.card).includes("thread reply"))).toBe(true));
-    expect(cards).toHaveLength(1);
+    expect(cards).toHaveLength(2);
     const requestUpdates = updates.filter((update) => JSON.stringify(update.card).includes("HERDR REQUEST"));
     expect(requestUpdates.length).toBeGreaterThan(0);
     expect(requestUpdates.every((update) => update.messageId === "request-card-1")).toBe(true);
@@ -325,11 +365,13 @@ describe("Herdr discovery", () => {
     expect(updates.some((card) => JSON.stringify(card).includes("TraeX 需要人工审批"))).toBe(true);
     await coordinator.handleMessage({ eventId: "event-2", messageId: "message-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(prompts).toEqual(["first"]);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatch(/^first\n<herdr_control>/);
     expect(store.countPendingPrompts(bindingId)).toBe(2);
 
     releaseApproval();
-    await vi.waitFor(() => expect(prompts).toEqual(["first", "second"]));
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[1]).toMatch(/^second\n<herdr_control>/);
     await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: "answer 2" }));
     expect(replies).toEqual([]);
 
@@ -384,7 +426,8 @@ describe("Herdr discovery", () => {
     await vi.waitFor(() => expect(store.countPendingPrompts(bindingId)).toBe(1));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(prompts).toEqual(["first"]);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatch(/^first\n<herdr_control>/);
     expect(store.countPendingPrompts(bindingId)).toBe(1);
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();

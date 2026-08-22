@@ -5,7 +5,7 @@ import type { CommandRunner } from "../infra/command-runner.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
-  pane_id: z.string(), workspace_id: z.string(), cwd: z.string().nullish(), label: z.string().nullish(),
+  pane_id: z.string(), workspace_id: z.string(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
   agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).default("unknown")
 }).passthrough();
 const processSchema = z.object({
@@ -41,13 +41,16 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  async createPane(workspaceId: string, cwd: string): Promise<HerdrPane> {
+  async createPane(workspaceId: string, cwd: string, identity?: { bindingId: string; generation: number; projectId: string }): Promise<HerdrPane> {
     const panes = await this.listPanes(workspaceId);
     const anchor = panes[0];
     if (!anchor) throw new Error(`Cannot create pane: workspace ${workspaceId} has no anchor pane`);
+    const identityArgs = identity ? [
+      "--env", `HERDR_BRIDGE_BINDING_ID=${identity.bindingId}`, "--env", `HERDR_BRIDGE_GENERATION=${identity.generation}`, "--env", `HERDR_PROJECT_ID=${identity.projectId}`
+    ] : [];
     const result = await this.json([
       "pane", "split", "--pane", anchor.paneId, "--direction", "right", "--ratio", "0.5",
-      "--cwd", cwd, "--no-focus"
+      "--cwd", cwd, ...identityArgs, "--no-focus"
     ]);
     const candidate = findPaneRecord(result);
     if (!candidate) throw new Error("Herdr pane split response did not contain a pane");
@@ -102,7 +105,7 @@ export class HerdrCliAdapter implements HerdrPort {
       // A pane can disappear between list and process inspection. Reconciliation handles it.
     }
     return {
-      paneId: raw.pane_id, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
+      paneId: raw.pane_id, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentState: raw.agent_status, foregroundExecutables: [...new Set(foregroundExecutables)]
     };
   }

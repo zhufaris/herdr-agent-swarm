@@ -1,3 +1,5 @@
+import { safeLogError } from "./safe-error.js";
+
 export interface ShutdownLogger {
   info(value: object, message: string): void;
   error(value: object, message: string): void;
@@ -39,7 +41,7 @@ async function stopSafely(component: string, stop: () => Promise<void>, logger: 
   try {
     await stop();
   } catch (error) {
-    logger.error({ event: "bridge-shutdown-component-failed", err: error, component, outcome: "failed" }, "shutdown component failed");
+    logger.error({ event: "bridge-shutdown-component-failed", err: safeLogError(error), component, outcome: "failed" }, "shutdown component failed");
   }
 }
 

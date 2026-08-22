@@ -11,6 +11,9 @@ describe("commands", () => {
     expect(parseCommand("/herdr attach datasage_semantic_knowledge w5:p3G")).toEqual({ kind: "attach", spaceName: "datasage_semantic_knowledge", paneId: "w5:p3G" });
     expect(parseCommand("/herdr attach datasage_semantic_knowledge")).toEqual({ kind: "help" });
     expect(parseCommand("/herdr attach datasage_semantic_knowledge w5:p3G extra")).toEqual({ kind: "help" });
+    expect(parseCommand("/herdr reattach w1:p9")).toEqual({ kind: "reattach", paneId: "w1:p9" });
+    expect(parseCommand("/herdr replace")).toEqual({ kind: "replace" });
+    expect(parseCommand("/herdr resume")).toEqual({ kind: "resume" });
     expect(parseCommand("hello")).toBeNull();
   });
 

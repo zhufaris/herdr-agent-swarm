@@ -2,6 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
+import { safeLogError } from "../runtime/safe-error.js";
 
 interface LarkAdapterOptions {
   appId: string;
@@ -56,16 +57,19 @@ export class LarkSdkAdapter implements LarkPort {
   private setReady(ready: boolean, event: string, message: string, error?: unknown): void {
     if (this.ready === ready && event !== "lark-websocket-error") return;
     this.ready = ready;
-    const context = { event, outcome: ready ? "connected" : "disconnected", ...(error === undefined ? {} : { err: error }) };
+    const context = { event, outcome: ready ? "connected" : "disconnected", ...(error === undefined ? {} : { err: safeLogError(error) }) };
     if (event === "lark-websocket-error") this.logger?.error(context, message);
     else if (ready) this.logger?.info(context, message);
     else this.logger?.warn(context, message);
   }
 
-  async createTopic(card: object): Promise<{ topicId: string; rootMessageId: string }> {
+  async createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }> {
     const response = await this.client.im.v1.message.create({
       params: { receive_id_type: "chat_id" },
-      data: { receive_id: this.options.chatId, msg_type: "interactive", content: JSON.stringify(card) }
+      data: {
+        receive_id: this.options.chatId, msg_type: "interactive", content: JSON.stringify(card),
+        ...(idempotencyKey ? { uuid: idempotencyKey } : {})
+      }
     });
     const messageId = requireMessageId(response.data?.message_id);
     return { topicId: messageId, rootMessageId: messageId };

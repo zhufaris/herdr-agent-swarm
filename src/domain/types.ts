@@ -1,7 +1,9 @@
+import type { AttachmentState, ProvisioningCheckpoint, SessionLifecycle } from "./pane-thread-lifecycle.js";
+
 export type BindingState = "pending" | "active" | "archived" | "orphaned" | "failed";
 export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
 export type EventOrigin = "lark" | "herdr" | "bridge";
-export type PromptState = "queued" | "running" | "delivered" | "failed";
+export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update";
@@ -39,6 +41,15 @@ export interface Binding {
   statusMessageId: string | null;
   lastAgentState: AgentState;
   lastOutputFingerprint: string | null;
+  lifecycle: SessionLifecycle;
+  attachment: AttachmentState;
+  generation: number;
+  provisioningCheckpoint: ProvisioningCheckpoint;
+  degradationCount: number;
+  hasCompletedTurn: boolean;
+  lastObservedAt: string | null;
+  archivedAt: string | null;
+  lastActivityAt: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -88,6 +99,12 @@ export interface OperationalSummary {
   oldestPendingAt: string | null;
   recentFailedPrompt: { promptId: string; bindingId: string; updatedAt: string; error: string } | null;
   recentDeadLetter: { replyId: string; bindingId: string | null; promptId: string | null; attemptCount: number; updatedAt: string; error: string } | null;
+  lifecycle: Record<import("./pane-thread-lifecycle.js").SessionLifecycle, number>;
+  attachment: Record<import("./pane-thread-lifecycle.js").AttachmentState, number>;
+  recoverableProvisioning: number;
+  archivedPanesPresent: number;
+  cleanupCandidates: number;
+  oldestInactiveAt: string | null;
 }
 
 export interface ProjectSelection {
@@ -114,6 +131,7 @@ export type ProjectSelectionClaim =
 
 export interface HerdrPane {
   paneId: string;
+  terminalId?: string | null;
   workspaceId: string;
   cwd: string | null;
   label: string | null;
@@ -140,4 +158,7 @@ export type BridgeCommand =
   | { kind: "attach"; spaceName: string; paneId: string }
   | { kind: "rename"; title: string }
   | { kind: "close" }
+  | { kind: "reattach"; paneId: string }
+  | { kind: "replace" }
+  | { kind: "resume" }
   | { kind: "help" };

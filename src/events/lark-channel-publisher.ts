@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { BindingStorePort, LarkPort } from "../domain/ports.js";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
+import { safeLogError } from "../runtime/safe-error.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkChannelPublisher {
@@ -100,7 +101,7 @@ export class LarkChannelPublisher {
           const failed = this.store.markOutboundReplyFailed(reply.id, errorMessage(error));
           const context = {
             event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled",
-            err: error, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
+            err: safeLogError(error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
             attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt,
             outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry"
           };

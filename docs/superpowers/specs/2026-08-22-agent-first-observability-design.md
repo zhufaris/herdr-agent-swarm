@@ -55,9 +55,11 @@ poll iterations, terminal observations, or every coalesced card version.
 Logs must not contain Lark message bodies, TraeX terminal output, rendered card
 payloads, app secrets, tokens, cookies, authorization headers, or private keys.
 User and chat identifiers are treated as operational identifiers and may be
-logged only when needed for routing diagnosis. Error objects use Pino's `err`
-serialization and the root logger expands its redaction paths for common secret
-and authorization field names.
+logged only when needed for routing diagnosis. Error objects are converted to a
+bounded whitelist of name, message, code, HTTP status, Lark error code, and
+request ID before reaching Pino. Raw request, response, header, body, stack, and
+cause fields are never serialized. Root logger redaction remains a defense in
+depth for common secret and authorization field names.
 
 ## Instrumentation points
 

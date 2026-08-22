@@ -10,6 +10,41 @@ import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project selection flow", () => {
+  it("explains where to continue when a message targets an archived or unbound topic", async () => {
+    const cards: Array<{ rootMessageId: string; card: object }> = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(rootMessageId, card) { cards.push({ rootMessageId, card }); return { messageId: `card-${cards.length}` }; },
+      async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; },
+      async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "archived-binding", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", title: "alpha / old task" });
+    store.updateBinding("archived-binding", { paneId: "w1:p-old", state: "archived" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "e-archived", messageId: "m-archived", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", actorOpenId: "user-1", text: "继续", mentionsBot: false, isRootMessage: false });
+    await coordinator.handleMessage({ eventId: "e-archived-again", messageId: "m-archived-again", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", actorOpenId: "user-1", text: "再试一次", mentionsBot: false, isRootMessage: false });
+    await coordinator.handleMessage({ eventId: "e-unbound", messageId: "m-unbound", chatId: "chat", topicId: "unbound-topic", rootMessageId: "unbound-root", actorOpenId: "user-1", text: "当前项目", mentionsBot: false, isRootMessage: false });
+
+    expect(cards.map(({ rootMessageId }) => rootMessageId)).toEqual(["archived-root", "archived-root", "unbound-root"]);
+    expect(JSON.stringify(cards[0]!.card)).toContain("话题已归档");
+    expect(JSON.stringify(cards[0]!.card)).toContain("/herdr new");
+    expect(JSON.stringify(cards[2]!.card)).toContain("话题未连接");
+    expect(JSON.stringify(cards[2]!.card)).toContain("/herdr new");
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("creates exactly one pane in the clicked project and does not submit an initial prompt", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
     const created: Array<[string, string]> = [];
@@ -71,13 +106,14 @@ describe("project selection flow", () => {
     expect(JSON.stringify(groupCards[0])).toContain("datasage_semantic_knowledge");
     expect(JSON.stringify(groupCards[0])).toContain("wD:p9");
     expect(store.findBindingByPane("wD:p9")).toMatchObject({
-      projectId: "datasage", workspaceId: "wD", title: "datasage / Fix login", state: "active",
+      projectId: "datasage", workspaceId: "wD", title: "datasage_semantic_knowledge / Fix login", state: "active",
       topicId: "project-topic-1", rootMessageId: "project-root-1", statusMessageId: "project-root-1"
     });
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
     expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
     expect(JSON.stringify(updates.at(-1))).toContain("datasage_semantic_knowledge");
-    expect(JSON.stringify(updates.at(-1))).toContain("请打开群里的新项目卡片");
+    expect(JSON.stringify(updates.at(-1))).toContain("打开项目话题");
+    expect(JSON.stringify(updates.at(-1))).toContain("openMessageId=project-root-1");
     expect(JSON.stringify(updates.at(-1))).not.toContain("当前话题");
     expect(JSON.stringify(updates.at(-1))).not.toContain("**Workspace**");
 
@@ -122,7 +158,7 @@ describe("project selection flow", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("keeps the started pane on a failed binding when group-card creation fails", async () => {
+  it("keeps the started pane recoverable when group-card creation fails", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
     const selectorCards: object[] = [];
     const updates: object[] = [];
@@ -150,9 +186,9 @@ describe("project selection flow", () => {
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
 
     expect(store.listBindings()).toHaveLength(1);
-    expect(store.listBindings()[0]).toMatchObject({ state: "failed", paneId: "w1:p7", topicId: null, rootMessageId: null, statusMessageId: null });
-    expect(store.getProjectSelection((value as { selectionId: string }).selectionId)).toMatchObject({ state: "failed", error: "group card unavailable" });
-    expect(JSON.stringify(updates.at(-1))).toContain("项目创建失败");
+    expect(store.listBindings()[0]).toMatchObject({ state: "pending", lifecycle: "provisioning", provisioningCheckpoint: "runtime_started", paneId: "w1:p7", topicId: null, rootMessageId: null, statusMessageId: null });
+    expect(store.getProjectSelection((value as { selectionId: string }).selectionId)).toMatchObject({ state: "processing", error: "group card unavailable" });
+    expect(JSON.stringify(updates.at(-1))).toContain("项目创建已暂停");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

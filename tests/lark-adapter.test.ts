@@ -1,5 +1,28 @@
-import { describe, expect, it } from "vitest";
-import { normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const createMessage = vi.fn();
+vi.mock("@larksuiteoapi/node-sdk", () => ({
+  Client: class { im = { v1: { message: { create: createMessage } } }; },
+  WSClient: class { async start() {} close() {} },
+  EventDispatcher: class { register() { return this; } }
+}));
+
+import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
+
+beforeEach(() => createMessage.mockReset());
+
+describe("Lark topic creation", () => {
+  it("passes a stable idempotency key to message.create", async () => {
+    createMessage.mockResolvedValue({ data: { message_id: "m-topic" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.createTopic({ schema: "2.0" }, "binding-1")).resolves.toEqual({ topicId: "m-topic", rootMessageId: "m-topic" });
+    expect(createMessage).toHaveBeenCalledWith({
+      params: { receive_id_type: "chat_id" },
+      data: { receive_id: "chat", msg_type: "interactive", content: JSON.stringify({ schema: "2.0" }), uuid: "binding-1" }
+    });
+  });
+});
 
 describe("Lark message normalization", () => {
   const base = {

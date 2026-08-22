@@ -26,6 +26,12 @@ export function parseCommand(text: string): BridgeCommand | null {
       return argument ? { kind: "rename", title: argument } : { kind: "help" };
     case "close":
       return { kind: "close" };
+    case "reattach":
+      return argument ? { kind: "reattach", paneId: argument } : { kind: "help" };
+    case "replace":
+      return { kind: "replace" };
+    case "resume":
+      return { kind: "resume" };
     case "help":
     default:
       return { kind: "help" };

@@ -2,8 +2,8 @@ import { basename } from "node:path";
 
 const MAX_THREAD_TITLE_LENGTH = 80;
 
-export function formatProjectPaneTitle(cwd: string | null, paneName: string | null, paneId: string): string {
-  const project = normalizeTitlePart(cwd ? basename(cwd) : "");
+export function formatProjectPaneTitle(spaceName: string | null, cwd: string | null, paneName: string | null, paneId: string): string {
+  const project = normalizeTitlePart(spaceName) || normalizeTitlePart(cwd ? basename(cwd) : "");
   const pane = normalizeTitlePart(paneName) || normalizeTitlePart(paneId) || "TraeX pane";
   if (!project) return truncateTitlePart(pane, MAX_THREAD_TITLE_LENGTH);
   const combined = `${project} / ${pane}`;

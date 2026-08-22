@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard, renderRequestRunCard } from "../cards/run-card.js";
+import { renderProjectEntryCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort } from "../domain/ports.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
@@ -7,6 +7,7 @@ import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import type { LarkChannelPublisher } from "./lark-channel-publisher.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
+import { safeLogError } from "../runtime/safe-error.js";
 
 export class CardProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
@@ -24,8 +25,11 @@ export class CardProjector {
   ) {
     this.scheduler = new CardUpdateScheduler(async (promptId) => {
       const view = this.store.loadRunCard(promptId);
-      if (!view?.larkMessageId) return;
-      await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.larkMessageId, view.viewVersion, renderRequestRunCard(view));
+      if (!view?.larkMessageId || !view.answerMessageId) return;
+      await Promise.all([
+        this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.larkMessageId, view.viewVersion, "task", renderRequestRunCard(view)),
+        this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view))
+      ]);
     });
   }
 
@@ -74,7 +78,7 @@ export class CardProjector {
         await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id);
       }
     } catch (error) {
-      this.logger.error({ event: "card-projection-failed", err: error, bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
+      this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
     }
   }
 
@@ -89,7 +93,7 @@ export class CardProjector {
 }
 
 function promptIdOf(event: BridgeEvent): string | null {
-  if (event.type === "PromptQueued" || event.type === "SteeringQueued" || event.type === "RunQueuePositionChanged" || event.type === "TurnStarted" || event.type === "SteeringStarted" || event.type === "SteeringDelivered" || event.type === "SteeringFailed" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted" || event.type === "TurnFailed") return event.payload.promptId;
+  if (event.type === "PromptQueued" || event.type === "PromptCancelled" || event.type === "SteeringQueued" || event.type === "RunQueuePositionChanged" || event.type === "TurnStarted" || event.type === "SteeringStarted" || event.type === "SteeringDelivered" || event.type === "SteeringFailed" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted" || event.type === "TurnFailed") return event.payload.promptId;
   if (event.type === "AgentStateChanged") return event.payload.promptId ?? null;
   return null;
 }
@@ -97,13 +101,14 @@ function promptIdOf(event: BridgeEvent): string | null {
 function runCardChange(event: BridgeEvent): RunCardChange | null {
   switch (event.type) {
     case "PromptQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queueDepth };
+    case "PromptCancelled": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.reason };
     case "SteeringQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: 0 };
     case "RunQueuePositionChanged": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queuePosition };
     case "TurnStarted": return { type: "started", occurredAt: event.occurredAt };
     case "SteeringStarted": return { type: "started", occurredAt: event.occurredAt };
     case "SteeringDelivered": return { type: "steering-delivered", occurredAt: event.occurredAt, notice: "已加入当前执行" };
     case "SteeringFailed": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.error };
-    case "TurnOutputObserved": return { type: "output", occurredAt: event.occurredAt, answerDelta: event.payload.answerDelta, progressEvents: event.payload.progressEvents.map((item) => ({ ...item, occurredAt: event.occurredAt })) };
+    case "TurnOutputObserved": return { type: "output", occurredAt: event.occurredAt, answerDelta: event.payload.answerDelta, progressEvents: event.payload.progressEvents.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(event.payload.hasProgressSnapshot === undefined ? {} : { hasProgressSnapshot: event.payload.hasProgressSnapshot }) };
     case "AgentStateChanged": return event.payload.state === "blocked"
       ? { type: "blocked", occurredAt: event.occurredAt, notice: "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。" }
       : event.payload.state === "working" ? { type: "started", occurredAt: event.occurredAt } : null;

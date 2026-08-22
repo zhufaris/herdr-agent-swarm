@@ -213,6 +213,9 @@ Available commands:
 /herdr status
 /herdr rename <title>
 /herdr close
+/herdr reattach <pane-id>
+/herdr replace
+/herdr resume
 /herdr help
 ```
 
@@ -231,6 +234,14 @@ When TraeX needs high-risk approval, the card changes to orange and directs the
 operator to the associated Herdr pane. Approve or reject the operation in Herdr;
 the Lark card cannot bypass that boundary. `/herdr close` archives the binding
 but does not kill TraeX or delete Lark history.
+If a pane becomes orphaned, `reattach` verifies the original pane identity and
+`replace` creates a new generation. Both leave the session archived until an
+explicit `resume`, so uncertain work is never replayed automatically.
+If project creation is interrupted before the new pane identity is persisted,
+the bridge pauses instead of creating another pane. Inspect the configured
+Space; use `/herdr attach <space> <pane-id>` if the pane survived, otherwise
+start again with `/herdr new`. Lark topic creation retries use the binding ID as
+a stable platform idempotency key.
 
 ## Health checks
 
@@ -248,7 +259,8 @@ and the Lark WebSocket connection. It reports every component independently so
 multiple simultaneous failures are visible in one response. A disconnected Lark
 client or inaccessible project returns HTTP 503. `/status` returns the same
 readiness snapshot plus process uptime and a safe SQLite summary of binding,
-prompt, and outbox state, including bounded recent failures. It never returns
+prompt, outbox, lifecycle, attachment, recoverable-provisioning, archived-pane,
+and retention-candidate state, including bounded recent failures. It never returns
 prompt bodies, terminal output, or card payloads. Keep the health server bound to
 localhost unless an authenticated network boundary is provided externally.
 

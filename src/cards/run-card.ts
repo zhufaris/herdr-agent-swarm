@@ -13,11 +13,13 @@ const RUN_STATE_VIEW = {
 
 const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: string }> = {
   provisioning: { label: "正在创建 Pane", icon: "◌", color: "blue" },
+  ready: { label: "已就绪", icon: "✓", color: "green" },
   queued: { label: "已排队", icon: "⏱", color: "blue" },
   running: { label: "TraeX 正在处理", icon: "◌", color: "blue" },
   blocked: { label: "等待用户处理", icon: "⚠", color: "orange" },
   done: { label: "已完成", icon: "✓", color: "green" },
   error: { label: "执行失败", icon: "×", color: "red" },
+  draining: { label: "正在归档", icon: "◌", color: "orange" },
   archived: { label: "已归档", icon: "□", color: "grey" },
   orphaned: { label: "绑定异常", icon: "!", color: "orange" }
 };
@@ -35,9 +37,10 @@ export function renderProjectSelectorCard(input: { selectionId: string; projects
   };
 }
 
-export function renderProjectSelectionStatusCard(input: { status: "processing" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; message?: string }): object {
+export function renderProjectSelectionStatusCard(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; topicUrl?: string; message?: string }): object {
   const views = {
     processing: { title: "正在创建项目 Pane", template: "blue", icon: "⏳" },
+    recoverable: { title: "项目创建已暂停", template: "orange", icon: "⚠" },
     completed: { title: "项目已打开", template: "green", icon: "✅" },
     failed: { title: "项目创建失败", template: "red", icon: "❌" },
     expired: { title: "项目选择已过期", template: "orange", icon: "⌛" },
@@ -45,7 +48,9 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
   } as const;
   const view = views[input.status];
   const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请打开群里的新项目卡片，并在其话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
-  return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements: [{ tag: "markdown", content: details || view.title }] } };
+  const elements: object[] = [{ tag: "markdown", content: details || view.title }];
+  if (input.status === "completed" && input.topicUrl) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", url: input.topicUrl });
+  return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
 export function renderRunCard(input: TopicViewState): object {
@@ -108,7 +113,8 @@ export function renderProjectEntryCard(input: TopicViewState): object {
         metric("QUEUE", String(input.queueDepth))
       ]
     },
-    { tag: "hr" }
+    { tag: "hr" },
+    { tag: "markdown", content: `**项目任务**  ${escapeMarkdown(input.title)}` }
   ];
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(preview), 2_500)}` });
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
@@ -158,6 +164,24 @@ export function renderRequestRunCard(input: RunCardView): object {
   };
 }
 
+export function renderRequestAnswerCard(input: RunCardView): object {
+  const state = RUN_STATE_VIEW[input.phase];
+  const content = input.answer.trim()
+    ? truncateLarkMarkdownTail(normalizeLarkPreview(input.answer), 12_000)
+    : input.phase === "running" ? "正在生成…"
+      : input.phase === "queued" ? "等待任务开始…"
+        : input.phase === "failed" ? "本次执行未产生回答。"
+          : "暂无回答。";
+  return {
+    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `回答 · ${state.label}` } },
+    header: { title: { tag: "plain_text", content: "TraeX 回答" }, subtitle: { tag: "plain_text", content: "HERDR ANSWER" }, template: state.color },
+    body: { elements: [
+      { tag: "markdown", content },
+      { tag: "markdown", content: `${state.icon} ${state.label}` }
+    ] }
+  };
+}
+
 export function renderHelpCard(): object {
   return {
     schema: "2.0",
@@ -172,11 +196,28 @@ export function renderHelpCard(): object {
         "`/herdr status`  查看当前绑定",
         "`/herdr rename <标题>`  重命名当前 pane",
         "`/herdr close`  归档映射（不会强杀 TraeX）",
+        "`/herdr reattach <pane>`  重新连接已验证的原 Pane",
+        "`/herdr replace`  创建新的 Pane generation（不会重放任务）",
+        "`/herdr resume`  验证后恢复已归档会话",
         "`/herdr help`  显示本卡片", "",
         "在已绑定话题中发送普通文本，即会按顺序提交给 TraeX。"
       ].join("\n") },
       { tag: "markdown", content: "高风险审批必须在 Herdr 终端完成" }
     ] }
+  };
+}
+
+export function renderDisconnectedTopicCard(reason: "archived" | "unbound"): object {
+  const archived = reason === "archived";
+  const title = archived ? "话题已归档" : "话题未连接";
+  const message = archived
+    ? "这个话题对应的 Herdr 项目已归档，消息没有提交给 TraeX。请打开群里的新项目卡片继续，或发送 `/herdr new` 新建项目。"
+    : "这个话题没有连接到 Herdr，消息没有提交给 TraeX。请在已创建的项目卡片话题中继续，或发送 `/herdr new` 新建项目。";
+  return {
+    schema: "2.0",
+    config: { update_multi: true, summary: { content: title } },
+    header: { title: { tag: "plain_text", content: archived ? `□ ${title}` : `⚠ ${title}` }, template: "orange" },
+    body: { elements: [{ tag: "markdown", content: message }] }
   };
 }
 

@@ -1,12 +1,14 @@
 import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
+import type { SessionTransition } from "./pane-thread-lifecycle.js";
+import type { BridgeEvent } from "./events.js";
 
 export interface LarkPort {
   start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   isReady(): boolean;
-  createTopic(card: object): Promise<{ topicId: string; rootMessageId: string }>;
+  createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }>;
   replyText(rootMessageId: string, text: string): Promise<{ messageId: string }>;
   replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
@@ -16,7 +18,7 @@ export interface HerdrPort {
   assertWorkspace(workspaceId: string): Promise<void>;
   listPanes(workspaceId: string): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;
-  createPane(workspaceId: string, cwd: string): Promise<HerdrPane>;
+  createPane(workspaceId: string, cwd: string, identity?: { bindingId: string; generation: number; projectId: string }): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string): Promise<void>;
   runPrompt(
     paneId: string,
@@ -51,9 +53,15 @@ export interface BindingStorePort {
   getProjectSelection(id: string): ProjectSelection | null;
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;
   recoverProcessingProjectSelections(): number;
+  listProcessingProjectSelections(): ProjectSelection[];
+  linkProjectSelectionBinding(id: string, bindingId: string): ProjectSelection;
+  pauseProjectSelection(id: string, error: string): ProjectSelection;
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
   updateBinding(id: string, patch: Partial<Binding>): Binding;
+  transitionBinding(id: string, transition: SessionTransition): Binding;
+  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
+  attachBindingPane(id: string, pane: HerdrPane, replacement: boolean): Binding;
   findBindingByTopic(topicId: string): Binding | null;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   findBindingByPane(paneId: string): Binding | null;
@@ -69,6 +77,7 @@ export interface BindingStorePort {
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   requeueSteeringAsTurn(promptId: string): void;
   requeueQueuedSteering(bindingId: string, parentPromptId: string): number;
+  cancelQueuedPrompts(bindingId: string, reason: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];

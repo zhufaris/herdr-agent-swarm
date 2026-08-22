@@ -2,7 +2,7 @@ import type { AgentState } from "./types.js";
 import type { BridgeEvent } from "./events.js";
 import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 
-export type TopicViewPhase = "provisioning" | "queued" | "running" | "blocked" | "done" | "error" | "archived" | "orphaned";
+export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; paneId: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[];
@@ -17,13 +17,15 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
   const base = { ...state, lastEventId: event.eventId };
   switch (event.type) {
     case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, paneId: event.payload.paneId, phase: "provisioning" };
-    case "BindingActivated": return { ...base, paneId: event.payload.paneId, phase: "done", notice: null };
+    case "BindingActivated": return { ...base, paneId: event.payload.paneId, phase: "ready", notice: null };
     case "BindingRenamed": return { ...base, title: event.payload.title };
+    case "BindingDraining": return { ...base, phase: "draining", notice: event.payload.reason };
     case "BindingArchived": return { ...base, phase: "archived", notice: event.payload.reason };
     case "BindingOrphaned": return { ...base, phase: "orphaned", notice: event.payload.reason };
     case "PromptQueued": return base.activePromptId
       ? { ...base, queueDepth: event.payload.queueDepth }
       : { ...base, phase: "queued", queueDepth: event.payload.queueDepth, notice: null };
+    case "PromptCancelled": return state;
     case "SteeringQueued": return state;
     case "RunQueuePositionChanged": return state;
     case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [] };
