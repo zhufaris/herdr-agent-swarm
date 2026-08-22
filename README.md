@@ -1,84 +1,190 @@
 # Herdr Lark Bridge
 
-TypeScript bridge that maps one Lark topic to one TraeX process running in a real Herdr pane. Group members can submit prompts from Lark while developers can observe and take over the same session in Herdr.
+Herdr Lark Bridge connects a Lark topic to a TraeX process running in a real
+Herdr pane. People can submit work from Lark while developers observe or take
+over the same terminal session in Herdr.
 
-## Architecture
+Each ordinary Lark message gets its own CardKit 2.0 run card. The bridge updates
+that card in place from queued to running, blocked, completed, or failed. During
+execution it shows filtered answer text and a simplified activity trail such as
+file reads, edits, and test runs. It does not post separate acknowledgement or
+final-answer text messages.
+
+## How it works
 
 ```text
-Lark events                         Herdr / TraeX state
-     │                                      │
-     └──────────────┐        ┌──────────────┘
-                    ▼        ▼
-             ┌────────────────────┐
-             │ Sync Coordinator   │
-             │ lifecycle + FIFO   │
-             └─────────┬──────────┘
-                       │ BridgeEvent
-                       ▼
-             ┌────────────────────┐
-             │ Node EventEmitter  │
-             └─────────┬──────────┘
-                       ▼
-             ┌────────────────────┐
-             │ TopicView Reducer  │  pure
-             └─────────┬──────────┘
-                       ▼
-             ┌────────────────────┐
-             │ SQLite view snapshot│
-             └─────────┬──────────┘
-                       ▼
-             ┌────────────────────┐
-             │ CardKit 2 Renderer │  pure
-             └─────────┬──────────┘
-                       ▼
-                 Lark run card
+Lark message -> durable FIFO prompt -> Herdr pane -> TraeX
+     |                                  |
+     +-> request card <--- safe output parser + lifecycle events
+              |
+              +-> SQLite snapshot -> 800 ms coalescer -> Lark card patch
 ```
 
-SQLite is not an event store. It persists only the topic/pane binding, FIFO prompt jobs, duplicate-event keys, bridge message IDs, current card projection, and audit records. Runtime events are distributed through Node.js `EventEmitter`.
+SQLite stores topic-to-pane bindings, FIFO prompt jobs, request-card snapshots,
+deduplication keys, a durable Lark outbox, and audit records. Runtime events stay
+inside the Node.js process. An interrupted running prompt is not replayed after a
+restart; its existing card is marked failed. Prompts that have not started remain
+queued.
 
-The run-card shape follows the useful interaction principles from [`lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge): one CardKit 2.0 card is updated in place, status remains compact, and the final response occupies the primary content area. This bridge intentionally omits remote stop/approval actions because its safety model requires high-risk approvals to happen in Herdr.
+The card interaction follows the useful patterns from
+[`lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge):
+compact status, in-place updates, visible progress, and the final response in the
+primary content area. This bridge deliberately omits remote stop and approval
+actions. High-risk approval stays in Herdr.
 
-## Requirements
+## Prerequisites
 
-- Node.js 22.5 or newer (Node 24 is recommended while `node:sqlite` remains experimental in older releases)
-- A running local Herdr server
-- `herdr` and `traex` available to the service account
-- A Lark custom app with bot capability and long-connection event subscription
+- Linux with Node.js 22.5 or newer. Node.js 24 LTS is recommended.
+- npm, supplied with Node.js.
+- A running Herdr workspace.
+- `herdr` and `traex` installed and executable by the service account.
+- A Lark custom app with bot capability.
+- A topic-enabled Lark group containing the bot.
 
-Subscribe the app to `im.message.receive_v1` and grant permissions required to receive group messages, create/reply to messages, and patch interactive messages. Add the bot to the configured topic-enabled group.
-
-## Setup
+Check the local tools before installing the bridge:
 
 ```bash
-npm install
+node --version
+npm --version
+herdr --version
+traex --version
+```
+
+If Node.js is missing, install Node.js 24 using your team's package manager or
+Node.js distribution method. Avoid a system Node older than 22.5 because this
+project uses the built-in `node:sqlite` module.
+
+## Configure the Lark app
+
+In the Lark developer console:
+
+1. Create a custom app and enable its bot.
+2. Enable long-connection event delivery.
+3. Subscribe to `im.message.receive_v1`.
+4. Grant the app permissions to receive group messages, create and reply to
+   messages, and patch interactive messages.
+5. Publish or install the app for the intended tenant.
+6. Add the bot to the target topic-enabled group.
+7. Record the app ID, app secret, group chat ID, and bot open ID.
+
+The bridge accepts messages only from the configured chat ID.
+
+## Install
+
+Clone or copy the repository, enter it, and install the locked dependencies:
+
+```bash
+cd /path/to/herdr-lark-bridge
+npm ci
+npm run build
+```
+
+For active dependency development, use `npm install` instead of `npm ci`.
+
+## Configure the bridge
+
+Create the local environment file:
+
+```bash
 cp .env.example .env
+chmod 600 .env
 ```
 
-Set these required environment variables:
+Edit `.env` and set at least these values:
 
-```bash
-export LARK_APP_ID=cli_xxx
-export LARK_APP_SECRET=xxx
-export LARK_CHAT_ID=oc_xxx
-export LARK_BOT_OPEN_ID=ou_xxx
-export HERDR_WORKSPACE_ID=wG
-export HERDR_WORKSPACE_CWD=/absolute/path/to/project
+```dotenv
+LARK_APP_ID=cli_xxxxxxxxxxxxxxxx
+LARK_APP_SECRET=replace-me
+LARK_CHAT_ID=oc_xxxxxxxxxxxxxxxx
+LARK_BOT_OPEN_ID=ou_xxxxxxxxxxxxxxxx
+HERDR_WORKSPACE_ID=wG
+HERDR_WORKSPACE_CWD=/absolute/path/to/the/project
 ```
 
-The service reads environment variables directly; it does not parse `.env` automatically. Start it through a shell that sources `.env`, a process manager, or systemd `EnvironmentFile`.
+The remaining settings have defaults:
+
+```dotenv
+BRIDGE_DATABASE_PATH=./var/bridge.db
+BRIDGE_HTTP_HOST=127.0.0.1
+BRIDGE_HTTP_PORT=8787
+HERDR_BIN=herdr
+TRAEX_BIN=traex
+LOG_LEVEL=info
+COMMAND_TIMEOUT_MS=30000
+TURN_TIMEOUT_MS=3600000
+RECONCILE_INTERVAL_MS=30000
+MAX_QUEUE_DEPTH=20
+LARK_MESSAGE_CHUNK_SIZE=3500
+```
+
+Use absolute `HERDR_BIN` and `TRAEX_BIN` paths when a systemd service may not
+inherit your interactive shell's `PATH`. `HERDR_WORKSPACE_CWD` must be an
+absolute path accessible to the service account. Keep `.env` private because it
+contains the Lark app secret.
+
+The application reads process environment variables; it does not load `.env`
+itself. Source the file for foreground operation or use systemd's
+`EnvironmentFile` directive.
+
+## Start in the foreground
+
+Load the environment, build, and start the compiled service:
 
 ```bash
+set -a
+source .env
+set +a
 npm run build
 npm start
 ```
 
-Development mode:
+For source-level development with automatic restart:
 
 ```bash
+set -a
+source .env
+set +a
 npm run dev
 ```
 
-## Commands
+After startup, send `/herdr help` in the configured Lark group. A successful
+long-connection startup logs `bridge started`.
+
+## Install as a user systemd service
+
+The repository includes a hardened example unit. Replace every
+`/absolute/path/to/herdr-lark-bridge` occurrence with the actual repository path
+before installing it. Ensure `ExecStart` can find the intended Node.js and npm.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/herdr-lark-bridge.service ~/.config/systemd/user/herdr-lark-bridge.service
+${EDITOR:-vi} ~/.config/systemd/user/herdr-lark-bridge.service
+systemctl --user daemon-reload
+systemctl --user enable --now herdr-lark-bridge.service
+```
+
+Inspect service state and logs:
+
+```bash
+systemctl --user status herdr-lark-bridge.service --no-pager
+journalctl --user -u herdr-lark-bridge.service -f
+```
+
+After code or configuration changes:
+
+```bash
+npm ci
+npm run build
+systemctl --user restart herdr-lark-bridge.service
+```
+
+If the service must survive logout, an administrator may need to enable user
+lingering for the service account.
+
+## Use the bridge
+
+Available commands:
 
 ```text
 /herdr new <title>
@@ -88,29 +194,33 @@ npm run dev
 /herdr help
 ```
 
-An `@Bot` root message also creates a binding and uses the message body as the first prompt. Subsequent topic replies are persisted in that topic's FIFO queue.
+An `@Bot` root message creates a topic binding and uses the message body as its
+first prompt. Later ordinary replies in the topic enter that binding's FIFO
+queue. Every prompt has an independent live card, so queued requests and earlier
+results remain visible.
 
-## Safety
+When TraeX needs high-risk approval, the card changes to orange and directs the
+operator to the associated Herdr pane. Approve or reject the operation in Herdr;
+the Lark card cannot bypass that boundary. `/herdr close` archives the binding
+but does not kill TraeX or delete Lark history.
 
-- Only the configured `LARK_CHAT_ID` is accepted.
-- Any member of that group may operate managed topics.
-- Only panes running a foreground executable named `traex` are automatically adopted.
-- TraeX starts with `--permission-mode auto`.
-- Lark cannot run arbitrary shell commands or approve blocked high-risk actions.
-- `/herdr close` archives the mapping; it does not kill TraeX or delete Lark history.
+## Health checks
 
-## Health and Operations
+The HTTP server listens on `127.0.0.1:8787` by default.
 
-```text
-GET http://127.0.0.1:8787/health
-GET http://127.0.0.1:8787/ready
+```bash
+curl --fail http://127.0.0.1:8787/health
+curl --fail http://127.0.0.1:8787/ready
 ```
 
-`/ready` requires SQLite, the configured Herdr workspace, and an established Lark WebSocket connection. Logs are structured JSON and omit prompt/response bodies by default.
+`/health` confirms that the process can answer HTTP requests. `/ready` also
+checks SQLite access, the configured Herdr workspace, and the Lark WebSocket
+connection. A disconnected Lark client or inaccessible Herdr workspace returns
+HTTP 503.
 
-An example systemd user unit is available at [`deploy/herdr-lark-bridge.service`](deploy/herdr-lark-bridge.service).
+## Verify a deployment
 
-## Verification
+Run the local checks:
 
 ```bash
 npm test
@@ -118,4 +228,34 @@ npm run typecheck
 npm run build
 ```
 
-See the complete behavior and acceptance criteria in [`docs/superpowers/specs/2026-08-22-herdr-lark-bridge-mvp-design.md`](docs/superpowers/specs/2026-08-22-herdr-lark-bridge-mvp-design.md).
+Then perform a Lark smoke test:
+
+1. Send two prompts in one bound topic.
+2. Confirm that two distinct cards appear and no acknowledgement text is posted.
+3. Confirm that the first card updates in place while TraeX works.
+4. Confirm that its progress area stays expanded and contains only simplified
+   activity.
+5. Confirm that completion updates the same card with the final answer and does
+   not post another text message.
+6. Confirm that the second card advances from queued to running.
+
+## Troubleshooting
+
+- `ready` returns 503 with `larkConnected: false`: verify the app credentials,
+  long-connection subscription, app publication, and bot installation.
+- Herdr workspace errors: run `herdr workspace get <workspace-id>` as the same
+  account that runs the service.
+- `herdr` or `traex` is not found under systemd: set absolute `HERDR_BIN` and
+  `TRAEX_BIN` paths in `.env`.
+- The service cannot write SQLite: create the database directory and ensure the
+  service account can write it. The example unit permits writes only under the
+  repository's `var` directory.
+- A running card becomes failed after restart: this is intentional. The bridge
+  does not replay an interrupted prompt because doing so could repeat side
+  effects. Send the prompt again if retry is safe.
+- Updates are delayed during high output volume: ordinary card changes are
+  coalesced to protect Lark from update storms; blocked, completed, and failed
+  states flush immediately.
+
+The request-card behavior and recovery contract are specified in
+[`docs/superpowers/specs/2026-08-22-request-live-card-design.md`](docs/superpowers/specs/2026-08-22-request-live-card-design.md).
