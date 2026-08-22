@@ -191,7 +191,11 @@ export function renderRequestRunCard(input: RunCardView): object {
 
 export function renderRequestAnswerCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
-  const prose = stripNativeTraexStatus(input.answer);
+  const structuredAnswer = Array.isArray(input.answerSegments) && typeof input.answerDraft === "string"
+    ? [...input.answerSegments, input.answerDraft].filter((part) => part.trim()).join("\n\n")
+    : "";
+  const answer = structuredAnswer || input.answer;
+  const prose = stripNativeTraexStatus(answer);
   const content = prose
     ? truncateLarkMarkdownTail(normalizeLarkPreview(prose), 12_000)
     : input.phase === "running" && input.progressEvents.some((event) => event.kind === "step")

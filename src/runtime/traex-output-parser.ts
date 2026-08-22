@@ -5,7 +5,7 @@ export interface ParsedProgressEvent { key: string; kind: ProgressEventKind; lab
 export interface ParsedTraexOutput {
   answerSnapshot: string;
   previousAnswerSnapshot: string;
-  answerUpdate: "append" | "replace";
+  answerUpdate: "append" | "replace" | "replace-status";
   progressEvents: ParsedProgressEvent[];
   hasProgressSnapshot: boolean;
 }
@@ -36,7 +36,7 @@ export function parseTraexOutput(previousRaw: string, currentRaw: string, _works
   const appendedBlock = Boolean(previousAnswer) && current.startsWith(previous) && /^\s*◆\s+/m.test(rawDelta);
   return {
     answerSnapshot, previousAnswerSnapshot: previousAnswer,
-    answerUpdate: appendedBlock && !isNativeStatusFrame(answerSnapshot) ? "append" : "replace",
+    answerUpdate: isNativeStatusFrame(answerSnapshot) ? "replace-status" : appendedBlock ? "append" : "replace",
     progressEvents: progress.steps, hasProgressSnapshot: progress.found
   };
 }

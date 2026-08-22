@@ -26,7 +26,7 @@ export type BridgeEvent =
   | EventBase<"SteeringDelivered", { promptId: string; parentPromptId: string }>
   | EventBase<"SteeringFailed", { promptId: string; parentPromptId: string; error: string }>
   | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number; promptId?: string }>
-  | EventBase<"TurnOutputObserved", { promptId: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace"; progressEvents: Omit<RunProgressEvent, "occurredAt">[]; hasProgressSnapshot?: boolean }>
+  | EventBase<"TurnOutputObserved", { promptId: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status"; progressEvents: Omit<RunProgressEvent, "occurredAt">[]; hasProgressSnapshot?: boolean }>
   | EventBase<"TurnCompleted", { promptId: string; answer: string; queueDepth: number }>
   | EventBase<"TurnFailed", { promptId: string; error: string; queueDepth: number }>;
 

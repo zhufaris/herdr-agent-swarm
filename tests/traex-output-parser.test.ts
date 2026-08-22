@@ -65,6 +65,6 @@ describe("TraeX output parser", () => {
     const previous = "◆ 重新构建部署并重放 Query Log 与 Aeolus Chart… (35m 10s • ↓ 30.8K tokens)\n  9 tasks (7 done, 1 in progress, 1 open)\n  ■ 重新构建部署并重放 Query Log 与 Aeolus Chart\n  ◻ 更新 PROGRESS.md";
     const current = "◆ 重新构建部署并重放 Query Log 与 Aeolus Chart… (35m 20s • ↓ 31.1K tokens)\n  9 tasks (8 done, 1 in progress, 0 open)\n  ✔ 重新构建部署并重放 Query Log 与 Aeolus Chart\n  ■ 更新 PROGRESS.md";
 
-    expect(parseTraexOutput(previous, current, "/repo")).toMatchObject({ answerSnapshot: current.slice(2) });
+    expect(parseTraexOutput(previous, current, "/repo")).toMatchObject({ answerSnapshot: current.slice(2), answerUpdate: "replace-status" });
   });
 });

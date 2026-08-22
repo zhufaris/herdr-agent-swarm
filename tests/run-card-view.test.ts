@@ -34,12 +34,15 @@ describe("request run-card view", () => {
       promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
     });
     const running = reduceRunCard(queued, { type: "started", occurredAt: "started" });
-    const first = reduceRunCard(running, { type: "output", occurredAt: "one", answerSnapshot: "Working (1m)\n9 tasks (7 done)", progressEvents: [] });
-    const second = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "Working (2m)\n9 tasks (8 done)", progressEvents: [] });
-    const duplicate = reduceRunCard(second, { type: "output", occurredAt: "three", answerSnapshot: "Working (2m)\n9 tasks (8 done)", progressEvents: [] });
+    const prose = reduceRunCard(running, { type: "output", occurredAt: "prose", answerSnapshot: "Finished inspection", answerUpdate: "replace", progressEvents: [] });
+    const first = reduceRunCard(prose, { type: "output", occurredAt: "one", answerSnapshot: "Working (1m)\n9 tasks (7 done)", answerUpdate: "replace-status", progressEvents: [] });
+    const second = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "Working (2m)\n9 tasks (8 done)", answerUpdate: "replace-status", progressEvents: [] });
+    const resumed = reduceRunCard(second, { type: "output", occurredAt: "resume", answerSnapshot: "Implemented fix", answerUpdate: "append", progressEvents: [] });
+    const duplicate = reduceRunCard(second, { type: "output", occurredAt: "three", answerSnapshot: "Working (2m)\n9 tasks (8 done)", answerUpdate: "replace-status", progressEvents: [] });
 
-    expect(second.answer).toBe("Working (2m)\n9 tasks (8 done)");
+    expect(second).toMatchObject({ answerSegments: ["Finished inspection"], answerDraft: "Working (2m)\n9 tasks (8 done)", answerDraftTransient: true });
     expect(second.answer).not.toContain("Working (1m)");
+    expect(resumed).toMatchObject({ answerSegments: ["Finished inspection"], answerDraft: "Implemented fix", answer: "Finished inspection\n\nImplemented fix" });
     expect(duplicate).toBe(second);
   });
 
@@ -52,8 +55,23 @@ describe("request run-card view", () => {
     const second = reduceRunCard(grown, { type: "output", occurredAt: "three", answerSnapshot: "Second", previousAnswerSnapshot: "First complete", answerUpdate: "append", progressEvents: [] });
     const secondGrown = reduceRunCard(second, { type: "output", occurredAt: "four", answerSnapshot: "Second complete", previousAnswerSnapshot: "Second", answerUpdate: "replace", progressEvents: [] });
 
-    expect(secondGrown.answer).toBe("First complete\n\nSecond complete");
-    expect(reduceRunCard(secondGrown, { type: "completed", occurredAt: "done", answer: "Second complete" }).answer).toBe("First complete\n\nSecond complete");
+    expect(first).toMatchObject({ answerSegments: [], answerDraft: "First", answer: "First" });
+    expect(grown).toMatchObject({ answerSegments: [], answerDraft: "First complete", answer: "First complete" });
+    expect(second).toMatchObject({ answerSegments: ["First complete"], answerDraft: "Second", answer: "First complete\n\nSecond" });
+    expect(secondGrown).toMatchObject({ answerSegments: ["First complete"], answerDraft: "Second complete", answer: "First complete\n\nSecond complete" });
+
+    const completed = reduceRunCard(secondGrown, { type: "completed", occurredAt: "done", answer: "Second complete" });
+    expect(completed).toMatchObject({ answerSegments: ["First complete", "Second complete"], answerDraft: "", answer: "First complete\n\nSecond complete" });
+  });
+
+  it("uses a grown final answer instead of preserving its partial draft", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const partial = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "Implemented", answerUpdate: "replace", progressEvents: [] });
+    const completed = reduceRunCard(partial, { type: "completed", occurredAt: "done", answer: "Implemented and verified." });
+
+    expect(completed).toMatchObject({ answerSegments: ["Implemented and verified."], answerDraft: "", answer: "Implemented and verified." });
   });
 
   it("ignores an identical structured progress snapshot with a newer observation time", () => {
@@ -64,6 +82,19 @@ describe("request run-card view", () => {
     const duplicate = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active", occurredAt: "two" }] });
 
     expect(duplicate).toBe(first);
+  });
+
+  it("keeps the current answer when an observation only refreshes progress", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const answer = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "Inspecting code", progressEvents: [] });
+    const progressOnly = reduceRunCard(answer, {
+      type: "output", occurredAt: "two", answerSnapshot: "", hasProgressSnapshot: true,
+      progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active", occurredAt: "two" }]
+    });
+
+    expect(progressOnly).toMatchObject({ answer: "Inspecting code", answerSegments: [], answerDraft: "Inspecting code" });
   });
 
   it("does not advance the version for an identical visible update", () => {

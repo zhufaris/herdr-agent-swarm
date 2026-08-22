@@ -199,6 +199,10 @@ describe("SQLite store", () => {
       larkMessageId: "task-card-m1", answerMessageId: "answer-card-m1", deliveredVersion: 1, answerDeliveredVersion: 1
     });
     expect(store.claimNextReadyPrompt("b1")?.id).toBe("p1");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false });
+    expect(store.loadRunCard("p1")).toMatchObject({
+      answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false
+    });
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed", notice: "Bridge 重启导致本次执行中断", queuePosition: 0, viewVersion: 2 });
   });
@@ -210,18 +214,24 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy **request**", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy **request**" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "legacy answer", answerSegments: ["legacy answer"] });
     store.close();
     store = undefined;
 
     const legacy = new DatabaseSync(path);
     legacy.exec(`
       DROP VIEW run_cards_view;
+      ALTER TABLE run_cards DROP COLUMN answer_draft_transient;
+      ALTER TABLE run_cards DROP COLUMN answer_draft;
+      ALTER TABLE run_cards DROP COLUMN answer_segments_json;
       ALTER TABLE run_cards DROP COLUMN request_text;
     `);
     legacy.close();
 
     store = new SqliteBindingStore(path);
-    expect(store.loadRunCard("p1")).toMatchObject({ requestText: "legacy **request**" });
+    expect(store.loadRunCard("p1")).toMatchObject({
+      requestText: "legacy **request**", answer: "legacy answer", answerSegments: ["legacy answer"], answerDraft: "", answerDraftTransient: false
+    });
   });
 
   it("migrates an outbox whose optional columns were appended in legacy order", () => {

@@ -22,6 +22,9 @@ export interface RunCardView {
   spaceName: string;
   paneId: string | null;
   answer: string;
+  answerSegments: string[];
+  answerDraft: string;
+  answerDraftTransient: boolean;
   progressEvents: RunProgressEvent[];
   queuePosition: number;
   startedAt: string | null;
@@ -39,7 +42,7 @@ export type RunCardChange =
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
+  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string }
   | { type: "failed"; occurredAt: string; notice: string };
 
@@ -49,7 +52,7 @@ export function createQueuedRunCard(input: {
 }): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, answerMessageId: null, phase: "queued",
-    title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "",
+    title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
@@ -67,17 +70,18 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "running", startedAt: state.startedAt ?? change.occurredAt, notice: null };
       break;
     case "steering-delivered":
-      patch = { phase: "completed", answer: "", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
+      patch = { phase: "completed", answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
     case "blocked":
       if (state.phase === "blocked" && state.notice === change.notice) return state;
       patch = { phase: "blocked", notice: change.notice };
       break;
     case "output": {
-      const answer = mergeAnswerSnapshot(state.answer, change.answerSnapshot, change.previousAnswerSnapshot ?? "", change.answerUpdate ?? "replace");
+      const answerState = reduceAnswerSnapshot(state, change.answerSnapshot, change.answerUpdate ?? "replace");
+      const answer = renderAnswer(answerState.answerSegments, answerState.answerDraft);
       if (change.hasProgressSnapshot) {
         if (answer === state.answer && sameProgress(change.progressEvents, state.progressEvents)) return state;
-        patch = { answer, progressEvents: change.progressEvents };
+        patch = { answer, ...answerState, progressEvents: change.progressEvents };
         break;
       }
       const events = [...state.progressEvents];
@@ -88,11 +92,11 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
         else events[position] = event;
       }
       if (answer === state.answer && sameProgress(events, state.progressEvents)) return state;
-      patch = { answer, progressEvents: events };
+      patch = { answer, ...answerState, progressEvents: events };
       break;
     }
     case "completed":
-      patch = { phase: "completed", answer: mergeFinalAnswer(state.answer, change.answer), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
+      patch = { phase: "completed", ...completeAnswer(state, change.answer), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
       break;
     case "failed":
       patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
@@ -101,17 +105,46 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
   return { ...state, ...patch, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
 }
 
-function mergeAnswerSnapshot(current: string, next: string, previous: string, update: "append" | "replace"): string {
-  if (update === "append") return [current.trimEnd(), next.trim()].filter(Boolean).join("\n\n");
-  if (previous && current.endsWith(previous)) return `${current.slice(0, -previous.length)}${next}`;
-  return next;
+type AnswerParts = Pick<RunCardView, "answerSegments" | "answerDraft" | "answerDraftTransient">;
+
+function answerParts(state: RunCardView): AnswerParts {
+  if (Array.isArray(state.answerSegments) && typeof state.answerDraft === "string") {
+    return { answerSegments: state.answerSegments, answerDraft: state.answerDraft, answerDraftTransient: state.answerDraftTransient === true };
+  }
+  return { answerSegments: state.answer.trim() ? [state.answer.trim()] : [], answerDraft: "", answerDraftTransient: false };
 }
 
-function mergeFinalAnswer(current: string, finalAnswer: string): string {
-  const currentValue = current.trimEnd();
+function reduceAnswerSnapshot(state: RunCardView, snapshot: string, update: "append" | "replace" | "replace-status"): AnswerParts {
+  const current = answerParts(state);
+  const next = snapshot.trim();
+  if (!next) return current;
+  if (update === "replace-status") {
+    const answerSegments = current.answerDraftTransient ? current.answerSegments : commitSegment(current.answerSegments, current.answerDraft);
+    return { answerSegments, answerDraft: next, answerDraftTransient: true };
+  }
+  if (update === "replace") return { ...current, answerDraft: next, answerDraftTransient: false };
+  const answerSegments = current.answerDraftTransient ? current.answerSegments : commitSegment(current.answerSegments, current.answerDraft);
+  return { answerSegments, answerDraft: next, answerDraftTransient: false };
+}
+
+function completeAnswer(state: RunCardView, finalAnswer: string): Pick<RunCardView, "answer" | "answerSegments" | "answerDraft" | "answerDraftTransient"> {
+  const current = answerParts(state);
+  const draft = current.answerDraft.trim();
   const finalValue = finalAnswer.trim();
-  if (!currentValue || currentValue.endsWith(finalValue)) return currentValue || finalValue;
-  return `${currentValue}\n\n${finalValue}`;
+  let answerSegments = current.answerSegments;
+  if (!current.answerDraftTransient && draft && !finalValue.startsWith(draft)) answerSegments = commitSegment(answerSegments, draft);
+  answerSegments = commitSegment(answerSegments, finalValue || draft);
+  return { answerSegments, answerDraft: "", answerDraftTransient: false, answer: renderAnswer(answerSegments, "") };
+}
+
+function commitSegment(segments: string[], segment: string): string[] {
+  const value = segment.trim();
+  if (!value || segments.at(-1) === value) return segments;
+  return [...segments, value];
+}
+
+function renderAnswer(segments: string[], draft: string): string {
+  return [...segments, draft.trim()].filter(Boolean).join("\n\n");
 }
 
 function sameProgress(left: RunProgressEvent[], right: RunProgressEvent[]): boolean {

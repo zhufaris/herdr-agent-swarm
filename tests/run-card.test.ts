@@ -221,6 +221,20 @@ describe("run card", () => {
     expect(serialized).toContain("较早内容已省略");
   });
 
+  it("renders stable answer segments followed by only the current draft", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stable answer", workspaceId: "w1", paneId: "p1", requestText: "Run", queuePosition: 1, occurredAt: "now" });
+    const card = renderRequestAnswerCard({
+      ...view, phase: "running", answer: "stale aggregate",
+      answerSegments: ["已完成检查。", "已更新实现。"], answerDraft: "正在运行测试…"
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("已完成检查。");
+    expect(serialized).toContain("已更新实现。");
+    expect(serialized).toContain("正在运行测试…");
+    expect(serialized).not.toContain("stale aggregate");
+  });
+
   it("shows request, queue state, and lifecycle fallback without inferred steps", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
     const queued = JSON.stringify(renderRequestRunCard(view));
