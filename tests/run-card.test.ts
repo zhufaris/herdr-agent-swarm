@@ -5,7 +5,9 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("run card", () => {
   it("documents how to attach an existing pane", () => {
-    expect(JSON.stringify(renderHelpCard())).toContain("/herdr attach <space> <pane-id>");
+    const help = JSON.stringify(renderHelpCard());
+    expect(help).toContain("/herdr attach <space> <pane-id>");
+    expect(help).toContain("/herdr spaces");
   });
 
   it("renders project buttons with opaque ids and no host routing details", () => {

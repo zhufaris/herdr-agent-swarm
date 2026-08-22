@@ -6,6 +6,8 @@ describe("commands", () => {
     expect(parseCommand("/herdr new fix build")).toEqual({ kind: "new", title: "fix build" });
     expect(parseCommand("/herdr new")).toEqual({ kind: "new", title: null });
     expect(parseCommand("/herdr projects")).toEqual({ kind: "projects" });
+    expect(parseCommand("/herdr spaces")).toEqual({ kind: "spaces" });
+    expect(parseCommand("/herdr spaces extra")).toEqual({ kind: "help" });
     expect(parseCommand("/herdr rename better title")).toEqual({ kind: "rename", title: "better title" });
     expect(parseCommand("/herdr status")).toEqual({ kind: "status" });
     expect(parseCommand("/herdr attach datasage_semantic_knowledge w5:p3G")).toEqual({ kind: "attach", spaceName: "datasage_semantic_knowledge", paneId: "w5:p3G" });

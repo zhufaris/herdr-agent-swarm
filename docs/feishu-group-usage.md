@@ -41,6 +41,18 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 打开同一个项目选择卡片。只有发起命令的人可以点击，选择结果在当前话题绑定后不可切换。
 
+### `/herdr spaces`
+
+按 Space 分组展示所有 Herdr pane，包括没有运行 TraeX 或尚未绑定飞书话题的
+pane。空 Space 仍会显示；配置目录之外的 pane 会归入对应 workspace 的“未注册”
+分组。某个 workspace 暂时不可用时，其他 Space 仍会正常展示。
+
+### `/herdr spaces`
+
+只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、非 TraeX Pane
+以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
+仍会正常显示。这个命令不会创建绑定、启动 TraeX 或修改 Pane。
+
 ### `/herdr attach <space> <pane-id>`
 
 把已经运行 TraeX 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
+import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -184,6 +185,8 @@ export class SyncCoordinator {
         await this.replyStandalone(message.rootMessageId ?? message.messageId, renderHelpCard());
       } else if (command?.kind === "new" || command?.kind === "projects") {
         await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
+      } else if (command?.kind === "spaces") {
+        await this.publishSpaceDirectory(message);
       } else if (command?.kind === "attach") {
         disposition = await this.attachExistingPane(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
       } else if (command?.kind === "status") {
@@ -417,6 +420,27 @@ export class SyncCoordinator {
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: renderProjectSelectorCard({ selectionId, projects: this.config.projects })
     });
     await this.channelPublisher.drain();
+  }
+
+  private async publishSpaceDirectory(message: IncomingLarkMessage): Promise<void> {
+    const panesByWorkspace = new Map<string, Awaited<ReturnType<HerdrPort["listPanes"]>>>();
+    const errorsByWorkspace = new Map<string, string>();
+    for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) {
+      try {
+        panesByWorkspace.set(workspaceId, await this.herdr.listPanes(workspaceId));
+      } catch (error) {
+        const safe = safeLogError(error);
+        errorsByWorkspace.set(workspaceId, safe.message);
+        this.logger.warn({ event: "space-directory-workspace-failed", err: safe, workspaceId, outcome: "partial" }, "workspace unavailable while building space directory");
+      }
+    }
+
+    const groups = buildSpaceDirectoryGroups(this.config.projects, panesByWorkspace, errorsByWorkspace);
+    const cards = renderSpaceDirectoryCards(groups);
+    const rootMessageId = message.rootMessageId ?? message.messageId;
+    for (const [index, card] of cards.entries()) {
+      await this.channelPublisher.enqueueCard(rootMessageId, `spaces:${message.messageId}:${index}`, card);
+    }
   }
 
   private async createSelectedProject(
@@ -853,6 +877,37 @@ export class SyncCoordinator {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+export function buildSpaceDirectoryGroups(
+  projects: readonly ProjectConfig[],
+  panesByWorkspace: ReadonlyMap<string, Awaited<ReturnType<HerdrPort["listPanes"]>>>,
+  errorsByWorkspace: ReadonlyMap<string, string>
+): SpaceDirectoryGroup[] {
+  const groups = new Map<string, SpaceDirectoryGroup>();
+  for (const project of projects) {
+    const spaceName = projectSpaceName(project);
+    const key = `${project.workspaceId}\0${spaceName}`;
+    const group = groups.get(key) ?? { spaceName, workspaceId: project.workspaceId, directories: [], panes: [] };
+    if (!group.directories.includes(project.cwd)) group.directories.push(project.cwd);
+    const error = errorsByWorkspace.get(project.workspaceId);
+    if (error) group.error = error;
+    groups.set(key, group);
+  }
+
+  const result = [...groups.values()];
+  for (const [workspaceId, panes] of panesByWorkspace) {
+    const workspaceGroups = result.filter((group) => group.workspaceId === workspaceId);
+    const unmatched = [];
+    for (const pane of panes) {
+      const group = workspaceGroups.find((candidate) => pane.cwd !== null && candidate.directories.includes(pane.cwd));
+      const view = { paneId: pane.paneId, name: pane.label ?? pane.paneId, agentState: pane.agentState, foregroundExecutables: pane.foregroundExecutables };
+      if (group) group.panes.push(view);
+      else unmatched.push(view);
+    }
+    if (unmatched.length) result.push({ spaceName: "未注册", workspaceId, directories: [], panes: unmatched, unregistered: true });
+  }
+  return result;
+}
 function provisioningRecoveryMessage(error: unknown): string {
   const detail = errorMessage(error);
   return detail.includes("/herdr attach")

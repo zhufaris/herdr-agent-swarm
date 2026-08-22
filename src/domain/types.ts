@@ -154,6 +154,7 @@ export interface IncomingLarkMessage {
 export type BridgeCommand =
   | { kind: "new"; title: string | null }
   | { kind: "projects" }
+  | { kind: "spaces" }
   | { kind: "status" }
   | { kind: "attach"; spaceName: string; paneId: string }
   | { kind: "rename"; title: string }

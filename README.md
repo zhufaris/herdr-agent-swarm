@@ -155,6 +155,8 @@ npm run dev
 
 After startup, send `/herdr help` in the configured Lark group. A successful
 long-connection startup logs `bridge started`.
+Use `/herdr spaces` to list every configured space and all of its live Herdr
+panes, including panes that are not running TraeX.
 
 ## Run with PM2
 
@@ -209,6 +211,7 @@ Available commands:
 /herdr new <title>
 /herdr new
 /herdr projects
+/herdr spaces
 /herdr attach <space> <pane-id>
 /herdr status
 /herdr rename <title>
@@ -221,6 +224,9 @@ Available commands:
 
 The `new` and `projects` commands open a project selector. Only the command
 initiator can use it, and each resulting topic remains bound to that project.
+The read-only `spaces` command lists every configured Space and its current
+panes, including empty Spaces and unregistered panes, without creating a
+binding or starting TraeX.
 The `attach` command creates a normal project topic for an existing TraeX pane
 in the exact configured space without creating, renaming, restarting, or writing
 to that pane. Repeating it for the same healthy binding is idempotent.

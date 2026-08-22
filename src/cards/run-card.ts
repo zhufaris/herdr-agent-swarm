@@ -192,6 +192,7 @@ export function renderHelpCard(): object {
         "**从飞书控制 Herdr 中的 TraeX pane**", "",
         "`/herdr new [标题]`  选择项目并创建 TraeX pane",
         "`/herdr projects`  打开项目选择卡片",
+        "`/herdr spaces`  按 Space 查看全部 Pane",
         "`/herdr attach <space> <pane-id>`  将已有 TraeX pane 连接到群聊",
         "`/herdr status`  查看当前绑定",
         "`/herdr rename <标题>`  重命名当前 pane",
