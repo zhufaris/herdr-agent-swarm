@@ -2,7 +2,7 @@ import pino from "pino";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { buildSpaceDirectoryGroups, SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { buildSpaceDirectoryGroups, selectSpaceDirectoryBinding, SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
@@ -84,6 +84,19 @@ describe("space directory command", () => {
     ]);
   });
 
+  it("selects the best navigable same-chat binding for a pane", () => {
+    const candidates = [
+      threadBinding("cross-chat", "other", "active", "2026-08-22T05:00:00.000Z", "omt-cross"),
+      threadBinding("unusable", "chat", "active", "2026-08-22T06:00:00.000Z", null, null),
+      threadBinding("archived-newer", "chat", "archived", "2026-08-22T04:00:00.000Z", "omt-archived"),
+      threadBinding("active-older", "chat", "active", "2026-08-22T01:00:00.000Z", null, "om-root"),
+      threadBinding("active-newer", "chat", "active", "2026-08-22T02:00:00.000Z", "omt-active")
+    ];
+
+    expect(selectSpaceDirectoryBinding(candidates, "w1:p1", "chat")?.id).toBe("active-newer");
+    expect(selectSpaceDirectoryBinding(candidates, "w1:p1", "unknown")).toBeNull();
+  });
+
   it("opens bound panes and force-refreshes before claiming an eligible pane", async () => {
     let onAction: Parameters<LarkPort["start"]>[1];
     let expose = false;
@@ -114,6 +127,13 @@ describe("space directory command", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 });
+
+function threadBinding(
+  id: string, chatId: string, lifecycle: "active" | "draining" | "archived", updatedAt: string,
+  topicId: string | null, rootMessageId: string | null = "root"
+) {
+  return { id, paneId: "w1:p1", chatId, topicId, rootMessageId, lifecycle, updatedAt };
+}
 
 function findAction(card: object, action: string): unknown {
   const elements = (card as { body: { elements: unknown[] } }).body.elements;

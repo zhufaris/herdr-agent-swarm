@@ -483,9 +483,10 @@ export class SyncCoordinator {
     const groups = buildSpaceDirectoryGroups(this.config.projects, panesByWorkspace, errorsByWorkspace);
     const bindings = this.store.listBindings();
     for (const group of groups) for (const pane of group.panes) {
-      const binding = bindings.find((candidate) => candidate.paneId === pane.paneId);
-      if (binding?.chatId === message.chatId && binding.rootMessageId) pane.bindingId = binding.id;
-      if (!binding && !group.unregistered && pane.foregroundExecutables.includes("traex")) {
+      const binding = selectSpaceDirectoryBinding(bindings, pane.paneId, message.chatId);
+      if (binding) pane.bindingId = binding.id;
+      const paneIsBound = bindings.some((candidate) => candidate.paneId === pane.paneId);
+      if (!paneIsBound && !group.unregistered && pane.foregroundExecutables.includes("traex")) {
         const projects = this.config.projects.filter((project) => project.workspaceId === group.workspaceId && projectSpaceName(project) === group.spaceName && project.cwd === panesByWorkspace.get(group.workspaceId)?.find((candidate) => candidate.paneId === pane.paneId)?.cwd);
         if (projects.length === 1) pane.claimProjectId = projects[0]!.id;
       }
@@ -998,6 +999,28 @@ export function buildSpaceDirectoryGroups(
     if (unmatched.length) result.push({ spaceName: "未注册", workspaceId, directories: [], panes: unmatched, unregistered: true });
   }
   return result;
+}
+
+type SpaceDirectoryBindingCandidate = Pick<Binding, "id" | "paneId" | "chatId" | "topicId" | "rootMessageId" | "lifecycle" | "updatedAt">;
+
+export function selectSpaceDirectoryBinding(
+  bindings: readonly SpaceDirectoryBindingCandidate[],
+  paneId: string,
+  chatId: string
+): SpaceDirectoryBindingCandidate | null {
+  const lifecycleRank: Partial<Record<Binding["lifecycle"], number>> = { active: 0, draining: 1, archived: 2 };
+  return bindings
+    .filter((binding) =>
+      binding.paneId === paneId &&
+      binding.chatId === chatId &&
+      Boolean(binding.topicId ?? binding.rootMessageId) &&
+      lifecycleRank[binding.lifecycle] !== undefined
+    )
+    .sort((left, right) =>
+      lifecycleRank[left.lifecycle]! - lifecycleRank[right.lifecycle]! ||
+      right.updatedAt.localeCompare(left.updatedAt) ||
+      left.id.localeCompare(right.id)
+    )[0] ?? null;
 }
 function provisioningRecoveryMessage(error: unknown): string {
   const detail = errorMessage(error);

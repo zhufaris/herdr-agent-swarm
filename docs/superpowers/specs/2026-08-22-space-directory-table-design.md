@@ -48,12 +48,19 @@ claim, binding validation, thread forwarding, and the prohibition on close or
 delete actions remain unchanged. Cards continue to use schema 2.0 and the
 existing Lark action callback path.
 
+When several historical bindings reference the same Pane, the directory only
+considers bindings owned by the requesting chat that contain a `topicId` or
+`rootMessageId`. It prefers `active`, then `draining`, then `archived`; within
+the same lifecycle it chooses the most recently updated binding. Bindings from
+another chat are never exposed, and a Pane without an eligible binding has no
+thread action.
+
 ## Verification
 
 Unit tests must assert column ordering, readable Space names, short displayed
 Pane IDs, full identifiers in action payloads, row-local open/claim actions,
 empty and failure rows, pagination, and absence of close actions. Integration
-tests must continue to prove that open forwards the correct thread and claim
-force-refreshes the workspace before binding. A real `/herdr spaces` message is
+tests must prove deterministic binding selection, same-chat isolation, that open
+forwards the correct thread, and that claim force-refreshes the workspace before binding. A real `/herdr spaces` message is
 required after deployment to confirm Lark accepts and renders the chosen native
 card structure.
