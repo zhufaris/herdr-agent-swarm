@@ -6,7 +6,7 @@ describe("TraeX output parser", () => {
     const previous = "✧ Working\n• Read /repo/src/a.ts\n◆ Fixed";
     const current = "✧ Working\n• Read /repo/src/a.ts\n• Edit /repo/src/b.ts\n• Bash npm test\n◆ Fixed login safely";
     expect(parseTraexOutput(previous, current, "/repo")).toEqual({
-      answerDelta: " login safely",
+      answerSnapshot: "Fixed login safely",
       progressEvents: [],
       hasProgressSnapshot: false
     });
@@ -14,7 +14,7 @@ describe("TraeX output parser", () => {
 
   it("omits reasoning, tool JSON, and credential-shaped content", () => {
     const unsafe = '<think>secret plan</think>\n{"command":"curl","Authorization":"Bearer abc123"}\nPRIVATE KEY-----\n• Bash echo $TOKEN';
-    expect(parseTraexOutput("", unsafe, "/repo")).toEqual({ answerDelta: "", progressEvents: [], hasProgressSnapshot: false });
+    expect(parseTraexOutput("", unsafe, "/repo")).toEqual({ answerSnapshot: "", progressEvents: [], hasProgressSnapshot: false });
   });
 
   it("uses the latest answer block for a later turn", () => {
@@ -33,7 +33,7 @@ describe("TraeX output parser", () => {
     const current = `${previous}\nImplemented change.\n<herdr_progress>\n{"steps":[{"id":"inspect","text":"Inspect code","status":"completed"},{"id":"test","text":"Run tests","status":"in_progress"}]}\n</herdr_progress>`;
 
     expect(parseTraexOutput(previous, current, "/repo")).toEqual({
-      answerDelta: "\nImplemented change.",
+      answerSnapshot: "Working\nImplemented change.",
       progressEvents: [
         { key: "step:inspect", kind: "step", label: "Inspect code", state: "done" },
         { key: "step:test", kind: "step", label: "Run tests", state: "active" }
@@ -45,6 +45,13 @@ describe("TraeX output parser", () => {
 
   it("does not turn tool activity or malformed progress into steps", () => {
     const output = `◆ Answer\n• Read /repo/src/a.ts\n<herdr_progress>{bad json}</herdr_progress>`;
-    expect(parseTraexOutput("", output, "/repo")).toEqual({ answerDelta: "Answer\n• Read /repo/src/a.ts", progressEvents: [], hasProgressSnapshot: false });
+    expect(parseTraexOutput("", output, "/repo")).toEqual({ answerSnapshot: "Answer\n• Read /repo/src/a.ts", progressEvents: [], hasProgressSnapshot: false });
+  });
+
+  it("returns the latest TraeX status frame as one replaceable snapshot", () => {
+    const previous = "◆ 重新构建部署并重放 Query Log 与 Aeolus Chart… (35m 10s • ↓ 30.8K tokens)\n  9 tasks (7 done, 1 in progress, 1 open)\n  ■ 重新构建部署并重放 Query Log 与 Aeolus Chart\n  ◻ 更新 PROGRESS.md";
+    const current = "◆ 重新构建部署并重放 Query Log 与 Aeolus Chart… (35m 20s • ↓ 31.1K tokens)\n  9 tasks (8 done, 1 in progress, 0 open)\n  ✔ 重新构建部署并重放 Query Log 与 Aeolus Chart\n  ■ 更新 PROGRESS.md";
+
+    expect(parseTraexOutput(previous, current, "/repo")).toMatchObject({ answerSnapshot: current.slice(2) });
   });
 });

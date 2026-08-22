@@ -62,7 +62,7 @@ describe("event-driven card projection", () => {
     const stopProjector = projector.start();
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
-    await bus.publish({ eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerDelta: "live answer", progressEvents: [{ key: "edit:card", kind: "edit", label: "更新主卡片", state: "active" }] } });
+    await bus.publish({ eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: "live answer", progressEvents: [{ key: "edit:card", kind: "edit", label: "更新主卡片", state: "active" }] } });
     await bus.publish({ eventId: "blocked", bindingId: "b1", type: "AgentStateChanged", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", state: "blocked", queueDepth: 1 } });
     await publisher.drain();
 

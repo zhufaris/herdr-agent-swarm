@@ -2,7 +2,7 @@ import type { ProgressEventKind, ProgressEventState } from "../domain/run-card-v
 import { stripTerminalControl } from "./output.js";
 
 export interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
-export interface ParsedTraexOutput { answerDelta: string; progressEvents: ParsedProgressEvent[]; hasProgressSnapshot: boolean }
+export interface ParsedTraexOutput { answerSnapshot: string; progressEvents: ParsedProgressEvent[]; hasProgressSnapshot: boolean }
 
 const UNSAFE = /<\/?(?:think|reasoning)>|authorization\s*[:=]|bearer\s+[a-z0-9._-]+|private[ _-]?key|\$(?:token|secret|password)|"(?:command|arguments|tool_call)"\s*:/i;
 const PROGRESS_BLOCK = /\n?<herdr_progress>\s*([\s\S]*?)(?:<\/herdr_progress>|$)\n?/g;
@@ -21,12 +21,10 @@ export function parseTraexOutput(previousRaw: string, currentRaw: string, _works
   const previous = stripTerminalControl(previousRaw).trim();
   const current = stripTerminalControl(currentRaw).trim();
   const rawDelta = current.startsWith(previous) ? current.slice(previous.length) : current;
-  if (UNSAFE.test(rawDelta)) return { answerDelta: "", progressEvents: [], hasProgressSnapshot: false };
-  const previousAnswer = visibleAnswer(previous);
+  if (UNSAFE.test(rawDelta)) return { answerSnapshot: "", progressEvents: [], hasProgressSnapshot: false };
   const currentAnswer = visibleAnswer(current);
-  const answerDelta = currentAnswer.startsWith(previousAnswer) ? currentAnswer.slice(previousAnswer.length) : currentAnswer;
   const progress = structuredProgress(current);
-  return { answerDelta: safeAnswer(answerDelta), progressEvents: progress.steps, hasProgressSnapshot: progress.found };
+  return { answerSnapshot: safeAnswer(currentAnswer), progressEvents: progress.steps, hasProgressSnapshot: progress.found };
 }
 
 export function extractFinalTraexAnswer(output: string): string { return safeAnswer(visibleAnswer(stripTerminalControl(output))).trim(); }

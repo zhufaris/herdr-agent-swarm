@@ -50,3 +50,19 @@ snapshot and assert object identity and `viewVersion` remain unchanged. Topic-vi
 tests assert the project-card preview also replaces rather than appends. Existing
 completion tests continue to prove that the final answer supersedes the live
 snapshot.
+
+### Message semantics
+
+The bridge treats visible state according to its lifecycle semantics:
+
+- Snapshot state is replaced in place: live TraeX output, structured steps,
+  queue position, agent state, and approval notices.
+- Terminal state supersedes live state: final answers, failures, and steering
+  delivery acknowledgements.
+- Historical records remain independent: the original request, each request's
+  own card, completed answers from earlier turns, audits, and failure records.
+
+Structured progress and live prose are separate snapshots. Updating one must not
+erase the other. Tool activity, reasoning, command JSON, and credential-shaped
+content remain filtered. Non-text inbound Feishu messages remain outside this
+change and continue to be ignored.

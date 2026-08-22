@@ -32,9 +32,15 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
     case "SteeringStarted":
     case "SteeringDelivered":
     case "SteeringFailed": return state;
-    case "TurnOutputObserved":
+    case "TurnOutputObserved": {
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
-      return { ...base, activePromptId: event.payload.promptId, answer: keepAnswerTail((base.answer ?? "") + event.payload.answerDelta), recentProgress: mergeProgress(base.recentProgress ?? [], event.payload.progressEvents) };
+      const answer = keepAnswerTail(event.payload.answerSnapshot);
+      const recentProgress = event.payload.hasProgressSnapshot
+        ? stampProgress(event.payload.progressEvents, event.occurredAt).slice(-8)
+        : mergeProgress(base.recentProgress ?? [], event.payload.progressEvents, event.occurredAt);
+      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && state.activePromptId === event.payload.promptId) return state;
+      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress };
+    }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       return { ...base, phase: event.payload.state === "blocked" ? "blocked" : event.payload.state === "working" ? "running" : base.phase, agentState: event.payload.state, queueDepth: event.payload.queueDepth, activePromptId: event.payload.promptId ?? base.activePromptId, notice: event.payload.state === "blocked" ? "TraeX 需要人工审批。请查看对应 Herdr panel 并完成所需交互。" : base.notice };
@@ -57,15 +63,26 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
   };
 }
 
-function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[]): RunProgressEvent[] {
+function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
   const result = [...current];
   for (const update of updates) {
-    const event = { ...update, occurredAt: new Date().toISOString() };
+    const event = { ...update, occurredAt };
     const existing = result.findIndex((item) => item.key === event.key);
     if (existing >= 0) result[existing] = event;
     else result.push(event);
   }
   return result.slice(-8);
+}
+
+function stampProgress(updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
+  return updates.map((update) => ({ ...update, occurredAt }));
+}
+
+function sameVisibleProgress(left: RunProgressEvent[], right: RunProgressEvent[]): boolean {
+  return left.length === right.length && left.every((event, index) => {
+    const other = right[index];
+    return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state;
+  });
 }
 
 function keepAnswerTail(answer: string): string { return answer.slice(-2_500); }

@@ -11,11 +11,11 @@ describe("request run-card view", () => {
       type: "started", occurredAt: "2026-08-22T10:00:01.000Z"
     });
     const observed = reduceRunCard(running, {
-      type: "output", occurredAt: "2026-08-22T10:00:02.000Z", answerDelta: "Working ",
+      type: "output", occurredAt: "2026-08-22T10:00:02.000Z", answerSnapshot: "Working ",
       progressEvents: [{ key: "read:src/a.ts", kind: "read", label: "已读取 src/a.ts", state: "done", occurredAt: "2026-08-22T10:00:02.000Z" }]
     });
     const duplicate = reduceRunCard(observed, {
-      type: "output", occurredAt: "2026-08-22T10:00:03.000Z", answerDelta: "on it",
+      type: "output", occurredAt: "2026-08-22T10:00:03.000Z", answerSnapshot: "Working on it",
       progressEvents: [{ key: "read:src/a.ts", kind: "read", label: "已读取 src/a.ts", state: "done", occurredAt: "2026-08-22T10:00:03.000Z" }]
     });
     const completed = reduceRunCard(duplicate, {
@@ -27,6 +27,30 @@ describe("request run-card view", () => {
     expect(duplicate).toMatchObject({ answer: "Working on it", viewVersion: 4 });
     expect(duplicate.progressEvents).toHaveLength(1);
     expect(completed).toMatchObject({ phase: "completed", answer: "Fixed login.", finishedAt: "2026-08-22T10:00:04.000Z", viewVersion: 5 });
+  });
+
+  it("replaces a live status snapshot and ignores an identical refresh", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const running = reduceRunCard(queued, { type: "started", occurredAt: "started" });
+    const first = reduceRunCard(running, { type: "output", occurredAt: "one", answerSnapshot: "Working (1m)\n9 tasks (7 done)", progressEvents: [] });
+    const second = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "Working (2m)\n9 tasks (8 done)", progressEvents: [] });
+    const duplicate = reduceRunCard(second, { type: "output", occurredAt: "three", answerSnapshot: "Working (2m)\n9 tasks (8 done)", progressEvents: [] });
+
+    expect(second.answer).toBe("Working (2m)\n9 tasks (8 done)");
+    expect(second.answer).not.toContain("Working (1m)");
+    expect(duplicate).toBe(second);
+  });
+
+  it("ignores an identical structured progress snapshot with a newer observation time", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const first = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active", occurredAt: "one" }] });
+    const duplicate = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active", occurredAt: "two" }] });
+
+    expect(duplicate).toBe(first);
   });
 
   it("does not advance the version for an identical visible update", () => {

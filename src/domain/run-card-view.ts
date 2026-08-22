@@ -39,7 +39,7 @@ export type RunCardChange =
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerDelta: string; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
+  | { type: "output"; occurredAt: string; answerSnapshot: string; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string }
   | { type: "failed"; occurredAt: string; notice: string };
 
@@ -75,7 +75,7 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       break;
     case "output": {
       if (change.hasProgressSnapshot) {
-        const answer = state.answer + change.answerDelta;
+        const answer = change.answerSnapshot;
         if (answer === state.answer && sameProgress(change.progressEvents, state.progressEvents)) return state;
         patch = { answer, progressEvents: change.progressEvents };
         break;
@@ -87,7 +87,7 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
         if (position === undefined) { positions.set(event.key, events.length); events.push(event); }
         else events[position] = event;
       }
-      const answer = state.answer + change.answerDelta;
+      const answer = change.answerSnapshot;
       if (answer === state.answer && sameProgress(events, state.progressEvents)) return state;
       patch = { answer, progressEvents: events };
       break;
@@ -103,5 +103,8 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
 }
 
 function sameProgress(left: RunProgressEvent[], right: RunProgressEvent[]): boolean {
-  return left.length === right.length && left.every((event, index) => JSON.stringify(event) === JSON.stringify(right[index]));
+  return left.length === right.length && left.every((event, index) => {
+    const other = right[index];
+    return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state;
+  });
 }
