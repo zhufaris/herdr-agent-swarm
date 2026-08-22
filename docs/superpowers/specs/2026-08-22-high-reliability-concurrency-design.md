@@ -32,14 +32,13 @@ unbounded backlog of delayed passes.
 ### Inbound acceptance has one durable consumer
 
 `handleMessage()` continues to persist each Lark event before processing it. It
-then invokes a single-flight inbound drain. Concurrent callbacks await the same
-drain rather than starting additional claim loops.
+then appends a pass to one serialized inbound drain tail. Concurrent callbacks
+never run claim loops at the same time.
 
 The drain claims durable rows in creation order. A failure releases that row
 back to `received` and ends the current drain, preserving retry semantics. A
-message inserted just as a drain completes must not become stranded: the owner
-performs a final durable queue check before relinquishing ownership, or the
-next caller becomes the owner.
+message inserted just as a drain completes cannot become stranded because its
+callback appends another durable queue check to the tail.
 
 This design serializes acceptance globally because the bridge serves one
 configured Lark chat and command ordering in that chat is observable. Prompt
@@ -74,7 +73,7 @@ Every application-state write path verifies in the same SQLite transaction
 that `instance_lease` still contains the active owner and token and that the
 lease has not expired. The verification and mutation therefore commit
 atomically relative to lease takeover. If validation fails, the mutation is
-rolled back and throws a typed stale-lease error.
+rolled back with the stable error marker `stale_instance_lease`.
 
 Lease acquisition, renewal, release, schema migration, and store close are
 lease-management operations and are not gated by the application write fence.
@@ -114,7 +113,7 @@ owns enforcement once the runtime activates the fence.
   stops so a later retry does not skip ordering ahead of the failed message.
 - A projection failure rejects the associated event publication but does not
   poison the binding's future event tail.
-- A fenced write after lease loss throws `StaleInstanceLeaseError`. The runtime's
+- A fenced write after lease loss fails with `stale_instance_lease`. The runtime's
   existing lease-loss callback initiates shutdown; no application mutation from
   that stale process is allowed to commit.
 - Shutdown does not wait for hypothetical queued timer ticks. It waits only for

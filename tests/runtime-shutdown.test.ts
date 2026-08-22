@@ -12,7 +12,7 @@ describe("bridge runtime shutdown", () => {
       publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
-      store: { close() { calls.push("store"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
       logger: { info() {}, error() {} }
     });
 
@@ -24,7 +24,7 @@ describe("bridge runtime shutdown", () => {
     releaseProjector();
     await Promise.all([first, second]);
 
-    expect(calls).toEqual(["coordinator", "projector:start", "projector:end", "publisher", "health", "lease", "store"]);
+    expect(calls).toEqual(["coordinator", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
   });
 
   it("continues releasing resources when an earlier stop fails", async () => {
@@ -36,13 +36,13 @@ describe("bridge runtime shutdown", () => {
       publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
-      store: { close() { calls.push("store"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
       logger: { info() {}, error(value) { errors.push(String(value.component)); } }
     });
 
     await runtime.shutdown("SIGTERM");
 
-    expect(calls).toEqual(["coordinator", "projector", "publisher", "health", "lease", "store"]);
+    expect(calls).toEqual(["coordinator", "projector", "publisher", "health", "fence", "lease", "store"]);
     expect(errors).toEqual(["coordinator"]);
   });
 
@@ -54,11 +54,11 @@ describe("bridge runtime shutdown", () => {
       publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
-      store: { close() { calls.push("store"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
       logger: { info() {}, error() {} }
     });
 
     await runtime.shutdown("SIGTERM");
-    expect(calls).toEqual(["coordinator:abort", "projector", "publisher", "health", "lease", "store"]);
+    expect(calls).toEqual(["coordinator:abort", "projector", "publisher", "health", "fence", "lease", "store"]);
   });
 });

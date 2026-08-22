@@ -24,7 +24,8 @@ export class SyncCoordinator {
   private readonly observedAgentStates = new Map<string, Binding["lastAgentState"]>();
   private readonly observedTerminalOutputs = new Map<string, string>();
   private skippedPaneReasons = new Map<string, string>();
-  private readonly activeReconciliations = new Set<Promise<void>>();
+  private reconciliation: Promise<void> | null = null;
+  private inboundDrain: Promise<void> | null = null;
   private stopping = false;
   private reconcileTimer: NodeJS.Timeout | null = null;
   private stopInboundSubscription: (() => void) | null = null;
@@ -95,7 +96,12 @@ export class SyncCoordinator {
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     await this.lark.stop();
     this.stopInboundSubscription?.();
-    const pending = [...this.workers.values(), ...this.steeringWorkers.values(), ...this.activeReconciliations];
+    const pending = [
+      ...this.workers.values(),
+      ...this.steeringWorkers.values(),
+      ...(this.reconciliation ? [this.reconciliation] : []),
+      ...(this.inboundDrain ? [this.inboundDrain] : [])
+    ];
     if (!pending.length) return;
     const settled = Promise.allSettled(pending);
     const graceful = await settlesWithin(settled, this.shutdownGraceMs);
@@ -197,6 +203,14 @@ export class SyncCoordinator {
   }
 
   private async drainInboundMessages(): Promise<void> {
+    const previous = this.inboundDrain ?? Promise.resolve();
+    const drain = previous.catch(() => undefined).then(() => this.drainInboundMessagesOnce());
+    this.inboundDrain = drain;
+    try { await drain; }
+    finally { if (this.inboundDrain === drain) this.inboundDrain = null; }
+  }
+
+  private async drainInboundMessagesOnce(): Promise<void> {
     for (let message = this.store.claimNextInboundMessage(); message; message = this.store.claimNextInboundMessage()) {
       try {
         await this.bus.publishInbound({
@@ -309,9 +323,11 @@ export class SyncCoordinator {
 
   async reconcile(): Promise<void> {
     if (this.stopping) return;
+    if (this.reconciliation) return this.reconciliation;
     const work = this.reconcileOnce();
-    this.activeReconciliations.add(work);
-    try { await work; } finally { this.activeReconciliations.delete(work); }
+    this.reconciliation = work;
+    try { await work; }
+    finally { if (this.reconciliation === work) this.reconciliation = null; }
   }
 
   private async reconcileOnce(): Promise<void> {

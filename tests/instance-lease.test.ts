@@ -36,6 +36,35 @@ describe("SQLite instance lease", () => {
     expect(store.renewInstanceLease("owner", 1, at(5_000), at(20_000))).toMatchObject({ expiresAt: at(20_000), updatedAt: at(5_000) });
     expect(store.renewInstanceLease("owner", 1, at(20_000), at(35_000))).toBeNull();
   });
+
+  it("fences every application table after another owner takes over", () => {
+    directory = mkdtempSync(join(tmpdir(), "herdr-fence-"));
+    const path = join(directory, "bridge.db");
+    const first = new SqliteBindingStore(path);
+    const second = new SqliteBindingStore(path);
+    stores.push(first, second);
+    const base = Date.now();
+    const timestamp = (offset: number) => new Date(base + offset).toISOString();
+    const firstLease = first.acquireInstanceLease("owner-a", timestamp(0), timestamp(15_000))!;
+    first.activateWriteFence(firstLease.ownerId, firstLease.fencingToken);
+    expect(first.database.prepare("SELECT COUNT(*) AS count FROM sqlite_temp_master WHERE type = 'trigger' AND name LIKE 'bridge_fence_%'").get()).toEqual({ count: 30 });
+    first.createPendingBinding({ id: "before", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Before" });
+
+    const secondLease = second.acquireInstanceLease("owner-b", timestamp(15_000), timestamp(30_000))!;
+    second.activateWriteFence(secondLease.ownerId, secondLease.fencingToken);
+
+    expect(() => first.createPendingBinding({ id: "stale", workspaceId: "w1", chatId: "c1", topicId: "t2", rootMessageId: "m2", title: "Stale" })).toThrow(/stale_instance_lease/);
+    expect(() => first.updateBinding("before", { title: "Stale update" })).toThrow(/stale_instance_lease/);
+    expect(() => first.recordInboundMessage({ eventId: "e1", messageId: "m3", chatId: "c1", topicId: "t1", rootMessageId: "m1", actorOpenId: "u1", text: "hello", mentionsBot: false, isRootMessage: false })).toThrow(/stale_instance_lease/);
+    expect(() => first.enqueueOutboundReply({ id: "o1", idempotencyKey: "stale:o1", bindingId: null, rootMessageId: "m1", kind: "text", payload: "hello" })).toThrow(/stale_instance_lease/);
+    expect(() => first.audit({ actorOpenId: "u1", action: "stale", target: "b1", outcome: "rejected" })).toThrow(/stale_instance_lease/);
+    expect(() => first.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES ('before', '{}', 'now')").run()).toThrow(/stale_instance_lease/);
+    expect(() => first.database.prepare("INSERT INTO lifecycle_events(event_id, binding_id, event_type, payload_json, occurred_at) VALUES ('le1', 'before', 'test', '{}', 'now')").run()).toThrow(/stale_instance_lease/);
+
+    expect(second.createPendingBinding({ id: "current", workspaceId: "w1", chatId: "c1", topicId: "t3", rootMessageId: "m3", title: "Current" })).toMatchObject({ id: "current" });
+    first.deactivateWriteFence();
+    expect(first.releaseInstanceLease("owner-a", firstLease.fencingToken)).toBe(false);
+  });
 });
 
 describe("instance lease controller", () => {
@@ -47,6 +76,7 @@ describe("instance lease controller", () => {
     const lost = vi.fn();
     const lease = new InstanceLeaseController(store, { ttlMs: 15_000, heartbeatMs: 5_000 }, logger as never, () => current, "owner-a");
     lease.acquire();
+    expect(lease.writeFence()).toMatchObject({ ownerId: "owner-a", fencingToken: 1 });
     lease.start(lost);
     expect(lease.snapshot()).toMatchObject({ held: true, fencingToken: 1, error: null });
 

@@ -35,6 +35,8 @@ export interface HerdrPort {
 
 export interface BindingStorePort {
   close(): void;
+  activateWriteFence(ownerId: string, fencingToken: number): void;
+  deactivateWriteFence(): void;
   acquireInstanceLease(ownerId: string, now: string, expiresAt: string): InstanceLease | null;
   renewInstanceLease(ownerId: string, fencingToken: number, now: string, expiresAt: string): InstanceLease | null;
   releaseInstanceLease(ownerId: string, fencingToken: number): boolean;

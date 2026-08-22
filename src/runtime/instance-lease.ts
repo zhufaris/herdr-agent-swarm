@@ -65,6 +65,11 @@ export class InstanceLeaseController {
 
   snapshot(): InstanceLeaseStatus { return { ...this.status }; }
 
+  writeFence(): { ownerId: string; fencingToken: number } {
+    if (!this.status.held || this.status.fencingToken === null) throw new Error("Cannot activate write fence without a held lease");
+    return { ownerId: this.ownerId, fencingToken: this.status.fencingToken };
+  }
+
   private lose(reason: string): false {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;

@@ -11,7 +11,7 @@ interface ShutdownDependencies {
   publisher: { stop(): Promise<void> };
   healthServer: { close(callback: (error?: Error) => void): unknown };
   lease: { release(): void };
-  store: { close(): void };
+  store: { deactivateWriteFence(): void; close(): void };
   logger: ShutdownLogger;
 }
 
@@ -33,6 +33,7 @@ export class BridgeRuntimeShutdown {
     await stopSafely("projector", () => projector.stop(), logger);
     await stopSafely("publisher", () => publisher.stop(), logger);
     await stopSafely("healthServer", () => closeServer(healthServer), logger);
+    await stopSafely("writeFence", async () => { store.deactivateWriteFence(); }, logger);
     await stopSafely("lease", async () => { lease.release(); }, logger);
     await stopSafely("store", async () => { store.close(); }, logger);
     logger.info({ event: "bridge-shutdown-completed", signal, outcome: "completed" }, "bridge shutdown completed");

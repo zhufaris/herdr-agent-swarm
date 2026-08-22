@@ -155,4 +155,83 @@ describe("event-driven card projection", () => {
     await publisher.stop();
     store.close();
   });
+
+  it("projects concurrent events for one binding in publication order", async () => {
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const updates: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
+      async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "card1" }; },
+      async updateCard(_messageId, card) {
+        const value = JSON.stringify(card);
+        if (value.includes("First")) await firstBlocked;
+        updates.push(value);
+      }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+
+    const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "First" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = bus.publish({ eventId: "second", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:01Z", payload: { title: "Second" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.loadTopicView("b1")?.title).toBe("First");
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(store.loadTopicView("b1")?.title).toBe("Second");
+    expect(updates.map((value) => value.includes("First") ? "First" : "Second")).toEqual(["First", "Second"]);
+    await projector.stop(); await publisher.stop(); store.close();
+  });
+
+  it("continues a binding projection tail after one event fails", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p2", state: "active" });
+    const originalSave = store.saveTopicView.bind(store);
+    let failOnce = true;
+    store.saveTopicView = (view) => { if (failOnce) { failOnce = false; throw new Error("projection failed"); } originalSave(view); };
+    const bus = new BridgeEventBus();
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+
+    await expect(bus.publish({ eventId: "failed", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Failed" } })).rejects.toThrow("projection failed");
+    expect(store.loadTopicView("b1")).toBeNull();
+    await expect(bus.publish({ eventId: "recovered", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:01Z", payload: { title: "Recovered" } })).resolves.toBeUndefined();
+    expect(store.loadTopicView("b1")?.title).toBe("Recovered");
+    await projector.stop(); await publisher.stop(); store.close();
+  });
+
+  it("projects different bindings independently", async () => {
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const store = new SqliteBindingStore(":memory:");
+    for (const id of ["b1", "b2"]) {
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: `t-${id}`, rootMessageId: `m-${id}`, title: id });
+      store.updateBinding(id, { paneId: `w1:p-${id}`, state: "active", statusMessageId: `card-${id}` });
+    }
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; },
+      async updateCard(messageId) { if (messageId === "card-b1") await firstBlocked; }
+    };
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+
+    const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Blocked" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = bus.publish({ eventId: "second", bindingId: "b2", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:01Z", payload: { title: "Independent" } });
+    await vi.waitFor(() => expect(store.loadTopicView("b2")?.title).toBe("Independent"));
+    releaseFirst();
+    await Promise.all([first, second]);
+    await projector.stop(); await publisher.stop(); store.close();
+  });
 });

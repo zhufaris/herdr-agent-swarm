@@ -35,6 +35,8 @@ let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 
 try {
   lease.acquire();
+  const writeFence = lease.writeFence();
+  store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr });
   runtimeShutdown = new BridgeRuntimeShutdown({ coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;

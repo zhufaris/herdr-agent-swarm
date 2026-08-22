@@ -11,7 +11,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 
 export class CardProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
-  private readonly activeHandlers = new Set<Promise<void>>();
+  private readonly bindingTails = new Map<string, Promise<void>>();
   private unsubscribe: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
@@ -34,7 +34,7 @@ export class CardProjector {
   }
 
   start(): () => void {
-    this.unsubscribe = this.bus.onBridgeEvent((event) => this.trackHandler(this.onEvent(event)));
+    this.unsubscribe = this.bus.onBridgeEvent((event) => this.enqueue(event));
     return () => this.unsubscribe?.();
   }
 
@@ -44,7 +44,7 @@ export class CardProjector {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.scheduler.stop();
-    this.stopPromise = Promise.allSettled([...this.activeHandlers]).then(() => undefined);
+    this.stopPromise = Promise.allSettled([...this.bindingTails.values()]).then(() => undefined);
     return this.stopPromise;
   }
 
@@ -65,8 +65,8 @@ export class CardProjector {
     const current = this.views.get(event.bindingId) ?? this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
     const next = reduceTopicView(current, event);
     if (next === current) return;
-    this.views.set(event.bindingId, next);
     this.store.saveTopicView(next);
+    this.views.set(event.bindingId, next);
 
     const binding = this.store.listBindings().find((candidate) => candidate.id === event.bindingId);
     if (!binding?.rootMessageId) return;
@@ -82,12 +82,14 @@ export class CardProjector {
     }
   }
 
-  private trackHandler(work: Promise<void>): Promise<void> {
-    this.activeHandlers.add(work);
-    void work.then(
-      () => this.activeHandlers.delete(work),
-      () => this.activeHandlers.delete(work)
-    );
+  private enqueue(event: BridgeEvent): Promise<void> {
+    const previous = this.bindingTails.get(event.bindingId) ?? Promise.resolve();
+    const work = previous.catch(() => undefined).then(() => this.onEvent(event));
+    const tail = work.catch(() => undefined);
+    this.bindingTails.set(event.bindingId, tail);
+    void tail.then(() => {
+      if (this.bindingTails.get(event.bindingId) === tail) this.bindingTails.delete(event.bindingId);
+    });
     return work;
   }
 }

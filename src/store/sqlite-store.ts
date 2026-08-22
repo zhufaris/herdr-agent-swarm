@@ -32,6 +32,11 @@ type ProjectSelectionRow = Record<string, SqlValue> & {
   requested_title: string | null; selected_project_id: string | null; binding_id: string | null; state: string; error: string | null; expires_at: string; created_at: string; updated_at: string;
 };
 
+const FENCED_TABLES = [
+  "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "project_selections", "audit_log", "lifecycle_events", "topic_views", "run_cards"
+] as const;
+
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
   rootMessageId: "root_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
@@ -54,6 +59,45 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   close(): void { this.database.close(); }
+
+  activateWriteFence(ownerId: string, fencingToken: number): void {
+    this.deactivateWriteFence();
+    this.database.exec("CREATE TEMP TABLE bridge_write_fence(owner_id TEXT NOT NULL, fencing_token INTEGER NOT NULL)");
+    this.database.prepare("INSERT INTO temp.bridge_write_fence(owner_id, fencing_token) VALUES (?, ?)").run(ownerId, fencingToken);
+    for (const table of FENCED_TABLES) for (const operation of ["INSERT", "UPDATE", "DELETE"] as const) {
+      const trigger = `bridge_fence_${table}_${operation.toLowerCase()}`;
+      this.database.exec(`
+        CREATE TEMP TRIGGER ${trigger} BEFORE ${operation} ON main.${table}
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM main.instance_lease AS lease, temp.bridge_write_fence AS fence
+            WHERE lease.singleton_id = 1 AND lease.owner_id = fence.owner_id
+              AND lease.fencing_token = fence.fencing_token
+              AND julianday(lease.expires_at) > julianday('now')
+          ) THEN RAISE(ABORT, 'stale_instance_lease') END;
+        END;
+      `);
+    }
+    try { this.assertWriteFence(); }
+    catch (error) { this.deactivateWriteFence(); throw error; }
+  }
+
+  deactivateWriteFence(): void {
+    for (const table of FENCED_TABLES) for (const operation of ["insert", "update", "delete"] as const) {
+      this.database.exec(`DROP TRIGGER IF EXISTS temp.bridge_fence_${table}_${operation}`);
+    }
+    this.database.exec("DROP TABLE IF EXISTS temp.bridge_write_fence");
+  }
+
+  private assertWriteFence(): void {
+    const valid = this.database.prepare(`
+      SELECT 1 FROM main.instance_lease AS lease, temp.bridge_write_fence AS fence
+      WHERE lease.singleton_id = 1 AND lease.owner_id = fence.owner_id
+        AND lease.fencing_token = fence.fencing_token
+        AND julianday(lease.expires_at) > julianday('now')
+    `).get();
+    if (!valid) throw new Error("stale_instance_lease");
+  }
 
   acquireInstanceLease(ownerId: string, currentTime: string, expiresAt: string): InstanceLease | null {
     this.database.exec("BEGIN IMMEDIATE");
