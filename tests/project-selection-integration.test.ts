@@ -16,10 +16,11 @@ describe("project selection flow", () => {
     const started: string[] = [];
     const prompts: string[] = [];
     const cards: object[] = [];
+    const groupCards: object[] = [];
     const updates: object[] = [];
     const lark: LarkPort = {
       async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
-      async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async createTopic(card) { groupCards.push(card); return { topicId: "project-topic-1", rootMessageId: "project-root-1" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { cards.push(card); return { messageId: "selector-card-1" }; },
       async updateCard(_messageId, card) { updates.push(card); }
@@ -46,8 +47,10 @@ describe("project selection flow", () => {
     const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
     const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
+    store.createPendingBinding({ id: "existing-binding", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", title: "bridge / Existing" });
+    store.updateBinding("existing-binding", { paneId: "wH:p1", state: "active" });
 
-    await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "topic-1", rootMessageId: "command-1", actorOpenId: "user-1", text: "/herdr new Fix login", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", actorOpenId: "user-1", text: "/herdr new Fix login", mentionsBot: true, isRootMessage: false });
     expect(created).toEqual([]);
     expect(cards).toHaveLength(1);
     const button = findProjectButton(cards[0]!, "datasage");
@@ -64,10 +67,18 @@ describe("project selection flow", () => {
     expect(created).toEqual([["wD", "/work/datasage"]]);
     expect(started).toEqual(["wD:p9"]);
     expect(prompts).toEqual([]);
-    expect(store.findBindingByPane("wD:p9")).toMatchObject({ projectId: "datasage", workspaceId: "wD", title: "datasage / Fix login", state: "active" });
+    expect(groupCards).toHaveLength(1);
+    expect(JSON.stringify(groupCards[0])).toContain("datasage_semantic_knowledge");
+    expect(JSON.stringify(groupCards[0])).toContain("wD:p9");
+    expect(store.findBindingByPane("wD:p9")).toMatchObject({
+      projectId: "datasage", workspaceId: "wD", title: "datasage / Fix login", state: "active",
+      topicId: "project-topic-1", rootMessageId: "project-root-1", statusMessageId: "project-root-1"
+    });
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
     expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
     expect(JSON.stringify(updates.at(-1))).toContain("datasage_semantic_knowledge");
+    expect(JSON.stringify(updates.at(-1))).toContain("请打开群里的新项目卡片");
+    expect(JSON.stringify(updates.at(-1))).not.toContain("当前话题");
     expect(JSON.stringify(updates.at(-1))).not.toContain("**Workspace**");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
@@ -109,6 +120,41 @@ describe("project selection flow", () => {
     expect(new Set(listed)).toEqual(new Set(["w1", "w2"]));
     expect(store.findBindingByPane("w2:p1")).toMatchObject({ state: "active", projectId: "beta" });
     await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("keeps the started pane on a failed binding when group-card creation fails", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
+    const selectorCards: object[] = [];
+    const updates: object[] = [];
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic() { throw new Error("group card unavailable"); },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card-1" }; },
+      async updateCard(_messageId, card) { updates.push(card); }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane(workspaceId, cwd) { return { paneId: "w1:p7", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/herdr new Broken", mentionsBot: true, isRootMessage: true });
+    const value = findProjectButton(selectorCards[0]!, "alpha").value;
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+
+    expect(store.listBindings()).toHaveLength(1);
+    expect(store.listBindings()[0]).toMatchObject({ state: "failed", paneId: "w1:p7", topicId: null, rootMessageId: null, statusMessageId: null });
+    expect(store.getProjectSelection((value as { selectionId: string }).selectionId)).toMatchObject({ state: "failed", error: "group card unavailable" });
+    expect(JSON.stringify(updates.at(-1))).toContain("项目创建失败");
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 });
 

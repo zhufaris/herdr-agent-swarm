@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderHelpCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestRunCard, renderRunCard } from "../cards/run-card.js";
+import { renderHelpCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestRunCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -42,7 +42,7 @@ export class SyncCoordinator {
       if (topicView && topicView.spaceName !== spaceName) {
         const current = { ...topicView, spaceName };
         this.store.saveTopicView(current);
-        if (binding.statusMessageId) await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `space-name:${binding.id}:${spaceName}`, renderRunCard(current));
+        if (binding.statusMessageId) await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `space-name:${binding.id}:${spaceName}`, renderProjectEntryCard(current));
       }
       const runCards = this.store.listRunCards(binding.id);
       for (const view of runCards.filter((item) => item.larkMessageId)) {
@@ -55,7 +55,7 @@ export class SyncCoordinator {
       if (latestRun && currentTopic && binding.statusMessageId) {
         const mirrored = mirrorRunCardToTopic(currentTopic, latestRun);
         this.store.saveTopicView(mirrored);
-        await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `startup-primary-sync:${binding.id}:${latestRun.promptId}:${latestRun.viewVersion}`, renderRunCard(mirrored));
+        await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `startup-primary-sync:${binding.id}:${latestRun.promptId}:${latestRun.viewVersion}`, renderProjectEntryCard(mirrored));
       }
     }
     const recoveredInbound = this.store.recoverProcessingInboundMessages();
@@ -163,7 +163,6 @@ export class SyncCoordinator {
       if (command?.kind === "help") {
         await this.replyStandalone(message.rootMessageId ?? message.messageId, renderHelpCard());
       } else if (command?.kind === "new" || command?.kind === "projects") {
-        if (binding?.state === "active") throw new Error("This topic is already bound to a TraeX pane");
         await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
       } else if (command?.kind === "status") {
         if (!binding) throw new Error("This topic is not bound to Herdr");
@@ -309,15 +308,21 @@ export class SyncCoordinator {
     const title = formatProjectPaneTitle(project.cwd, selection.requestedTitle ?? project.displayName, "TraeX pane");
     let binding = this.store.createPendingBinding({
       id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId,
-      topicId: selection.topicId ?? selection.commandMessageId, rootMessageId: selection.rootMessageId, title
+      topicId: null, rootMessageId: null, title
     });
-    if (selection.selectorMessageId) binding = this.store.updateBinding(binding.id, { statusMessageId: selection.selectorMessageId });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
     try {
       const pane = await this.herdr.createPane(project.workspaceId, project.cwd);
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
-      binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, state: "active", lastAgentState: "idle" });
-      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: binding.topicId! });
+      binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, lastAgentState: "idle" });
+      const activatedEvent = this.event(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: "pending" });
+      const activeView = reduceTopicView(this.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), activatedEvent);
+      const topic = await this.lark.createTopic(renderProjectEntryCard(activeView));
+      this.store.recordBridgeMessage(topic.rootMessageId);
+      binding = this.store.updateBinding(binding.id, {
+        topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId, state: "active"
+      });
+      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: topic.topicId });
       return binding;
     } catch (error) {
       this.store.updateBinding(binding.id, { state: "failed" });
@@ -363,7 +368,7 @@ export class SyncCoordinator {
     const createdEvent = this.event(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId });
     const initialView = reduceTopicView(initialTopicView(binding.id), createdEvent);
     this.store.saveTopicView(initialView);
-    const topic = await this.lark.createTopic(renderRunCard(initialView));
+    const topic = await this.lark.createTopic(renderProjectEntryCard(initialView));
     this.store.recordBridgeMessage(topic.rootMessageId);
     binding = this.store.updateBinding(binding.id, {
       paneId: pane.paneId, topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId, state: "active"

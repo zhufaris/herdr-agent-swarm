@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { renderRequestRunCard, renderRunCard } from "../cards/run-card.js";
+import { renderProjectEntryCard, renderRequestRunCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort } from "../domain/ports.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
@@ -66,7 +66,7 @@ export class CardProjector {
 
     const binding = this.store.listBindings().find((candidate) => candidate.id === event.bindingId);
     if (!binding?.rootMessageId) return;
-    const card = renderRunCard(next);
+    const card = renderProjectEntryCard(next);
     try {
       if (binding.statusMessageId) {
         await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, event.eventId, card);

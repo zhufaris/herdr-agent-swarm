@@ -135,7 +135,7 @@ describe("Herdr discovery", () => {
     await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-project / Initial pane" });
 
-    await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", actorOpenId: "user", text: "/herdr rename Better pane", mentionsBot: false, isRootMessage: false });
+    await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/herdr rename Better pane", mentionsBot: false, isRootMessage: false });
     expect(renamed).toEqual([["w1:p2", "Better pane"]]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-project / Better pane" });
 
@@ -181,7 +181,8 @@ describe("Herdr discovery", () => {
     await coordinator.reconcile();
     await publisher.drain();
 
-    expect(JSON.stringify(updates.at(-1))).toContain("TraeX local answer");
+    expect(JSON.stringify(updates.at(-1))).toContain("已完成");
+    expect(JSON.stringify(updates.at(-1))).not.toContain("TraeX local answer");
     expect(replies).toEqual([]);
     await coordinator.stop(); stopProjector(); stopChannelPublisher(); store.close();
   });
@@ -260,7 +261,7 @@ describe("Herdr discovery", () => {
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: "thread reply", larkMessageId: "request-card-1" }));
-    await vi.waitFor(() => expect(JSON.stringify(updates.at(-1)?.card)).toContain("thread reply"));
+    await vi.waitFor(() => expect(updates.some((update) => update.messageId === "request-card-1" && JSON.stringify(update.card).includes("thread reply"))).toBe(true));
     expect(cards).toHaveLength(1);
     const requestUpdates = updates.filter((update) => JSON.stringify(update.card).includes("HERDR REQUEST"));
     expect(requestUpdates.length).toBeGreaterThan(0);
@@ -320,8 +321,8 @@ describe("Herdr discovery", () => {
     const bindingId = store.findBindingByPane("w1:p1")!.id;
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "first", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(JSON.stringify(updates.at(-1))).toContain("等待用户处理"));
-    expect(JSON.stringify(updates.at(-1))).toContain("TraeX 需要人工审批");
+    await vi.waitFor(() => expect(updates.some((card) => JSON.stringify(card).includes("等待用户处理"))).toBe(true));
+    expect(updates.some((card) => JSON.stringify(card).includes("TraeX 需要人工审批"))).toBe(true);
     await coordinator.handleMessage({ eventId: "event-2", messageId: "message-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(prompts).toEqual(["first"]);

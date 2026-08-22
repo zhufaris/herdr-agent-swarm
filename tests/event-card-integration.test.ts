@@ -32,11 +32,12 @@ describe("event-driven card projection", () => {
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "Finished" });
     await publisher.drain();
     expect(updates).toHaveLength(2);
-    expect(JSON.stringify(updates.at(-1))).toContain("Finished");
+    expect(JSON.stringify(updates.at(-1))).toContain("已完成");
+    expect(JSON.stringify(updates.at(-1))).not.toContain("Finished");
     stop(); stopPublisher(); store.close();
   });
 
-  it("continuously mirrors a request's live output to the primary channel card", async () => {
+  it("keeps live output in the request card while updating only primary-card lifecycle", async () => {
     const updates: Array<{ messageId: string; card: object }> = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
@@ -64,7 +65,8 @@ describe("event-driven card projection", () => {
     await publisher.drain();
 
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "blocked", answer: "live answer", recentProgress: [expect.objectContaining({ key: "edit:card" })] });
-    expect(updates.some((update) => update.messageId === "primary-card" && JSON.stringify(update.card).includes("live answer") && JSON.stringify(update.card).includes("更新主卡片"))).toBe(true);
+    expect(updates.some((update) => update.messageId === "primary-card" && JSON.stringify(update.card).includes("等待用户处理"))).toBe(true);
+    expect(updates.some((update) => update.messageId === "primary-card" && (JSON.stringify(update.card).includes("live answer") || JSON.stringify(update.card).includes("更新主卡片")))).toBe(false);
     expect(updates.some((update) => update.messageId === "request-card" && JSON.stringify(update.card).includes("live answer"))).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();

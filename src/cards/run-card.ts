@@ -44,7 +44,7 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
     unauthorized: { title: "无法使用此选择器", template: "orange", icon: "🔒" }
   } as const;
   const view = views[input.status];
-  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请在当前话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
+  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请打开群里的新项目卡片，并在其话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements: [{ tag: "markdown", content: details || view.title }] } };
 }
 
@@ -90,6 +90,32 @@ export function renderRunCard(input: TopicViewState): object {
       template: view.color
     },
     body: { elements }
+  };
+}
+
+export function renderProjectEntryCard(input: TopicViewState): object {
+  const view = STATE_VIEW[input.phase];
+  return {
+    schema: "2.0",
+    config: { update_multi: true, summary: { content: view.label } },
+    header: {
+      title: { tag: "plain_text", content: `TraeX · ${truncate(input.title, 64)}` },
+      subtitle: { tag: "plain_text", content: "HERDR PROJECT" },
+      template: view.color
+    },
+    body: { elements: [
+      {
+        tag: "column_set",
+        horizontal_spacing: "8px",
+        columns: [
+          metric("SPACE", input.spaceName),
+          metric("PANE", input.paneId ?? "provisioning"),
+          metric("QUEUE", String(input.queueDepth))
+        ]
+      },
+      { tag: "hr" },
+      { tag: "markdown", content: `${view.icon} ${view.label}` }
+    ] }
   };
 }
 
