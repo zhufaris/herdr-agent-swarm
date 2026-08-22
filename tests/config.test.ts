@@ -41,6 +41,11 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, PROJECTS_CONFIG_PATH: registryPath })).toThrow();
   });
 
+  it("requires the lease heartbeat to be less than half the TTL", () => {
+    expect(() => loadConfig({ ...requiredEnvironment, INSTANCE_LEASE_TTL_MS: "10000", INSTANCE_LEASE_HEARTBEAT_MS: "5000" })).toThrow(/less than half/);
+    expect(loadConfig({ ...requiredEnvironment }).instanceLease).toEqual({ ttlMs: 15_000, heartbeatMs: 5_000 });
+  });
+
   it("rejects project paths that are missing or not directories", () => {
     const directory = mkdtempSync(join(tmpdir(), "herdr-projects-"));
     const filePath = join(directory, "file.txt");

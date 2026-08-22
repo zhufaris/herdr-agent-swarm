@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, IncomingLarkMessage, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState, RequestCardRole } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState, RequestCardRole } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -54,6 +54,38 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   close(): void { this.database.close(); }
+
+  acquireInstanceLease(ownerId: string, currentTime: string, expiresAt: string): InstanceLease | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare("SELECT owner_id, fencing_token, expires_at, updated_at FROM instance_lease WHERE singleton_id = 1").get() as { owner_id: string; fencing_token: number; expires_at: string; updated_at: string } | undefined;
+      if (!row) {
+        this.database.prepare("INSERT INTO instance_lease(singleton_id, owner_id, fencing_token, expires_at, updated_at) VALUES (1, ?, 1, ?, ?)").run(ownerId, expiresAt, currentTime);
+      } else if (row.owner_id === ownerId) {
+        this.database.prepare("UPDATE instance_lease SET expires_at = ?, updated_at = ? WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ?").run(expiresAt, currentTime, ownerId, row.fencing_token);
+      } else if (row.expires_at <= currentTime) {
+        this.database.prepare("UPDATE instance_lease SET owner_id = ?, fencing_token = fencing_token + 1, expires_at = ?, updated_at = ? WHERE singleton_id = 1 AND fencing_token = ? AND expires_at <= ?").run(ownerId, expiresAt, currentTime, row.fencing_token, currentTime);
+      } else {
+        this.database.exec("COMMIT");
+        return null;
+      }
+      const acquired = this.database.prepare("SELECT owner_id, fencing_token, expires_at, updated_at FROM instance_lease WHERE singleton_id = 1 AND owner_id = ?").get(ownerId) as { owner_id: string; fencing_token: number; expires_at: string; updated_at: string } | undefined;
+      this.database.exec("COMMIT");
+      return acquired ? mapInstanceLease(acquired) : null;
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  renewInstanceLease(ownerId: string, fencingToken: number, currentTime: string, expiresAt: string): InstanceLease | null {
+    const result = this.database.prepare("UPDATE instance_lease SET expires_at = ?, updated_at = ? WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ? AND expires_at > ?")
+      .run(expiresAt, currentTime, ownerId, fencingToken, currentTime);
+    if (result.changes !== 1) return null;
+    const row = this.database.prepare("SELECT owner_id, fencing_token, expires_at, updated_at FROM instance_lease WHERE singleton_id = 1").get() as { owner_id: string; fencing_token: number; expires_at: string; updated_at: string };
+    return mapInstanceLease(row);
+  }
+
+  releaseInstanceLease(ownerId: string, fencingToken: number): boolean {
+    return this.database.prepare("DELETE FROM instance_lease WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ?").run(ownerId, fencingToken).changes === 1;
+  }
 
   recordInboundMessage(message: IncomingLarkMessage): boolean {
     const result = this.database.prepare(`
@@ -580,6 +612,10 @@ export class SqliteBindingStore implements BindingStorePort {
   private migrate(): void {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS instance_lease(
+        singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), owner_id TEXT NOT NULL, fencing_token INTEGER NOT NULL,
+        expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS bindings(
         id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
         root_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
@@ -772,6 +808,9 @@ export class SqliteBindingStore implements BindingStorePort {
 }
 
 function now(): string { return new Date().toISOString(); }
+function mapInstanceLease(row: { owner_id: string; fencing_token: number; expires_at: string; updated_at: string }): InstanceLease {
+  return { ownerId: row.owner_id, fencingToken: Number(row.fencing_token), expiresAt: row.expires_at, updatedAt: row.updated_at };
+}
 function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
 function retryAt(attempt: number): string { return new Date(Date.now() + Math.min(60_000, 1_000 * 2 ** (attempt - 1))).toISOString(); }
 

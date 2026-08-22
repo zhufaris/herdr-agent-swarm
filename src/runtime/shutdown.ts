@@ -10,6 +10,7 @@ interface ShutdownDependencies {
   projector: { stop(): Promise<void> };
   publisher: { stop(): Promise<void> };
   healthServer: { close(callback: (error?: Error) => void): unknown };
+  lease: { release(): void };
   store: { close(): void };
   logger: ShutdownLogger;
 }
@@ -26,12 +27,13 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<void> {
-    const { coordinator, projector, publisher, healthServer, store, logger } = this.dependencies;
+    const { coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     logger.info({ event: "bridge-shutdown-started", signal }, "shutting down");
     await stopSafely("coordinator", () => coordinator.stop(), logger);
     await stopSafely("projector", () => projector.stop(), logger);
     await stopSafely("publisher", () => publisher.stop(), logger);
     await stopSafely("healthServer", () => closeServer(healthServer), logger);
+    await stopSafely("lease", async () => { lease.release(); }, logger);
     await stopSafely("store", async () => { store.close(); }, logger);
     logger.info({ event: "bridge-shutdown-completed", signal, outcome: "completed" }, "bridge shutdown completed");
   }

@@ -10,6 +10,22 @@ export type OutboundReplyKind = "text" | "card_reply" | "card_update";
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 
+export interface InstanceLease {
+  ownerId: string;
+  fencingToken: number;
+  expiresAt: string;
+  updatedAt: string;
+}
+
+export interface InstanceLeaseStatus {
+  held: boolean;
+  ownerSuffix: string;
+  fencingToken: number | null;
+  expiresAt: string | null;
+  lastRenewedAt: string | null;
+  error: string | null;
+}
+
 export interface ProjectConfig {
   id: string;
   displayName: string;

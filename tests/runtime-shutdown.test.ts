@@ -11,6 +11,7 @@ describe("bridge runtime shutdown", () => {
       projector: { async stop() { calls.push("projector:start"); await projectorBlocked; calls.push("projector:end"); } },
       publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
       store: { close() { calls.push("store"); } },
       logger: { info() {}, error() {} }
     });
@@ -23,7 +24,7 @@ describe("bridge runtime shutdown", () => {
     releaseProjector();
     await Promise.all([first, second]);
 
-    expect(calls).toEqual(["coordinator", "projector:start", "projector:end", "publisher", "health", "store"]);
+    expect(calls).toEqual(["coordinator", "projector:start", "projector:end", "publisher", "health", "lease", "store"]);
   });
 
   it("continues releasing resources when an earlier stop fails", async () => {
@@ -34,13 +35,14 @@ describe("bridge runtime shutdown", () => {
       projector: { async stop() { calls.push("projector"); } },
       publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
       store: { close() { calls.push("store"); } },
       logger: { info() {}, error(value) { errors.push(String(value.component)); } }
     });
 
     await runtime.shutdown("SIGTERM");
 
-    expect(calls).toEqual(["coordinator", "projector", "publisher", "health", "store"]);
+    expect(calls).toEqual(["coordinator", "projector", "publisher", "health", "lease", "store"]);
     expect(errors).toEqual(["coordinator"]);
   });
 });

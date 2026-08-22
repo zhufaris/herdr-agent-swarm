@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { ProjectConfig } from "../domain/types.js";
+import type { InstanceLeaseStatus, ProjectConfig } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 
 interface ComponentState { ok: boolean; error?: string }
@@ -8,12 +8,14 @@ interface Readiness {
   status: "ready" | "not_ready";
   components: {
     database: ComponentState; projects: ComponentState; lark: ComponentState;
+    lease: InstanceLeaseStatus & { ok: boolean };
     herdr: ComponentState & { workspaces: Array<{ workspaceId: string; ok: boolean; error?: string }> };
   };
 }
 
 export function startHealthServer(options: {
   host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
+  lease: { snapshot(): InstanceLeaseStatus };
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -32,7 +34,7 @@ export function startHealthServer(options: {
       response.statusCode = 200;
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded",
-        timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational
+        timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot()
       }));
       return;
     }
@@ -44,17 +46,19 @@ export function startHealthServer(options: {
   });
 }
 
-async function inspectReadiness(options: { store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[] }): Promise<Readiness> {
+async function inspectReadiness(options: { store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus } }): Promise<Readiness> {
   const database = check(() => options.store.listBindings());
   const projects = check(() => validateProjectDirectories(options.projects));
   const lark = options.lark.isReady() ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };
+  const leaseStatus = options.lease.snapshot();
+  const lease = { ...leaseStatus, ok: leaseStatus.held, ...(leaseStatus.held ? {} : { error: leaseStatus.error ?? "Instance lease is not held" }) };
   const workspaces = await Promise.all([...new Set(options.projects.map((project) => project.workspaceId))].map(async (workspaceId) => {
     try { await options.herdr.assertWorkspace(workspaceId); return { workspaceId, ok: true }; }
     catch (error) { return { workspaceId, ok: false, error: boundedError(error) }; }
   }));
   const failedWorkspace = workspaces.find((workspace) => !workspace.ok);
   const herdr = failedWorkspace ? { ok: false, error: "One or more Herdr workspaces are unavailable", workspaces } : { ok: true, workspaces };
-  const components = { database, projects, herdr, lark };
+  const components = { database, projects, herdr, lark, lease };
   return { status: Object.values(components).every((component) => component.ok) ? "ready" : "not_ready", components };
 }
 

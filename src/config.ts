@@ -44,6 +44,8 @@ const environmentSchema = z.object({
   COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
+  INSTANCE_LEASE_HEARTBEAT_MS: z.coerce.number().int().min(500).default(5_000),
   MAX_QUEUE_DEPTH: z.coerce.number().int().positive().default(20),
   LARK_MESSAGE_CHUNK_SIZE: z.coerce.number().int().min(500).max(20_000).default(3_500)
 });
@@ -53,6 +55,9 @@ export type BridgeConfig = ReturnType<typeof loadConfig>;
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const value = environmentSchema.parse(environment);
   const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH, value.HERDR_WORKSPACE_ID, value.HERDR_WORKSPACE_CWD);
+  if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
+    throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
+  }
   const defaultProject = registry.projects.find((project) => project.id === registry.defaultProjectId)!;
   return {
     lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID },
@@ -67,6 +72,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     commandTimeoutMs: value.COMMAND_TIMEOUT_MS,
     turnTimeoutMs: value.TURN_TIMEOUT_MS,
     reconcileIntervalMs: value.RECONCILE_INTERVAL_MS,
+    instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
     maxQueueDepth: value.MAX_QUEUE_DEPTH,
     larkMessageChunkSize: value.LARK_MESSAGE_CHUNK_SIZE
   } as const;
