@@ -14,6 +14,49 @@ describe("Herdr adapter", () => {
     const panes = await new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1");
     expect(panes[0]?.foregroundExecutables).toContain("traex");
   });
+
+  it("injects a prompt into TraeX and waits for its terminal turn to finish", async () => {
+    const calls: string[][] = [];
+    const outputs = ["before", "✧ Working", "answer", "answer", "answer"];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "agent" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 1000)).resolves.toBe("done");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "hello"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+    expect(calls.some((args) => args[0] === "agent" && args[1] === "prompt")).toBe(false);
+  });
+
+  it("keeps the turn open while approval is blocked and completes after approval", async () => {
+    const states = ["working", "blocked", "blocked", "working", "done"] as const;
+    const observed: Array<{ state: string; output: string }> = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "agent" && args[1] === "read") return { stdout: "terminal", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") {
+          const agent_status = states.shift() ?? "done";
+          return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status } });
+        }
+        if (args[0] === "pane" && args[1] === "process-info") {
+          return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        }
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    const turn = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt(
+      "w1:p1", "needs approval", 2000, (observation) => { observed.push(observation); }
+    );
+
+    await expect(turn).resolves.toBe("done");
+    expect(observed.map(({ state }) => state)).toEqual(["working", "blocked", "working", "done"]);
+    expect(observed.every(({ output }) => output === "terminal")).toBe(true);
+  });
 });
 
 function json(result: unknown) { return Promise.resolve({ stdout: JSON.stringify({ id: "test", result }), stderr: "" }); }

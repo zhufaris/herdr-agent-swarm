@@ -56,6 +56,14 @@ export class LarkSdkAdapter implements LarkPort {
     return { topicId: messageId, rootMessageId: messageId };
   }
 
+  async replyText(rootMessageId: string, text: string): Promise<{ messageId: string }> {
+    const response = await this.client.im.v1.message.reply({
+      path: { message_id: rootMessageId },
+      data: { msg_type: "text", content: JSON.stringify({ text }), reply_in_thread: true }
+    });
+    return { messageId: requireMessageId(response.data?.message_id) };
+  }
+
   async replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },

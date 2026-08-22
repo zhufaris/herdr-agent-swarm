@@ -2,6 +2,8 @@ export type BindingState = "pending" | "active" | "archived" | "orphaned" | "fai
 export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed";
+export type OutboundReplyState = "pending" | "delivered" | "dead_letter";
+export type OutboundReplyKind = "text" | "card_reply" | "card_update";
 
 export interface Binding {
   id: string;
@@ -30,6 +32,24 @@ export interface PromptJob {
   state: PromptState;
   attemptCount: number;
   error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OutboundReply {
+  id: string;
+  idempotencyKey: string;
+  bindingId: string | null;
+  promptId: string | null;
+  viewVersion: number | null;
+  rootMessageId: string;
+  kind: OutboundReplyKind;
+  payload: string;
+  state: OutboundReplyState;
+  attemptCount: number;
+  error: string | null;
+  deliveredMessageId: string | null;
+  nextAttemptAt: string;
   createdAt: string;
   updatedAt: string;
 }

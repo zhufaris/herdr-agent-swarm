@@ -1,0 +1,39 @@
+import { describe, expect, it } from "vitest";
+import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
+
+describe("request run-card view", () => {
+  it("accumulates safe output, deduplicates progress, and completes with the final answer", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1",
+      paneId: "w1:p2", queuePosition: 2, occurredAt: "2026-08-22T10:00:00.000Z"
+    });
+    const running = reduceRunCard(queued, {
+      type: "started", occurredAt: "2026-08-22T10:00:01.000Z"
+    });
+    const observed = reduceRunCard(running, {
+      type: "output", occurredAt: "2026-08-22T10:00:02.000Z", answerDelta: "Working ",
+      progressEvents: [{ key: "read:src/a.ts", kind: "read", label: "已读取 src/a.ts", state: "done", occurredAt: "2026-08-22T10:00:02.000Z" }]
+    });
+    const duplicate = reduceRunCard(observed, {
+      type: "output", occurredAt: "2026-08-22T10:00:03.000Z", answerDelta: "on it",
+      progressEvents: [{ key: "read:src/a.ts", kind: "read", label: "已读取 src/a.ts", state: "done", occurredAt: "2026-08-22T10:00:03.000Z" }]
+    });
+    const completed = reduceRunCard(duplicate, {
+      type: "completed", occurredAt: "2026-08-22T10:00:04.000Z", answer: "Fixed login."
+    });
+
+    expect(queued).toMatchObject({ promptId: "p1", phase: "queued", queuePosition: 2, viewVersion: 1 });
+    expect(running).toMatchObject({ phase: "running", startedAt: "2026-08-22T10:00:01.000Z", viewVersion: 2 });
+    expect(duplicate).toMatchObject({ answer: "Working on it", viewVersion: 4 });
+    expect(duplicate.progressEvents).toHaveLength(1);
+    expect(completed).toMatchObject({ phase: "completed", answer: "Fixed login.", finishedAt: "2026-08-22T10:00:04.000Z", viewVersion: 5 });
+  });
+
+  it("does not advance the version for an identical visible update", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1",
+      paneId: null, queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z"
+    });
+    expect(reduceRunCard(queued, { type: "queue-position", occurredAt: "later", queuePosition: 1 })).toBe(queued);
+  });
+});

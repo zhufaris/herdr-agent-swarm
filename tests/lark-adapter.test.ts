@@ -12,4 +12,16 @@ describe("Lark message normalization", () => {
     expect(normalizeMessage(base, "bot")).toMatchObject({ mentionsBot: true, text: "fix this" });
     expect(normalizeMessage(base, "someone-else")).toMatchObject({ mentionsBot: false, text: "@_user_1 fix this" });
   });
+
+  it("maps a thread reply to its root binding without requiring a bot mention", () => {
+    const reply = {
+      ...base,
+      event_id: "e2",
+      message: { ...base.message, message_id: "m2", root_id: "root-1", thread_id: "thread-1", content: JSON.stringify({ text: "continue" }), mentions: [] }
+    };
+
+    expect(normalizeMessage(reply, "bot")).toMatchObject({
+      messageId: "m2", rootMessageId: "root-1", topicId: "thread-1", text: "continue", mentionsBot: false, isRootMessage: false
+    });
+  });
 });

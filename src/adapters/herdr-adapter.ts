@@ -59,11 +59,16 @@ export class HerdrCliAdapter implements HerdrPort {
     await this.waitUntilTraex(paneId);
   }
 
-  async runPrompt(paneId: string, text: string, timeoutMs: number): Promise<AgentState> {
-    const result = await this.json([
-      "agent", "prompt", paneId, text, "--wait", "--timeout", String(timeoutMs)
-    ], timeoutMs + 2_000);
-    return findAgentState(result) ?? "unknown";
+  async runPrompt(
+    paneId: string,
+    text: string,
+    timeoutMs: number,
+    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
+  ): Promise<AgentState> {
+    const before = await this.readOutput(paneId, 240);
+    await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
+    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+    return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation);
   }
 
   async readOutput(paneId: string, lines: number): Promise<string> {
@@ -103,6 +108,48 @@ export class HerdrCliAdapter implements HerdrPort {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new Error(`TraeX did not become ready in pane ${paneId}`);
+  }
+
+  private async waitForTraexTurn(
+    paneId: string,
+    before: string,
+    timeoutMs: number,
+    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
+  ): Promise<AgentState> {
+    const deadline = Date.now() + timeoutMs;
+    let observedWorking = false;
+    let lastAgentState: AgentState = "unknown";
+    let lastOutput = before;
+    let stableIdlePolls = 0;
+
+    while (Date.now() < deadline) {
+      let agentState: AgentState = "unknown";
+      try {
+        const pane = await this.getPane(paneId);
+        if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
+        agentState = pane.agentState;
+      } catch (error) {
+        if (String(error).includes("pane not found")) throw error;
+      }
+      if (agentState === "working" || agentState === "blocked") observedWorking = true;
+      const output = await this.readOutput(paneId, 240);
+      if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
+        if (agentState !== "unknown") lastAgentState = agentState;
+        await onObservation?.({ state: agentState, output });
+      }
+      if (observedWorking && (agentState === "done" || agentState === "idle")) return "done";
+      if (agentState === "unknown" && isTraexWorking(output)) {
+        observedWorking = true;
+        stableIdlePolls = 0;
+      } else if (agentState === "unknown" && observedWorking) {
+        stableIdlePolls = output === lastOutput ? stableIdlePolls + 1 : 0;
+        if (stableIdlePolls >= 1) return "done";
+      }
+      lastOutput = output;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    throw new Error(`Timed out waiting for TraeX turn in pane ${paneId}`);
   }
 
   private async json(args: string[], timeoutMs = this.commandTimeoutMs): Promise<unknown> {
@@ -148,4 +195,8 @@ function unwrapText(stdout: string): string {
     }
   } catch { /* text output is expected on some Herdr versions */ }
   return trimmed;
+}
+
+function isTraexWorking(output: string): boolean {
+  return /[✧◆]\s*Work(?:ing|i…)/u.test(output);
 }

@@ -1,11 +1,13 @@
-import type { AgentState, Binding, HerdrPane, IncomingLarkMessage, PromptJob } from "./types.js";
+import type { AgentState, Binding, HerdrPane, IncomingLarkMessage, OutboundReply, PromptJob } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
+import type { RunCardView } from "./run-card-view.js";
 
 export interface LarkPort {
   start(onMessage: (message: IncomingLarkMessage) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   isReady(): boolean;
   createTopic(card: object): Promise<{ topicId: string; rootMessageId: string }>;
+  replyText(rootMessageId: string, text: string): Promise<{ messageId: string }>;
   replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
 }
@@ -16,15 +18,23 @@ export interface HerdrPort {
   getPane(paneId: string): Promise<HerdrPane | null>;
   createPane(workspaceId: string, cwd: string): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string): Promise<void>;
-  runPrompt(paneId: string, text: string, timeoutMs: number): Promise<AgentState>;
+  runPrompt(
+    paneId: string,
+    text: string,
+    timeoutMs: number,
+    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
+  ): Promise<AgentState>;
   readOutput(paneId: string, lines: number): Promise<string>;
   renamePane(paneId: string, title: string): Promise<void>;
 }
 
 export interface BindingStorePort {
   close(): void;
-  hasProcessedEvent(eventId: string): boolean;
-  recordProcessedEvent(eventId: string, messageId: string): void;
+  recordInboundMessage(message: IncomingLarkMessage): boolean;
+  claimNextInboundMessage(): IncomingLarkMessage | null;
+  markInboundMessageAccepted(eventId: string): void;
+  releaseInboundMessage(eventId: string, error: string): void;
+  recoverProcessingInboundMessages(): number;
   isBridgeMessage(messageId: string): boolean;
   recordBridgeMessage(messageId: string): void;
   createPendingBinding(input: {
@@ -42,10 +52,20 @@ export interface BindingStorePort {
   listBindings(): Binding[];
   countPendingPrompts(bindingId: string): number;
   recoverRunningPrompts(): number;
-  enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt">): PromptJob;
+  enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt">): { prompt: PromptJob; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt">; view: RunCardView; rootMessageId: string; card: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   claimNextPrompt(bindingId: string): PromptJob | null;
+  claimNextReadyPrompt(bindingId: string): PromptJob | null;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null }): OutboundReply;
+  listPendingOutboundReplies(): OutboundReply[];
+  listDueOutboundReplies(): OutboundReply[];
+  markOutboundReplyDelivered(id: string, messageId: string): void;
+  markOutboundReplyFailed(id: string, error: string): void;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;
   loadTopicView(bindingId: string): TopicViewState | null;
+  saveRunCard(view: RunCardView): RunCardView;
+  loadRunCard(promptId: string): RunCardView | null;
+  listRunCards(bindingId: string): RunCardView[];
 }

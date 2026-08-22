@@ -10,6 +10,8 @@ export function cleanTerminalOutput(output: string): string {
     .trim();
 }
 
+export function stripTerminalControl(output: string): string { return output.replace(ANSI, "").replace(/\r/g, ""); }
+
 export function outputFingerprint(output: string): string {
   return createHash("sha256").update(output).digest("hex");
 }

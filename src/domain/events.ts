@@ -1,4 +1,5 @@
-import type { AgentState, EventOrigin } from "./types.js";
+import type { AgentState, EventOrigin, IncomingLarkMessage } from "./types.js";
+import type { RunProgressEvent } from "./run-card-view.js";
 
 interface EventBase<T extends string, P> {
   eventId: string;
@@ -16,7 +17,17 @@ export type BridgeEvent =
   | EventBase<"BindingArchived", { reason: string }>
   | EventBase<"BindingOrphaned", { reason: string }>
   | EventBase<"PromptQueued", { promptId: string; queueDepth: number; actorOpenId: string }>
+  | EventBase<"RunQueuePositionChanged", { promptId: string; queuePosition: number }>
   | EventBase<"TurnStarted", { promptId: string; queueDepth: number }>
-  | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number }>
+  | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number; promptId?: string }>
+  | EventBase<"TurnOutputObserved", { promptId: string; answerDelta: string; progressEvents: Omit<RunProgressEvent, "occurredAt">[] }>
   | EventBase<"TurnCompleted", { promptId: string; answer: string; queueDepth: number }>
   | EventBase<"TurnFailed", { promptId: string; error: string; queueDepth: number }>;
+
+export interface InboundMessageReceivedEvent {
+  eventId: string;
+  type: "InboundMessageReceived";
+  origin: "lark";
+  occurredAt: string;
+  payload: IncomingLarkMessage;
+}
