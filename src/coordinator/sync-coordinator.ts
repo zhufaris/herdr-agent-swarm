@@ -462,7 +462,7 @@ export class SyncCoordinator {
       if (pane && binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${binding.paneId}`);
       if (binding.provisioningCheckpoint === "selected") {
         if (!allowPaneCreation) {
-          throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /herdr attach <space> <pane-id>");
+          throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /herdr attach <space> <pane>");
         }
         pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id });
         binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
@@ -775,7 +775,7 @@ export class SyncCoordinator {
     const exactId = panes.find((candidate) => candidate.paneId === paneReference);
     const labelMatches = exactId ? [] : panes.filter((candidate) => candidate.label === paneReference);
     if (!exactId && labelMatches.length > 1) {
-      const paneIds = labelMatches.map((candidate) => candidate.paneId).sort().join(", " );
+      const paneIds = labelMatches.map((candidate) => candidate.paneId).sort().join(", ");
       await this.reject(message, `Pane 名称 ${paneReference} 不唯一，请改用 Pane ID：${paneIds}`);
       this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: "ambiguous_pane_label" });
       return false;
@@ -921,7 +921,7 @@ export function buildSpaceDirectoryGroups(
 function provisioningRecoveryMessage(error: unknown): string {
   const detail = errorMessage(error);
   return detail.includes("/herdr attach")
-    ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/herdr attach <space> <pane-id>\`；若不存在，再发送 \`/herdr new\`。${detail}`
+    ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/herdr attach <space> <pane>\`；若不存在，再发送 \`/herdr new\`。${detail}`
     : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`;
 }
 function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }

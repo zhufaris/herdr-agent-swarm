@@ -118,7 +118,7 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 
 如果项目创建在 Pane ID 落库前中断，Bridge 不会在重启后自动新建第二个
 Pane。请先检查对应 Space；已有 Pane 时发送
-`/herdr attach <space> <pane-id>`，确认不存在时再发送 `/herdr new`。
+`/herdr attach <space> <pane>`，确认不存在时再发送 `/herdr new`。
 
 ### `/herdr help`
 

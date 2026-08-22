@@ -246,7 +246,7 @@ If a pane becomes orphaned, `reattach` verifies the original pane identity and
 explicit `resume`, so uncertain work is never replayed automatically.
 If project creation is interrupted before the new pane identity is persisted,
 the bridge pauses instead of creating another pane. Inspect the configured
-Space; use `/herdr attach <space> <pane-id>` if the pane survived, otherwise
+Space; use `/herdr attach <space> <pane>` if the pane survived, otherwise
 start again with `/herdr new`. Lark topic creation retries use the binding ID as
 a stable platform idempotency key.
 

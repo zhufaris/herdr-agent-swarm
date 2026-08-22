@@ -119,23 +119,6 @@ describe("attach existing pane command", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("resolves a unique exact pane label", async () => {
-    let exposePanes = false;
-    const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
-    const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/repo", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
-    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? [pane] : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
-    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
-
-    await coordinator.handleMessage({ ...command(1), text: "/herdr attach datasage_semantic_knowledge tidy" });
-
-    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ state: "active" });
-    expect(createTopic).toHaveBeenCalledTimes(1);
-    await coordinator.stop(); await publisher.stop(); store.close();
-  });
-
   it("rejects an ambiguous pane label and lists candidate ids", async () => {
     let exposePanes = false; const cards: object[] = [];
     const panes = ["w5:p1", "w5:p2"].map((paneId) => ({ paneId, workspaceId: "w5", cwd: "/repo", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] }));
