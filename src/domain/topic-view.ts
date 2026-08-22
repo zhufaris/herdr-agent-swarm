@@ -66,4 +66,4 @@ function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEve
   return result.slice(-8);
 }
 
-function keepAnswerTail(answer: string): string { return answer.slice(-2_000); }
+function keepAnswerTail(answer: string): string { return answer.slice(-2_500); }

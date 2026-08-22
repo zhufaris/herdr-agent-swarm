@@ -47,9 +47,9 @@ export class LarkChannelPublisher {
     await this.drain();
   }
 
-  async enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, card: object): Promise<void> {
+  async enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object): Promise<void> {
     this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: "run-card:update:" + promptId + ":" + viewVersion, bindingId, promptId, viewVersion,
+      id: randomUUID(), idempotencyKey: "run-card:update:" + promptId + ":" + cardRole + ":" + viewVersion, bindingId, promptId, viewVersion, cardRole,
       rootMessageId: messageId, kind: "card_update", payload: JSON.stringify(card)
     });
     await this.drain();

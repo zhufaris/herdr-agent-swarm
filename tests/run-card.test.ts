@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderProjectEntryCard, renderProjectSelectorCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
+import { renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 
@@ -35,7 +35,7 @@ describe("run card", () => {
   });
 
   it("shows only the newest compact answer preview on the group project entry card", () => {
-    const answer = `old answer ${"x".repeat(700)} newest conclusion`;
+    const answer = `old answer ${"x".repeat(2_700)} newest conclusion`;
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "datasage / Fix login", spaceName: "datasage_semantic_knowledge", paneId: "wD:p9",
       phase: "running", queueDepth: 2, answer, recentProgress: [{ key: "edit:a", kind: "edit", label: "changed secret.ts", state: "done", occurredAt: "now" }]
@@ -81,65 +81,57 @@ describe("run card", () => {
     expect(requestCard).toMatchObject({ header: { template: "red" } });
   });
 
-  it("renders separate expanded progress and answer regions for a completed request", () => {
+  it("renders real steps on the task card and the answer only on its sibling card", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
-    const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerDelta: "partial", progressEvents: [{ key: "read:a", kind: "read", label: "已读取 src/a.ts", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
+    const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerDelta: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "2026-08-22T10:00:02Z", answer: "Fixed." });
-    const card = renderRequestRunCard(completed);
-    const serialized = JSON.stringify(card);
-    expect(card).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "green" } });
-    expect(serialized).toContain("执行进度");
-    expect(serialized).toContain("📩 **已接收请求**");
-    expect(serialized).toContain("## Request\\nFix **login**");
-    expect(serialized).not.toContain("bad()");
-    expect(serialized).toContain("📖 已读取 src/a.ts");
-    expect(serialized).toContain("回答");
-    expect(serialized).toContain("Fixed.");
-    expect(serialized).not.toContain("partial");
-    expect(serialized).toContain("SPACE");
-    expect(serialized).toContain("datasage_semantic_knowledge");
-    expect(serialized).not.toContain("WORKSPACE");
-    expect(serialized).not.toContain('**WORKSPACE**\n`w1`');
+    const taskCard = renderRequestRunCard(completed);
+    const answerCard = renderRequestAnswerCard(completed);
+    const task = JSON.stringify(taskCard);
+    const answer = JSON.stringify(answerCard);
+    expect(taskCard).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "green" } });
+    expect(task).toContain("任务步骤");
+    expect(task).toContain("📩 **已接收请求**");
+    expect(task).toContain("## Request\\nFix **login**");
+    expect(task).not.toContain("bad()");
+    expect(task).toContain("✓ 实现双卡更新");
+    expect(task).not.toContain("Fixed.");
+    expect(answer).toContain("Fixed.");
+    expect(answer).not.toContain("实现双卡更新");
+    expect(answer).not.toContain("Fix **login**");
   });
 
-  it("keeps recent progress and reports omitted older entries", () => {
+  it("filters legacy tool activity and renders real steps", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large", workspaceId: "w1", paneId: "p1", requestText: "Inspect files", queuePosition: 1, occurredAt: "now" });
-    const card = renderRequestRunCard({ ...view, progressEvents: Array.from({ length: 90 }, (_, index) => ({ key: "read:" + index, kind: "read" as const, label: "已读取 file-" + index, state: "done" as const, occurredAt: "now" })) });
+    const card = renderRequestRunCard({ ...view, progressEvents: [
+      { key: "legacy", kind: "read" as const, label: "已读取 secret.ts", state: "done" as const, occurredAt: "now" },
+      ...Array.from({ length: 20 }, (_, index) => ({ key: "step:" + index, kind: "step" as const, label: "任务步骤 " + index, state: "pending" as const, occurredAt: "now" }))
+    ] });
     const serialized = JSON.stringify(card);
-    expect(serialized).toContain("已省略 30 条较早记录");
-    expect(serialized).not.toContain("已读取 file-0\"");
-    expect(serialized).toContain("已读取 file-89");
+    expect(serialized).not.toContain("secret.ts");
+    expect(serialized).toContain("☐ 任务步骤 0");
+    expect(serialized).toContain("☐ 任务步骤 19");
   });
 
   it("keeps the newest answer window in request cards", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large answer", workspaceId: "w1", paneId: "p1", requestText: "Keep this request beginning", queuePosition: 1, occurredAt: "now" });
     const answer = `old answer ${"x".repeat(13_000)} newest conclusion`;
-    const card = renderRequestRunCard({ ...view, phase: "completed", answer });
+    const card = renderRequestAnswerCard({ ...view, phase: "completed", answer });
     const serialized = JSON.stringify(card);
-    expect(serialized).toContain("Keep this request beginning");
+    expect(serialized).not.toContain("Keep this request beginning");
     expect(serialized).toContain("newest conclusion");
     expect(serialized).not.toContain("old answer");
     expect(serialized).toContain("较早内容已省略");
   });
 
-  it("shows request, queue state, and semantic emoji for every progress kind", () => {
+  it("shows request, queue state, and lifecycle fallback without inferred steps", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
     const queued = JSON.stringify(renderRequestRunCard(view));
     expect(queued).toContain("📩 **已接收请求**");
     expect(queued).toContain("⏳ 已进入队列 · 当前第 3 位");
 
-    const card = renderRequestRunCard({ ...view, phase: "running", progressEvents: [
-      { key: "a", kind: "analyze", label: "正在分析请求", state: "active", occurredAt: "now" },
-      { key: "s", kind: "search", label: "正在查找相关代码", state: "active", occurredAt: "now" },
-      { key: "r", kind: "read", label: "已读取 a.ts", state: "done", occurredAt: "now" },
-      { key: "e", kind: "edit", label: "已修改 a.ts", state: "done", occurredAt: "now" },
-      { key: "t", kind: "test", label: "正在运行测试", state: "active", occurredAt: "now" },
-      { key: "td", kind: "test", label: "测试通过", state: "done", occurredAt: "now" },
-      { key: "f", kind: "test", label: "测试失败", state: "failed", occurredAt: "now" }
-    ] });
+    const card = renderRequestRunCard({ ...view, phase: "running" });
     const serialized = JSON.stringify(card);
-    for (const line of ["🧠 正在分析请求", "🔍 正在查找相关代码", "📖 已读取 a.ts", "✏️ 已修改 a.ts", "🧪 正在运行测试", "✅ 测试通过", "❌ 测试失败"]) {
-      expect(serialized).toContain(line);
-    }
+    expect(serialized).toContain("正在等待 TraeX 提供任务计划");
   });
 });

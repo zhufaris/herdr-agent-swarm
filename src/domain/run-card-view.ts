@@ -1,6 +1,6 @@
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
-export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test";
-export type ProgressEventState = "active" | "done" | "failed";
+export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
+export type ProgressEventState = "pending" | "active" | "done" | "failed";
 
 export interface RunProgressEvent {
   key: string;
@@ -14,6 +14,7 @@ export interface RunCardView {
   promptId: string;
   bindingId: string;
   larkMessageId: string | null;
+  answerMessageId: string | null;
   phase: RunCardPhase;
   title: string;
   requestText: string;
@@ -28,6 +29,7 @@ export interface RunCardView {
   notice: string | null;
   viewVersion: number;
   deliveredVersion: number;
+  answerDeliveredVersion: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -37,7 +39,7 @@ export type RunCardChange =
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerDelta: string; progressEvents: RunProgressEvent[] }
+  | { type: "output"; occurredAt: string; answerDelta: string; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string }
   | { type: "failed"; occurredAt: string; notice: string };
 
@@ -46,10 +48,10 @@ export function createQueuedRunCard(input: {
   queuePosition: number; occurredAt: string;
 }): RunCardView {
   return {
-    promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, phase: "queued",
+    promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, answerMessageId: null, phase: "queued",
     title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "",
     progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null,
-    viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
+    viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
 
@@ -72,6 +74,12 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "blocked", notice: change.notice };
       break;
     case "output": {
+      if (change.hasProgressSnapshot) {
+        const answer = state.answer + change.answerDelta;
+        if (answer === state.answer && sameProgress(change.progressEvents, state.progressEvents)) return state;
+        patch = { answer, progressEvents: change.progressEvents };
+        break;
+      }
       const events = [...state.progressEvents];
       const positions = new Map(events.map((event, index) => [event.key, index]));
       for (const event of change.progressEvents) {

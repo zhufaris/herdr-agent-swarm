@@ -62,14 +62,15 @@ export interface BindingStorePort {
   listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
   enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; card: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   claimNextPrompt(bindingId: string): PromptJob | null;
   claimNextReadyPrompt(bindingId: string): PromptJob | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   requeueSteeringAsTurn(promptId: string): void;
   requeueQueuedSteering(bindingId: string, parentPromptId: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];
   listDueOutboundReplies(): OutboundReply[];
   markOutboundReplyDelivered(id: string, messageId: string): void;

@@ -110,7 +110,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     },
     { tag: "hr" }
   ];
-  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(preview), 500)}` });
+  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(preview), 2_500)}` });
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
     schema: "2.0",
@@ -126,17 +126,16 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 
 export function renderRequestRunCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
-  const visibleProgress = input.progressEvents.slice(-60);
-  const omittedProgress = input.progressEvents.length - visibleProgress.length;
+  const visibleProgress = input.progressEvents.filter((event) => event.kind === "step").slice(0, 20);
   const lifecycleLine = input.phase === "queued"
     ? `⏳ 已进入队列 · 当前第 ${input.queuePosition} 位`
-    : input.phase === "running" && visibleProgress.length === 0 ? "🧠 正在分析请求"
+    : input.phase === "running" && visibleProgress.length === 0 ? "正在等待 TraeX 提供任务计划"
       : input.phase === "blocked" ? "⚠️ 等待用户处理"
         : input.phase === "completed" ? "✅ 任务完成"
           : input.phase === "failed" ? "❌ 执行失败" : null;
   const progressContent = [
     "📩 **已接收请求**", truncateLarkMarkdown(input.requestText, 2_000), "",
-    lifecycleLine, omittedProgress > 0 ? `… 已省略 ${omittedProgress} 条较早记录` : null, ...visibleProgress.map(progressLine)
+    lifecycleLine, ...visibleProgress.map(progressLine)
   ].filter((line) => line !== null).join("\n");
   const elements: object[] = [
     { tag: "column_set", horizontal_spacing: "8px", columns: [
@@ -144,14 +143,11 @@ export function renderRequestRunCard(input: RunCardView): object {
       metric("QUEUE", input.queuePosition > 0 ? String(input.queuePosition) : "—")
     ] },
     { tag: "hr" },
-    { tag: "markdown", content: "**执行进度**" },
+    { tag: "markdown", content: "**任务步骤**" },
     { tag: "collapsible_panel", expanded: true, border: { color: input.phase === "failed" ? "red" : "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: input.progressEvents.length ? `共 ${input.progressEvents.length} 项` : "请求详情" } },
+      header: { title: { tag: "plain_text", content: visibleProgress.length ? `共 ${visibleProgress.length} 项` : "请求详情" } },
       elements: [{ tag: "markdown", content: progressContent }] }
   ];
-  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(input.answer), 12_000)}` });
-  else if (input.phase === "completed" && input.notice) elements.push({ tag: "markdown", content: `**结果**\n\n${truncateLarkMarkdown(input.notice, 2_000)}` });
-  else if (input.phase === "running") elements.push({ tag: "markdown", content: "**回答**\n\n正在生成…" });
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   elements.push({ tag: "markdown", content: `${state.icon} ${state.label}` });
@@ -199,6 +195,7 @@ function escapeCode(value: string): string { return value.replaceAll("`", "'"); 
 function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
+  if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${event.label}`;
   if (event.state === "failed") return `❌ ${event.label}`;
   if (event.kind === "test" && event.state === "done") return `✅ ${event.label}`;
   const icon = { analyze: "🧠", search: "🔍", read: "📖", edit: "✏️", test: "🧪" }[event.kind];

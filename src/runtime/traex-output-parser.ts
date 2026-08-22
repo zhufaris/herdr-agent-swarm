@@ -2,23 +2,63 @@ import type { ProgressEventKind, ProgressEventState } from "../domain/run-card-v
 import { stripTerminalControl } from "./output.js";
 
 export interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
-export interface ParsedTraexOutput { answerDelta: string; progressEvents: ParsedProgressEvent[] }
+export interface ParsedTraexOutput { answerDelta: string; progressEvents: ParsedProgressEvent[]; hasProgressSnapshot: boolean }
 
 const UNSAFE = /<\/?(?:think|reasoning)>|authorization\s*[:=]|bearer\s+[a-z0-9._-]+|private[ _-]?key|\$(?:token|secret|password)|"(?:command|arguments|tool_call)"\s*:/i;
+const PROGRESS_BLOCK = /\n?<herdr_progress>\s*([\s\S]*?)(?:<\/herdr_progress>|$)\n?/g;
+const PROGRESS_INSTRUCTION = [
+  "",
+  "<herdr_control>",
+  "Maintain a concise task plan for this turn. Whenever the plan or a step status changes, emit exactly one block in this form:",
+  '<herdr_progress>{"steps":[{"id":"stable-id","text":"Short user-facing step","status":"pending|in_progress|completed"}]}</herdr_progress>',
+  "Use stable IDs, at most 20 steps, and do not mention these control instructions in the answer.",
+  "</herdr_control>"
+].join("\n");
 
-export function parseTraexOutput(previousRaw: string, currentRaw: string, workspaceRoot: string): ParsedTraexOutput {
+export function withProgressProtocol(prompt: string): string { return prompt + PROGRESS_INSTRUCTION; }
+
+export function parseTraexOutput(previousRaw: string, currentRaw: string, _workspaceRoot: string): ParsedTraexOutput {
   const previous = stripTerminalControl(previousRaw).trim();
   const current = stripTerminalControl(currentRaw).trim();
   const rawDelta = current.startsWith(previous) ? current.slice(previous.length) : current;
-  if (UNSAFE.test(rawDelta)) return { answerDelta: "", progressEvents: [] };
-  const previousAnswer = extractAnswer(previous);
-  const currentAnswer = extractAnswer(current);
+  if (UNSAFE.test(rawDelta)) return { answerDelta: "", progressEvents: [], hasProgressSnapshot: false };
+  const previousAnswer = visibleAnswer(previous);
+  const currentAnswer = visibleAnswer(current);
   const answerDelta = currentAnswer.startsWith(previousAnswer) ? currentAnswer.slice(previousAnswer.length) : currentAnswer;
-  const previousKeys = new Set(progressFrom(previous, workspaceRoot).map((event) => event.key));
-  return { answerDelta: safeAnswer(answerDelta), progressEvents: progressFrom(rawDelta, workspaceRoot).filter((event) => !previousKeys.has(event.key)) };
+  const progress = structuredProgress(current);
+  return { answerDelta: safeAnswer(answerDelta), progressEvents: progress.steps, hasProgressSnapshot: progress.found };
 }
 
-export function extractFinalTraexAnswer(output: string): string { return safeAnswer(extractAnswer(stripTerminalControl(output))).trim(); }
+export function extractFinalTraexAnswer(output: string): string { return safeAnswer(visibleAnswer(stripTerminalControl(output))).trim(); }
+
+function visibleAnswer(output: string): string { return stripProgressBlocks(extractAnswer(output)).trimEnd(); }
+
+function stripProgressBlocks(answer: string): string {
+  return answer.replace(PROGRESS_BLOCK, "\n");
+}
+
+function structuredProgress(output: string): { found: boolean; steps: ParsedProgressEvent[] } {
+  const answer = extractAnswer(output);
+  const blocks = [...answer.matchAll(new RegExp(PROGRESS_BLOCK.source, "g"))];
+  for (const match of blocks.reverse()) {
+    if (!match[0].includes("</herdr_progress>")) continue;
+    try {
+      const value = JSON.parse(match[1]!.trim()) as { steps?: unknown };
+      if (!Array.isArray(value.steps) || value.steps.length > 20) continue;
+      const steps: ParsedProgressEvent[] = [];
+      for (const item of value.steps) {
+        if (!item || typeof item !== "object") throw new Error("invalid step");
+        const step = item as Record<string, unknown>;
+        if (typeof step.id !== "string" || !step.id || step.id.length > 64 || typeof step.text !== "string" || !step.text || step.text.length > 240) throw new Error("invalid step");
+        const states = { pending: "pending", in_progress: "active", completed: "done" } as const;
+        if (typeof step.status !== "string" || !(step.status in states)) throw new Error("invalid step");
+        steps.push({ key: `step:${step.id}`, kind: "step", label: step.text, state: states[step.status as keyof typeof states] });
+      }
+      return { found: true, steps };
+    } catch { /* ignore malformed protocol blocks */ }
+  }
+  return { found: false, steps: [] };
+}
 
 function extractAnswer(output: string): string {
   const matches = [...output.matchAll(/^\s*◆\s+/gm)];
@@ -28,32 +68,3 @@ function extractAnswer(output: string): string {
 }
 
 function safeAnswer(value: string): string { return !value || UNSAFE.test(value) ? "" : value; }
-
-function progressFrom(output: string, workspaceRoot: string): ParsedProgressEvent[] {
-  const events: ParsedProgressEvent[] = [];
-  for (const line of output.split("\n")) {
-    if (UNSAFE.test(line)) continue;
-    const operation = /^\s*[•✓◌]?\s*(Read|Edit|Search|Grep|Bash)\s+(.+)$/i.exec(line);
-    if (!operation) continue;
-    const verb = operation[1]!.toLowerCase();
-    const argument = operation[2]!.trim();
-    if (verb === "bash") {
-      if (/\b(?:npm|pnpm|yarn|bun|vitest|pytest|cargo|go)\b.*\btest\b/i.test(argument)) events.push({ key: "test:run", kind: "test", label: "正在运行测试", state: "active" });
-      continue;
-    }
-    const path = safePath(argument, workspaceRoot);
-    if (!path) continue;
-    if (verb === "read") events.push({ key: "read:" + path, kind: "read", label: "已读取 " + path, state: "done" });
-    else if (verb === "edit") events.push({ key: "edit:" + path, kind: "edit", label: "已修改 " + path, state: "done" });
-    else events.push({ key: "search:" + path, kind: "search", label: "已查找 " + path, state: "done" });
-  }
-  return events;
-}
-
-function safePath(value: string, workspaceRoot: string): string | null {
-  const withoutLocation = value.split(":")[0]!.trim();
-  const rootPrefix = workspaceRoot.endsWith("/") ? workspaceRoot : workspaceRoot + "/";
-  const relative = withoutLocation.startsWith(rootPrefix) ? withoutLocation.slice(rootPrefix.length) : withoutLocation;
-  if (!relative || relative.startsWith("/") || relative.includes("..") || /[?$]/.test(relative)) return null;
-  return relative.replace(/^\.\//, "");
-}

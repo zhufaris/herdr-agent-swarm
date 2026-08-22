@@ -50,8 +50,10 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "primary-card" });
     const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", card: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "request-card");
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) {
+      store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
+    }
     store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
     const bus = new BridgeEventBus();
     const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
@@ -70,7 +72,8 @@ describe("event-driven card projection", () => {
     expect(JSON.stringify(latestPrimary.card)).toContain("TraeX 需要人工审批");
     expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
     expect(JSON.stringify(latestPrimary.card)).not.toContain("更新主卡片");
-    expect(updates.some((update) => update.messageId === "request-card" && JSON.stringify(update.card).includes("live answer"))).toBe(true);
+    expect(updates.some((update) => update.messageId === "request-task-card" && JSON.stringify(update.card).includes("等待用户处理") && !JSON.stringify(update.card).includes("live answer"))).toBe(true);
+    expect(updates.some((update) => update.messageId === "request-answer-card" && JSON.stringify(update.card).includes("live answer") && !JSON.stringify(update.card).includes("Do work"))).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
   });

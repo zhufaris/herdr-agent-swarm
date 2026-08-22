@@ -5,6 +5,7 @@ export type PromptState = "queued" | "running" | "delivered" | "failed";
 export type PromptDispatchKind = "turn" | "steering";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update";
+export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 
 export interface ProjectConfig {
@@ -64,6 +65,7 @@ export interface OutboundReply {
   promptId: string | null;
   viewVersion: number | null;
   selectionId: string | null;
+  cardRole: RequestCardRole | null;
   rootMessageId: string;
   kind: OutboundReplyKind;
   payload: string;
