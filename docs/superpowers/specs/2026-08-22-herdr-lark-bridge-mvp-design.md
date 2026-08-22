@@ -234,6 +234,8 @@ If Lark's topic API does not allow changing a root title after creation, the bri
 ### 8.2 Close and Archive
 
 - `/herdr close` archives the binding and stops accepting new prompts.
+- `/herdr pane close` uses the two-step confirmation and safety gates specified
+  by `2026-08-22-lark-pane-close-design.md` to close an idle or done pane.
 - Archiving or deleting a Lark topic archives the binding but does not terminate TraeX or close the pane.
 - Closing the Herdr pane posts a final notice and archives the binding.
 - The bridge never deletes Lark message history.
@@ -248,10 +250,14 @@ The MVP exposes these commands in the configured group:
 /herdr status
 /herdr rename <name>
 /herdr close
+/herdr pane close
+/herdr pane close confirm <code>
 /herdr help
 ```
 
-`status`, `rename`, and `close` require an active managed topic. Invalid context or syntax receives a concise help response and causes no Herdr mutation.
+`status`, `rename`, `close`, and `pane close` require an active managed topic.
+Invalid context or syntax receives a concise help response and causes no Herdr
+mutation.
 
 ## 10. Authorization and Safety
 
