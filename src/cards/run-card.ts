@@ -208,6 +208,8 @@ export function renderHelpCard(): object {
         "`/herdr new [标题]`  选择项目并创建 TraeX pane",
         "`/herdr projects`  打开项目选择卡片",
         "`/herdr spaces`  按 Space 查看全部 Pane",
+        "`/herdr sessions`  查看当前群的会话",
+        "`/herdr failures`  查看并处理发送失败",
         "`/herdr attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",
         "`/herdr status`  查看当前绑定",
         "`/herdr rename <标题>`  重命名当前 pane",

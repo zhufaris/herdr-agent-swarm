@@ -65,6 +65,8 @@ export class LarkChannelPublisher {
     return this.draining;
   }
 
+  async retryPending(): Promise<void> { await this.drain(true); }
+
   private trackHandler(work: Promise<void>): Promise<void> {
     this.activeHandlers.add(work);
     void work.then(

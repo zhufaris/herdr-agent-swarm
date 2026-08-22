@@ -5,7 +5,7 @@ export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
-export type OutboundReplyState = "pending" | "delivered" | "dead_letter";
+export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update";
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
@@ -35,6 +35,18 @@ export interface WorkspaceCacheStatus {
   refreshFailures: number;
   oldestSnapshotAgeMs: number | null;
 }
+
+export interface SessionSummary {
+  binding: Binding;
+  queueDepth: number;
+}
+
+export type FailureSummary =
+  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string }
+  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string }
+  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string };
+
+export type DeadLetterActionOutcome = "retried" | "dismissed" | "missing" | "unauthorized" | "stale";
 
 export interface ProjectConfig {
   id: string;
@@ -181,6 +193,8 @@ export type BridgeCommand =
   | { kind: "new"; title: string | null }
   | { kind: "projects" }
   | { kind: "spaces" }
+  | { kind: "sessions" }
+  | { kind: "failures" }
   | { kind: "status" }
   | { kind: "attach"; spaceName: string; paneId: string }
   | { kind: "rename"; title: string }

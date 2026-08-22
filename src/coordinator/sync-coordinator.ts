@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderAttachStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
 import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
+import { renderFailureCards, renderSessionCards } from "../cards/operations-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -124,6 +125,18 @@ export class SyncCoordinator {
       this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
       return;
     }
+    const deadLetter = parseDeadLetterAction(action.value);
+    if (deadLetter) {
+      const outcome = deadLetter.action === "retry_dead_letter"
+        ? this.store.retryDeadLetter(deadLetter.replyId, action.chatId, action.operatorOpenId)
+        : this.store.dismissDeadLetter(deadLetter.replyId, action.chatId, action.operatorOpenId);
+      this.logger.info({ event: "dead-letter-action-decided", replyId: deadLetter.replyId, action: deadLetter.action, outcome }, "processed dead-letter action");
+      if (outcome === "retried") await this.channelPublisher.retryPending();
+      const notice = outcome === "retried" ? "已重新提交该消息发送；不会重放 TraeX 任务。" : outcome === "dismissed" ? "已忽略该发送失败并保留历史记录。" : "该操作已失效或无权执行。";
+      const cards = renderFailureCards(this.store.listFailures(action.chatId), notice);
+      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${deadLetter.replyId}:${outcome}`, cards[0]!);
+      return;
+    }
     const value = parseProjectAction(action.value);
     if (!value) return;
     const claim = this.store.claimProjectSelection({
@@ -197,6 +210,10 @@ export class SyncCoordinator {
         await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
       } else if (command?.kind === "spaces") {
         await this.publishSpaceDirectory(message);
+      } else if (command?.kind === "sessions") {
+        await this.publishOperationCards(message, "sessions", renderSessionCards(this.store.listSessions(message.chatId)));
+      } else if (command?.kind === "failures") {
+        await this.publishOperationCards(message, "failures", renderFailureCards(this.store.listFailures(message.chatId)));
       } else if (command?.kind === "attach") {
         disposition = await this.attachExistingPane(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
       } else if (command?.kind === "status") {
@@ -451,6 +468,12 @@ export class SyncCoordinator {
     for (const [index, card] of cards.entries()) {
       await this.channelPublisher.enqueueCard(rootMessageId, `spaces:${message.messageId}:${index}`, card);
     }
+  }
+
+  private async publishOperationCards(message: IncomingLarkMessage, kind: string, cards: object[]): Promise<void> {
+    const rootMessageId = message.rootMessageId ?? message.messageId;
+    for (const [index, card] of cards.entries()) await this.channelPublisher.enqueueCard(rootMessageId, `${kind}:${message.messageId}:${index}`, card);
+    this.logger.info({ event: `operation-${kind}-listed`, chatId: message.chatId, pageCount: cards.length, outcome: "listed" }, `listed Herdr ${kind}`);
   }
 
   private async createSelectedProject(
@@ -952,6 +975,12 @@ function parseOpenThreadAction(value: unknown): { bindingId: string } | null {
   const candidate = value as Record<string, unknown>;
   if (candidate.action !== "open_project_thread" || typeof candidate.bindingId !== "string") return null;
   return { bindingId: candidate.bindingId };
+}
+function parseDeadLetterAction(value: unknown): { action: "retry_dead_letter" | "dismiss_dead_letter"; replyId: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if ((candidate.action !== "retry_dead_letter" && candidate.action !== "dismiss_dead_letter") || typeof candidate.replyId !== "string") return null;
+  return { action: candidate.action, replyId: candidate.replyId };
 }
 function parseProjectAction(value: unknown): { selectionId: string; projectId: string } | null {
   if (!value || typeof value !== "object") return null;

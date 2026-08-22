@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState, RequestCardRole } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState, RequestCardRole, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -312,6 +312,34 @@ export class SqliteBindingStore implements BindingStorePort {
     return (this.database.prepare("SELECT * FROM bindings ORDER BY created_at").all() as BindingRow[]).map(mapBinding);
   }
 
+  listSessions(chatId: string): SessionSummary[] {
+    const rows = this.database.prepare(`
+      SELECT b.*, (SELECT COUNT(*) FROM prompt_jobs p WHERE p.binding_id = b.id AND p.state IN ('queued','running')) AS queue_depth
+      FROM bindings b WHERE b.chat_id = ?
+      ORDER BY CASE b.attachment WHEN 'degraded' THEN 0 WHEN 'orphaned' THEN 2 ELSE 1 END,
+        CASE b.lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END,
+        b.last_activity_at DESC, b.id
+    `).all(chatId) as Array<BindingRow & { queue_depth: number }>;
+    return rows.map((row) => ({ binding: mapBinding(row), queueDepth: Number(row.queue_depth) }));
+  }
+
+  listFailures(chatId: string): FailureSummary[] {
+    const outbound = this.database.prepare(`
+      SELECT o.id, o.binding_id, o.attempt_count, o.updated_at, o.error FROM outbound_replies o
+      LEFT JOIN bindings b ON b.id = o.binding_id
+      LEFT JOIN project_selections s ON s.id = o.selection_id
+      WHERE o.state = 'dead_letter' AND (b.chat_id = ? OR s.chat_id = ?)
+      ORDER BY o.updated_at DESC
+    `).all(chatId, chatId) as Array<{ id: string; binding_id: string | null; attempt_count: number; updated_at: string; error: string | null }>;
+    const prompts = this.database.prepare(`SELECT p.id, p.binding_id, p.updated_at, p.error FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id WHERE b.chat_id = ? AND p.state IN ('failed','cancelled') ORDER BY p.updated_at DESC`).all(chatId) as Array<{ id: string; binding_id: string; updated_at: string; error: string | null }>;
+    const sessions = this.database.prepare(`SELECT id, updated_at, lifecycle, attachment FROM bindings WHERE chat_id = ? AND (lifecycle IN ('failed','provisioning') OR attachment IN ('degraded','orphaned')) ORDER BY updated_at DESC`).all(chatId) as Array<{ id: string; updated_at: string; lifecycle: string; attachment: string }>;
+    return [
+      ...outbound.map((row): FailureSummary => ({ kind: "outbound", id: row.id, bindingId: row.binding_id, attemptCount: Number(row.attempt_count), updatedAt: row.updated_at, error: boundedError(row.error) })),
+      ...prompts.map((row): FailureSummary => ({ kind: "prompt", id: row.id, bindingId: row.binding_id, updatedAt: row.updated_at, error: boundedError(row.error) })),
+      ...sessions.map((row): FailureSummary => ({ kind: "session", id: `session:${row.id}`, bindingId: row.id, updatedAt: row.updated_at, error: `Session is ${row.lifecycle}/${row.attachment}` }))
+    ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
   countPendingPrompts(bindingId: string): number {
     const row = this.database.prepare(
       "SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state IN ('queued','running')"
@@ -526,6 +554,33 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.getOutboundReply(id);
   }
 
+  retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome {
+    return this.changeDeadLetter(id, chatId, actorOpenId, "retry");
+  }
+
+  dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome {
+    return this.changeDeadLetter(id, chatId, actorOpenId, "dismiss");
+  }
+
+  private changeDeadLetter(id: string, chatId: string, actorOpenId: string, action: "retry" | "dismiss"): DeadLetterActionOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare(`SELECT o.state, COALESCE(b.chat_id, s.chat_id) AS chat_id FROM outbound_replies o LEFT JOIN bindings b ON b.id = o.binding_id LEFT JOIN project_selections s ON s.id = o.selection_id WHERE o.id = ?`).get(id) as { state: OutboundReplyState; chat_id: string | null } | undefined;
+      let outcome: DeadLetterActionOutcome;
+      if (!row) outcome = "missing";
+      else if (row.chat_id !== chatId) outcome = "unauthorized";
+      else if (row.state !== "dead_letter") outcome = "stale";
+      else {
+        const nextState = action === "retry" ? "pending" : "dismissed";
+        this.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, now(), now(), id);
+        outcome = action === "retry" ? "retried" : "dismissed";
+      }
+      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(actorOpenId, `outbound.${action}`, id, outcome, now());
+      this.database.exec("COMMIT");
+      return outcome;
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
   getOperationalSummary(): OperationalSummary {
     const groupedCounts = <T extends string>(table: string, column: string, values: readonly T[]): Record<T, number> => {
       const result = Object.fromEntries(values.map((value) => [value, 0])) as Record<T, number>;
@@ -536,7 +591,7 @@ export class SqliteBindingStore implements BindingStorePort {
     const recentFailedPrompt = this.database.prepare("SELECT id, binding_id, updated_at, error FROM prompt_jobs WHERE state = 'failed' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string; updated_at: string; error: string | null } | undefined;
     const recentDeadLetter = this.database.prepare("SELECT id, binding_id, prompt_id, attempt_count, updated_at, error FROM outbound_replies WHERE state = 'dead_letter' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
     const oldestPending = this.database.prepare("SELECT MIN(created_at) AS value FROM outbound_replies WHERE state = 'pending'").get() as { value: string | null };
-    const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter"]);
+    const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
     const oldestInactive = this.database.prepare("SELECT MIN(last_activity_at) AS value FROM bindings WHERE lifecycle != 'active' OR attachment != 'attached'").get() as { value: string | null };
     const recoverableProvisioning = this.database.prepare("SELECT COUNT(*) AS count FROM project_selections WHERE state = 'processing' AND binding_id IS NOT NULL").get() as { count: number };
     const archivedPanesPresent = this.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL").get() as { count: number };
@@ -642,7 +697,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE IF NOT EXISTS outbound_replies(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update')), payload TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter')), attempt_count INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
         error TEXT, delivered_message_id TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
@@ -680,6 +735,25 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
     this.ensurePromptCancelledState();
+    this.ensureOutboundDismissedState();
+  }
+
+  private ensureOutboundDismissedState(): void {
+    const schema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_replies'").get() as { sql: string } | undefined;
+    if (schema?.sql.includes("'dismissed'")) return;
+    this.database.exec(`
+      PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
+      CREATE TABLE outbound_replies_next(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, next_attempt_at, created_at, updated_at)
+      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
+      CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
+    `);
+    const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+    if (violation) throw new Error(`Outbound-state migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
   }
 
   private ensurePromptCancelledState(): void {

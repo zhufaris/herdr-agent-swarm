@@ -1,4 +1,4 @@
-import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -70,6 +70,8 @@ export interface BindingStorePort {
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   findBindingByPane(paneId: string): Binding | null;
   listBindings(): Binding[];
+  listSessions(chatId: string): SessionSummary[];
+  listFailures(chatId: string): FailureSummary[];
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
@@ -88,6 +90,8 @@ export interface BindingStorePort {
   listDueOutboundReplies(): OutboundReply[];
   markOutboundReplyDelivered(id: string, messageId: string): void;
   markOutboundReplyFailed(id: string, error: string): OutboundReply | null;
+  retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
+  dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   getOperationalSummary(): OperationalSummary;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;

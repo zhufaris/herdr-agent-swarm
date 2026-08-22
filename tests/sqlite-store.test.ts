@@ -141,6 +141,29 @@ describe("SQLite store", () => {
     expect(serialized).not.toContain("private card payload");
   });
 
+  it("scopes sessions and dead-letter actions to a chat without replaying prompts", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Visible" });
+    store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c2", topicId: "t2", rootMessageId: "m2", title: "Hidden" });
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "p-m1", actorOpenId: "u1", body: "private" });
+    store.updatePrompt("p1", "failed", "prompt failed");
+    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", promptId: "p1", rootMessageId: "m1", kind: "card_update", payload: "{}" });
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed");
+
+    expect(store.listSessions("c1")).toHaveLength(1);
+    expect(store.listFailures("c1")).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "outbound", id: "o1" }), expect.objectContaining({ kind: "prompt", id: "p1" })]));
+    expect(store.retryDeadLetter("o1", "c2", "u2")).toBe("unauthorized");
+    expect(store.retryDeadLetter("o1", "c1", "u1")).toBe("retried");
+    expect(store.retryDeadLetter("o1", "c1", "u1")).toBe("stale");
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "o1" })]);
+    expect(store.getOperationalSummary().prompts.failed).toBe(1);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed again");
+    expect(store.dismissDeadLetter("o1", "c1", "u1")).toBe("dismissed");
+    expect(store.listFailures("c1").some((failure) => failure.kind === "outbound")).toBe(false);
+    expect(store.getOperationalSummary().outbound.dismissed).toBe(1);
+  });
+
   it("atomically accepts task and answer cards and only claims after both are delivered", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -199,6 +222,28 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.loadRunCard("p1")).toMatchObject({ requestText: "legacy **request**" });
+  });
+
+  it("migrates an outbox whose optional columns were appended in legacy order", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-outbox-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = undefined;
+    const database = new DatabaseSync(path);
+    database.exec(`
+      DROP TABLE outbound_replies;
+      CREATE TABLE outbound_replies(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT, root_message_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT,
+        next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT
+      );
+      INSERT INTO outbound_replies VALUES ('o1','key',NULL,'root','card_reply','{}','dead_letter',5,'failed',NULL,'now','now','now',NULL,NULL,NULL,NULL);
+    `);
+    database.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
   });
 
   it("queues a missing answer card for a migrated request exactly once", () => {
