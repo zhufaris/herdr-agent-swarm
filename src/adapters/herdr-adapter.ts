@@ -80,7 +80,7 @@ export class HerdrCliAdapter implements HerdrPort {
 
   async readOutput(paneId: string, lines: number): Promise<string> {
     const { stdout } = await this.runner.run(this.executable, [
-      "agent", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines), "--format", "text"
+      "pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines), "--format", "text"
     ], this.commandTimeoutMs);
     return unwrapText(stdout);
   }

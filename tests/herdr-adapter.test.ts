@@ -3,6 +3,22 @@ import { HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 
 describe("Herdr adapter", () => {
+  it("reads terminal output from the pane without requiring an agent registration", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "agent" && args[1] === "read") throw new Error("agent_not_found");
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "TraeX ready", stderr: "" };
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).readOutput("wA:p3", 240))
+      .resolves.toBe("TraeX ready");
+    expect(calls).toEqual([["pane", "read", "wA:p3", "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]]);
+  });
+
   it("identifies TraeX from process metadata, not the compatibility label", async () => {
     const runner: CommandRunner = {
       async run(_executable, args) {
@@ -21,7 +37,7 @@ describe("Herdr adapter", () => {
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
-        if (args[0] === "agent" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
         return { stdout: "", stderr: "" };
       }
     };
@@ -30,7 +46,7 @@ describe("Herdr adapter", () => {
     expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "hello"]);
     expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
     const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
-    const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "agent" && args[1] === "read");
+    const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read");
     expect(readsBeforeEnter).toHaveLength(2);
     expect(calls.some((args) => args[0] === "agent" && args[1] === "prompt")).toBe(false);
   });
@@ -41,7 +57,7 @@ describe("Herdr adapter", () => {
     const observed: Array<{ state: string; output: string }> = [];
     const runner: CommandRunner = {
       async run(_executable, args) {
-        if (args[0] === "agent" && args[1] === "read") return { stdout: outputs.shift() ?? "terminal", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "terminal", stderr: "" };
         if (args[0] === "pane" && args[1] === "get") {
           const agent_status = states.shift() ?? "done";
           return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status } });
@@ -69,7 +85,7 @@ describe("Herdr adapter", () => {
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
-        if (args[0] === "agent" && args[1] === "read") return { stdout: outputs.shift() ?? "before\n❯ change course", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "before\n❯ change course", stderr: "" };
         if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: state } });
         if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
         return { stdout: "", stderr: "" };
@@ -93,7 +109,7 @@ describe("Herdr adapter", () => {
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
-        if (args[0] === "agent" && args[1] === "read") return { stdout: outputs.shift() ?? "before\n❯ possibly typed", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "before\n❯ possibly typed", stderr: "" };
         if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
         if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
         if (args[0] === "pane" && args[1] === "send-keys") throw new Error("enter failed");
@@ -112,7 +128,7 @@ describe("Herdr adapter", () => {
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
-        if (args[0] === "agent" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ hi\n❯ hi", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ hi\n❯ hi", stderr: "" };
         if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
         if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
         return { stdout: "", stderr: "" };
@@ -121,7 +137,7 @@ describe("Herdr adapter", () => {
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).resolves.toBe("injected");
     const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
-    const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "agent" && args[1] === "read");
+    const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read");
     expect(readsBeforeEnter).toHaveLength(3);
   });
 
@@ -130,7 +146,7 @@ describe("Herdr adapter", () => {
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
-        if (args[0] === "agent" && args[1] === "read") return { stdout: "unchanged terminal", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "unchanged terminal", stderr: "" };
         if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
         if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
         return { stdout: "", stderr: "" };
