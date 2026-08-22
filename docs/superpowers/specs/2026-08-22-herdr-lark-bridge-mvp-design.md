@@ -191,7 +191,12 @@ Creation sequence:
 
 Any member of the configured group may send text or a code block in an active managed topic. The bridge strips only the bot mention used for routing and preserves the remaining text.
 
-Each binding owns a FIFO prompt queue. If TraeX is working, the new prompt is persisted and the status message says it is queued. The coordinator submits the next prompt only after the current turn reaches a settled state. Prompts are never injected into an active turn.
+Each binding owns a FIFO prompt queue and may also accept active-turn steering as
+specified by `2026-08-22-active-turn-steering-design.md`. If the bridge owns an
+active turn and Herdr reports `working`, a newly accepted message is durably
+associated with and injected into that turn. In every other state, including
+`blocked`, the message remains FIFO and is submitted only after the current turn
+settles.
 
 Bot-authored messages, bridge status messages, duplicate Lark events, and messages from other groups never become prompts.
 
@@ -299,14 +304,16 @@ The process exposes a local HTTP server with:
 - Unit tests: command parsing, mention removal, mapping transitions, authorization, origin-loop suppression, response chunking, and deduplication.
 - Store tests: transactional transitions, unique events, queue recovery, and WAL configuration against a temporary database.
 - Adapter contract tests: fake Lark and fake command runner responses, including timeouts, malformed output, and retries.
-- Integration tests: temporary SQLite plus fake Herdr/TraeX processes for bidirectional creation, FIFO prompts, blocked state, restart recovery, and orphan detection.
+- Integration tests: temporary SQLite plus fake Herdr/TraeX processes for bidirectional creation, FIFO prompts, active-turn steering, blocked state, restart recovery, and orphan detection.
 
 ### 14.2 Manual E2E Acceptance
 
 The MVP is accepted when all of the following work in a test group and workspace:
 
 1. A group member creates a managed topic, a Herdr pane starts TraeX, and the initial prompt's final response returns to the same topic.
-2. A second message sent while TraeX is working is queued and runs only after the first turn settles.
+2. A second message sent while a bridge-owned TraeX turn is `working` steers that
+   turn without starting another waiter; messages received in non-steerable states
+   remain FIFO.
 3. A bridge-managed TraeX pane created from Herdr receives a corresponding Lark topic without duplicate creation after restart.
 4. Rename propagates without a loop.
 5. Closing a pane archives the binding and preserves Lark history.
