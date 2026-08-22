@@ -61,8 +61,8 @@ describe("TraeX output parser", () => {
     expect(parseTraexOutput(previous, current, "/repo")).toMatchObject({
       answerSnapshot: current.slice(2), answerUpdate: "replace-status", hasProgressSnapshot: true,
       progressEvents: [
-        { key: "native:重新构建部署并重放 Query Log 与 Aeolus Chart", label: "重新构建部署并重放 Query Log 与 Aeolus Chart", state: "done" },
-        { key: "native:更新 PROGRESS.md", label: "更新 PROGRESS.md", state: "active" }
+        { key: "native:0:重新构建部署并重放 Query Log 与 Aeolus Chart", label: "重新构建部署并重放 Query Log 与 Aeolus Chart", state: "done" },
+        { key: "native:1:更新 PROGRESS.md", label: "更新 PROGRESS.md", state: "active" }
       ]
     });
   });
@@ -75,5 +75,28 @@ describe("TraeX output parser", () => {
     expect(parsed.progressEvents[0]).toMatchObject({ label: "Step 0", state: "active" });
     expect(parsed.progressEvents.at(-1)).toMatchObject({ label: "Step 19", state: "pending" });
     expect(parseTraexOutput("", "◆ Work (1m • 2K tokens)\n2 tasks (1 done, 1 open)", "/repo")).toMatchObject({ hasProgressSnapshot: false, progressEvents: [] });
+  });
+
+  it("recognizes a terminal-wrapped native frame and keeps duplicate labels distinct", () => {
+    const wrapped = [
+      "◆ Rebuild deployment and replay Query Log",
+      "  and Aeolus Chart…",
+      "  (35m 20s • ↓ 31.1K tokens • esc to interrupt)",
+      "  4 tasks (1 done, 1 in progress, 1 open, 1 failed)",
+      "  ✔ Validate",
+      "  ■ Validate",
+      "  ◻ Publish",
+      "  ✕ Recover"
+    ].join("\n");
+
+    expect(parseTraexOutput("", wrapped, "/repo")).toMatchObject({
+      answerUpdate: "replace-status", hasProgressSnapshot: true,
+      progressEvents: [
+        { key: "native:0:Validate", label: "Validate", state: "done" },
+        { key: "native:1:Validate", label: "Validate", state: "active" },
+        { key: "native:2:Publish", label: "Publish", state: "pending" },
+        { key: "native:3:Recover", label: "Recover", state: "failed" }
+      ]
+    });
   });
 });

@@ -182,6 +182,17 @@ describe("run card", () => {
     expect(serialized).not.toContain("✔ 部署");
   });
 
+  it("removes a terminal-wrapped native task frame from answer prose", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Replay", workspaceId: "w1", paneId: "w1:p1", requestText: "Replay", queuePosition: 0, occurredAt: "start" });
+    const serialized = JSON.stringify(renderRequestAnswerCard({
+      ...view, phase: "running", answer: "已完成部署。\n\nRebuild Query Log and Aeolus\nChart…\n(2m 1s • 2K tokens • esc to interrupt)\n2 tasks (1 done, 1 open)\n✔ 部署\n◻ 验证"
+    }));
+
+    expect(serialized).toContain("已完成部署。");
+    expect(serialized).not.toContain("Rebuild Query Log");
+    expect(serialized).not.toContain("2 tasks");
+  });
+
   it("shows phase-aware status and elapsed duration instead of a queue dash", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "Run", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const completed = { ...view, phase: "completed" as const, queuePosition: 0, startedAt: "2026-08-22T10:00:10Z", finishedAt: "2026-08-22T10:02:15Z" };

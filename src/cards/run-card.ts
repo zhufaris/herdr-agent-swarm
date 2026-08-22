@@ -2,6 +2,7 @@ import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
+import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -297,18 +298,7 @@ function formatRunDuration(input: RunCardView): string | null {
   return [hours ? `${hours}h` : null, minutes ? `${minutes}m` : null, `${remainder}s`].filter(Boolean).join(" " );
 }
 function stripNativeTraexStatus(source: string): string {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
-  const taskCount = lines.findIndex((line) => /^\s*\d+\s+tasks?\s*\(.*\)\s*$/i.test(line));
-  if (taskCount < 0) return source.trim();
-
-  let start = taskCount;
-  while (start > 0 && !lines[start - 1]!.trim()) start -= 1;
-  if (start > 0 && /(?:\([^)]*(?:tokens?|esc to|[smh]\s*[•·])[^)]*\)|^[◆◇]\s*)/i.test(lines[start - 1]!)) start -= 1;
-  if (start > 0 && /^\s*(?:traex|codex)\s*$/i.test(lines[start - 1]!)) start -= 1;
-
-  let end = taskCount + 1;
-  while (end < lines.length && /^(?:\s*[■◻✔□✓✕✖▪▫]\s+|\s*\d+[.)]\s+)/.test(lines[end]!)) end += 1;
-  return [...lines.slice(0, start), ...lines.slice(end)].join("\n").replace(/^\s+|\s+$/g, "");
+  return stripNativeTaskFrame(source);
 }
 function latestParagraph(source: string): string | null {
   const paragraphs = source.split(/\n\s*\n/).map((value) => value.trim()).filter(Boolean);

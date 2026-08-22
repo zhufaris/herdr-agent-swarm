@@ -1,5 +1,6 @@
 import type { ProgressEventKind, ProgressEventState } from "../domain/run-card-view.js";
 import { stripTerminalControl } from "./output.js";
+import { findNativeTaskFrame } from "./native-task-frame.js";
 
 export interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
 export interface ParsedTraexOutput {
@@ -62,18 +63,8 @@ function structuredProgress(output: string): { found: boolean; steps: ParsedProg
 }
 
 function nativeProgress(answer: string): { found: boolean; steps: ParsedProgressEvent[] } {
-  if (!isNativeStatusFrame(answer)) return { found: false, steps: [] };
-  const states = { "✔": "done", "✓": "done", "■": "active", "◻": "pending", "□": "pending", "✖": "failed", "✘": "failed", "×": "failed" } as const;
-  const steps: ParsedProgressEvent[] = [];
-  for (const line of answer.split("\n")) {
-    const match = line.match(/^\s*([✔✓■◻□✖✘×])\s+(.+?)\s*$/);
-    if (!match) continue;
-    const label = match[2]!.trim().slice(0, 240);
-    if (!label) continue;
-    steps.push({ key: `native:${label}`, kind: "step", label, state: states[match[1] as keyof typeof states] });
-    if (steps.length === 20) break;
-  }
-  return { found: steps.length > 0, steps };
+  const frame = findNativeTaskFrame(answer);
+  return frame ? { found: true, steps: frame.steps.map((step) => ({ ...step, kind: "step" })) } : { found: false, steps: [] };
 }
 
 function extractAnswer(output: string): string {
@@ -85,5 +76,5 @@ function extractAnswer(output: string): string {
 
 function safeAnswer(value: string): string { return !value || UNSAFE.test(value) ? "" : value; }
 function isNativeStatusFrame(value: string): boolean {
-  return /^.*\([^)]*(?:tokens?|esc to)[^)]*\)\s*\n\s*\d+\s+tasks?\s*\(/im.test(value);
+  return findNativeTaskFrame(value) !== null;
 }
