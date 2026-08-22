@@ -174,6 +174,16 @@ pm2 describe herdr-lark-bridge
 pm2 logs herdr-lark-bridge
 ```
 
+Logs are newline-delimited Pino JSON with a stable `event` field. Correlate a
+request using `eventId`, `bindingId`, `promptId`, `paneId`, or `replyId`. The
+bridge deliberately excludes Lark message bodies, terminal output, card payloads,
+and credentials from operational logs. For example:
+
+```bash
+pm2 logs herdr-lark-bridge --raw | jq 'select(.event == "turn-failed")'
+pm2 logs herdr-lark-bridge --raw | jq 'select(.promptId == "PROMPT_ID")'
+```
+
 After code or configuration changes:
 
 ```bash
@@ -225,12 +235,18 @@ The HTTP server listens on `127.0.0.1:8787` by default.
 ```bash
 curl --fail http://127.0.0.1:8787/health
 curl --fail http://127.0.0.1:8787/ready
+curl --fail http://127.0.0.1:8787/status
 ```
 
 `/health` confirms that the process can answer HTTP requests. `/ready` also
 checks SQLite access, every configured project directory and Herdr workspace,
-and the Lark WebSocket connection. A disconnected Lark client or inaccessible
-project returns HTTP 503.
+and the Lark WebSocket connection. It reports every component independently so
+multiple simultaneous failures are visible in one response. A disconnected Lark
+client or inaccessible project returns HTTP 503. `/status` returns the same
+readiness snapshot plus process uptime and a safe SQLite summary of binding,
+prompt, and outbox state, including bounded recent failures. It never returns
+prompt bodies, terminal output, or card payloads. Keep the health server bound to
+localhost unless an authenticated network boundary is provided externally.
 
 ## Verify a deployment
 

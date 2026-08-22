@@ -3,6 +3,15 @@ import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 
+interface ComponentState { ok: boolean; error?: string }
+interface Readiness {
+  status: "ready" | "not_ready";
+  components: {
+    database: ComponentState; projects: ComponentState; lark: ComponentState;
+    herdr: ComponentState & { workspaces: Array<{ workspaceId: string; ok: boolean; error?: string }> };
+  };
+}
+
 export function startHealthServer(options: {
   host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
 }): Promise<Server> {
@@ -10,17 +19,21 @@ export function startHealthServer(options: {
     response.setHeader("content-type", "application/json");
     if (request.url === "/health") { response.statusCode = 200; response.end(JSON.stringify({ status: "ok" })); return; }
     if (request.url === "/ready") {
-      try {
-        options.store.listBindings();
-        validateProjectDirectories(options.projects);
-        for (const workspaceId of new Set(options.projects.map((project) => project.workspaceId))) await options.herdr.assertWorkspace(workspaceId);
-        const ready = options.lark.isReady();
-        response.statusCode = ready ? 200 : 503;
-        response.end(JSON.stringify({ status: ready ? "ready" : "not_ready", larkConnected: ready }));
-      } catch (error) {
-        response.statusCode = 503;
-        response.end(JSON.stringify({ status: "not_ready", error: error instanceof Error ? error.message : String(error) }));
-      }
+      const readiness = await inspectReadiness(options);
+      response.statusCode = readiness.status === "ready" ? 200 : 503;
+      response.end(JSON.stringify(readiness));
+      return;
+    }
+    if (request.url === "/status") {
+      const readiness = await inspectReadiness(options);
+      let operational: ReturnType<BindingStorePort["getOperationalSummary"]> | { error: string };
+      try { operational = options.store.getOperationalSummary(); }
+      catch (error) { operational = { error: boundedError(error) }; }
+      response.statusCode = 200;
+      response.end(JSON.stringify({
+        status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded",
+        timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational
+      }));
       return;
     }
     response.statusCode = 404; response.end(JSON.stringify({ error: "not_found" }));
@@ -29,4 +42,27 @@ export function startHealthServer(options: {
     server.once("error", reject);
     server.listen(options.port, options.host, () => resolve(server));
   });
+}
+
+async function inspectReadiness(options: { store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[] }): Promise<Readiness> {
+  const database = check(() => options.store.listBindings());
+  const projects = check(() => validateProjectDirectories(options.projects));
+  const lark = options.lark.isReady() ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };
+  const workspaces = await Promise.all([...new Set(options.projects.map((project) => project.workspaceId))].map(async (workspaceId) => {
+    try { await options.herdr.assertWorkspace(workspaceId); return { workspaceId, ok: true }; }
+    catch (error) { return { workspaceId, ok: false, error: boundedError(error) }; }
+  }));
+  const failedWorkspace = workspaces.find((workspace) => !workspace.ok);
+  const herdr = failedWorkspace ? { ok: false, error: "One or more Herdr workspaces are unavailable", workspaces } : { ok: true, workspaces };
+  const components = { database, projects, herdr, lark };
+  return { status: Object.values(components).every((component) => component.ok) ? "ready" : "not_ready", components };
+}
+
+function check(operation: () => void): ComponentState {
+  try { operation(); return { ok: true }; }
+  catch (error) { return { ok: false, error: boundedError(error) }; }
+}
+
+function boundedError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }

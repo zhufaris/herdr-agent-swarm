@@ -25,12 +25,13 @@ export class BridgeRuntimeShutdown {
 
   private async performShutdown(signal: string): Promise<void> {
     const { coordinator, projector, publisher, healthServer, store, logger } = this.dependencies;
-    logger.info({ signal }, "shutting down");
+    logger.info({ event: "bridge-shutdown-started", signal }, "shutting down");
     await stopSafely("coordinator", () => coordinator.stop(), logger);
     await stopSafely("projector", () => projector.stop(), logger);
     await stopSafely("publisher", () => publisher.stop(), logger);
     await stopSafely("healthServer", () => closeServer(healthServer), logger);
     await stopSafely("store", async () => { store.close(); }, logger);
+    logger.info({ event: "bridge-shutdown-completed", signal, outcome: "completed" }, "bridge shutdown completed");
   }
 }
 
@@ -38,7 +39,7 @@ async function stopSafely(component: string, stop: () => Promise<void>, logger: 
   try {
     await stop();
   } catch (error) {
-    logger.error({ err: error, component }, "shutdown component failed");
+    logger.error({ event: "bridge-shutdown-component-failed", err: error, component, outcome: "failed" }, "shutdown component failed");
   }
 }
 

@@ -1,4 +1,5 @@
 import pino from "pino";
+import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
@@ -15,6 +16,8 @@ describe("active-turn steering", () => {
     const hold = new Promise<void>((resolve) => { release = resolve; });
     const turns: string[] = [];
     const steering: string[] = [];
+    const info = vi.fn();
+    const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
     let cardNumber = 0;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
@@ -51,7 +54,7 @@ describe("active-turn steering", () => {
     publisher.start();
     const projector = new CardProjector(bus, store, publisher, pino({ enabled: false }));
     projector.start();
-    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, logger);
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
     const message = (n: number, text: string) => ({ eventId: `e${n}`, messageId: `m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
@@ -63,6 +66,9 @@ describe("active-turn steering", () => {
     await vi.waitFor(() => expect(store.listRunCards(bindingId).slice(1).every((view) => view.phase === "completed")).toBe(true));
     await coordinator.handleMessage(message(2, "steer one"));
     expect(steering).toEqual(["steer one", "steer two"]);
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "prompt-dispatch-decided", dispatchKind: "steering", outcome: "accepted" }), expect.any(String));
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "steering-delivered", outcome: "delivered" }), expect.any(String));
+    expect(JSON.stringify(info.mock.calls)).not.toContain("steer one");
 
     expect(turns).toEqual(["parent"]);
     expect(store.listRunCards(bindingId).slice(1)).toMatchObject([

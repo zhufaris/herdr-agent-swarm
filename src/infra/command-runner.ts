@@ -34,7 +34,20 @@ export class CommandError extends Error {
     readonly timedOut: boolean,
     options?: unknown
   ) {
-    super(`Command failed: ${executable} ${args.join(" " )}: ${message}`, { cause: options });
+    const safeArgs = redactCommandArgs(args);
+    const safeMessage = redactKnownValues(message, args.filter((_, index) => safeArgs[index] === "[REDACTED]"));
+    super(`Command failed: ${executable} ${safeArgs.join(" " )}: ${safeMessage}`, { cause: options });
     this.name = "CommandError";
+    this.args = safeArgs;
   }
+}
+
+function redactCommandArgs(args: string[]): string[] {
+  const safe = [...args];
+  if (safe[0] === "pane" && safe[1] === "send-text" && safe.length > 3) safe[3] = "[REDACTED]";
+  return safe;
+}
+
+function redactKnownValues(message: string, values: string[]): string {
+  return values.filter(Boolean).reduce((safe, value) => safe.replaceAll(value, "[REDACTED]"), message);
 }

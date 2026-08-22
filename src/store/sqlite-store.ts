@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, IncomingLarkMessage, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, IncomingLarkMessage, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 
@@ -369,17 +369,39 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  markOutboundReplyFailed(id: string, error: string): void {
+  markOutboundReplyFailed(id: string, error: string): OutboundReply | null {
     const row = this.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
-    if (!row) return;
+    if (!row) return null;
     const attempts = Number(row.attempt_count) + 1;
     const timestamp = now();
     if (attempts >= 5) {
       this.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, attempt_count = ?, updated_at = ? WHERE id = ?").run(error, attempts, timestamp, id);
-      return;
+      return this.getOutboundReply(id);
     }
     this.database.prepare("UPDATE outbound_replies SET error = ?, attempt_count = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?")
       .run(error, attempts, retryAt(attempts), timestamp, id);
+    return this.getOutboundReply(id);
+  }
+
+  getOperationalSummary(): OperationalSummary {
+    const groupedCounts = <T extends string>(table: string, column: string, values: readonly T[]): Record<T, number> => {
+      const result = Object.fromEntries(values.map((value) => [value, 0])) as Record<T, number>;
+      const rows = this.database.prepare(`SELECT ${column} AS value, COUNT(*) AS count FROM ${table} GROUP BY ${column}`).all() as Array<{ value: T; count: number }>;
+      for (const row of rows) result[row.value] = Number(row.count);
+      return result;
+    };
+    const recentFailedPrompt = this.database.prepare("SELECT id, binding_id, updated_at, error FROM prompt_jobs WHERE state = 'failed' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string; updated_at: string; error: string | null } | undefined;
+    const recentDeadLetter = this.database.prepare("SELECT id, binding_id, prompt_id, attempt_count, updated_at, error FROM outbound_replies WHERE state = 'dead_letter' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
+    const oldestPending = this.database.prepare("SELECT MIN(created_at) AS value FROM outbound_replies WHERE state = 'pending'").get() as { value: string | null };
+    const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter"]);
+    return {
+      bindings: groupedCounts<BindingState>("bindings", "state", ["pending", "active", "archived", "orphaned", "failed"]),
+      prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed"]),
+      promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
+      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, oldestPendingAt: oldestPending.value,
+      recentFailedPrompt: recentFailedPrompt ? { promptId: recentFailedPrompt.id, bindingId: recentFailedPrompt.binding_id, updatedAt: recentFailedPrompt.updated_at, error: boundedError(recentFailedPrompt.error) } : null,
+      recentDeadLetter: recentDeadLetter ? { replyId: recentDeadLetter.id, bindingId: recentDeadLetter.binding_id, promptId: recentDeadLetter.prompt_id, attemptCount: Number(recentDeadLetter.attempt_count), updatedAt: recentDeadLetter.updated_at, error: boundedError(recentDeadLetter.error) } : null
+    };
   }
 
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void {
@@ -429,6 +451,11 @@ export class SqliteBindingStore implements BindingStorePort {
     const row = this.database.prepare("SELECT * FROM prompt_jobs WHERE id = ?").get(id) as PromptRow | undefined;
     if (!row) throw new Error(`Prompt not found: ${id}`);
     return mapPrompt(row);
+  }
+
+  private getOutboundReply(id: string): OutboundReply | null {
+    const row = this.database.prepare("SELECT * FROM outbound_replies WHERE id = ?").get(id) as OutboundReplyRow | undefined;
+    return row ? mapOutboundReply(row) : null;
   }
 
   private migrate(): void {
@@ -574,6 +601,7 @@ export class SqliteBindingStore implements BindingStorePort {
 }
 
 function now(): string { return new Date().toISOString(); }
+function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
 function retryAt(attempt: number): string { return new Date(Date.now() + Math.min(60_000, 1_000 * 2 ** (attempt - 1))).toISOString(); }
 
 function mapBinding(row: BindingRow): Binding {

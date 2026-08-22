@@ -35,7 +35,7 @@ export class SyncCoordinator {
 
   async start(): Promise<void> {
     const recovered = this.store.recoverRunningPrompts();
-    if (recovered > 0) this.logger.warn({ recovered }, "marked interrupted prompt jobs as failed without replay");
+    if (recovered > 0) this.logger.warn({ event: "startup-prompts-recovered", recovered, outcome: "failed_without_replay" }, "marked interrupted prompt jobs as failed without replay");
     for (const binding of this.store.listBindings()) {
       const spaceName = this.spaceNameFor(binding);
       const topicView = this.store.loadTopicView(binding.id);
@@ -59,14 +59,14 @@ export class SyncCoordinator {
       }
     }
     const recoveredInbound = this.store.recoverProcessingInboundMessages();
-    if (recoveredInbound > 0) this.logger.warn({ recoveredInbound }, "returned interrupted inbound messages to acceptance queue");
+    if (recoveredInbound > 0) this.logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     const recoveredSelections = this.store.recoverProcessingProjectSelections();
-    if (recoveredSelections > 0) this.logger.warn({ recoveredSelections }, "marked interrupted project selections as failed without replay");
+    if (recoveredSelections > 0) this.logger.warn({ event: "startup-selections-recovered", recovered: recoveredSelections, outcome: "failed_without_replay" }, "marked interrupted project selections as failed without replay");
     for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) await this.herdr.assertWorkspace(workspaceId);
     await this.captureOutputBaselines();
     await this.reconcile();
     this.reconcileTimer = setInterval(() => {
-      void this.reconcile().catch((error) => this.logger.error({ err: error }, "reconciliation failed"));
+      void this.reconcile().catch((error) => this.logger.error({ event: "reconciliation-failed", err: error, outcome: "failed" }, "reconciliation failed"));
     }, this.config.reconcileIntervalMs);
     this.reconcileTimer.unref();
     this.stopInboundSubscription = this.bus.onInboundMessage((event) => this.acceptInboundMessage(event.payload));
@@ -83,8 +83,18 @@ export class SyncCoordinator {
   }
 
   async handleMessage(message: IncomingLarkMessage): Promise<void> {
-    if (message.chatId !== this.config.lark.chatId || this.store.isBridgeMessage(message.messageId)) return;
-    if (!this.store.recordInboundMessage(message)) return;
+    if (message.chatId !== this.config.lark.chatId) {
+      this.logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "chat_not_allowed" }, "ignored Lark message");
+      return;
+    }
+    if (this.store.isBridgeMessage(message.messageId)) {
+      this.logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "bridge_message" }, "ignored Lark message");
+      return;
+    }
+    if (!this.store.recordInboundMessage(message)) {
+      this.logger.debug({ event: "lark-message-duplicate", eventId: message.eventId, messageId: message.messageId, outcome: "ignored" }, "ignored duplicate Lark message");
+      return;
+    }
     await this.drainInboundMessages();
   }
 
@@ -96,6 +106,7 @@ export class SyncCoordinator {
       selectionId: value.selectionId, projectId: value.projectId, messageId: action.messageId, chatId: action.chatId, actorOpenId: action.operatorOpenId,
       allowedProjectIds: this.config.projects.map((project) => project.id)
     });
+    this.logger.info({ event: "project-selection-decided", selectionId: value.selectionId, projectId: value.projectId, messageId: action.messageId, outcome: claim.outcome }, "processed project selection action");
     this.store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${value.selectionId}:${value.projectId}`, outcome: claim.outcome });
     if (claim.outcome === "missing" || !claim.selection) return;
     const selection = claim.selection;
@@ -123,7 +134,7 @@ export class SyncCoordinator {
     } catch (error) {
       this.store.failProjectSelection(selection.id, errorMessage(error));
       await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:failed`, renderProjectSelectionStatusCard({ status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) }));
-      this.logger.error({ err: error, selectionId: value.selectionId, projectId: project.id }, "project selection failed");
+      this.logger.error({ event: "project-selection-failed", err: error, selectionId: value.selectionId, projectId: project.id, outcome: "failed" }, "project selection failed");
     }
   }
 
@@ -136,7 +147,7 @@ export class SyncCoordinator {
         this.store.markInboundMessageAccepted(message.eventId);
       } catch (error) {
         this.store.releaseInboundMessage(message.eventId, errorMessage(error));
-        this.logger.error({ err: error, eventId: message.eventId }, "inbound message acceptance failed; retained for retry");
+        this.logger.error({ event: "lark-message-acceptance-failed", err: error, eventId: message.eventId, messageId: message.messageId, outcome: "retry" }, "inbound message acceptance failed; retained for retry");
         return;
       }
     }
@@ -145,6 +156,8 @@ export class SyncCoordinator {
   private async acceptInboundMessage(message: IncomingLarkMessage): Promise<void> {
     const command = parseCommand(message.text);
     const binding = this.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
+    const decision = command ? `command:${command.kind}` : binding?.state === "active" ? "prompt" : message.isRootMessage && message.mentionsBot ? "create_binding" : "ignore";
+    this.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: decision === "ignore" ? "ignored" : "accepted" }, "routed persisted Lark message");
 
     try {
       if (command?.kind === "help") {
@@ -175,7 +188,7 @@ export class SyncCoordinator {
         await this.createFromLark(message, deriveTopicTitle(message.text), message.text);
       }
     } catch (error) {
-      this.logger.error({ err: error, eventId: message.eventId, messageId: message.messageId }, "Lark message handling failed");
+      this.logger.error({ event: "lark-message-handling-failed", err: error, eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed");
       const failedBinding = binding ?? this.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
       if (failedBinding) await this.publish(failedBinding.id, "TurnFailed", "bridge", { promptId: message.messageId, error: errorMessage(error), queueDepth: this.store.countPendingPrompts(failedBinding.id) });
     }
@@ -188,7 +201,7 @@ export class SyncCoordinator {
       try {
         panesByWorkspace.set(workspaceId, await this.herdr.listPanes(workspaceId));
       } catch (error) {
-        this.logger.error({ err: error, workspaceId }, "workspace reconciliation failed");
+        this.logger.error({ event: "workspace-reconciliation-failed", err: error, workspaceId, outcome: "failed" }, "workspace reconciliation failed");
       }
     }
     for (const binding of this.store.listBindings().filter((item) => item.state === "active")) {
@@ -218,7 +231,7 @@ export class SyncCoordinator {
       if (!existing) {
         const projects = this.config.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
         if (projects.length !== 1) {
-          this.logger.warn({ workspaceId: pane.workspaceId, paneId: pane.paneId, cwd: pane.cwd, matchingProjects: projects.map((project) => project.id) }, "skipping unregistered or ambiguous Herdr pane");
+          this.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, matchingProjects: projects.map((project) => project.id), reason: projects.length === 0 ? "unregistered" : "ambiguous" }, "skipping unregistered or ambiguous Herdr pane");
           continue;
         }
         await this.createFromHerdr(pane, projects[0]!);
@@ -261,7 +274,7 @@ export class SyncCoordinator {
       } catch (error) {
         this.store.updateBinding(binding.id, { state: "orphaned" });
         await this.publish(binding.id, "BindingOrphaned", "herdr", { reason: `Unable to read Herdr pane ${binding.paneId}: ${errorMessage(error)}` });
-        this.logger.warn({ err: error, bindingId: binding.id, paneId: binding.paneId }, "marked missing Herdr pane as orphaned during startup");
+        this.logger.warn({ event: "binding-orphaned", err: error, bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, outcome: "orphaned" }, "marked missing Herdr pane as orphaned during startup");
       }
     }
   }
@@ -382,6 +395,7 @@ export class SyncCoordinator {
       return;
     }
     const depth = this.store.countPendingPrompts(binding.id);
+    this.logger.info({ event: "prompt-dispatch-decided", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: prompt.id, parentPromptId, workspaceId: binding.workspaceId, paneId: binding.paneId, dispatchKind, queueDepth: depth, outcome: inserted ? "accepted" : "duplicate" }, "accepted Lark prompt dispatch decision");
     if (dispatchKind === "steering" && parentPromptId) {
       await this.publish(binding.id, "SteeringQueued", "lark", { promptId: prompt.id, parentPromptId, actorOpenId: message.actorOpenId });
     } else {
@@ -410,16 +424,19 @@ export class SyncCoordinator {
         const result = this.herdr.steerPrompt ? await this.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
         if (result === "not_working") {
           this.store.requeueSteeringAsTurn(prompt.id);
+          this.logger.warn({ event: "steering-fell-back-to-turn", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "requeued", reason: "not_working" }, "steering target was no longer working");
           await this.refreshQueuePositions(bindingId);
           continue;
         }
         await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
         this.store.updatePrompt(prompt.id, "delivered");
         await this.publish(bindingId, "SteeringDelivered", "herdr", { promptId: prompt.id, parentPromptId });
+        this.logger.info({ event: "steering-delivered", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "delivered" }, "steering delivered to active turn");
       } catch (error) {
         const message = `Steering 注入结果无法确认，请检查 Herdr pane 后按需重试：${errorMessage(error)}`;
         this.store.updatePrompt(prompt.id, "failed", message);
         await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+        this.logger.error({ event: "steering-failed", err: error, bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "uncertain" }, "steering delivery failed");
       }
     }
   }
@@ -442,10 +459,12 @@ export class SyncCoordinator {
     const paneId = binding.paneId;
     for (let prompt = this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.store.claimNextReadyPrompt(bindingId)) {
       const queueDepth = this.store.countPendingPrompts(bindingId);
+      const startedAt = Date.now();
       try {
         await this.refreshQueuePositions(bindingId);
         this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "working" });
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
+        this.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
@@ -464,6 +483,7 @@ export class SyncCoordinator {
             await this.publish(bindingId, "AgentStateChanged", "herdr", {
               state: observedState, queueDepth: this.store.countPendingPrompts(bindingId), promptId: prompt.id
             });
+            if (observedState === "blocked") this.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding?.workspaceId, paneId, agentState: observedState, queueDepth: this.store.countPendingPrompts(bindingId), outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
         });
         const stateBeforeReturn = binding.lastAgentState;
@@ -482,10 +502,12 @@ export class SyncCoordinator {
         this.store.updateBinding(bindingId, { lastOutputFingerprint: fingerprint });
         this.store.updatePrompt(prompt.id, "delivered");
         await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。", queueDepth: this.store.countPendingPrompts(bindingId) });
+        this.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
         await this.refreshQueuePositions(bindingId);
       } catch (error) {
         this.store.updatePrompt(prompt.id, "failed", errorMessage(error));
         await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.store.countPendingPrompts(bindingId) });
+        this.logger.error({ event: "turn-failed", err: error, bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
         await this.refreshQueuePositions(bindingId);
         if (binding.lastAgentState === "blocked") return;
       } finally {

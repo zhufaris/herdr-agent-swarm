@@ -1,5 +1,6 @@
 import pino from "pino";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "pino";
 import type { LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
@@ -21,6 +22,25 @@ describe("Lark channel publisher", () => {
     expect(cards).toEqual([{ schema: "2.0" }]);
     expect(store.listPendingOutboundReplies()).toEqual([]);
     await publisher.stop(); store.close();
+  });
+
+  it("logs retry and dead-letter decisions without card payloads", async () => {
+    const warn = vi.fn();
+    const error = vi.fn();
+    const debug = vi.fn();
+    const logger = { warn, error, debug } as unknown as Logger;
+    const lark = fakeLark({ async replyCard() { throw new Error("network unavailable"); } });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, logger);
+
+    await publisher.enqueueCard("root-1", "failure:1", { secret: "private card payload" }, "b1");
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-retry-scheduled", replyKind: "card_reply", attempt: 1, outcome: "retry" }), expect.any(String));
+    for (let attempt = 0; attempt < 4; attempt += 1) await publisher.drain(true);
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-dead-lettered", attempt: 5, outcome: "dead_letter" }), expect.any(String));
+    expect(JSON.stringify([...warn.mock.calls, ...error.mock.calls])).not.toContain("private card payload");
+    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, pendingOutbox: 0 });
+    store.close();
   });
 
   it("waits for an in-flight card delivery before stopping", async () => {

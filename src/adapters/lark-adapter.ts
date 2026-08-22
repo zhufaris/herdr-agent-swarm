@@ -1,4 +1,5 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 
@@ -14,7 +15,7 @@ export class LarkSdkAdapter implements LarkPort {
   private readonly wsClient: lark.WSClient;
   private ready = false;
 
-  constructor(private readonly options: LarkAdapterOptions) {
+  constructor(private readonly options: LarkAdapterOptions, private readonly logger?: Logger) {
     this.client = new lark.Client({ appId: options.appId, appSecret: options.appSecret });
     this.wsClient = new lark.WSClient({
       appId: options.appId,
@@ -22,10 +23,10 @@ export class LarkSdkAdapter implements LarkPort {
       autoReconnect: true,
       handshakeTimeoutMs: 15_000,
       wsConfig: { pingTimeout: 10 },
-      onReady: () => { this.ready = true; },
-      onError: () => { this.ready = false; },
-      onReconnecting: () => { this.ready = false; },
-      onReconnected: () => { this.ready = true; }
+      onReady: () => this.setReady(true, "lark-websocket-ready", "Lark WebSocket connected"),
+      onError: (error) => this.setReady(false, "lark-websocket-error", "Lark WebSocket error", error),
+      onReconnecting: () => this.setReady(false, "lark-websocket-reconnecting", "Lark WebSocket reconnecting"),
+      onReconnected: () => this.setReady(true, "lark-websocket-reconnected", "Lark WebSocket reconnected")
     });
   }
 
@@ -51,6 +52,15 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   isReady(): boolean { return this.ready; }
+
+  private setReady(ready: boolean, event: string, message: string, error?: unknown): void {
+    if (this.ready === ready && event !== "lark-websocket-error") return;
+    this.ready = ready;
+    const context = { event, outcome: ready ? "connected" : "disconnected", ...(error === undefined ? {} : { err: error }) };
+    if (event === "lark-websocket-error") this.logger?.error(context, message);
+    else if (ready) this.logger?.info(context, message);
+    else this.logger?.warn(context, message);
+  }
 
   async createTopic(card: object): Promise<{ topicId: string; rootMessageId: string }> {
     const response = await this.client.im.v1.message.create({

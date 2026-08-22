@@ -97,8 +97,15 @@ export class LarkChannelPublisher {
           if (reply.kind === "card_reply" && reply.bindingId && !reply.promptId) this.store.updateBinding(reply.bindingId, { statusMessageId: sent.messageId });
         }
         } catch (error) {
-          this.store.markOutboundReplyFailed(reply.id, errorMessage(error));
-          this.logger.error({ err: error, replyId: reply.id }, "failed to deliver Lark outbox reply");
+          const failed = this.store.markOutboundReplyFailed(reply.id, errorMessage(error));
+          const context = {
+            event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled",
+            err: error, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
+            attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt,
+            outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry"
+          };
+          if (failed?.state === "dead_letter") this.logger.error(context, "Lark outbox reply exhausted retries");
+          else this.logger.warn(context, "Lark outbox reply delivery failed; retry scheduled");
           blockedTargets.add(reply.rootMessageId);
         }
       }

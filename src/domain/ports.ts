@@ -1,4 +1,4 @@
-import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
+import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 
@@ -73,7 +73,8 @@ export interface BindingStorePort {
   listPendingOutboundReplies(): OutboundReply[];
   listDueOutboundReplies(): OutboundReply[];
   markOutboundReplyDelivered(id: string, messageId: string): void;
-  markOutboundReplyFailed(id: string, error: string): void;
+  markOutboundReplyFailed(id: string, error: string): OutboundReply | null;
+  getOperationalSummary(): OperationalSummary;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;
   loadTopicView(bindingId: string): TopicViewState | null;

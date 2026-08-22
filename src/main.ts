@@ -13,11 +13,15 @@ import { SqliteBindingStore } from "./store/sqlite-store.js";
 
 const config = loadConfig();
 validateProjectDirectories(config.projects);
-const logger = pino({ level: config.logLevel, redact: ["lark.appSecret", "appSecret", "*.appSecret"] });
+const logger = pino({ level: config.logLevel, redact: [
+  "lark.appSecret", "appSecret", "*.appSecret", "token", "*.token", "authorization", "*.authorization",
+  "cookie", "*.cookie", "password", "*.password", "privateKey", "*.privateKey"
+] });
+const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
 const herdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs);
-const lark = new LarkSdkAdapter(config.lark);
+const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus();
 const channelPublisher = new LarkChannelPublisher(bus, store, lark, logger);
 channelPublisher.start();
@@ -31,10 +35,11 @@ process.once("SIGINT", () => void runtimeShutdown.shutdown("SIGINT"));
 process.once("SIGTERM", () => void runtimeShutdown.shutdown("SIGTERM"));
 
 try {
+  logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
-  logger.info({ workspaceId: config.herdr.workspaceId, chatId: config.lark.chatId, http: config.http }, "bridge started");
+  logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");
 } catch (error) {
-  logger.fatal({ err: error }, "bridge failed to start");
+  logger.fatal({ event: "bridge-startup-failed", err: error, durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");
   await runtimeShutdown.shutdown("startup-failure");
   process.exitCode = 1;
 }

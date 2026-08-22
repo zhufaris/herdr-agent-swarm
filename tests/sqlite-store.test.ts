@@ -86,6 +86,28 @@ describe("SQLite store", () => {
     expect(store.loadTopicView("b1")).toEqual(view);
   });
 
+  it("summarizes durable failures without exposing prompt bodies or outbox payloads", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "private prompt body" });
+    store.updatePrompt("p1", "failed", "x".repeat(800));
+    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", promptId: "p1", rootMessageId: "m1", kind: "card_update", payload: "private card payload" });
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "delivery failed " + "y".repeat(800));
+
+    const summary = store.getOperationalSummary();
+    const serialized = JSON.stringify(summary);
+    expect(summary).toMatchObject({
+      bindings: { pending: 1 }, prompts: { failed: 1 }, promptDispatch: { turn: 1 },
+      outbound: { dead_letter: 1 }, pendingOutbox: 0, deadLetters: 1,
+      recentFailedPrompt: { promptId: "p1", bindingId: "b1" },
+      recentDeadLetter: { replyId: "o1", bindingId: "b1", promptId: "p1", attemptCount: 5 }
+    });
+    expect(summary.recentFailedPrompt?.error.length).toBeLessThanOrEqual(500);
+    expect(summary.recentDeadLetter?.error.length).toBeLessThanOrEqual(500);
+    expect(serialized).not.toContain("private prompt body");
+    expect(serialized).not.toContain("private card payload");
+  });
+
   it("atomically accepts one prompt card and only claims it after card delivery", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

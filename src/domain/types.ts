@@ -76,6 +76,18 @@ export interface OutboundReply {
   updatedAt: string;
 }
 
+export interface OperationalSummary {
+  bindings: Record<BindingState, number>;
+  prompts: Record<PromptState, number>;
+  promptDispatch: Record<PromptDispatchKind, number>;
+  outbound: Record<OutboundReplyState, number>;
+  pendingOutbox: number;
+  deadLetters: number;
+  oldestPendingAt: string | null;
+  recentFailedPrompt: { promptId: string; bindingId: string; updatedAt: string; error: string } | null;
+  recentDeadLetter: { replyId: string; bindingId: string | null; promptId: string | null; attemptCount: number; updatedAt: string; error: string } | null;
+}
+
 export interface ProjectSelection {
   id: string;
   commandMessageId: string;

@@ -74,7 +74,7 @@ export class CardProjector {
         await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id);
       }
     } catch (error) {
-      this.logger.error({ err: error, bindingId: event.bindingId, eventId: event.eventId }, "failed to project Lark card");
+      this.logger.error({ event: "card-projection-failed", err: error, bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
     }
   }
 
