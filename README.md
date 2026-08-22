@@ -112,6 +112,8 @@ LOG_LEVEL=info
 COMMAND_TIMEOUT_MS=30000
 TURN_TIMEOUT_MS=3600000
 RECONCILE_INTERVAL_MS=30000
+INSTANCE_LEASE_TTL_MS=15000
+INSTANCE_LEASE_HEARTBEAT_MS=5000
 MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
@@ -156,7 +158,15 @@ npm run dev
 After startup, send `/herdr help` in the configured Lark group. A successful
 long-connection startup logs `bridge started`.
 Use `/herdr spaces` to list every configured space and all of its live Herdr
-panes, including panes that are not running TraeX.
+panes, including panes that are not running TraeX. Eligible unbound TraeX panes
+can be claimed from the card, while a same-group bound pane can open its topic.
+Use `/herdr sessions` for the current group's session inventory and `/herdr
+failures` for actionable failures. Only failed Lark delivery can be retried; a
+failed TraeX prompt is never replayed.
+
+The process holds a fenced SQLite lease. A second process using the same database
+fails startup while the current lease is live. `/ready` requires lease ownership,
+and `/status` reports bounded lease and two-second workspace-cache diagnostics.
 
 ## Run with PM2
 
@@ -175,6 +185,17 @@ Inspect service state and logs:
 pm2 describe herdr-lark-bridge
 pm2 logs herdr-lark-bridge
 ```
+
+For final acceptance, start the read-only observer and follow its checklist from
+a genuine Feishu user account:
+
+```bash
+npm run smoke:real-user
+```
+
+The script never sends a Lark message and never bypasses the bot-message filter.
+Set `SMOKE_TIMEOUT_MS` or `BRIDGE_STATUS_URL` only when a different observation
+window or local endpoint is needed.
 
 Logs are newline-delimited Pino JSON with a stable `event` field. Correlate a
 request using `eventId`, `bindingId`, `promptId`, `paneId`, or `replyId`. The

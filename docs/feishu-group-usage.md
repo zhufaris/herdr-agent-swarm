@@ -43,15 +43,22 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 ### `/herdr spaces`
 
-按 Space 分组展示所有 Herdr pane，包括没有运行 TraeX 或尚未绑定飞书话题的
-pane。空 Space 仍会显示；配置目录之外的 pane 会归入对应 workspace 的“未注册”
-分组。某个 workspace 暂时不可用时，其他 Space 仍会正常展示。
-
-### `/herdr spaces`
-
 只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、非 TraeX Pane
 以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
-仍会正常显示。这个命令不会创建绑定、启动 TraeX 或修改 Pane。
+仍会正常显示。已绑定到当前群的 Pane 提供“打开项目话题”；符合条件且未绑定的
+TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
+校验。卡片不会提供关闭或删除动作。
+
+### `/herdr sessions`
+
+列出当前群的会话，包括 Space、Pane ID、lifecycle、attachment、TraeX 状态、
+generation、队列长度和最近活动时间。不会显示其他群的话题链接、prompt 正文或终端输出。
+
+### `/herdr failures`
+
+列出当前群需要处理的发送失败、失败任务和异常会话。只有 Lark outbox dead letter
+提供“重试发送”和“忽略”；重试复用原幂等键且只发送卡片或文本，绝不会重放 TraeX
+prompt。失败任务只用于诊断。
 
 ### `/herdr attach <space> <pane>`
 
