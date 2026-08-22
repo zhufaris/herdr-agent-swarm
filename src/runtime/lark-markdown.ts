@@ -63,6 +63,40 @@ export function truncateLarkMarkdownTail(source: string, maxLength: number): str
   return `${prefix}${tail}`.slice(0, maxLength);
 }
 
+/** Removes terminal-width wrapping from prose without flattening Markdown blocks. */
+export function normalizeLarkPreview(source: string): string {
+  const lines = normalizeLarkMarkdown(source).split("\n");
+  const output: string[] = [];
+  let prose: string[] = [];
+  let inFence = false;
+
+  const flushProse = (): void => {
+    if (!prose.length) return;
+    output.push(prose.reduce((joined, line) => joined + proseSeparator(joined, line) + line.trim()));
+    prose = [];
+  };
+
+  for (const line of lines) {
+    if (/^ {0,3}`{3,}/.test(line)) {
+      flushProse();
+      output.push(line);
+      inFence = !inFence;
+    } else if (inFence) {
+      output.push(line);
+    } else if (!line.trim()) {
+      flushProse();
+      if (output.at(-1) !== "") output.push("");
+    } else if (isMarkdownBlockLine(line)) {
+      flushProse();
+      output.push(line);
+    } else {
+      prose.push(line);
+    }
+  }
+  flushProse();
+  return output.join("\n");
+}
+
 function normalizeProse(source: string): string {
   const inlineCode: string[] = [];
   let value = source.replace(/(`+)([^\n]*?)\1/g, (match) => {
@@ -147,6 +181,14 @@ function isSafeHttpUrl(value: string): boolean {
 function isTableRow(line: string): boolean {
   const trimmed = line.trim();
   return trimmed.includes("|") && (trimmed.startsWith("|") || trimmed.endsWith("|"));
+}
+
+function isMarkdownBlockLine(line: string): boolean {
+  return /^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|-{3,}\s*$)/.test(line) || isTableRow(line) || / {2}$/.test(line);
+}
+
+function proseSeparator(previous: string, next: string): string {
+  return /[A-Za-z0-9]$/.test(previous.trimEnd()) && /^[A-Za-z0-9]/.test(next.trimStart()) ? " " : "";
 }
 
 function hasOpenFence(source: string): boolean {

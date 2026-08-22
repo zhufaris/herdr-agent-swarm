@@ -1,7 +1,7 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
-import { truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
+import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -110,7 +110,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     },
     { tag: "hr" }
   ];
-  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(preview, 500)}` });
+  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(preview), 500)}` });
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
     schema: "2.0",
@@ -149,7 +149,7 @@ export function renderRequestRunCard(input: RunCardView): object {
       header: { title: { tag: "plain_text", content: input.progressEvents.length ? `共 ${input.progressEvents.length} 项` : "请求详情" } },
       elements: [{ tag: "markdown", content: progressContent }] }
   ];
-  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdownTail(input.answer, 12_000)}` });
+  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(input.answer), 12_000)}` });
   else if (input.phase === "completed" && input.notice) elements.push({ tag: "markdown", content: `**结果**\n\n${truncateLarkMarkdown(input.notice, 2_000)}` });
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**回答**\n\n正在生成…" });
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeLarkMarkdown, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
+import { normalizeLarkMarkdown, normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
 
 describe("Lark Markdown normalization", () => {
   it("preserves supported document structure and closes a streaming fence in the rendered copy", () => {
@@ -59,5 +59,19 @@ describe("Lark Markdown normalization", () => {
     expect(result).toContain("**new result**");
     expect(result).not.toContain("bad()");
     expect(result.length).toBeLessThanOrEqual(80);
+  });
+
+  it("unwraps narrow terminal prose while preserving Markdown blocks", () => {
+    const source = [
+      "当前主线已", "从“代码/部", "署问题”收敛", "为“下游系统", "不支持当前", "服务账号身", "份”。", "",
+      "下一步需要二", "选一：", "", "- 短期：完成授权", "- 长期：支持 service principal", "",
+      "```text", "keep", "line breaks", "```"
+    ].join("\n");
+
+    expect(normalizeLarkPreview(source)).toBe([
+      "当前主线已从“代码/部署问题”收敛为“下游系统不支持当前服务账号身份”。", "",
+      "下一步需要二选一：", "", "- 短期：完成授权", "- 长期：支持 service principal", "",
+      "```text", "keep", "line breaks", "```"
+    ].join("\n"));
   });
 });
