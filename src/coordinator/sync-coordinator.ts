@@ -15,6 +15,8 @@ import { extractFinalTraexAnswer, parseTraexOutput } from "../runtime/traex-outp
 
 export class SyncCoordinator {
   private readonly workers = new Map<string, Promise<void>>();
+  private readonly activeRuns = new Map<string, { promptId: string; paneId: string; state: Binding["lastAgentState"] }>();
+  private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly observedAgentStates = new Map<string, Binding["lastAgentState"]>();
   private readonly observedTerminalOutputs = new Map<string, string>();
   private reconcileTimer: NodeJS.Timeout | null = null;
@@ -57,7 +59,7 @@ export class SyncCoordinator {
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     await this.lark.stop();
     this.stopInboundSubscription?.();
-    await Promise.allSettled(this.workers.values());
+    await Promise.allSettled([...this.workers.values(), ...this.steeringWorkers.values()]);
   }
 
   async handleMessage(message: IncomingLarkMessage): Promise<void> {
@@ -240,25 +242,64 @@ export class SyncCoordinator {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const promptId = randomUUID();
     const occurredAt = new Date().toISOString();
+    const activeRun = this.activeRuns.get(binding.id);
+    const parentPromptId = activeRun?.state === "working" ? activeRun.promptId : null;
+    const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({
       promptId, bindingId: binding.id, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId,
-      requestText: body, queuePosition: this.store.countPendingPrompts(binding.id) + 1, occurredAt
+      requestText: body, queuePosition: dispatchKind === "steering" ? 0 : this.store.countPendingPrompts(binding.id) + 1, occurredAt
     });
     const { prompt, inserted } = this.store.acceptPrompt({
-      prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body },
+      prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId },
       view, rootMessageId: binding.rootMessageId, card: renderRequestRunCard(view)
     });
     if (!inserted) {
       await this.channelPublisher.drain();
-      this.scheduleWorker(binding.id);
+      if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.scheduleSteering(binding.id, prompt.parentPromptId);
+      else this.scheduleWorker(binding.id);
       return;
     }
     const depth = this.store.countPendingPrompts(binding.id);
-    await this.publish(binding.id, "PromptQueued", "lark", { promptId: prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
-    await this.refreshQueuePositions(binding.id);
-    this.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.queue", target: binding.id, outcome: "success" });
+    if (dispatchKind === "steering" && parentPromptId) {
+      await this.publish(binding.id, "SteeringQueued", "lark", { promptId: prompt.id, parentPromptId, actorOpenId: message.actorOpenId });
+    } else {
+      await this.publish(binding.id, "PromptQueued", "lark", { promptId: prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
+    }
+    if (dispatchKind === "turn") await this.refreshQueuePositions(binding.id);
+    this.store.audit({ actorOpenId: message.actorOpenId, action: dispatchKind === "steering" ? "prompt.steer" : "prompt.queue", target: binding.id, outcome: "success" });
     await this.channelPublisher.drain();
-    this.scheduleWorker(binding.id);
+    if (dispatchKind === "steering" && parentPromptId) this.scheduleSteering(binding.id, parentPromptId);
+    else this.scheduleWorker(binding.id);
+  }
+
+  private scheduleSteering(bindingId: string, parentPromptId: string): void {
+    const previous = this.steeringWorkers.get(bindingId) ?? Promise.resolve();
+    const worker = previous.catch(() => undefined).then(() => this.drainSteering(bindingId, parentPromptId)).finally(() => {
+      if (this.steeringWorkers.get(bindingId) === worker) this.steeringWorkers.delete(bindingId);
+    });
+    this.steeringWorkers.set(bindingId, worker);
+  }
+
+  private async drainSteering(bindingId: string, parentPromptId: string): Promise<void> {
+    const activeRun = this.activeRuns.get(bindingId);
+    if (!activeRun || activeRun.promptId !== parentPromptId) return;
+    for (let prompt = this.store.claimNextReadySteering(bindingId, parentPromptId); prompt; prompt = this.store.claimNextReadySteering(bindingId, parentPromptId)) {
+      try {
+        const result = this.herdr.steerPrompt ? await this.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
+        if (result === "not_working") {
+          this.store.requeueSteeringAsTurn(prompt.id);
+          await this.refreshQueuePositions(bindingId);
+          continue;
+        }
+        await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
+        this.store.updatePrompt(prompt.id, "delivered");
+        await this.publish(bindingId, "SteeringDelivered", "herdr", { promptId: prompt.id, parentPromptId });
+      } catch (error) {
+        const message = `Steering 注入结果无法确认，请检查 Herdr pane 后按需重试：${errorMessage(error)}`;
+        this.store.updatePrompt(prompt.id, "failed", message);
+        await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+      }
+    }
   }
 
   private scheduleWorker(bindingId: string): void {
@@ -282,6 +323,7 @@ export class SyncCoordinator {
       try {
         await this.refreshQueuePositions(bindingId);
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
+        this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "unknown" });
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
@@ -291,6 +333,8 @@ export class SyncCoordinator {
             await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerDelta: parsed.answerDelta, progressEvents: parsed.progressEvents });
           }
           const previousState = this.observedAgentStates.get(paneId) ?? binding?.lastAgentState ?? "unknown";
+          const activeRun = this.activeRuns.get(bindingId);
+          if (activeRun?.promptId === prompt.id) activeRun.state = observedState;
           if (previousState !== observedState) {
             this.observedAgentStates.set(paneId, observedState);
             binding = this.store.updateBinding(bindingId, { lastAgentState: observedState });
@@ -300,6 +344,8 @@ export class SyncCoordinator {
           }
         });
         const stateBeforeReturn = binding.lastAgentState;
+        const activeRun = this.activeRuns.get(bindingId);
+        if (activeRun?.promptId === prompt.id) activeRun.state = state;
         this.observedAgentStates.set(paneId, state);
         binding = this.store.updateBinding(bindingId, { lastAgentState: state });
         if (stateBeforeReturn !== state) {
@@ -319,6 +365,11 @@ export class SyncCoordinator {
         await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.store.countPendingPrompts(bindingId) });
         await this.refreshQueuePositions(bindingId);
         if (binding.lastAgentState === "blocked") return;
+      } finally {
+        const steeringWorker = this.steeringWorkers.get(bindingId);
+        if (steeringWorker) await steeringWorker;
+        if (this.store.requeueQueuedSteering(bindingId, prompt.id) > 0) await this.refreshQueuePositions(bindingId);
+        if (this.activeRuns.get(bindingId)?.promptId === prompt.id) this.activeRuns.delete(bindingId);
       }
     }
   }
@@ -328,7 +379,8 @@ export class SyncCoordinator {
   }
 
   private async refreshQueuePositions(bindingId: string): Promise<void> {
-    const queued = this.store.listRunCards(bindingId).filter((view) => view.phase === "queued");
+    const queuedTurnIds = new Set(this.store.listQueuedTurnPromptIds(bindingId));
+    const queued = this.store.listRunCards(bindingId).filter((view) => view.phase === "queued" && queuedTurnIds.has(view.promptId));
     for (const [index, view] of queued.entries()) {
       const position = index + 1;
       if (view.queuePosition !== position) await this.publish(bindingId, "RunQueuePositionChanged", "bridge", { promptId: view.promptId, queuePosition: position });

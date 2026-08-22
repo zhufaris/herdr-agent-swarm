@@ -24,6 +24,7 @@ export interface HerdrPort {
     timeoutMs: number,
     onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
   ): Promise<AgentState>;
+  steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
   renamePane(paneId: string, title: string): Promise<void>;
 }
@@ -51,11 +52,15 @@ export interface BindingStorePort {
   findBindingByPane(paneId: string): Binding | null;
   listBindings(): Binding[];
   countPendingPrompts(bindingId: string): number;
+  listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
-  enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt">): { prompt: PromptJob; inserted: boolean };
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt">; view: RunCardView; rootMessageId: string; card: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; card: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   claimNextPrompt(bindingId: string): PromptJob | null;
   claimNextReadyPrompt(bindingId: string): PromptJob | null;
+  claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
+  requeueSteeringAsTurn(promptId: string): void;
+  requeueQueuedSteering(bindingId: string, parentPromptId: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];

@@ -13,7 +13,7 @@ final-answer text messages.
 ## How it works
 
 ```text
-Lark message -> durable FIFO prompt -> Herdr pane -> TraeX
+Lark message -> durable turn or steering job -> Herdr pane -> TraeX
      |                                  |
      +-> request card <--- safe output parser + lifecycle events
               |
@@ -195,8 +195,9 @@ Available commands:
 ```
 
 An `@Bot` root message creates a topic binding and uses the message body as its
-first prompt. Later ordinary replies in the topic enter that binding's FIFO
-queue. Every prompt has an independent live card, so queued requests and earlier
+first prompt. A reply received while a bridge-owned turn is actively `working`
+steers that turn; replies received while idle, blocked, or in an unknown state
+enter the binding's FIFO queue. Every message has an independent live card, so queued requests and earlier
 results remain visible.
 
 When TraeX needs high-risk approval, the card changes to orange and directs the

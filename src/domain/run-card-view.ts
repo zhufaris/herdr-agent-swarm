@@ -34,6 +34,7 @@ export interface RunCardView {
 export type RunCardChange =
   | { type: "queue-position"; occurredAt: string; queuePosition: number }
   | { type: "started"; occurredAt: string }
+  | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
   | { type: "output"; occurredAt: string; answerDelta: string; progressEvents: RunProgressEvent[] }
   | { type: "completed"; occurredAt: string; answer: string }
@@ -61,6 +62,9 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
     case "started":
       if (state.phase === "running" && state.notice === null) return state;
       patch = { phase: "running", startedAt: state.startedAt ?? change.occurredAt, notice: null };
+      break;
+    case "steering-delivered":
+      patch = { phase: "completed", answer: "", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
     case "blocked":
       if (state.phase === "blocked" && state.notice === change.notice) return state;

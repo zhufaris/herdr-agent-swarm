@@ -2,6 +2,7 @@ export type BindingState = "pending" | "active" | "archived" | "orphaned" | "fai
 export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed";
+export type PromptDispatchKind = "turn" | "steering";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update";
 
@@ -29,6 +30,8 @@ export interface PromptJob {
   larkMessageId: string;
   actorOpenId: string;
   body: string;
+  dispatchKind: PromptDispatchKind;
+  parentPromptId: string | null;
   state: PromptState;
   attemptCount: number;
   error: string | null;

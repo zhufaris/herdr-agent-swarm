@@ -71,6 +71,14 @@ export class HerdrCliAdapter implements HerdrPort {
     return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation);
   }
 
+  async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
+    const pane = await this.getPane(paneId);
+    if (!pane || pane.agentState !== "working") return "not_working";
+    await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
+    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+    return "injected";
+  }
+
   async readOutput(paneId: string, lines: number): Promise<string> {
     const { stdout } = await this.runner.run(this.executable, [
       "agent", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines), "--format", "text"

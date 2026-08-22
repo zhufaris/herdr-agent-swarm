@@ -88,6 +88,7 @@ export function renderRequestRunCard(input: RunCardView): object {
       elements: [{ tag: "markdown", content: progressContent }] }
   ];
   if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdown(input.answer, 12_000)}` });
+  else if (input.phase === "completed" && input.notice) elements.push({ tag: "markdown", content: `**结果**\n\n${truncateLarkMarkdown(input.notice, 2_000)}` });
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**回答**\n\n正在生成…" });
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));

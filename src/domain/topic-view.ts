@@ -21,8 +21,12 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
     case "BindingArchived": return { ...base, phase: "archived", notice: event.payload.reason };
     case "BindingOrphaned": return { ...base, phase: "orphaned", notice: event.payload.reason };
     case "PromptQueued": return { ...base, phase: "queued", queueDepth: event.payload.queueDepth, notice: null };
+    case "SteeringQueued": return state;
     case "RunQueuePositionChanged": return state;
     case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null };
+    case "SteeringStarted":
+    case "SteeringDelivered":
+    case "SteeringFailed": return state;
     case "TurnOutputObserved": return state;
     case "AgentStateChanged": return { ...base, phase: event.payload.state === "blocked" ? "blocked" : event.payload.state === "working" ? "running" : base.phase, agentState: event.payload.state, queueDepth: event.payload.queueDepth };
     case "TurnCompleted": return { ...base, phase: "done", agentState: "done", queueDepth: event.payload.queueDepth, answer: event.payload.answer, notice: null };

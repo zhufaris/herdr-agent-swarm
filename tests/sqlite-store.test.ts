@@ -59,6 +59,7 @@ describe("SQLite store", () => {
     expect(duplicate).toMatchObject({ inserted: false, prompt: { id: "p1" }, view: { promptId: "p1" } });
     expect(store.listPendingOutboundReplies()).toMatchObject([{ promptId: "p1", viewVersion: 1, kind: "card_reply" }]);
     expect(store.claimNextReadyPrompt("b1")).toBeNull();
+    expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1"]);
 
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "card-m1");
@@ -87,5 +88,44 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.loadRunCard("p1")).toMatchObject({ requestText: "legacy **request**" });
+  });
+
+  it("classifies, claims, falls back, and recovers steering jobs without replay", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const makeView = (promptId: string) => createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 0, occurredAt: new Date().toISOString() });
+    for (const [id, messageId] of [["s1", "m2"], ["s2", "m3"]] as const) {
+      store.acceptPrompt({
+        prompt: { id, bindingId: "b1", larkMessageId: messageId, actorOpenId: "u1", body: id, dispatchKind: "steering", parentPromptId: "parent" },
+        view: makeView(id), rootMessageId: "m1", card: {}
+      });
+    }
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`);
+
+    expect(store.claimNextReadyPrompt("b1")).toBeNull();
+    expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
+    expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
+    store.updatePrompt("s1", "delivered");
+    expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s2");
+    store.requeueSteeringAsTurn("s2");
+    expect(store.claimNextReadyPrompt("b1")).toMatchObject({ id: "s2", dispatchKind: "turn", parentPromptId: null });
+
+    store.updatePrompt("s2", "queued");
+    store.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'steering', parent_prompt_id = 'parent' WHERE id = 's2'").run();
+    expect(store.recoverRunningPrompts()).toBe(0);
+    expect(store.claimNextReadyPrompt("b1")).toMatchObject({ id: "s2", dispatchKind: "turn" });
+  });
+
+  it("marks interrupted steering as uncertain instead of replaying it", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "s1", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent" }, view, rootMessageId: "m1", card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-s1");
+    expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
+
+    expect(store.recoverRunningPrompts()).toBe(1);
+    expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" });
+    expect(store.claimNextReadyPrompt("b1")).toBeNull();
   });
 });

@@ -87,7 +87,7 @@ export class CardProjector {
 }
 
 function promptIdOf(event: BridgeEvent): string | null {
-  if (event.type === "PromptQueued" || event.type === "RunQueuePositionChanged" || event.type === "TurnStarted" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted" || event.type === "TurnFailed") return event.payload.promptId;
+  if (event.type === "PromptQueued" || event.type === "SteeringQueued" || event.type === "RunQueuePositionChanged" || event.type === "TurnStarted" || event.type === "SteeringStarted" || event.type === "SteeringDelivered" || event.type === "SteeringFailed" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted" || event.type === "TurnFailed") return event.payload.promptId;
   if (event.type === "AgentStateChanged") return event.payload.promptId ?? null;
   return null;
 }
@@ -95,8 +95,12 @@ function promptIdOf(event: BridgeEvent): string | null {
 function runCardChange(event: BridgeEvent): RunCardChange | null {
   switch (event.type) {
     case "PromptQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queueDepth };
+    case "SteeringQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: 0 };
     case "RunQueuePositionChanged": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queuePosition };
     case "TurnStarted": return { type: "started", occurredAt: event.occurredAt };
+    case "SteeringStarted": return { type: "started", occurredAt: event.occurredAt };
+    case "SteeringDelivered": return { type: "steering-delivered", occurredAt: event.occurredAt, notice: "已加入当前执行" };
+    case "SteeringFailed": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.error };
     case "TurnOutputObserved": return { type: "output", occurredAt: event.occurredAt, answerDelta: event.payload.answerDelta, progressEvents: event.payload.progressEvents.map((item) => ({ ...item, occurredAt: event.occurredAt })) };
     case "AgentStateChanged": return event.payload.state === "blocked"
       ? { type: "blocked", occurredAt: event.occurredAt, notice: "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。" }

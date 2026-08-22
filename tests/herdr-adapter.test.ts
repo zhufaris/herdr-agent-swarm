@@ -57,6 +57,46 @@ describe("Herdr adapter", () => {
     expect(observed.map(({ state }) => state)).toEqual(["working", "blocked", "working", "done"]);
     expect(observed.every(({ output }) => output === "terminal")).toBe(true);
   });
+
+  it("steers only while structured pane state is working", async () => {
+    const calls: string[][] = [];
+    let state: "working" | "blocked" = "working";
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: state } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000);
+
+    await expect(adapter.steerPrompt("w1:p1", "change course")).resolves.toBe("injected");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "change course"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+
+    state = "blocked";
+    calls.length = 0;
+    await expect(adapter.steerPrompt("w1:p1", "do not inject")).resolves.toBe("not_working");
+    expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
+  });
+
+  it("surfaces an uncertain steering delivery when Enter fails after text was sent", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        if (args[0] === "pane" && args[1] === "send-keys") throw new Error("enter failed");
+        return { stdout: "", stderr: "" };
+      }
+    };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000);
+
+    await expect(adapter.steerPrompt("w1:p1", "possibly typed")).rejects.toThrow("enter failed");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "possibly typed"]);
+  });
 });
 
 function json(result: unknown) { return Promise.resolve({ stdout: JSON.stringify({ id: "test", result }), stderr: "" }); }
