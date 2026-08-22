@@ -400,8 +400,8 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   saveRunCard(view: RunCardView): RunCardView {
-    this.database.prepare(`UPDATE run_cards SET lark_message_id = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, pane_id = ?, answer = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, view_version = ?, delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
-      .run(view.larkMessageId, view.phase, view.title, view.requestText, view.workspaceId, view.paneId, view.answer, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.updatedAt, view.promptId);
+    this.database.prepare(`UPDATE run_cards SET lark_message_id = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, view_version = ?, delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
+      .run(view.larkMessageId, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.updatedAt, view.promptId);
     return this.loadRunCard(view.promptId)!;
   }
 
@@ -415,8 +415,8 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   private insertRunCard(view: RunCardView): void {
-    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, lark_message_id, phase, title, request_text, workspace_id, pane_id, answer, progress_events_json, queue_position, started_at, finished_at, notice, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(view.promptId, view.bindingId, view.larkMessageId, view.phase, view.title, view.requestText, view.workspaceId, view.paneId, view.answer, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, lark_message_id, phase, title, request_text, workspace_id, space_name, pane_id, answer, progress_events_json, queue_position, started_at, finished_at, notice, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(view.promptId, view.bindingId, view.larkMessageId, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
   }
 
   private getBinding(id: string): Binding {
@@ -478,7 +478,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS run_cards(
         prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT,
-        phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, pane_id TEXT,
+        phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, space_name TEXT NOT NULL DEFAULT 'unknown', pane_id TEXT,
         answer TEXT NOT NULL, progress_events_json TEXT NOT NULL, queue_position INTEGER NOT NULL, started_at TEXT, finished_at TEXT, notice TEXT,
         view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
@@ -488,6 +488,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundReplyColumns();
     this.ensureRequestCardOutboxColumns();
     this.ensureRunCardRequestText();
+    this.ensureRunCardSpaceName();
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
   }
@@ -525,6 +526,24 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE VIEW run_cards_view AS SELECT *, json_object(
         'promptId', prompt_id, 'bindingId', binding_id, 'larkMessageId', lark_message_id, 'phase', phase, 'title', title, 'requestText', request_text,
         'workspaceId', workspace_id, 'paneId', pane_id, 'answer', answer, 'progressEvents', json(progress_events_json),
+        'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice,
+        'viewVersion', view_version, 'deliveredVersion', delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
+      ) AS state_json FROM run_cards;
+    `);
+  }
+
+  private ensureRunCardSpaceName(): void {
+    const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "space_name")) this.database.exec("ALTER TABLE run_cards ADD COLUMN space_name TEXT NOT NULL DEFAULT 'unknown'");
+    this.recreateRunCardsView();
+  }
+
+  private recreateRunCardsView(): void {
+    this.database.exec(`
+      DROP VIEW IF EXISTS run_cards_view;
+      CREATE VIEW run_cards_view AS SELECT *, json_object(
+        'promptId', prompt_id, 'bindingId', binding_id, 'larkMessageId', lark_message_id, 'phase', phase, 'title', title, 'requestText', request_text,
+        'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'progressEvents', json(progress_events_json),
         'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice,
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
       ) AS state_json FROM run_cards;

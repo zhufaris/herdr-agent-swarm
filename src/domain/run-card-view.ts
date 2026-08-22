@@ -18,6 +18,7 @@ export interface RunCardView {
   title: string;
   requestText: string;
   workspaceId: string;
+  spaceName: string;
   paneId: string | null;
   answer: string;
   progressEvents: RunProgressEvent[];
@@ -41,12 +42,12 @@ export type RunCardChange =
   | { type: "failed"; occurredAt: string; notice: string };
 
 export function createQueuedRunCard(input: {
-  promptId: string; bindingId: string; title: string; workspaceId: string; paneId: string | null; requestText: string;
+  promptId: string; bindingId: string; title: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
   queuePosition: number; occurredAt: string;
 }): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, phase: "queued",
-    title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, paneId: input.paneId, answer: "",
+    title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "",
     progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null,
     viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };

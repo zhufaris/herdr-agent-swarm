@@ -11,7 +11,7 @@ interface EventBase<T extends string, P> {
 }
 
 export type BridgeEvent =
-  | EventBase<"BindingCreated", { title: string; workspaceId: string; paneId: string | null }>
+  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; paneId: string | null }>
   | EventBase<"BindingActivated", { paneId: string; topicId: string }>
   | EventBase<"BindingRenamed", { title: string }>
   | EventBase<"BindingArchived", { reason: string }>

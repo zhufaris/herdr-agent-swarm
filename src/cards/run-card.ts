@@ -35,7 +35,7 @@ export function renderProjectSelectorCard(input: { selectionId: string; projects
   };
 }
 
-export function renderProjectSelectionStatusCard(input: { status: "processing" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; workspaceId?: string; paneId?: string; message?: string }): object {
+export function renderProjectSelectionStatusCard(input: { status: "processing" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; message?: string }): object {
   const views = {
     processing: { title: "正在创建项目 Pane", template: "blue", icon: "⏳" },
     completed: { title: "项目已打开", template: "green", icon: "✅" },
@@ -44,7 +44,7 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
     unauthorized: { title: "无法使用此选择器", template: "orange", icon: "🔒" }
   } as const;
   const view = views[input.status];
-  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.workspaceId ? `**Workspace**  \`${escapeCode(input.workspaceId)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请在当前话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
+  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请在当前话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements: [{ tag: "markdown", content: details || view.title }] } };
 }
 
@@ -55,7 +55,7 @@ export function renderRunCard(input: TopicViewState): object {
       tag: "column_set",
       horizontal_spacing: "8px",
       columns: [
-        metric("WORKSPACE", input.workspaceId),
+        metric("SPACE", input.spaceName),
         metric("PANE", input.paneId ?? "provisioning"),
         metric("QUEUE", String(input.queueDepth))
       ]
@@ -105,7 +105,7 @@ export function renderRequestRunCard(input: RunCardView): object {
   ].filter((line) => line !== null).join("\n");
   const elements: object[] = [
     { tag: "column_set", horizontal_spacing: "8px", columns: [
-      metric("WORKSPACE", input.workspaceId), metric("PANE", input.paneId ?? "provisioning"),
+      metric("SPACE", input.spaceName), metric("PANE", input.paneId ?? "provisioning"),
       metric("QUEUE", input.queuePosition > 0 ? String(input.queuePosition) : "—")
     ] },
     { tag: "hr" },

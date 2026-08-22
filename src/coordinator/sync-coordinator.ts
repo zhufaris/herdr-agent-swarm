@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderHelpCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestRunCard, renderRunCard } from "../cards/run-card.js";
-import type { BridgeConfig } from "../config.js";
+import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
@@ -37,8 +37,17 @@ export class SyncCoordinator {
     const recovered = this.store.recoverRunningPrompts();
     if (recovered > 0) this.logger.warn({ recovered }, "marked interrupted prompt jobs as failed without replay");
     for (const binding of this.store.listBindings()) {
-      for (const view of this.store.listRunCards(binding.id).filter((item) => item.larkMessageId && item.viewVersion > item.deliveredVersion)) {
-        await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, view.promptId, view.larkMessageId!, view.viewVersion, renderRequestRunCard(view));
+      const spaceName = this.spaceNameFor(binding);
+      const topicView = this.store.loadTopicView(binding.id);
+      if (topicView && topicView.spaceName !== spaceName) {
+        const current = { ...topicView, spaceName };
+        this.store.saveTopicView(current);
+        if (binding.statusMessageId) await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `space-name:${binding.id}:${spaceName}`, renderRunCard(current));
+      }
+      for (const view of this.store.listRunCards(binding.id).filter((item) => item.larkMessageId)) {
+        const changed = view.spaceName !== spaceName;
+        const current = changed ? this.store.saveRunCard({ ...view, spaceName, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
+        if (changed || current.viewVersion > current.deliveredVersion) await this.channelPublisher.enqueueRunCardUpdate(current.bindingId, current.promptId, current.larkMessageId!, current.viewVersion, renderRequestRunCard(current));
       }
     }
     const recoveredInbound = this.store.recoverProcessingInboundMessages();
@@ -97,7 +106,7 @@ export class SyncCoordinator {
     }
     const project = this.config.projects.find((item) => item.id === value.projectId);
     if (!project) return;
-    await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:processing`, renderProjectSelectionStatusCard({ status: "processing", projectName: project.displayName }));
+    await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:processing`, renderProjectSelectionStatusCard({ status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) }));
     try {
       const binding = await this.createSelectedProject(selection, project);
       this.store.completeProjectSelection(selection.id, binding.id);
@@ -105,7 +114,7 @@ export class SyncCoordinator {
       this.store.audit({ actorOpenId: action.operatorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
     } catch (error) {
       this.store.failProjectSelection(selection.id, errorMessage(error));
-      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:failed`, renderProjectSelectionStatusCard({ status: "failed", projectName: project.displayName, message: errorMessage(error) }));
+      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:failed`, renderProjectSelectionStatusCard({ status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) }));
       this.logger.error({ err: error, selectionId: value.selectionId, projectId: project.id }, "project selection failed");
     }
   }
@@ -282,7 +291,7 @@ export class SyncCoordinator {
       topicId: selection.topicId ?? selection.commandMessageId, rootMessageId: selection.rootMessageId, title
     });
     if (selection.selectorMessageId) binding = this.store.updateBinding(binding.id, { statusMessageId: selection.selectorMessageId });
-    await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, paneId: null });
+    await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
     try {
       const pane = await this.herdr.createPane(project.workspaceId, project.cwd);
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
@@ -299,7 +308,7 @@ export class SyncCoordinator {
   private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> {
     const pane = binding.paneId ? { paneId: binding.paneId } : {};
     await this.channelPublisher.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, renderProjectSelectionStatusCard({
-      status: "completed", projectName: project.displayName, workspaceId: project.workspaceId, ...pane
+      status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...pane
     }));
   }
 
@@ -311,7 +320,7 @@ export class SyncCoordinator {
       id: bindingId, projectId: defaultProject.id, workspaceId: defaultProject.workspaceId, chatId: message.chatId,
       topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title
     });
-    await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, paneId: null });
+    await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(defaultProject), paneId: null });
     try {
       const pane = await this.herdr.createPane(binding.workspaceId, defaultProject.cwd);
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
@@ -330,7 +339,7 @@ export class SyncCoordinator {
     const id = randomUUID();
     const title = formatProjectPaneTitle(pane.cwd, pane.label, pane.paneId);
     let binding = this.store.createPendingBinding({ id, projectId: project.id, workspaceId: pane.workspaceId, chatId: this.config.lark.chatId, topicId: null, rootMessageId: null, title });
-    const createdEvent = this.event(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, paneId: pane.paneId });
+    const createdEvent = this.event(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId });
     const initialView = reduceTopicView(initialTopicView(binding.id), createdEvent);
     this.store.saveTopicView(initialView);
     const topic = await this.lark.createTopic(renderRunCard(initialView));
@@ -352,7 +361,7 @@ export class SyncCoordinator {
     const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({
       promptId, bindingId: binding.id, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId,
-      requestText: body, queuePosition: dispatchKind === "steering" ? 0 : this.store.countPendingPrompts(binding.id) + 1, occurredAt
+      spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: dispatchKind === "steering" ? 0 : this.store.countPendingPrompts(binding.id) + 1, occurredAt
     });
     const { prompt, inserted } = this.store.acceptPrompt({
       prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId },
@@ -482,6 +491,13 @@ export class SyncCoordinator {
 
   private async emitState(binding: Binding, state: Binding["lastAgentState"]): Promise<void> {
     await this.publish(binding.id, "AgentStateChanged", "bridge", { state, queueDepth: this.store.countPendingPrompts(binding.id) });
+  }
+
+  private spaceNameFor(binding: Binding): string {
+    const matches = binding.projectId
+      ? this.config.projects.filter((project) => project.id === binding.projectId)
+      : this.config.projects.filter((project) => project.workspaceId === binding.workspaceId);
+    return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved";
   }
 
   private async refreshQueuePositions(bindingId: string): Promise<void> {

@@ -20,15 +20,19 @@ describe("run card", () => {
   });
 
   it("renders CardKit 2.0 from a projected state", () => {
-    const card = renderRunCard({ ...initialTopicView("b1"), title: "Build bridge", workspaceId: "wG", paneId: "wG:p2", phase: "blocked", agentState: "blocked", queueDepth: 2 });
+    const card = renderRunCard({ ...initialTopicView("b1"), title: "Build bridge", workspaceId: "wG", spaceName: "datasage_semantic_knowledge", paneId: "wG:p2", phase: "blocked", agentState: "blocked", queueDepth: 2 });
     expect(card).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "orange" } });
     expect((card as { header: Record<string, unknown> }).header).not.toHaveProperty("ud_icon");
     expect(JSON.stringify(card)).not.toContain('"tag":"note"');
     expect(JSON.stringify(card)).toContain("回到对应 Herdr pane");
+    expect(JSON.stringify(card)).toContain("SPACE");
+    expect(JSON.stringify(card)).toContain("datasage_semantic_knowledge");
+    expect(JSON.stringify(card)).not.toContain("WORKSPACE");
+    expect(JSON.stringify(card)).not.toContain('**WORKSPACE**\n`wG`');
   });
 
   it("renders separate expanded progress and answer regions for a completed request", () => {
-    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerDelta: "partial", progressEvents: [{ key: "read:a", kind: "read", label: "已读取 src/a.ts", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "2026-08-22T10:00:02Z", answer: "Fixed." });
     const card = renderRequestRunCard(completed);
@@ -42,6 +46,10 @@ describe("run card", () => {
     expect(serialized).toContain("回答");
     expect(serialized).toContain("Fixed.");
     expect(serialized).not.toContain("partial");
+    expect(serialized).toContain("SPACE");
+    expect(serialized).toContain("datasage_semantic_knowledge");
+    expect(serialized).not.toContain("WORKSPACE");
+    expect(serialized).not.toContain('**WORKSPACE**\n`w1`');
   });
 
   it("keeps recent progress and reports omitted older entries", () => {

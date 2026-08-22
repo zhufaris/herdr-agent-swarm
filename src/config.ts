@@ -1,11 +1,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { z } from "zod";
 import type { ProjectConfig } from "./domain/types.js";
 
 const projectSchema = z.object({
   id: z.string().regex(/^[a-z0-9_-]+$/),
   displayName: z.string().trim().min(1),
+  spaceName: z.string().trim().min(1).optional(),
   description: z.string().trim().min(1),
   workspaceId: z.string().trim().min(1),
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path")
@@ -91,4 +92,8 @@ export function validateProjectDirectories(projects: readonly ProjectConfig[]): 
     try { isDirectory = statSync(project.cwd).isDirectory(); } catch {}
     if (!isDirectory) throw new Error(`Project directory is not accessible: ${project.id} (${project.cwd})`);
   }
+}
+
+export function projectSpaceName(project: ProjectConfig): string {
+  return project.spaceName?.trim() || basename(project.cwd) || project.displayName;
 }

@@ -34,8 +34,8 @@ describe("project selection flow", () => {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
       herdr: { workspaceId: "wH", workspaceCwd: "/work/bridge", executable: "herdr" },
       projects: [
-        { id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" },
-        { id: "datasage", displayName: "DataSage", description: "Semantic knowledge", workspaceId: "wD", cwd: "/work/datasage" }
+        { id: "bridge", displayName: "Bridge", spaceName: "herdr-lark-bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" },
+        { id: "datasage", displayName: "DataSage", spaceName: "datasage_semantic_knowledge", description: "Semantic knowledge", workspaceId: "wD", cwd: "/work/datasage" }
       ], defaultProjectId: "bridge", projectsConfigPath: "config/projects.json",
       traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
@@ -67,6 +67,8 @@ describe("project selection flow", () => {
     expect(store.findBindingByPane("wD:p9")).toMatchObject({ projectId: "datasage", workspaceId: "wD", title: "datasage / Fix login", state: "active" });
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
     expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
+    expect(JSON.stringify(updates.at(-1))).toContain("datasage_semantic_knowledge");
+    expect(JSON.stringify(updates.at(-1))).not.toContain("**Workspace**");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

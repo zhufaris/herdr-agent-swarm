@@ -10,6 +10,7 @@ export type ProjectSelectionState = "pending" | "processing" | "completed" | "fa
 export interface ProjectConfig {
   id: string;
   displayName: string;
+  spaceName?: string | undefined;
   description: string;
   workspaceId: string;
   cwd: string;

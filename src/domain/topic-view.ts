@@ -3,19 +3,19 @@ import type { BridgeEvent } from "./events.js";
 
 export type TopicViewPhase = "provisioning" | "queued" | "running" | "blocked" | "done" | "error" | "archived" | "orphaned";
 export interface TopicViewState {
-  bindingId: string; title: string; workspaceId: string; paneId: string | null; phase: TopicViewPhase;
+  bindingId: string; title: string; workspaceId: string; spaceName: string; paneId: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
-  return { bindingId, title: "TraeX task", workspaceId: "unknown", paneId: null, phase: "provisioning",
+  return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", paneId: null, phase: "provisioning",
     agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
   const base = { ...state, lastEventId: event.eventId };
   switch (event.type) {
-    case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, paneId: event.payload.paneId, phase: "provisioning" };
+    case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, paneId: event.payload.paneId, phase: "provisioning" };
     case "BindingActivated": return { ...base, paneId: event.payload.paneId, phase: "done", notice: null };
     case "BindingRenamed": return { ...base, title: event.payload.title };
     case "BindingArchived": return { ...base, phase: "archived", notice: event.payload.reason };
