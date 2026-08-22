@@ -117,14 +117,14 @@ MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
 
-Use absolute `HERDR_BIN` and `TRAEX_BIN` paths when a systemd service may not
-inherit your interactive shell's `PATH`. `HERDR_WORKSPACE_CWD` must be an
-absolute path accessible to the service account. Keep `.env` private because it
-contains the Lark app secret.
+Use absolute `HERDR_BIN` and `TRAEX_BIN` paths so the PM2 process does not depend
+on an interactive shell's `PATH`. `HERDR_WORKSPACE_CWD` must be an absolute path
+accessible to the service account. Keep `.env` private because it contains the
+Lark app secret.
 
 The application reads process environment variables; it does not load `.env`
-itself. Source the file for foreground operation or use systemd's
-`EnvironmentFile` directive.
+itself. Source the file for foreground operation. The included PM2 configuration
+loads it before starting the application.
 
 ## Start in the foreground
 
@@ -150,25 +150,22 @@ npm run dev
 After startup, send `/herdr help` in the configured Lark group. A successful
 long-connection startup logs `bridge started`.
 
-## Install as a user systemd service
+## Run with PM2
 
-The repository includes a hardened example unit. Replace every
-`/absolute/path/to/herdr-lark-bridge` occurrence with the actual repository path
-before installing it. Ensure `ExecStart` can find the intended Node.js and npm.
+Install PM2 once for the service account, then start the checked-in process
+definition from the repository root:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/herdr-lark-bridge.service ~/.config/systemd/user/herdr-lark-bridge.service
-${EDITOR:-vi} ~/.config/systemd/user/herdr-lark-bridge.service
-systemctl --user daemon-reload
-systemctl --user enable --now herdr-lark-bridge.service
+npm install --global pm2
+pm2 start ecosystem.config.cjs
+pm2 save
 ```
 
 Inspect service state and logs:
 
 ```bash
-systemctl --user status herdr-lark-bridge.service --no-pager
-journalctl --user -u herdr-lark-bridge.service -f
+pm2 describe herdr-lark-bridge
+pm2 logs herdr-lark-bridge
 ```
 
 After code or configuration changes:
@@ -176,11 +173,14 @@ After code or configuration changes:
 ```bash
 npm ci
 npm run build
-systemctl --user restart herdr-lark-bridge.service
+pm2 restart ecosystem.config.cjs --only herdr-lark-bridge
+pm2 save
 ```
 
-If the service must survive logout, an administrator may need to enable user
-lingering for the service account.
+To start the saved process list after a host reboot, run `pm2 startup` and follow
+the command it prints. This one-time host integration may require administrator
+permission. The configured shutdown timeout lets an active TraeX turn finish
+before PM2 force-stops the bridge.
 
 ## Use the bridge
 
@@ -245,11 +245,10 @@ Then perform a Lark smoke test:
   long-connection subscription, app publication, and bot installation.
 - Herdr workspace errors: run `herdr workspace get <workspace-id>` as the same
   account that runs the service.
-- `herdr` or `traex` is not found under systemd: set absolute `HERDR_BIN` and
+- `herdr` or `traex` is not found under PM2: set absolute `HERDR_BIN` and
   `TRAEX_BIN` paths in `.env`.
 - The service cannot write SQLite: create the database directory and ensure the
-  service account can write it. The example unit permits writes only under the
-  repository's `var` directory.
+  service account can write the repository's `var` directory.
 - A running card becomes failed after restart: this is intentional. The bridge
   does not replay an interrupted prompt because doing so could repeat side
   effects. Send the prompt again if retry is safe.
