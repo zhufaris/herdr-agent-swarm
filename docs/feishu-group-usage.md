@@ -53,7 +53,7 @@ pane。空 Space 仍会显示；配置目录之外的 pane 会归入对应 works
 以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
 仍会正常显示。这个命令不会创建绑定、启动 TraeX 或修改 Pane。
 
-### `/herdr attach <space> <pane-id>`
+### `/herdr attach <space> <pane>`
 
 把已经运行 TraeX 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。
 这个命令不会创建、重命名或重启 pane，也不会向 pane 发送文字。
@@ -62,7 +62,8 @@ pane。空 Space 仍会显示；配置目录之外的 pane 会归入对应 works
 /herdr attach datasage_semantic_knowledge w5:p3G
 ```
 
-`space` 必须精确匹配项目配置中显式声明的 `spaceName`。Bridge 只会在该项目的
+`space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID，
+也可以是该 Space 中唯一的精确 Pane 名称；名称重名时会返回候选 ID。Bridge 只会在该项目的
 Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
 不会创建第二个绑定，而会返回已有连接信息。未知或重复的 space、其他 workspace
 中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。

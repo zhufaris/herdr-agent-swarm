@@ -9,6 +9,36 @@ import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("attach existing pane command", () => {
+  it("resolves a unique exact pane label and stores the stable pane ID", async () => {
+    let exposePane = false;
+    const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, createTopic,
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard() { return { messageId: "reply-1" }; }, async updateCard() {}
+    };
+    const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/different/cwd", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return null; },
+      async createPane() { throw new Error("unexpected createPane"); }, async startTraex() { throw new Error("unexpected startTraex"); },
+      async runPrompt() { throw new Error("unexpected runPrompt"); }, async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+    exposePane = true;
+
+    await coordinator.handleMessage(command(1, "tidy"));
+
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active" });
+    expect(createTopic).toHaveBeenCalledTimes(1);
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("attaches an eligible pane without mutating or starting it and is idempotent", async () => {
     let exposePane = false;
     const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
@@ -89,6 +119,60 @@ describe("attach existing pane command", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("resolves a unique exact pane label", async () => {
+    let exposePanes = false;
+    const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/repo", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? [pane] : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
+
+    await coordinator.handleMessage({ ...command(1), text: "/herdr attach datasage_semantic_knowledge tidy" });
+
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ state: "active" });
+    expect(createTopic).toHaveBeenCalledTimes(1);
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("rejects an ambiguous pane label and lists candidate ids", async () => {
+    let exposePanes = false; const cards: object[] = [];
+    const panes = ["w5:p1", "w5:p2"].map((paneId) => ({ paneId, workspaceId: "w5", cwd: "/repo", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] }));
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
+
+    await coordinator.handleMessage({ ...command(1), text: "/herdr attach datasage_semantic_knowledge tidy" });
+
+    expect(store.listBindings()).toEqual([]);
+    expect(JSON.stringify(cards.at(-1))).toContain("w5:p1, w5:p2");
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("prefers an exact pane ID over a matching pane label", async () => {
+    let exposePanes = false;
+    const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    const panes = [
+      { paneId: "w5:p3G", workspaceId: "w5", cwd: "/different/id", label: "primary", agentState: "idle" as const, foregroundExecutables: ["traex"] },
+      { paneId: "w5:p4H", workspaceId: "w5", cwd: "/different/label", label: "w5:p3G", agentState: "idle" as const, foregroundExecutables: ["traex"] }
+    ];
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
+
+    await coordinator.handleMessage(command(1, "w5:p3G"));
+
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ state: "active" });
+    expect(store.findBindingByPane("w5:p4H")).toBeNull();
+    expect(createTopic).toHaveBeenCalledTimes(1);
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("rejects a pane that does not belong to the selected project's workspace", async () => {
     const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
     const replyCards: object[] = [];
@@ -166,6 +250,6 @@ function config(): BridgeConfig {
   };
 }
 
-function command(index: number) {
-  return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId: "user", text: "/herdr attach datasage_semantic_knowledge w5:p3G", mentionsBot: true, isRootMessage: true };
+function command(index: number, pane = "w5:p3G") {
+  return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId: "user", text: `/herdr attach datasage_semantic_knowledge ${pane}`, mentionsBot: true, isRootMessage: true };
 }

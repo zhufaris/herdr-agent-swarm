@@ -761,37 +761,47 @@ export class SyncCoordinator {
     await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason));
   }
 
-  private async attachExistingPane(message: IncomingLarkMessage, spaceName: string, paneId: string): Promise<boolean> {
+  private async attachExistingPane(message: IncomingLarkMessage, spaceName: string, paneReference: string): Promise<boolean> {
     const projects = this.config.projects.filter((project) => project.spaceName === spaceName);
     if (projects.length !== 1) {
       const reason = projects.length === 0 ? `未找到空间 ${spaceName}。` : `空间 ${spaceName} 对应多个项目，无法确定要连接哪一个。`;
       await this.reject(message, reason);
-      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneId, outcome: projects.length === 0 ? "unknown_space" : "ambiguous_space" });
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: projects.length === 0 ? "unknown_space" : "ambiguous_space" });
       return false;
     }
 
     const project = projects[0]!;
-    const existing = this.store.findBindingByPane(paneId);
+    const panes = (await this.herdr.listPanes(project.workspaceId)).filter((candidate) => candidate.workspaceId === project.workspaceId);
+    const exactId = panes.find((candidate) => candidate.paneId === paneReference);
+    const labelMatches = exactId ? [] : panes.filter((candidate) => candidate.label === paneReference);
+    if (!exactId && labelMatches.length > 1) {
+      const paneIds = labelMatches.map((candidate) => candidate.paneId).sort().join(", " );
+      await this.reject(message, `Pane 名称 ${paneReference} 不唯一，请改用 Pane ID：${paneIds}`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: "ambiguous_pane_label" });
+      return false;
+    }
+    const pane = exactId ?? labelMatches[0];
+    if (!pane) {
+      await this.reject(message, `在空间 ${spaceName} 的 Herdr workspace ${project.workspaceId} 中未找到 Pane ${paneReference}。`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: "pane_not_found" });
+      return false;
+    }
+
+    const existing = this.store.findBindingByPane(pane.paneId);
     if (existing) {
       if (existing.chatId === this.config.lark.chatId && existing.projectId === project.id && existing.state === "active") {
-        await this.reject(message, `Pane ${paneId} 已经连接到空间 ${spaceName}，无需重复连接。`);
+        await this.reject(message, `Pane ${pane.paneId} 已经连接到空间 ${spaceName}，无需重复连接。`);
         this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "already_attached" });
         return true;
       }
-      await this.reject(message, `Pane ${paneId} 已绑定到其他会话，不能在这里重新连接。`);
+      await this.reject(message, `Pane ${pane.paneId} 已绑定到其他会话，不能在这里重新连接。`);
       this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "bound_elsewhere" });
       return false;
     }
 
-    const pane = (await this.herdr.listPanes(project.workspaceId)).find((candidate) => candidate.paneId === paneId && candidate.workspaceId === project.workspaceId);
-    if (!pane) {
-      await this.reject(message, `在空间 ${spaceName} 的 Herdr workspace ${project.workspaceId} 中未找到 Pane ${paneId}。`);
-      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneId, outcome: "pane_not_found" });
-      return false;
-    }
     if (!pane.foregroundExecutables.includes("traex")) {
-      await this.reject(message, `Pane ${paneId} 当前没有运行 TraeX，未执行连接。`);
-      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneId, outcome: "traex_not_running" });
+      await this.reject(message, `Pane ${pane.paneId} 当前没有运行 TraeX，未执行连接。`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: pane.paneId, outcome: "traex_not_running" });
       return false;
     }
 
@@ -812,8 +822,8 @@ export class SyncCoordinator {
     }
 
     await this.createFromHerdr(pane, project);
-    const binding = this.store.findBindingByPane(paneId);
-    this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: binding?.id ?? paneId, outcome: "success" });
+    const binding = this.store.findBindingByPane(pane.paneId);
+    this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: binding?.id ?? pane.paneId, outcome: "success" });
     return true;
   }
 

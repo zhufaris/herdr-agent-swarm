@@ -212,7 +212,7 @@ Available commands:
 /herdr new
 /herdr projects
 /herdr spaces
-/herdr attach <space> <pane-id>
+/herdr attach <space> <pane>
 /herdr status
 /herdr rename <title>
 /herdr close
@@ -227,7 +227,8 @@ initiator can use it, and each resulting topic remains bound to that project.
 The read-only `spaces` command lists every configured Space and its current
 panes, including empty Spaces and unregistered panes, without creating a
 binding or starting TraeX.
-The `attach` command creates a normal project topic for an existing TraeX pane
+The `attach` command accepts an exact pane ID or a unique exact pane label and
+creates a normal project topic for an existing TraeX pane
 in the exact configured space without creating, renaming, restarting, or writing
 to that pane. Repeating it for the same healthy binding is idempotent.
 An `@Bot` root message creates a topic in the default project and uses the

@@ -6,7 +6,8 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 describe("run card", () => {
   it("documents how to attach an existing pane", () => {
     const help = JSON.stringify(renderHelpCard());
-    expect(help).toContain("/herdr attach <space> <pane-id>");
+    expect(help).toContain("/herdr attach <space> <pane>");
+    expect(help).toContain("ID 或唯一名称");
     expect(help).toContain("/herdr spaces");
   });
 
