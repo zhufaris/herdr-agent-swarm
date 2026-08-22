@@ -60,7 +60,7 @@ In the Lark developer console:
 
 1. Create a custom app and enable its bot.
 2. Enable long-connection event delivery.
-3. Subscribe to `im.message.receive_v1`.
+3. Subscribe to `im.message.receive_v1` and the `card.action.trigger` callback.
 4. Grant the app permissions to receive group messages, create and reply to
    messages, and patch interactive messages.
 5. Publish or install the app for the intended tenant.
@@ -97,8 +97,7 @@ LARK_APP_ID=cli_xxxxxxxxxxxxxxxx
 LARK_APP_SECRET=replace-me
 LARK_CHAT_ID=oc_xxxxxxxxxxxxxxxx
 LARK_BOT_OPEN_ID=ou_xxxxxxxxxxxxxxxx
-HERDR_WORKSPACE_ID=wG
-HERDR_WORKSPACE_CWD=/absolute/path/to/the/project
+PROJECTS_CONFIG_PATH=./config/projects.json
 ```
 
 The remaining settings have defaults:
@@ -117,10 +116,17 @@ MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
 
+`config/projects.json` is the project allowlist shown by `/herdr new`. Every
+entry contains a stable `id`, display name, description, Herdr `workspaceId`,
+and absolute `cwd`; `defaultProjectId` must reference one entry. If the file is
+absent, the legacy `HERDR_WORKSPACE_ID` and `HERDR_WORKSPACE_CWD` variables are
+accepted as a temporary single-project fallback. An invalid existing file is
+never ignored.
+
 Use absolute `HERDR_BIN` and `TRAEX_BIN` paths so the PM2 process does not depend
-on an interactive shell's `PATH`. `HERDR_WORKSPACE_CWD` must be an absolute path
-accessible to the service account. Keep `.env` private because it contains the
-Lark app secret.
+on an interactive shell's `PATH`. Every project `cwd` must be an absolute,
+accessible directory. Keep `.env` private because it contains the Lark app
+secret.
 
 The application reads process environment variables; it does not load `.env`
 itself. Source the file for foreground operation. The included PM2 configuration
@@ -184,18 +190,25 @@ before PM2 force-stops the bridge.
 
 ## Use the bridge
 
+For complete Feishu group instructions, command examples, steering behavior, and
+safety boundaries, see [Feishu group usage](docs/feishu-group-usage.md).
+
 Available commands:
 
 ```text
 /herdr new <title>
+/herdr new
+/herdr projects
 /herdr status
 /herdr rename <title>
 /herdr close
 /herdr help
 ```
 
-An `@Bot` root message creates a topic binding and uses the message body as its
-first prompt. A reply received while a bridge-owned turn is actively `working`
+The `new` and `projects` commands open a project selector. Only the command
+initiator can use it, and each resulting topic remains bound to that project.
+An `@Bot` root message creates a topic in the default project and uses the
+message body as its first prompt. A reply received while a bridge-owned turn is actively `working`
 steers that turn; replies received while idle, blocked, or in an unknown state
 enter the binding's FIFO queue. Every message has an independent live card, so queued requests and earlier
 results remain visible.
@@ -215,9 +228,9 @@ curl --fail http://127.0.0.1:8787/ready
 ```
 
 `/health` confirms that the process can answer HTTP requests. `/ready` also
-checks SQLite access, the configured Herdr workspace, and the Lark WebSocket
-connection. A disconnected Lark client or inaccessible Herdr workspace returns
-HTTP 503.
+checks SQLite access, every configured project directory and Herdr workspace,
+and the Lark WebSocket connection. A disconnected Lark client or inaccessible
+project returns HTTP 503.
 
 ## Verify a deployment
 
