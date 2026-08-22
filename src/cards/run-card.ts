@@ -1,12 +1,13 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
+import { truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 
 const RUN_STATE_VIEW = {
-  queued: { label: "已排队", icon: "⏱", color: "blue" },
-  running: { label: "TraeX 正在处理", icon: "◌", color: "blue" },
-  blocked: { label: "等待终端审批", icon: "⚠", color: "orange" },
-  completed: { label: "已完成", icon: "✓", color: "green" },
-  failed: { label: "执行失败", icon: "×", color: "red" }
+  queued: { label: "已排队", icon: "⏳", color: "blue" },
+  running: { label: "TraeX 正在处理", icon: "🧠", color: "blue" },
+  blocked: { label: "等待终端审批", icon: "⚠️", color: "orange" },
+  completed: { label: "任务完成", icon: "✅", color: "green" },
+  failed: { label: "执行失败", icon: "❌", color: "red" }
 } as const;
 
 const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: string }> = {
@@ -65,7 +66,16 @@ export function renderRequestRunCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
   const visibleProgress = input.progressEvents.slice(-60);
   const omittedProgress = input.progressEvents.length - visibleProgress.length;
-  const progressContent = [omittedProgress > 0 ? `… 已省略 ${omittedProgress} 条较早记录` : null, ...visibleProgress.map(progressLine)].filter(Boolean).join("\n");
+  const lifecycleLine = input.phase === "queued"
+    ? `⏳ 已进入队列 · 当前第 ${input.queuePosition} 位`
+    : input.phase === "running" && visibleProgress.length === 0 ? "🧠 正在分析请求"
+      : input.phase === "blocked" ? "⚠️ 等待终端审批"
+        : input.phase === "completed" ? "✅ 任务完成"
+          : input.phase === "failed" ? "❌ 执行失败" : null;
+  const progressContent = [
+    "📩 **已接收请求**", truncateLarkMarkdown(input.requestText, 2_000), "",
+    lifecycleLine, omittedProgress > 0 ? `… 已省略 ${omittedProgress} 条较早记录` : null, ...visibleProgress.map(progressLine)
+  ].filter((line) => line !== null).join("\n");
   const elements: object[] = [
     { tag: "column_set", horizontal_spacing: "8px", columns: [
       metric("WORKSPACE", input.workspaceId), metric("PANE", input.paneId ?? "provisioning"),
@@ -74,10 +84,10 @@ export function renderRequestRunCard(input: RunCardView): object {
     { tag: "hr" },
     { tag: "markdown", content: "**执行进度**" },
     { tag: "collapsible_panel", expanded: true, border: { color: input.phase === "failed" ? "red" : "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: input.progressEvents.length ? `共 ${input.progressEvents.length} 项` : "等待开始" } },
-      elements: [{ tag: "markdown", content: progressContent || "· 等待 TraeX 开始处理" }] }
+      header: { title: { tag: "plain_text", content: input.progressEvents.length ? `共 ${input.progressEvents.length} 项` : "请求详情" } },
+      elements: [{ tag: "markdown", content: progressContent }] }
   ];
-  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncate(input.answer, 12_000)}` });
+  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdown(input.answer, 12_000)}` });
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**回答**\n\n正在生成…" });
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
@@ -124,6 +134,8 @@ function callout(color: string, content: string): object {
 function escapeCode(value: string): string { return value.replaceAll("`", "'"); }
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
-  const icon = event.state === "done" ? "✓" : event.state === "failed" ? "×" : "◌";
+  if (event.state === "failed") return `❌ ${event.label}`;
+  if (event.kind === "test" && event.state === "done") return `✅ ${event.label}`;
+  const icon = { analyze: "🧠", search: "🔍", read: "📖", edit: "✏️", test: "🧪" }[event.kind];
   return `${icon} ${event.label}`;
 }

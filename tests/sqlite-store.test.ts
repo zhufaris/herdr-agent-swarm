@@ -1,10 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 let store: SqliteBindingStore | undefined;
-afterEach(() => store?.close());
+let temporaryDirectory: string | undefined;
+afterEach(() => {
+  store?.close();
+  store = undefined;
+  if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
+  temporaryDirectory = undefined;
+});
 
 describe("SQLite store", () => {
   it("persists bindings, FIFO jobs, deduplication, and view snapshots", () => {
@@ -41,7 +51,7 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "first **request**", queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z" });
     const accepted = store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" }, view, rootMessageId: "m1", card: { schema: "2.0" } });
     const duplicate = store.acceptPrompt({ prompt: { id: "other", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" }, view: { ...view, promptId: "other" }, rootMessageId: "m1", card: { schema: "2.0" } });
 
@@ -52,9 +62,30 @@ describe("SQLite store", () => {
 
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "card-m1");
-    expect(store.loadRunCard("p1")).toMatchObject({ larkMessageId: "card-m1", deliveredVersion: 1 });
+    expect(store.loadRunCard("p1")).toMatchObject({ larkMessageId: "card-m1", requestText: "first **request**", deliveredVersion: 1 });
     expect(store.claimNextReadyPrompt("b1")?.id).toBe("p1");
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed", notice: "Bridge 重启导致本次执行中断", queuePosition: 0, viewVersion: 2 });
+  });
+
+  it("backfills original request text when migrating an existing run-card database", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-lark-bridge-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy **request**", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy **request**" }, view, rootMessageId: "m1", card: {} });
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      DROP VIEW run_cards_view;
+      ALTER TABLE run_cards DROP COLUMN request_text;
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.loadRunCard("p1")).toMatchObject({ requestText: "legacy **request**" });
   });
 });

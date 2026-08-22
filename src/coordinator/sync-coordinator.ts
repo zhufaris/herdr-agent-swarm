@@ -242,7 +242,7 @@ export class SyncCoordinator {
     const occurredAt = new Date().toISOString();
     const view = createQueuedRunCard({
       promptId, bindingId: binding.id, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId,
-      queuePosition: this.store.countPendingPrompts(binding.id) + 1, occurredAt
+      requestText: body, queuePosition: this.store.countPendingPrompts(binding.id) + 1, occurredAt
     });
     const { prompt, inserted } = this.store.acceptPrompt({
       prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body },
