@@ -63,6 +63,8 @@ export function renderRunCard(input: TopicViewState): object {
     { tag: "hr" }
   ];
 
+  if (input.latestProgress) elements.push({ tag: "markdown", content: `**执行进度**\n${truncateLarkMarkdown(input.latestProgress, 2_000)}` });
+
   if (input.answer?.trim()) {
     elements.push({ tag: "markdown", content: truncate(input.answer.trim(), 12_000) });
   } else if (input.phase === "blocked") {

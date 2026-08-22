@@ -50,15 +50,17 @@ export class CardProjector {
     const runCard = promptId ? this.store.loadRunCard(promptId) : null;
     if (promptId && runCard) {
       const change = runCardChange(event);
-      if (!change) return;
-      const next = reduceRunCard(runCard, change);
-      if (next === runCard) return;
-      this.store.saveRunCard(next);
-      this.scheduler.schedule(promptId, next.viewVersion, ["blocked", "completed", "failed"].includes(next.phase));
-      return;
+      if (change) {
+        const next = reduceRunCard(runCard, change);
+        if (next !== runCard) {
+          this.store.saveRunCard(next);
+          this.scheduler.schedule(promptId, next.viewVersion, ["blocked", "completed", "failed"].includes(next.phase));
+        }
+      }
     }
     const current = this.views.get(event.bindingId) ?? this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
     const next = reduceTopicView(current, event);
+    if (next === current) return;
     this.views.set(event.bindingId, next);
     this.store.saveTopicView(next);
 

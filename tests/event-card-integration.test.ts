@@ -5,6 +5,8 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { CardProjector } from "../src/events/card-projector.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("event-driven card projection", () => {
   it("reduces an event, persists the view, then updates the same card", async () => {
@@ -32,6 +34,40 @@ describe("event-driven card projection", () => {
     expect(updates).toHaveLength(2);
     expect(JSON.stringify(updates.at(-1))).toContain("Finished");
     stop(); stopPublisher(); store.close();
+  });
+
+  it("continuously mirrors a request's live output to the primary channel card", async () => {
+    const updates: Array<{ messageId: string; card: object }> = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
+      async replyText() { return { messageId: "text1" }; },
+      async replyCard() { return { messageId: "request-card" }; },
+      async updateCard(messageId, card) { updates.push({ messageId, card }); }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "primary-card" });
+    const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "request-card");
+    store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const stopPublisher = publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false }));
+    const stopProjector = projector.start();
+
+    await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
+    await bus.publish({ eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerDelta: "live answer", progressEvents: [{ key: "edit:card", kind: "edit", label: "更新主卡片", state: "active" }] } });
+    await bus.publish({ eventId: "blocked", bindingId: "b1", type: "AgentStateChanged", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", state: "blocked", queueDepth: 1 } });
+    await publisher.drain();
+
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "blocked", answer: "live answer", latestProgress: "✏️ 更新主卡片" });
+    expect(updates.some((update) => update.messageId === "primary-card" && JSON.stringify(update.card).includes("live answer") && JSON.stringify(update.card).includes("更新主卡片"))).toBe(true);
+    expect(updates.some((update) => update.messageId === "request-card" && JSON.stringify(update.card).includes("live answer"))).toBe(true);
+
+    stopProjector(); stopPublisher(); store.close();
   });
 
   it("waits for an in-flight card update before stopping", async () => {

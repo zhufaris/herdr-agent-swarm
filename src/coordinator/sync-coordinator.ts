@@ -5,7 +5,7 @@ import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
-import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
+import { initialTopicView, mirrorRunCardToTopic, reduceTopicView } from "../domain/topic-view.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
@@ -44,10 +44,18 @@ export class SyncCoordinator {
         this.store.saveTopicView(current);
         if (binding.statusMessageId) await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `space-name:${binding.id}:${spaceName}`, renderRunCard(current));
       }
-      for (const view of this.store.listRunCards(binding.id).filter((item) => item.larkMessageId)) {
+      const runCards = this.store.listRunCards(binding.id);
+      for (const view of runCards.filter((item) => item.larkMessageId)) {
         const changed = view.spaceName !== spaceName;
         const current = changed ? this.store.saveRunCard({ ...view, spaceName, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
         if (changed || current.viewVersion > current.deliveredVersion) await this.channelPublisher.enqueueRunCardUpdate(current.bindingId, current.promptId, current.larkMessageId!, current.viewVersion, renderRequestRunCard(current));
+      }
+      const latestRun = runCards.at(-1);
+      const currentTopic = this.store.loadTopicView(binding.id);
+      if (latestRun && currentTopic && binding.statusMessageId) {
+        const mirrored = mirrorRunCardToTopic(currentTopic, latestRun);
+        this.store.saveTopicView(mirrored);
+        await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, `startup-primary-sync:${binding.id}:${latestRun.promptId}:${latestRun.viewVersion}`, renderRunCard(mirrored));
       }
     }
     const recoveredInbound = this.store.recoverProcessingInboundMessages();
@@ -436,8 +444,8 @@ export class SyncCoordinator {
       const queueDepth = this.store.countPendingPrompts(bindingId);
       try {
         await this.refreshQueuePositions(bindingId);
+        this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "working" });
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
-        this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "unknown" });
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
