@@ -6,7 +6,7 @@ import { truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
   running: { label: "TraeX 正在处理", icon: "🧠", color: "blue" },
-  blocked: { label: "等待终端审批", icon: "⚠️", color: "orange" },
+  blocked: { label: "等待用户处理", icon: "⚠️", color: "orange" },
   completed: { label: "任务完成", icon: "✅", color: "green" },
   failed: { label: "执行失败", icon: "❌", color: "red" }
 } as const;
@@ -15,7 +15,7 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
   provisioning: { label: "正在创建 Pane", icon: "◌", color: "blue" },
   queued: { label: "已排队", icon: "⏱", color: "blue" },
   running: { label: "TraeX 正在处理", icon: "◌", color: "blue" },
-  blocked: { label: "等待终端审批", icon: "⚠", color: "orange" },
+  blocked: { label: "等待用户处理", icon: "⚠", color: "orange" },
   done: { label: "已完成", icon: "✓", color: "green" },
   error: { label: "执行失败", icon: "×", color: "red" },
   archived: { label: "已归档", icon: "□", color: "grey" },
@@ -66,7 +66,7 @@ export function renderRunCard(input: TopicViewState): object {
   if (input.answer?.trim()) {
     elements.push({ tag: "markdown", content: truncate(input.answer.trim(), 12_000) });
   } else if (input.phase === "blocked") {
-    elements.push(callout("orange", "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批；Lark 端不会绕过安全限制。"));
+    elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   } else if (input.phase === "error" || input.phase === "orphaned") {
     elements.push(callout(input.phase === "error" ? "red" : "orange", input.notice ?? "请检查 bridge 日志与 Herdr pane。"));
   } else if (input.phase === "running") {
@@ -96,7 +96,7 @@ export function renderRequestRunCard(input: RunCardView): object {
   const lifecycleLine = input.phase === "queued"
     ? `⏳ 已进入队列 · 当前第 ${input.queuePosition} 位`
     : input.phase === "running" && visibleProgress.length === 0 ? "🧠 正在分析请求"
-      : input.phase === "blocked" ? "⚠️ 等待终端审批"
+      : input.phase === "blocked" ? "⚠️ 等待用户处理"
         : input.phase === "completed" ? "✅ 任务完成"
           : input.phase === "failed" ? "❌ 执行失败" : null;
   const progressContent = [
@@ -117,7 +117,7 @@ export function renderRequestRunCard(input: RunCardView): object {
   if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdown(input.answer, 12_000)}` });
   else if (input.phase === "completed" && input.notice) elements.push({ tag: "markdown", content: `**结果**\n\n${truncateLarkMarkdown(input.notice, 2_000)}` });
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**回答**\n\n正在生成…" });
-  if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。"));
+  if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   elements.push({ tag: "markdown", content: `${state.icon} ${state.label}` });
   return {

@@ -21,14 +21,38 @@ describe("run card", () => {
 
   it("renders CardKit 2.0 from a projected state", () => {
     const card = renderRunCard({ ...initialTopicView("b1"), title: "Build bridge", workspaceId: "wG", spaceName: "datasage_semantic_knowledge", paneId: "wG:p2", phase: "blocked", agentState: "blocked", queueDepth: 2 });
+    const serialized = JSON.stringify(card);
     expect(card).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "orange" } });
     expect((card as { header: Record<string, unknown> }).header).not.toHaveProperty("ud_icon");
-    expect(JSON.stringify(card)).not.toContain('"tag":"note"');
-    expect(JSON.stringify(card)).toContain("回到对应 Herdr pane");
-    expect(JSON.stringify(card)).toContain("SPACE");
-    expect(JSON.stringify(card)).toContain("datasage_semantic_knowledge");
-    expect(JSON.stringify(card)).not.toContain("WORKSPACE");
-    expect(JSON.stringify(card)).not.toContain('**WORKSPACE**\n`wG`');
+    expect(serialized).not.toContain('"tag":"note"');
+    expect(serialized).toContain("等待用户处理");
+    expect(serialized).toContain("查看对应 Herdr panel");
+    expect(serialized).not.toContain("终端审批");
+    expect(serialized).toContain("SPACE");
+    expect(serialized).toContain("datasage_semantic_knowledge");
+    expect(serialized).not.toContain("WORKSPACE");
+    expect(serialized).not.toContain('**WORKSPACE**\n`wG`');
+  });
+
+  it("renders blocked requests as warnings and preserves the supplied action notice", () => {
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Need input", workspaceId: "w1", paneId: "w1:p1", requestText: "Continue", queuePosition: 1, occurredAt: "now" });
+    const blocked = reduceRunCard(queued, { type: "blocked", occurredAt: "later", notice: "请选择目标环境。" });
+    const card = renderRequestRunCard(blocked);
+    const serialized = JSON.stringify(card);
+
+    expect(card).toMatchObject({ header: { template: "orange" } });
+    expect(serialized).toContain("等待用户处理");
+    expect(serialized).toContain("请选择目标环境。");
+    expect(serialized).not.toContain("终端审批");
+  });
+
+  it("keeps failed topic and request cards red", () => {
+    const topicCard = renderRunCard({ ...initialTopicView("b1"), phase: "error", notice: "command failed" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Failed", workspaceId: "w1", paneId: "w1:p1", requestText: "Run", queuePosition: 1, occurredAt: "now" });
+    const requestCard = renderRequestRunCard(reduceRunCard(queued, { type: "failed", occurredAt: "later", notice: "command failed" }));
+
+    expect(topicCard).toMatchObject({ header: { template: "red" } });
+    expect(requestCard).toMatchObject({ header: { template: "red" } });
   });
 
   it("renders separate expanded progress and answer regions for a completed request", () => {

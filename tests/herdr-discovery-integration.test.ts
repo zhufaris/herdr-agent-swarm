@@ -320,7 +320,8 @@ describe("Herdr discovery", () => {
     const bindingId = store.findBindingByPane("w1:p1")!.id;
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "first", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(JSON.stringify(updates.at(-1))).toContain("等待终端审批"));
+    await vi.waitFor(() => expect(JSON.stringify(updates.at(-1))).toContain("等待用户处理"));
+    expect(JSON.stringify(updates.at(-1))).toContain("TraeX 需要人工审批");
     await coordinator.handleMessage({ eventId: "event-2", messageId: "message-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(prompts).toEqual(["first"]);
