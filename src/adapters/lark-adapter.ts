@@ -72,7 +72,7 @@ export class LarkSdkAdapter implements LarkPort {
       }
     });
     const messageId = requireMessageId(response.data?.message_id);
-    return { topicId: messageId, rootMessageId: messageId };
+    return { topicId: response.data?.thread_id ?? messageId, rootMessageId: messageId };
   }
 
   async replyText(rootMessageId: string, text: string): Promise<{ messageId: string }> {

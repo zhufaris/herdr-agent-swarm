@@ -26,6 +26,16 @@ export interface InstanceLeaseStatus {
   error: string | null;
 }
 
+export interface WorkspaceCacheStatus {
+  ttlMs: number;
+  entries: number;
+  hits: number;
+  misses: number;
+  coalescedRefreshes: number;
+  refreshFailures: number;
+  oldestSnapshotAgeMs: number | null;
+}
+
 export interface ProjectConfig {
   id: string;
   displayName: string;

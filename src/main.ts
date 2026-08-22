@@ -10,6 +10,7 @@ import { startHealthServer } from "./health/server.js";
 import { ExecFileCommandRunner } from "./infra/command-runner.js";
 import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
 import { InstanceLeaseController } from "./runtime/instance-lease.js";
+import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
@@ -23,7 +24,8 @@ const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
-const herdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs);
+const rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs);
+const herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus();
 const channelPublisher = new LarkChannelPublisher(bus, store, lark, logger);
@@ -33,7 +35,7 @@ let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 
 try {
   lease.acquire();
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease });
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr });
   runtimeShutdown = new BridgeRuntimeShutdown({ coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   lease.start(() => shutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; }));

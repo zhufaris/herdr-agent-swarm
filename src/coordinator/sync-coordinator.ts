@@ -781,7 +781,7 @@ export class SyncCoordinator {
     }
 
     const project = projects[0]!;
-    const panes = (await this.herdr.listPanes(project.workspaceId)).filter((candidate) => candidate.workspaceId === project.workspaceId);
+    const panes = (await this.herdr.listPanes(project.workspaceId, { forceRefresh: true })).filter((candidate) => candidate.workspaceId === project.workspaceId);
     const exactId = panes.find((candidate) => candidate.paneId === paneReference);
     const labelMatches = exactId ? [] : panes.filter((candidate) => candidate.label === paneReference);
     if (!exactId && labelMatches.length > 1) {
@@ -850,7 +850,7 @@ export class SyncCoordinator {
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string) {
-    const pane = await this.herdr.getPane(paneId);
+    const pane = (await this.herdr.listPanes(binding.workspaceId, { forceRefresh: true })).find((candidate) => candidate.paneId === paneId) ?? null;
     if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
     if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
     const project = this.config.projects.find((item) => item.id === binding.projectId);
@@ -861,7 +861,7 @@ export class SyncCoordinator {
   }
 
   private async reattachBinding(binding: Binding, paneId: string, replacement: boolean, actorOpenId: string): Promise<void> {
-    const pane = replacement ? await this.herdr.getPane(paneId) : await this.requireMatchingPane(binding, paneId);
+    const pane = await this.requireMatchingPane(binding, paneId);
     if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
     const next = this.store.attachBindingPane(binding.id, pane, replacement);
     await this.publish(next.id, "BindingArchived", "lark", { reason: "Pane 已验证并连接；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });

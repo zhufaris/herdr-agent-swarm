@@ -66,7 +66,9 @@ pane。空 Space 仍会显示；配置目录之外的 pane 会归入对应 works
 也可以是该 Space 中唯一的精确 Pane 名称；名称重名时会返回候选 ID。Bridge 只会在该项目的
 Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
 不会创建第二个绑定，而会返回已有连接信息。首次连接成功和重复连接的结果卡都会提供
-“打开项目话题”按钮；如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题链接。
+“打开项目话题”按钮；点击后 Bridge 会在当前群发送飞书原生的话题转发卡片，再点击该卡片
+即可进入项目话题。飞书公开 AppLink 不支持通过 Open API 的消息 ID 直达消息，因此 Bridge
+不会再生成无效的 `openMessageId` 链接。如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题。
 未知或重复的 space、其他 workspace
 中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。
 

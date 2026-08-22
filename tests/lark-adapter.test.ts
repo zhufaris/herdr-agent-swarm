@@ -15,10 +15,10 @@ beforeEach(() => { createMessage.mockReset(); getMessage.mockReset(); forwardThr
 
 describe("Lark topic creation", () => {
   it("passes a stable idempotency key to message.create", async () => {
-    createMessage.mockResolvedValue({ data: { message_id: "m-topic" } });
+    createMessage.mockResolvedValue({ data: { message_id: "m-topic", thread_id: "omt-topic" } });
     const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
 
-    await expect(adapter.createTopic({ schema: "2.0" }, "binding-1")).resolves.toEqual({ topicId: "m-topic", rootMessageId: "m-topic" });
+    await expect(adapter.createTopic({ schema: "2.0" }, "binding-1")).resolves.toEqual({ topicId: "omt-topic", rootMessageId: "m-topic" });
     expect(createMessage).toHaveBeenCalledWith({
       params: { receive_id_type: "chat_id" },
       data: { receive_id: "chat", msg_type: "interactive", content: JSON.stringify({ schema: "2.0" }), uuid: "binding-1" }

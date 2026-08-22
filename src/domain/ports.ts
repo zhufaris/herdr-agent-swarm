@@ -17,7 +17,7 @@ export interface LarkPort {
 
 export interface HerdrPort {
   assertWorkspace(workspaceId: string): Promise<void>;
-  listPanes(workspaceId: string): Promise<HerdrPane[]>;
+  listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;
   createPane(workspaceId: string, cwd: string, identity?: { bindingId: string; generation: number; projectId: string }): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string): Promise<void>;

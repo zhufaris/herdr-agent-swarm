@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { InstanceLeaseStatus, ProjectConfig } from "../domain/types.js";
+import type { InstanceLeaseStatus, ProjectConfig, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 
 interface ComponentState { ok: boolean; error?: string }
@@ -16,6 +16,7 @@ interface Readiness {
 export function startHealthServer(options: {
   host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
   lease: { snapshot(): InstanceLeaseStatus };
+  workspaceCache?: { status(): WorkspaceCacheStatus };
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -34,7 +35,8 @@ export function startHealthServer(options: {
       response.statusCode = 200;
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded",
-        timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot()
+        timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
+        ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {})
       }));
       return;
     }
@@ -46,7 +48,7 @@ export function startHealthServer(options: {
   });
 }
 
-async function inspectReadiness(options: { store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus } }): Promise<Readiness> {
+async function inspectReadiness(options: { store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus } }): Promise<Readiness> {
   const database = check(() => options.store.listBindings());
   const projects = check(() => validateProjectDirectories(options.projects));
   const lark = options.lark.isReady() ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };
