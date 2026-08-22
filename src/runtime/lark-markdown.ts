@@ -1,6 +1,7 @@
 const FENCE = /^ {0,3}(`{3,})([^`]*)$/;
 const TABLE_DELIMITER = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 const TRUNCATION_MARKER = "…（内容已截断）";
+const LEADING_TRUNCATION_MARKER = "…（较早内容已省略）";
 
 /** Produces the conservative Markdown subset accepted by Lark CardKit. */
 export function normalizeLarkMarkdown(source: string): string {
@@ -47,6 +48,19 @@ export function truncateLarkMarkdown(source: string, maxLength: number): string 
     closingFence = hasOpenFence(truncated) ? "\n```" : "";
   }
   return `${truncated}${closingFence}${suffix}`.slice(0, maxLength);
+}
+
+/** Normalizes first, then keeps the newest render-safe Markdown window. */
+export function truncateLarkMarkdownTail(source: string, maxLength: number): string {
+  const normalized = normalizeLarkMarkdown(source);
+  if (normalized.length <= maxLength) return normalized;
+  const prefix = `${LEADING_TRUNCATION_MARKER}\n\n`;
+  const room = Math.max(0, maxLength - prefix.length);
+  let tail = normalized.slice(-room);
+  const firstLineBreak = tail.indexOf("\n");
+  if (firstLineBreak >= 0 && firstLineBreak < Math.floor(room / 2)) tail = tail.slice(firstLineBreak + 1);
+  tail = normalizeLarkMarkdown(tail).slice(-room);
+  return `${prefix}${tail}`.slice(0, maxLength);
 }
 
 function normalizeProse(source: string): string {

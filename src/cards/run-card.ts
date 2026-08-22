@@ -1,7 +1,7 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
-import { truncateLarkMarkdown } from "../runtime/lark-markdown.js";
+import { truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -63,10 +63,12 @@ export function renderRunCard(input: TopicViewState): object {
     { tag: "hr" }
   ];
 
-  if (input.latestProgress) elements.push({ tag: "markdown", content: `**执行进度**\n${truncateLarkMarkdown(input.latestProgress, 2_000)}` });
+  const recentProgress = input.recentProgress ?? [];
+  if (recentProgress.length) elements.push({ tag: "markdown", content: `**执行进度**\n${recentProgress.slice(-8).map(progressLine).join("\n")}` });
+  else if (input.phase === "running") elements.push({ tag: "markdown", content: "**执行进度**\n🧠 正在分析请求" });
 
   if (input.answer?.trim()) {
-    elements.push({ tag: "markdown", content: truncate(input.answer.trim(), 12_000) });
+    elements.push({ tag: "markdown", content: `**最近输出**\n\n${truncateLarkMarkdownTail(input.answer.trim(), 2_000)}` });
   } else if (input.phase === "blocked") {
     elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   } else if (input.phase === "error" || input.phase === "orphaned") {

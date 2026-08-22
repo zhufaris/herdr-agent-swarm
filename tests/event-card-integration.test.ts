@@ -63,7 +63,7 @@ describe("event-driven card projection", () => {
     await bus.publish({ eventId: "blocked", bindingId: "b1", type: "AgentStateChanged", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", state: "blocked", queueDepth: 1 } });
     await publisher.drain();
 
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "blocked", answer: "live answer", latestProgress: "✏️ 更新主卡片" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "blocked", answer: "live answer", recentProgress: [expect.objectContaining({ key: "edit:card" })] });
     expect(updates.some((update) => update.messageId === "primary-card" && JSON.stringify(update.card).includes("live answer") && JSON.stringify(update.card).includes("更新主卡片"))).toBe(true);
     expect(updates.some((update) => update.messageId === "request-card" && JSON.stringify(update.card).includes("live answer"))).toBe(true);
 

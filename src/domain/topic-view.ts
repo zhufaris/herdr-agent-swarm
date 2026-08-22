@@ -1,16 +1,16 @@
 import type { AgentState } from "./types.js";
 import type { BridgeEvent } from "./events.js";
-import type { RunCardView } from "./run-card-view.js";
+import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 
 export type TopicViewPhase = "provisioning" | "queued" | "running" | "blocked" | "done" | "error" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; paneId: string | null; phase: TopicViewPhase;
-  agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; latestProgress: string | null;
+  agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[];
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", paneId: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, latestProgress: null };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [] };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
@@ -26,19 +26,19 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       : { ...base, phase: "queued", queueDepth: event.payload.queueDepth, notice: null };
     case "SteeringQueued": return state;
     case "RunQueuePositionChanged": return state;
-    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, latestProgress: "🧠 正在分析请求" };
+    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [] };
     case "SteeringStarted":
     case "SteeringDelivered":
     case "SteeringFailed": return state;
     case "TurnOutputObserved":
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
-      return { ...base, activePromptId: event.payload.promptId, answer: (base.answer ?? "") + event.payload.answerDelta, latestProgress: progressSummary(event.payload.progressEvents) ?? base.latestProgress };
+      return { ...base, activePromptId: event.payload.promptId, answer: keepAnswerTail((base.answer ?? "") + event.payload.answerDelta), recentProgress: mergeProgress(base.recentProgress ?? [], event.payload.progressEvents) };
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       return { ...base, phase: event.payload.state === "blocked" ? "blocked" : event.payload.state === "working" ? "running" : base.phase, agentState: event.payload.state, queueDepth: event.payload.queueDepth, activePromptId: event.payload.promptId ?? base.activePromptId, notice: event.payload.state === "blocked" ? "TraeX 需要人工审批。请查看对应 Herdr panel 并完成所需交互。" : base.notice };
     case "TurnCompleted":
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
-      return { ...base, phase: "done", agentState: "done", queueDepth: event.payload.queueDepth, answer: event.payload.answer, notice: null, activePromptId: null };
+      return { ...base, phase: "done", agentState: "done", queueDepth: event.payload.queueDepth, answer: keepAnswerTail(event.payload.answer), notice: null, activePromptId: null };
     case "TurnFailed":
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       return { ...base, phase: "error", queueDepth: event.payload.queueDepth, notice: event.payload.error, activePromptId: null };
@@ -47,19 +47,23 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
 
 export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): TopicViewState {
   const phase = { queued: "queued", running: "running", blocked: "blocked", completed: "done", failed: "error" }[run.phase] as TopicViewPhase;
-  const latest = run.progressEvents.at(-1);
   return {
-    ...state, phase, queueDepth: run.queuePosition, answer: run.answer || null, notice: run.notice,
+    ...state, phase, queueDepth: run.queuePosition, answer: run.answer ? keepAnswerTail(run.answer) : null, notice: run.notice,
     activePromptId: run.phase === "running" || run.phase === "blocked" ? run.promptId : null,
     agentState: run.phase === "running" ? "working" : run.phase === "blocked" ? "blocked" : run.phase === "completed" ? "done" : state.agentState,
-    latestProgress: latest ? progressSummary([latest]) : run.phase === "running" ? "🧠 正在分析请求" : null
+    recentProgress: run.progressEvents.slice(-8)
   };
 }
 
-function progressSummary(events: Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["progressEvents"]): string | null {
-  const event = events.at(-1);
-  if (!event) return null;
-  if (event.state === "failed") return `❌ ${event.label}`;
-  if (event.kind === "test" && event.state === "done") return `✅ ${event.label}`;
-  return `${{ analyze: "🧠", search: "🔍", read: "📖", edit: "✏️", test: "🧪" }[event.kind]} ${event.label}`;
+function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[]): RunProgressEvent[] {
+  const result = [...current];
+  for (const update of updates) {
+    const event = { ...update, occurredAt: new Date().toISOString() };
+    const existing = result.findIndex((item) => item.key === event.key);
+    if (existing >= 0) result[existing] = event;
+    else result.push(event);
+  }
+  return result.slice(-8);
 }
+
+function keepAnswerTail(answer: string): string { return answer.slice(-2_000); }

@@ -30,6 +30,29 @@ describe("topic view reducer", () => {
     expect(view).toMatchObject({ phase: "running", activePromptId: "new", answer: "live answer" });
   });
 
+  it("keeps only the latest eight progress entries and the latest 2000 answer characters", () => {
+    let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    for (let index = 0; index < 9; index += 1) {
+      view = reduceTopicView(view, event("TurnOutputObserved", {
+        promptId: "p1", answerDelta: String(index).repeat(300),
+        progressEvents: [{ key: `read:${index}`, kind: "read", label: `file-${index}`, state: "done" }]
+      }));
+    }
+
+    expect(view.recentProgress).toHaveLength(8);
+    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 8 }, (_, index) => `read:${index + 1}`));
+    expect(view.answer).toHaveLength(2000);
+    expect(view.answer).toBe(`${"2".repeat(200)}${"3".repeat(300)}${"4".repeat(300)}${"5".repeat(300)}${"6".repeat(300)}${"7".repeat(300)}${"8".repeat(300)}`);
+  });
+
+  it("resets the rolling window when a new request starts", () => {
+    let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    view = reduceTopicView(view, event("TurnOutputObserved", { promptId: "p1", answerDelta: "old", progressEvents: [{ key: "old", kind: "edit", label: "old", state: "done" }] }));
+    view = reduceTopicView(view, event("TurnStarted", { promptId: "p2", queueDepth: 1 }));
+
+    expect(view).toMatchObject({ activePromptId: "p2", answer: null, recentProgress: [] });
+  });
+
   it("projects blocked and orphaned states", () => {
     const blocked = reduceTopicView(initialTopicView("b1"), event("AgentStateChanged", { state: "blocked", queueDepth: 1 }));
     expect(blocked.phase).toBe("blocked");
@@ -42,6 +65,8 @@ describe("topic view reducer", () => {
     const output = reduceRunCard(queued, { type: "output", occurredAt: "later", answerDelta: "latest answer", progressEvents: [{ key: "test", kind: "test", label: "tests passed", state: "done", occurredAt: "later" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "done", answer: "finished" });
 
-    expect(mirrorRunCardToTopic(initialTopicView("b1"), completed)).toMatchObject({ phase: "done", answer: "finished", latestProgress: "✅ tests passed", activePromptId: null });
+    expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(2_100), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
+      phase: "done", answer: "x".repeat(2_000), activePromptId: null, recentProgress: Array.from({ length: 8 }, (_, index) => expect.objectContaining({ key: String(index + 2) }))
+    });
   });
 });

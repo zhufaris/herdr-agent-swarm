@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeLarkMarkdown, truncateLarkMarkdown } from "../src/runtime/lark-markdown.js";
+import { normalizeLarkMarkdown, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
 
 describe("Lark Markdown normalization", () => {
   it("preserves supported document structure and closes a streaming fence in the rendered copy", () => {
@@ -51,5 +51,13 @@ describe("Lark Markdown normalization", () => {
     expect(result).toContain("…（内容已截断）");
     expect((result.match(/```/g) ?? [])).toHaveLength(2);
     expect(result.length).toBeLessThanOrEqual(48);
+  });
+
+  it("keeps the newest safe Markdown when truncating a rolling window", () => {
+    const result = truncateLarkMarkdownTail(`<script>bad()</script>${"old".repeat(800)}\n\n**new result**`, 80);
+    expect(result).toContain("较早内容已省略");
+    expect(result).toContain("**new result**");
+    expect(result).not.toContain("bad()");
+    expect(result.length).toBeLessThanOrEqual(80);
   });
 });
