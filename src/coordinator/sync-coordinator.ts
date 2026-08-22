@@ -290,11 +290,14 @@ export class SyncCoordinator {
           if (parsed.answerDelta || parsed.progressEvents.length) {
             await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerDelta: parsed.answerDelta, progressEvents: parsed.progressEvents });
           }
-          this.observedAgentStates.set(paneId, observedState);
-          binding = this.store.updateBinding(bindingId, { lastAgentState: observedState });
-          await this.publish(bindingId, "AgentStateChanged", "herdr", {
-            state: observedState, queueDepth: this.store.countPendingPrompts(bindingId), promptId: prompt.id
-          });
+          const previousState = this.observedAgentStates.get(paneId) ?? binding?.lastAgentState ?? "unknown";
+          if (previousState !== observedState) {
+            this.observedAgentStates.set(paneId, observedState);
+            binding = this.store.updateBinding(bindingId, { lastAgentState: observedState });
+            await this.publish(bindingId, "AgentStateChanged", "herdr", {
+              state: observedState, queueDepth: this.store.countPendingPrompts(bindingId), promptId: prompt.id
+            });
+          }
         });
         const stateBeforeReturn = binding.lastAgentState;
         this.observedAgentStates.set(paneId, state);

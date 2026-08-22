@@ -4,13 +4,13 @@ import { CardUpdateScheduler } from "../src/events/card-update-scheduler.js";
 afterEach(() => vi.useRealTimers());
 
 describe("card update scheduler", () => {
-  it("coalesces ordinary updates and flushes terminal updates immediately", async () => {
+  it("coalesces ordinary updates for two seconds and flushes terminal updates immediately", async () => {
     vi.useFakeTimers();
     const delivered: number[] = [];
-    const scheduler = new CardUpdateScheduler(async (_promptId, version) => { delivered.push(version); }, 800);
+    const scheduler = new CardUpdateScheduler(async (_promptId, version) => { delivered.push(version); });
     scheduler.schedule("p1", 2, false);
     scheduler.schedule("p1", 3, false);
-    await vi.advanceTimersByTimeAsync(799);
+    await vi.advanceTimersByTimeAsync(1_999);
     expect(delivered).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(delivered).toEqual([3]);

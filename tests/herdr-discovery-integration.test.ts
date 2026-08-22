@@ -9,6 +9,56 @@ import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("Herdr discovery", () => {
+  it("publishes repeated working state once while preserving distinct output observations", async () => {
+    let output = "initial terminal";
+    const events: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "request-card-1" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation) {
+        output += "\n✧ Working";
+        await onObservation?.({ state: "working", output });
+        output += "\n◆ Ran first";
+        await onObservation?.({ state: "working", output });
+        output += "\n◆ Ran second";
+        await onObservation?.({ state: "working", output });
+        output += "\n◆ done\n────────";
+        await onObservation?.({ state: "done", output });
+        return "done";
+      },
+      async readOutput() { return output; }, async renamePane() {}
+    };
+    const config = {
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
+      commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const stopObserver = bus.onBridgeEvent((event) => { if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : "")); });
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const stopPublisher = publisher.start();
+    const stopProjector = new CardProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "event-dedup", messageId: "message-dedup", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed" }));
+
+    expect(events.filter((event) => event === "AgentStateChanged:working")).toHaveLength(1);
+    expect(events.filter((event) => event === "TurnOutputObserved")).toHaveLength(3);
+    expect(events.filter((event) => event === "AgentStateChanged:done")).toHaveLength(1);
+
+    await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
+  });
+
   it("uses the root card as the status card instead of posting a second card", async () => {
     let created = 0; let replied = 0; let updated = 0;
     const lark: LarkPort = {

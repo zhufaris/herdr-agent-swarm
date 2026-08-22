@@ -58,9 +58,11 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { queuePosition: change.queuePosition };
       break;
     case "started":
+      if (state.phase === "running" && state.notice === null) return state;
       patch = { phase: "running", startedAt: state.startedAt ?? change.occurredAt, notice: null };
       break;
     case "blocked":
+      if (state.phase === "blocked" && state.notice === change.notice) return state;
       patch = { phase: "blocked", notice: change.notice };
       break;
     case "output": {

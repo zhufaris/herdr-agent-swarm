@@ -4,7 +4,7 @@ export class CardUpdateScheduler {
   private readonly pending = new Map<string, PendingCardUpdate>();
   private stopped = false;
 
-  constructor(private readonly deliver: (promptId: string, version: number) => Promise<void>, private readonly intervalMs = 800) {}
+  constructor(private readonly deliver: (promptId: string, version: number) => Promise<void>, private readonly intervalMs = 2_000) {}
 
   schedule(promptId: string, version: number, immediate: boolean): void {
     if (this.stopped) return;

@@ -35,5 +35,9 @@ describe("request run-card view", () => {
       paneId: null, queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z"
     });
     expect(reduceRunCard(queued, { type: "queue-position", occurredAt: "later", queuePosition: 1 })).toBe(queued);
+    const running = reduceRunCard(queued, { type: "started", occurredAt: "started" });
+    expect(reduceRunCard(running, { type: "started", occurredAt: "later" })).toBe(running);
+    const blocked = reduceRunCard(running, { type: "blocked", occurredAt: "blocked", notice: "approval needed" });
+    expect(reduceRunCard(blocked, { type: "blocked", occurredAt: "later", notice: "approval needed" })).toBe(blocked);
   });
 });
