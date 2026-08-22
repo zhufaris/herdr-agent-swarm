@@ -1,8 +1,10 @@
 import { createServer, type Server } from "node:http";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
+import type { ProjectConfig } from "../domain/types.js";
+import { validateProjectDirectories } from "../config.js";
 
 export function startHealthServer(options: {
-  host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; workspaceId: string;
+  host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -10,7 +12,8 @@ export function startHealthServer(options: {
     if (request.url === "/ready") {
       try {
         options.store.listBindings();
-        await options.herdr.assertWorkspace(options.workspaceId);
+        validateProjectDirectories(options.projects);
+        for (const workspaceId of new Set(options.projects.map((project) => project.workspaceId))) await options.herdr.assertWorkspace(workspaceId);
         const ready = options.lark.isReady();
         response.statusCode = ready ? 200 : 503;
         response.end(JSON.stringify({ status: ready ? "ready" : "not_ready", larkConnected: ready }));

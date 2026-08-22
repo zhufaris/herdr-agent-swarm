@@ -1,5 +1,6 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
+import type { ProjectConfig } from "../domain/types.js";
 import { truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 
 const RUN_STATE_VIEW = {
@@ -20,6 +21,32 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
   archived: { label: "已归档", icon: "□", color: "grey" },
   orphaned: { label: "绑定异常", icon: "!", color: "orange" }
 };
+
+export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }): object {
+  return {
+    schema: "2.0",
+    config: { update_multi: true, summary: { content: "选择 Herdr 项目" } },
+    header: { title: { tag: "plain_text", content: "选择项目" }, subtitle: { tag: "plain_text", content: "HERDR PROJECTS" }, template: "blue" },
+    body: { elements: input.projects.flatMap((project) => [
+      { tag: "markdown", content: `**${escapeMarkdown(project.displayName)}**\n${escapeMarkdown(project.description)}` },
+      { tag: "button", text: { tag: "plain_text", content: `打开 ${project.displayName}` }, type: "primary",
+        value: { action: "select_project", selectionId: input.selectionId, projectId: project.id } }
+    ]) }
+  };
+}
+
+export function renderProjectSelectionStatusCard(input: { status: "processing" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; workspaceId?: string; paneId?: string; message?: string }): object {
+  const views = {
+    processing: { title: "正在创建项目 Pane", template: "blue", icon: "⏳" },
+    completed: { title: "项目已打开", template: "green", icon: "✅" },
+    failed: { title: "项目创建失败", template: "red", icon: "❌" },
+    expired: { title: "项目选择已过期", template: "orange", icon: "⌛" },
+    unauthorized: { title: "无法使用此选择器", template: "orange", icon: "🔒" }
+  } as const;
+  const view = views[input.status];
+  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.workspaceId ? `**Workspace**  \`${escapeCode(input.workspaceId)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "请在当前话题中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
+  return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements: [{ tag: "markdown", content: details || view.title }] } };
+}
 
 export function renderRunCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
@@ -108,7 +135,8 @@ export function renderHelpCard(): object {
     body: { elements: [
       { tag: "markdown", content: [
         "**从飞书控制 Herdr 中的 TraeX pane**", "",
-        "`/herdr new <标题>`  创建一个 TraeX pane",
+        "`/herdr new [标题]`  选择项目并创建 TraeX pane",
+        "`/herdr projects`  打开项目选择卡片",
         "`/herdr status`  查看当前绑定",
         "`/herdr rename <标题>`  重命名当前 pane",
         "`/herdr close`  归档映射（不会强杀 TraeX）",
@@ -133,6 +161,7 @@ function callout(color: string, content: string): object {
 }
 
 function escapeCode(value: string): string { return value.replaceAll("`", "'"); }
+function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   if (event.state === "failed") return `❌ ${event.label}`;

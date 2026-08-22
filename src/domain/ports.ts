@@ -1,9 +1,9 @@
-import type { AgentState, Binding, HerdrPane, IncomingLarkMessage, OutboundReply, PromptJob } from "./types.js";
+import type { AgentState, Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 
 export interface LarkPort {
-  start(onMessage: (message: IncomingLarkMessage) => Promise<void>): Promise<void>;
+  start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   isReady(): boolean;
   createTopic(card: object): Promise<{ topicId: string; rootMessageId: string }>;
@@ -40,12 +40,19 @@ export interface BindingStorePort {
   recordBridgeMessage(messageId: string): void;
   createPendingBinding(input: {
     id: string;
+    projectId?: string | null;
     workspaceId: string;
     chatId: string;
     topicId: string | null;
     rootMessageId: string | null;
     title: string;
   }): Binding;
+  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection;
+  getProjectSelection(id: string): ProjectSelection | null;
+  claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;
+  recoverProcessingProjectSelections(): number;
+  completeProjectSelection(id: string, bindingId: string): ProjectSelection;
+  failProjectSelection(id: string, error: string): ProjectSelection;
   updateBinding(id: string, patch: Partial<Binding>): Binding;
   findBindingByTopic(topicId: string): Binding | null;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
@@ -62,7 +69,7 @@ export interface BindingStorePort {
   requeueSteeringAsTurn(promptId: string): void;
   requeueQueuedSteering(bindingId: string, parentPromptId: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];
   listDueOutboundReplies(): OutboundReply[];
   markOutboundReplyDelivered(id: string, messageId: string): void;

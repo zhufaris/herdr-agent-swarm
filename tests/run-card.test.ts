@@ -1,9 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
+import { renderProjectSelectorCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("run card", () => {
+  it("renders project buttons with opaque ids and no host routing details", () => {
+    const card = renderProjectSelectorCard({
+      selectionId: "selection-1",
+      projects: [{ id: "bridge", displayName: "Herdr Lark Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/secret/work/bridge" }]
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("Herdr Lark Bridge");
+    expect(serialized).toContain("Bridge service");
+    expect(serialized).toContain(JSON.stringify({ action: "select_project", selectionId: "selection-1", projectId: "bridge" }));
+    expect(serialized).not.toContain("/secret/work/bridge");
+    expect(serialized).not.toContain('\"workspaceId\"');
+    expect(serialized).not.toContain("wH");
+  });
+
   it("renders CardKit 2.0 from a projected state", () => {
     const card = renderRunCard({ ...initialTopicView("b1"), title: "Build bridge", workspaceId: "wG", paneId: "wG:p2", phase: "blocked", agentState: "blocked", queueDepth: 2 });
     expect(card).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "orange" } });

@@ -1,0 +1,33 @@
+{
+  "defaultProjectId": "bridge",
+  "projects": [
+    {
+      "id": "bridge",
+      "displayName": "Herdr Lark Bridge",
+      "description": "Bridge service and Lark integration",
+      "workspaceId": "wH",
+      "cwd": "/data00/home/feiyu.zhu/work/herdr-lark-bridge"
+    },
+    {
+      "id": "datasage",
+      "displayName": "DataSage Semantic Knowledge",
+      "description": "DataSage semantic extraction and knowledge workflows",
+      "workspaceId": "w5",
+      "cwd": "/data00/home/feiyu.zhu/work/datasage_semantic_knowledge"
+    },
+    {
+      "id": "fabric2onetable",
+      "displayName": "DataSage Fabric2OneTable",
+      "description": "Fabric to OneTable conversion workspace",
+      "workspaceId": "wD",
+      "cwd": "/data00/home/feiyu.zhu/work/datasage_fabric2onetable"
+    },
+    {
+      "id": "fabric-mvp",
+      "displayName": "Fabric OneTable MVP",
+      "description": "Fabric OneTable MVP development workspace",
+      "workspaceId": "w8",
+      "cwd": "/data00/home/feiyu.zhu/work/datasage_fabric_onetable_mvp"
+    }
+  ]
+}

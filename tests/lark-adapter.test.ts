@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMessage } from "../src/adapters/lark-adapter.js";
+import { normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
 describe("Lark message normalization", () => {
   const base = {
@@ -23,5 +23,25 @@ describe("Lark message normalization", () => {
     expect(normalizeMessage(reply, "bot")).toMatchObject({
       messageId: "m2", rootMessageId: "root-1", topicId: "thread-1", text: "continue", mentionsBot: false, isRootMessage: false
     });
+  });
+});
+
+describe("Lark card action normalization", () => {
+  it("normalizes the current nested callback shape", () => {
+    expect(normalizeCardActionEvent({
+      context: { open_message_id: "om_1", open_chat_id: "oc_1" },
+      operator: { open_id: "ou_1" },
+      action: { tag: "button", value: { action: "select_project", selectionId: "s1", projectId: "bridge" } }
+    })).toEqual({
+      messageId: "om_1", chatId: "oc_1", operatorOpenId: "ou_1",
+      value: { action: "select_project", selectionId: "s1", projectId: "bridge" }
+    });
+  });
+
+  it("accepts top-level ids and rejects incomplete callbacks", () => {
+    expect(normalizeCardActionEvent({
+      open_message_id: "om_2", open_chat_id: "oc_2", operator: { open_id: "ou_2" }, action: { value: { action: "noop" } }
+    })).toMatchObject({ messageId: "om_2", chatId: "oc_2", operatorOpenId: "ou_2" });
+    expect(normalizeCardActionEvent({ context: {}, operator: {}, action: {} })).toBeNull();
   });
 });

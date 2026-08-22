@@ -1,7 +1,7 @@
 import pino from "pino";
 import { HerdrCliAdapter } from "./adapters/herdr-adapter.js";
 import { LarkSdkAdapter } from "./adapters/lark-adapter.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, validateProjectDirectories } from "./config.js";
 import { SyncCoordinator } from "./coordinator/sync-coordinator.js";
 import { BridgeEventBus } from "./events/bridge-event-bus.js";
 import { CardProjector } from "./events/card-projector.js";
@@ -12,6 +12,7 @@ import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
 const config = loadConfig();
+validateProjectDirectories(config.projects);
 const logger = pino({ level: config.logLevel, redact: ["lark.appSecret", "appSecret", "*.appSecret"] });
 const store = new SqliteBindingStore(config.databasePath);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
@@ -23,7 +24,7 @@ channelPublisher.start();
 const projector = new CardProjector(bus, store, channelPublisher, logger);
 projector.start();
 const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, channelPublisher, logger);
-const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, workspaceId: config.herdr.workspaceId });
+const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects });
 const runtimeShutdown = new BridgeRuntimeShutdown({ coordinator, projector, publisher: channelPublisher, healthServer, store, logger });
 
 process.once("SIGINT", () => void runtimeShutdown.shutdown("SIGINT"));

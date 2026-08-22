@@ -40,7 +40,8 @@ describe("active-turn steering", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -99,7 +100,7 @@ describe("active-turn steering", () => {
       async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },
       async readOutput() { return output; }, async renamePane() {}
     };
-    const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
+    const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
     const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
     const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();

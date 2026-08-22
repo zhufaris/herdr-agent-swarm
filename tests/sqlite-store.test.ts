@@ -17,6 +17,45 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("durably creates, links, and atomically claims a project selection", () => {
+    store = new SqliteBindingStore(":memory:");
+    const selection = store.createProjectSelection({
+      id: "s1", commandMessageId: "cmd-1", chatId: "c1", topicId: "t1", rootMessageId: "root-1",
+      actorOpenId: "u1", requestedTitle: "Fix login", expiresAt: "2099-01-01T00:00:00.000Z", card: { schema: "2.0" }
+    });
+    const duplicate = store.createProjectSelection({
+      id: "other", commandMessageId: "cmd-1", chatId: "c1", topicId: "t1", rootMessageId: "root-1",
+      actorOpenId: "u1", requestedTitle: null, expiresAt: "2099-01-01T00:00:00.000Z", card: {}
+    });
+
+    expect(selection).toMatchObject({ id: "s1", state: "pending", selectorMessageId: null });
+    expect(duplicate.id).toBe("s1");
+    expect(store.listPendingOutboundReplies()).toMatchObject([{ selectionId: "s1", kind: "card_reply", rootMessageId: "root-1" }]);
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "selector-1");
+    expect(store.getProjectSelection("s1")).toMatchObject({ selectorMessageId: "selector-1" });
+
+    expect(store.claimProjectSelection({ selectionId: "s1", projectId: "bridge", messageId: "wrong", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "invalid" });
+    expect(store.claimProjectSelection({ selectionId: "s1", projectId: "bridge", messageId: "selector-1", chatId: "c1", actorOpenId: "other", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "unauthorized" });
+    expect(store.claimProjectSelection({ selectionId: "s1", projectId: "unknown", messageId: "selector-1", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "invalid" });
+    expect(store.claimProjectSelection({ selectionId: "s1", projectId: "bridge", messageId: "selector-1", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "claimed", selection: { state: "processing", selectedProjectId: "bridge" } });
+    expect(store.claimProjectSelection({ selectionId: "s1", projectId: "bridge", messageId: "selector-1", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "processing" });
+  });
+
+  it("expires stale selections and fails interrupted processing without replay", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createProjectSelection({ id: "expired", commandMessageId: "cmd-old", chatId: "c1", topicId: null, rootMessageId: "root-old", actorOpenId: "u1", requestedTitle: null, expiresAt: "2000-01-01T00:00:00.000Z", card: {} });
+    const outbound = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(outbound.id, "selector-old");
+    expect(store.claimProjectSelection({ selectionId: "expired", projectId: "bridge", messageId: "selector-old", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "expired" });
+
+    store.createProjectSelection({ id: "processing", commandMessageId: "cmd-new", chatId: "c1", topicId: null, rootMessageId: "root-new", actorOpenId: "u1", requestedTitle: null, expiresAt: "2099-01-01T00:00:00.000Z", card: {} });
+    const next = store.listPendingOutboundReplies().find((reply) => reply.selectionId === "processing")!;
+    store.markOutboundReplyDelivered(next.id, "selector-new");
+    expect(store.claimProjectSelection({ selectionId: "processing", projectId: "bridge", messageId: "selector-new", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] }).outcome).toBe("claimed");
+    expect(store.recoverProcessingProjectSelections()).toBe(1);
+    expect(store.getProjectSelection("processing")).toMatchObject({ state: "failed" });
+  });
+
   it("persists bindings, FIFO jobs, deduplication, and view snapshots", () => {
     store = new SqliteBindingStore(":memory:");
     const binding = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

@@ -36,7 +36,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -60,23 +61,24 @@ describe("Herdr discovery", () => {
   });
 
   it("uses the root card as the status card instead of posting a second card", async () => {
-    let created = 0; let replied = 0; let updated = 0;
+    let created = 0; let replied = 0; let updated = 0; let rootCard: object | null = null;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
-      async createTopic() { created += 1; return { topicId: "topic-1", rootMessageId: "root-1" }; },
+      async createTopic(card) { created += 1; rootCard = card; return { topicId: "topic-1", rootMessageId: "root-1" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard() { replied += 1; return { messageId: "reply-1" }; },
       async updateCard() { updated += 1; }
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/work/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/work/repo", executable: "herdr" },
+      projects: [{ id: "repo", displayName: "Repo", description: "Test project", workspaceId: "w1", cwd: "/work/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -90,9 +92,54 @@ describe("Herdr discovery", () => {
 
     await publisher.drain();
     expect({ created, replied, updated }).toEqual({ created: 1, replied: 0, updated: 2 });
-    expect(store.findBindingByPane("w1:p1")).toMatchObject({ statusMessageId: "root-1", state: "active" });
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ title: "repo / task", statusMessageId: "root-1", state: "active" });
+    expect(JSON.stringify(rootCard)).toContain("repo / task");
 
     await coordinator.stop(); stopProjector(); stopChannelPublisher(); store.close();
+  });
+
+  it("uses the configured project for Lark creation and preserves it on rename", async () => {
+    const renamed: Array<[string, string]> = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard() { return { messageId: "card-1" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; },
+      async getPane() { return { paneId: "w1:p2", workspaceId: "w1", cwd: "/work/my-project", label: "Initial pane", agentState: "idle", foregroundExecutables: ["traex"] }; },
+      async createPane() { return { paneId: "w1:p2", workspaceId: "w1", cwd: "/work/my-project", label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; },
+      async renamePane(paneId, title) { renamed.push([paneId, title]); }
+    };
+    const config = {
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/work/my-project", executable: "herdr" },
+      projects: [{ id: "my-project", displayName: "My project", description: "Test project", workspaceId: "w1", cwd: "/work/my-project" }], defaultProjectId: "my-project", projectsConfigPath: "test", traex: { executable: "traex" },
+      databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
+      commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const stopPublisher = publisher.start();
+    const stopProjector = new CardProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "new", messageId: "root-2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", actorOpenId: "user", text: "/herdr new Initial pane", mentionsBot: true, isRootMessage: true });
+    await publisher.drain();
+    const selection = (store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("root-2") as { id: string }).id;
+    expect(selection).toBeTruthy();
+    await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
+    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-project / Initial pane" });
+
+    await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", actorOpenId: "user", text: "/herdr rename Better pane", mentionsBot: false, isRootMessage: false });
+    expect(renamed).toEqual([["w1:p2", "Better pane"]]);
+    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-project / Better pane" });
+
+    await coordinator.stop(); stopProjector(); stopPublisher(); store.close();
   });
 
   it("forwards changed TraeX terminal output even when Herdr continues to report idle", async () => {
@@ -114,7 +161,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -156,7 +204,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -193,7 +242,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -255,7 +305,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -310,7 +361,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -354,7 +406,8 @@ describe("Herdr discovery", () => {
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
-      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, traex: { executable: "traex" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;

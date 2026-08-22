@@ -40,7 +40,7 @@ export class LarkChannelPublisher {
     await this.drain();
   }
 
-  async enqueueCardUpdate(bindingId: string, messageId: string, eventId: string, card: object): Promise<void> {
+  async enqueueCardUpdate(bindingId: string | null, messageId: string, eventId: string, card: object): Promise<void> {
     this.store.enqueueOutboundReply({
       id: randomUUID(), idempotencyKey: `card-update:${messageId}:${eventId}`, bindingId, rootMessageId: messageId, kind: "card_update", payload: JSON.stringify(card)
     });

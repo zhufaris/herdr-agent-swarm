@@ -1,5 +1,7 @@
 import type { BridgeCommand } from "./types.js";
 
+const MAX_TOPIC_TITLE_LENGTH = 80;
+
 export function parseCommand(text: string): BridgeCommand | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith("/herdr")) return null;
@@ -11,7 +13,9 @@ export function parseCommand(text: string): BridgeCommand | null {
   const argument = (match[2] ?? "").trim();
   switch (action) {
     case "new":
-      return argument ? { kind: "new", title: argument } : { kind: "help" };
+      return { kind: "new", title: argument || null };
+    case "projects":
+      return { kind: "projects" };
     case "status":
       return { kind: "status" };
     case "rename":
@@ -23,12 +27,10 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "help" };
   }
 }
-
 export function deriveTopicTitle(text: string): string {
   const firstLine = text.trim().split(/\r?\n/, 1)[0] ?? "TraeX task";
-  return firstLine.slice(0, 80) || "TraeX task";
+  return firstLine.slice(0, MAX_TOPIC_TITLE_LENGTH) || "TraeX task";
 }
-
 export function splitMessage(text: string, chunkSize: number): string[] {
   if (text.length <= chunkSize) return [text];
   const chunks: string[] = [];

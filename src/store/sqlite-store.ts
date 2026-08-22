@@ -3,13 +3,13 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, IncomingLarkMessage, OutboundReply, OutboundReplyKind, OutboundReplyState, PromptDispatchKind, PromptJob, PromptState } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, IncomingLarkMessage, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 
 type SqlValue = string | number | bigint | null;
 type BindingRow = Record<string, SqlValue> & {
-  id: string; workspace_id: string; chat_id: string; topic_id: string | null; root_message_id: string | null;
+  id: string; project_id: string | null; workspace_id: string; chat_id: string; topic_id: string | null; root_message_id: string | null;
   pane_id: string | null; traex_session_id: string | null; title: string; runtime: string; state: string;
   status_message_id: string | null; last_agent_state: string; last_output_fingerprint: string | null;
   created_at: string; updated_at: string;
@@ -20,12 +20,16 @@ type PromptRow = Record<string, SqlValue> & {
   attempt_count: number; error: string | null; created_at: string; updated_at: string;
 };
 type OutboundReplyRow = Record<string, SqlValue> & {
-  id: string; idempotency_key: string; binding_id: string | null; prompt_id: string | null; view_version: number | null; root_message_id: string; kind: string; payload: string; state: string;
+  id: string; idempotency_key: string; binding_id: string | null; prompt_id: string | null; view_version: number | null; selection_id: string | null; root_message_id: string; kind: string; payload: string; state: string;
   attempt_count: number; error: string | null; delivered_message_id: string | null; next_attempt_at: string; created_at: string; updated_at: string;
+};
+type ProjectSelectionRow = Record<string, SqlValue> & {
+  id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
+  requested_title: string | null; selected_project_id: string | null; binding_id: string | null; state: string; error: string | null; expires_at: string; created_at: string; updated_at: string;
 };
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
-  id: "id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
+  id: "id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
   rootMessageId: "root_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
   title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
   lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
@@ -88,14 +92,74 @@ export class SqliteBindingStore implements BindingStorePort {
       .run(messageId, now());
   }
 
-  createPendingBinding(input: { id: string; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string }): Binding {
+  createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string }): Binding {
     const timestamp = now();
     this.database.prepare(`
       INSERT INTO bindings(
-        id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
-    `).run(input.id, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
+        id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
+    `).run(input.id, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
     return this.getBinding(input.id);
+  }
+
+  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
+      if (existing) { this.database.exec("COMMIT"); return mapProjectSelection(existing); }
+      const timestamp = now();
+      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
+        .run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.expiresAt, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, 'pending', 0, ?, ?, ?)`)
+        .run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), timestamp, timestamp, timestamp);
+      this.database.exec("COMMIT");
+      return this.getProjectSelection(input.id)!;
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  getProjectSelection(id: string): ProjectSelection | null {
+    const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(id) as ProjectSelectionRow | undefined;
+    return row ? mapProjectSelection(row) : null;
+  }
+
+  claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(input.selectionId) as ProjectSelectionRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return { outcome: "missing", selection: null }; }
+      const selection = mapProjectSelection(row);
+      if (selection.chatId !== input.chatId || selection.selectorMessageId !== input.messageId || !input.allowedProjectIds.includes(input.projectId)) { this.database.exec("COMMIT"); return { outcome: "invalid", selection }; }
+      if (selection.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", selection }; }
+      if (selection.state === "completed") { this.database.exec("COMMIT"); return { outcome: "completed", selection }; }
+      if (selection.state === "processing") { this.database.exec("COMMIT"); return { outcome: "processing", selection }; }
+      if (selection.state !== "pending") { this.database.exec("COMMIT"); return { outcome: selection.state === "expired" ? "expired" : "invalid", selection }; }
+      if (Date.parse(selection.expiresAt) <= Date.now()) {
+        this.database.prepare("UPDATE project_selections SET state = 'expired', updated_at = ? WHERE id = ?").run(now(), selection.id);
+        this.database.exec("COMMIT");
+        return { outcome: "expired", selection: { ...selection, state: "expired" } };
+      }
+      this.database.prepare("UPDATE project_selections SET state = 'processing', selected_project_id = ?, error = NULL, updated_at = ? WHERE id = ?").run(input.projectId, now(), selection.id);
+      this.database.exec("COMMIT");
+      return { outcome: "claimed", selection: this.getProjectSelection(selection.id)! };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  recoverProcessingProjectSelections(): number {
+    return Number(this.database.prepare("UPDATE project_selections SET state = 'failed', error = 'Interrupted during project creation; inspect Herdr before retrying', updated_at = ? WHERE state = 'processing'").run(now()).changes);
+  }
+
+  completeProjectSelection(id: string, bindingId: string): ProjectSelection {
+    this.database.prepare("UPDATE project_selections SET state = 'completed', binding_id = ?, error = NULL, updated_at = ? WHERE id = ? AND state = 'processing'").run(bindingId, now(), id);
+    const selection = this.getProjectSelection(id);
+    if (!selection) throw new Error(`Project selection not found: ${id}`);
+    return selection;
+  }
+
+  failProjectSelection(id: string, error: string): ProjectSelection {
+    this.database.prepare("UPDATE project_selections SET state = 'failed', error = ?, updated_at = ? WHERE id = ?").run(error, now(), id);
+    const selection = this.getProjectSelection(id);
+    if (!selection) throw new Error(`Project selection not found: ${id}`);
+    return selection;
   }
 
   updateBinding(id: string, patch: Partial<Binding>): Binding {
@@ -264,20 +328,20 @@ export class SqliteBindingStore implements BindingStorePort {
       .run(state, error, now(), id);
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null }): OutboundReply {
     const timestamp = now();
     if (input.kind === "card_update" && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
       this.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND kind = 'card_update' AND state = 'pending' AND COALESCE(view_version, 0) < ?")
         .run(input.promptId, input.viewVersion);
     }
     this.database.prepare(`
-      INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+      INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
       ON CONFLICT(idempotency_key) DO UPDATE SET
         payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
         view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
         updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-    `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.rootMessageId, input.kind, input.payload, timestamp, timestamp, timestamp);
+    `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.rootMessageId, input.kind, input.payload, timestamp, timestamp, timestamp);
     const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
     if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
     return mapOutboundReply(row);
@@ -294,12 +358,13 @@ export class SqliteBindingStore implements BindingStorePort {
   markOutboundReplyDelivered(id: string, messageId: string): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.database.prepare("SELECT prompt_id, view_version, kind FROM outbound_replies WHERE id = ?").get(id) as { prompt_id: string | null; view_version: number | null; kind: string } | undefined;
+      const row = this.database.prepare("SELECT prompt_id, view_version, selection_id, kind FROM outbound_replies WHERE id = ?").get(id) as { prompt_id: string | null; view_version: number | null; selection_id: string | null; kind: string } | undefined;
       this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.kind === "card_reply") this.database.prepare("UPDATE run_cards SET lark_message_id = ?, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(messageId, row.view_version ?? 0, now(), row.prompt_id);
         else this.database.prepare("UPDATE run_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
       }
+      if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
@@ -370,7 +435,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS bindings(
-        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
+        id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
         root_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
@@ -393,12 +458,17 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
       CREATE TABLE IF NOT EXISTS outbound_replies(
-        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, root_message_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter')), attempt_count INTEGER NOT NULL DEFAULT 0,
         error TEXT, delivered_message_id TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
+      CREATE TABLE IF NOT EXISTS project_selections(
+        id TEXT PRIMARY KEY, command_message_id TEXT UNIQUE NOT NULL, selector_message_id TEXT, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,
+        requested_title TEXT, selected_project_id TEXT, binding_id TEXT REFERENCES bindings(id), state TEXT NOT NULL CHECK(state IN ('pending','processing','completed','failed','expired')),
+        error TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS audit_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, actor_open_id TEXT NOT NULL, action TEXT NOT NULL,
         target TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL
@@ -419,6 +489,14 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureRequestCardOutboxColumns();
     this.ensureRunCardRequestText();
     this.ensurePromptDispatchColumns();
+    this.ensureProjectSelectionColumns();
+  }
+
+  private ensureProjectSelectionColumns(): void {
+    const bindingColumns = this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>;
+    if (!bindingColumns.some((column) => column.name === "project_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN project_id TEXT");
+    const outboundColumns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
+    if (!outboundColumns.some((column) => column.name === "selection_id")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN selection_id TEXT");
   }
 
   private ensurePromptDispatchColumns(): void {
@@ -481,7 +559,7 @@ function retryAt(attempt: number): string { return new Date(Date.now() + Math.mi
 
 function mapBinding(row: BindingRow): Binding {
   return {
-    id: row.id, workspaceId: row.workspace_id, chatId: row.chat_id, topicId: row.topic_id,
+    id: row.id, projectId: row.project_id, workspaceId: row.workspace_id, chatId: row.chat_id, topicId: row.topic_id,
     rootMessageId: row.root_message_id, paneId: row.pane_id, traexSessionId: row.traex_session_id,
     title: row.title, runtime: "traex", state: row.state as BindingState, statusMessageId: row.status_message_id,
     lastAgentState: row.last_agent_state as AgentState, lastOutputFingerprint: row.last_output_fingerprint,
@@ -500,8 +578,16 @@ function mapPrompt(row: PromptRow): PromptJob {
 function mapOutboundReply(row: OutboundReplyRow): OutboundReply {
   return {
     id: row.id, idempotencyKey: row.idempotency_key, bindingId: row.binding_id, rootMessageId: row.root_message_id,
-    promptId: row.prompt_id, viewVersion: row.view_version === null ? null : Number(row.view_version), kind: row.kind as OutboundReplyKind, payload: row.payload, state: row.state as OutboundReplyState,
+    promptId: row.prompt_id, viewVersion: row.view_version === null ? null : Number(row.view_version), selectionId: row.selection_id, kind: row.kind as OutboundReplyKind, payload: row.payload, state: row.state as OutboundReplyState,
     attemptCount: Number(row.attempt_count), error: row.error, deliveredMessageId: row.delivered_message_id, nextAttemptAt: row.next_attempt_at,
     createdAt: row.created_at, updatedAt: row.updated_at
+  };
+}
+
+function mapProjectSelection(row: ProjectSelectionRow): ProjectSelection {
+  return {
+    id: row.id, commandMessageId: row.command_message_id, selectorMessageId: row.selector_message_id, chatId: row.chat_id, topicId: row.topic_id, rootMessageId: row.root_message_id,
+    actorOpenId: row.actor_open_id, requestedTitle: row.requested_title, selectedProjectId: row.selected_project_id, bindingId: row.binding_id,
+    state: row.state as ProjectSelectionState, error: row.error, expiresAt: row.expires_at, createdAt: row.created_at, updatedAt: row.updated_at
   };
 }

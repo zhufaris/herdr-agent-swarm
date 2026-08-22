@@ -5,9 +5,26 @@ export type PromptState = "queued" | "running" | "delivered" | "failed";
 export type PromptDispatchKind = "turn" | "steering";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update";
+export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
+
+export interface ProjectConfig {
+  id: string;
+  displayName: string;
+  description: string;
+  workspaceId: string;
+  cwd: string;
+}
+
+export interface IncomingLarkCardAction {
+  messageId: string;
+  chatId: string;
+  operatorOpenId: string;
+  value: unknown;
+}
 
 export interface Binding {
   id: string;
+  projectId: string | null;
   workspaceId: string;
   chatId: string;
   topicId: string | null;
@@ -45,6 +62,7 @@ export interface OutboundReply {
   bindingId: string | null;
   promptId: string | null;
   viewVersion: number | null;
+  selectionId: string | null;
   rootMessageId: string;
   kind: OutboundReplyKind;
   payload: string;
@@ -56,6 +74,28 @@ export interface OutboundReply {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface ProjectSelection {
+  id: string;
+  commandMessageId: string;
+  selectorMessageId: string | null;
+  chatId: string;
+  topicId: string | null;
+  rootMessageId: string;
+  actorOpenId: string;
+  requestedTitle: string | null;
+  selectedProjectId: string | null;
+  bindingId: string | null;
+  state: ProjectSelectionState;
+  error: string | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ProjectSelectionClaim =
+  | { outcome: "claimed" | "processing" | "completed"; selection: ProjectSelection }
+  | { outcome: "missing" | "invalid" | "unauthorized" | "expired"; selection: ProjectSelection | null };
 
 export interface HerdrPane {
   paneId: string;
@@ -79,7 +119,8 @@ export interface IncomingLarkMessage {
 }
 
 export type BridgeCommand =
-  | { kind: "new"; title: string }
+  | { kind: "new"; title: string | null }
+  | { kind: "projects" }
   | { kind: "status" }
   | { kind: "rename"; title: string }
   | { kind: "close" }

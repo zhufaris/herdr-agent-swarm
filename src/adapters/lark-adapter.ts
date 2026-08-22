@@ -1,6 +1,6 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import type { LarkPort } from "../domain/ports.js";
-import type { IncomingLarkMessage } from "../domain/types.js";
+import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 
 interface LarkAdapterOptions {
   appId: string;
@@ -29,12 +29,17 @@ export class LarkSdkAdapter implements LarkPort {
     });
   }
 
-  async start(onMessage: (message: IncomingLarkMessage) => Promise<void>): Promise<void> {
+  async start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<void>): Promise<void> {
     const dispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data) => {
         const normalized = normalizeMessage(data, this.options.botOpenId);
         if (!normalized || normalized.chatId !== this.options.chatId) return;
         await onMessage(normalized);
+      },
+      "card.action.trigger": async (data: lark.RawCardActionEvent) => {
+        const normalized = normalizeCardActionEvent(data);
+        if (!normalized || normalized.chatId !== this.options.chatId || !onCardAction) return;
+        await onCardAction(normalized);
       }
     });
     await this.wsClient.start({ eventDispatcher: dispatcher });
@@ -108,6 +113,14 @@ export function normalizeMessage(data: MessageEvent, botOpenId: string): Incomin
     actorOpenId: data.sender.sender_id?.open_id ?? "unknown",
     text, mentionsBot, isRootMessage: rootMessageId === null
   };
+}
+
+export function normalizeCardActionEvent(data: lark.RawCardActionEvent): IncomingLarkCardAction | null {
+  const messageId = data.context?.open_message_id ?? data.open_message_id;
+  const chatId = data.context?.open_chat_id ?? data.open_chat_id;
+  const operatorOpenId = data.operator?.open_id;
+  if (!messageId || !chatId || !operatorOpenId || data.action?.value === undefined) return null;
+  return { messageId, chatId, operatorOpenId, value: data.action.value };
 }
 
 function requireMessageId(value: string | undefined): string {

@@ -4,6 +4,8 @@ import { deriveTopicTitle, parseCommand, splitMessage } from "../src/domain/comm
 describe("commands", () => {
   it("parses supported commands", () => {
     expect(parseCommand("/herdr new fix build")).toEqual({ kind: "new", title: "fix build" });
+    expect(parseCommand("/herdr new")).toEqual({ kind: "new", title: null });
+    expect(parseCommand("/herdr projects")).toEqual({ kind: "projects" });
     expect(parseCommand("/herdr rename better title")).toEqual({ kind: "rename", title: "better title" });
     expect(parseCommand("/herdr status")).toEqual({ kind: "status" });
     expect(parseCommand("hello")).toBeNull();

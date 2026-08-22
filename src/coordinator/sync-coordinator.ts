@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderHelpCard, renderRequestRunCard, renderRunCard } from "../cards/run-card.js";
+import { renderHelpCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestRunCard, renderRunCard } from "../cards/run-card.js";
 import type { BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
-import type { Binding, EventOrigin, IncomingLarkMessage } from "../domain/types.js";
+import { formatProjectPaneTitle } from "../domain/thread-title.js";
+import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
 import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
 import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
@@ -42,7 +43,9 @@ export class SyncCoordinator {
     }
     const recoveredInbound = this.store.recoverProcessingInboundMessages();
     if (recoveredInbound > 0) this.logger.warn({ recoveredInbound }, "returned interrupted inbound messages to acceptance queue");
-    await this.herdr.assertWorkspace(this.config.herdr.workspaceId);
+    const recoveredSelections = this.store.recoverProcessingProjectSelections();
+    if (recoveredSelections > 0) this.logger.warn({ recoveredSelections }, "marked interrupted project selections as failed without replay");
+    for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) await this.herdr.assertWorkspace(workspaceId);
     await this.captureOutputBaselines();
     await this.reconcile();
     this.reconcileTimer = setInterval(() => {
@@ -50,7 +53,7 @@ export class SyncCoordinator {
     }, this.config.reconcileIntervalMs);
     this.reconcileTimer.unref();
     this.stopInboundSubscription = this.bus.onInboundMessage((event) => this.acceptInboundMessage(event.payload));
-    await this.lark.start((message) => this.handleMessage(message));
+    await this.lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
     await this.drainInboundMessages();
     for (const binding of this.store.listBindings().filter((item) => item.state === "active")) this.scheduleWorker(binding.id);
   }
@@ -66,6 +69,45 @@ export class SyncCoordinator {
     if (message.chatId !== this.config.lark.chatId || this.store.isBridgeMessage(message.messageId)) return;
     if (!this.store.recordInboundMessage(message)) return;
     await this.drainInboundMessages();
+  }
+
+  async handleCardAction(action: IncomingLarkCardAction): Promise<void> {
+    if (action.chatId !== this.config.lark.chatId) return;
+    const value = parseProjectAction(action.value);
+    if (!value) return;
+    const claim = this.store.claimProjectSelection({
+      selectionId: value.selectionId, projectId: value.projectId, messageId: action.messageId, chatId: action.chatId, actorOpenId: action.operatorOpenId,
+      allowedProjectIds: this.config.projects.map((project) => project.id)
+    });
+    this.store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${value.selectionId}:${value.projectId}`, outcome: claim.outcome });
+    if (claim.outcome === "missing" || !claim.selection) return;
+    const selection = claim.selection;
+    if (claim.outcome === "invalid") return;
+    if (claim.outcome === "unauthorized") return;
+    if (claim.outcome === "expired") {
+      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:expired`, renderProjectSelectionStatusCard({ status: "expired", message: "请重新发送 /herdr new。" }));
+      return;
+    }
+    if (claim.outcome === "processing") return;
+    if (claim.outcome === "completed") {
+      const binding = selection.bindingId ? this.store.listBindings().find((item) => item.id === selection.bindingId) : null;
+      const project = this.config.projects.find((item) => item.id === selection.selectedProjectId);
+      if (binding && project) await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
+      return;
+    }
+    const project = this.config.projects.find((item) => item.id === value.projectId);
+    if (!project) return;
+    await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:processing`, renderProjectSelectionStatusCard({ status: "processing", projectName: project.displayName }));
+    try {
+      const binding = await this.createSelectedProject(selection, project);
+      this.store.completeProjectSelection(selection.id, binding.id);
+      await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
+      this.store.audit({ actorOpenId: action.operatorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
+    } catch (error) {
+      this.store.failProjectSelection(selection.id, errorMessage(error));
+      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:failed`, renderProjectSelectionStatusCard({ status: "failed", projectName: project.displayName, message: errorMessage(error) }));
+      this.logger.error({ err: error, selectionId: value.selectionId, projectId: project.id }, "project selection failed");
+    }
   }
 
   private async drainInboundMessages(): Promise<void> {
@@ -90,17 +132,20 @@ export class SyncCoordinator {
     try {
       if (command?.kind === "help") {
         await this.replyStandalone(message.rootMessageId ?? message.messageId, renderHelpCard());
-      } else if (command?.kind === "new") {
+      } else if (command?.kind === "new" || command?.kind === "projects") {
         if (binding?.state === "active") throw new Error("This topic is already bound to a TraeX pane");
-        await this.createFromLark(message, command.title, null);
+        await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
       } else if (command?.kind === "status") {
         if (!binding) throw new Error("This topic is not bound to Herdr");
         await this.emitState(binding, binding.lastAgentState);
       } else if (command?.kind === "rename") {
         if (!binding?.paneId || binding.state !== "active") throw new Error("This topic has no active Herdr binding");
+        const pane = await this.herdr.getPane(binding.paneId);
+        const project = this.config.projects.find((candidate) => candidate.id === binding.projectId);
+        const title = formatProjectPaneTitle(pane?.cwd ?? project?.cwd ?? this.config.herdr.workspaceCwd, command.title, binding.paneId);
         await this.herdr.renamePane(binding.paneId, command.title);
-        this.store.updateBinding(binding.id, { title: command.title });
-        await this.publish(binding.id, "BindingRenamed", "lark", { title: command.title });
+        this.store.updateBinding(binding.id, { title });
+        await this.publish(binding.id, "BindingRenamed", "lark", { title });
         this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" });
       } else if (command?.kind === "close") {
         if (!binding) throw new Error("This topic is not bound to Herdr");
@@ -121,9 +166,18 @@ export class SyncCoordinator {
 
   async reconcile(): Promise<void> {
     await this.channelPublisher.drain();
-    const panes = await this.herdr.listPanes(this.config.herdr.workspaceId);
-    const paneIds = new Set(panes.map((pane) => pane.paneId));
+    const panesByWorkspace = new Map<string, Awaited<ReturnType<HerdrPort["listPanes"]>>>();
+    for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) {
+      try {
+        panesByWorkspace.set(workspaceId, await this.herdr.listPanes(workspaceId));
+      } catch (error) {
+        this.logger.error({ err: error, workspaceId }, "workspace reconciliation failed");
+      }
+    }
     for (const binding of this.store.listBindings().filter((item) => item.state === "active")) {
+      const workspacePanes = panesByWorkspace.get(binding.workspaceId);
+      if (!workspacePanes) continue;
+      const paneIds = new Set(workspacePanes.map((pane) => pane.paneId));
       if (binding.paneId && !paneIds.has(binding.paneId)) {
         this.store.updateBinding(binding.id, { state: "orphaned" });
         const occurredAt = new Date().toISOString();
@@ -141,15 +195,24 @@ export class SyncCoordinator {
       }
     }
 
-    for (const pane of panes) {
+    for (const panes of panesByWorkspace.values()) for (const pane of panes) {
       if (!pane.foregroundExecutables.includes("traex")) continue;
       const existing = this.store.findBindingByPane(pane.paneId);
       if (!existing) {
-        await this.createFromHerdr(pane.paneId, pane.label ?? `TraeX ${pane.paneId}`);
+        const projects = this.config.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
+        if (projects.length !== 1) {
+          this.logger.warn({ workspaceId: pane.workspaceId, paneId: pane.paneId, cwd: pane.cwd, matchingProjects: projects.map((project) => project.id) }, "skipping unregistered or ambiguous Herdr pane");
+          continue;
+        }
+        await this.createFromHerdr(pane, projects[0]!);
         const output = cleanTerminalOutput(await this.herdr.readOutput(pane.paneId, 240));
         this.observedTerminalOutputs.set(pane.paneId, output);
         this.observedAgentStates.set(pane.paneId, pane.agentState);
         continue;
+      }
+      if (!existing.projectId) {
+        const projects = this.config.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
+        if (projects.length === 1) this.store.updateBinding(existing.id, { projectId: projects[0]!.id });
       }
       const previous = this.observedAgentStates.get(pane.paneId) ?? existing.lastAgentState;
       this.observedAgentStates.set(pane.paneId, pane.agentState);
@@ -201,15 +264,56 @@ export class SyncCoordinator {
     });
   }
 
+  private async createProjectSelector(message: IncomingLarkMessage, requestedTitle: string | null): Promise<void> {
+    const selectionId = randomUUID();
+    this.store.createProjectSelection({
+      id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId,
+      rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle,
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: renderProjectSelectorCard({ selectionId, projects: this.config.projects })
+    });
+    await this.channelPublisher.drain();
+  }
+
+  private async createSelectedProject(selection: ReturnType<BindingStorePort["getProjectSelection"]> & {}, project: ProjectConfig): Promise<Binding> {
+    const bindingId = randomUUID();
+    const title = formatProjectPaneTitle(project.cwd, selection.requestedTitle ?? project.displayName, "TraeX pane");
+    let binding = this.store.createPendingBinding({
+      id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId,
+      topicId: selection.topicId ?? selection.commandMessageId, rootMessageId: selection.rootMessageId, title
+    });
+    if (selection.selectorMessageId) binding = this.store.updateBinding(binding.id, { statusMessageId: selection.selectorMessageId });
+    await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, paneId: null });
+    try {
+      const pane = await this.herdr.createPane(project.workspaceId, project.cwd);
+      await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
+      binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, state: "active", lastAgentState: "idle" });
+      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: binding.topicId! });
+      return binding;
+    } catch (error) {
+      this.store.updateBinding(binding.id, { state: "failed" });
+      await this.publish(binding.id, "TurnFailed", "bridge", { promptId: selection.commandMessageId, error: errorMessage(error), queueDepth: 0 });
+      throw error;
+    }
+  }
+
+  private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> {
+    const pane = binding.paneId ? { paneId: binding.paneId } : {};
+    await this.channelPublisher.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, renderProjectSelectionStatusCard({
+      status: "completed", projectName: project.displayName, workspaceId: project.workspaceId, ...pane
+    }));
+  }
+
   private async createFromLark(message: IncomingLarkMessage, title: string, initialPrompt: string | null): Promise<void> {
     const bindingId = randomUUID();
+    const defaultProject = this.config.projects.find((project) => project.id === this.config.defaultProjectId) ?? this.config.projects[0]!;
+    title = formatProjectPaneTitle(defaultProject.cwd, title, "TraeX pane");
     let binding = this.store.createPendingBinding({
-      id: bindingId, workspaceId: this.config.herdr.workspaceId, chatId: message.chatId,
+      id: bindingId, projectId: defaultProject.id, workspaceId: defaultProject.workspaceId, chatId: message.chatId,
       topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title
     });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, paneId: null });
     try {
-      const pane = await this.herdr.createPane(binding.workspaceId, this.config.herdr.workspaceCwd);
+      const pane = await this.herdr.createPane(binding.workspaceId, defaultProject.cwd);
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
       binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, state: "active", lastAgentState: "idle" });
       await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: binding.topicId! });
@@ -222,19 +326,20 @@ export class SyncCoordinator {
     }
   }
 
-  private async createFromHerdr(paneId: string, title: string): Promise<void> {
+  private async createFromHerdr(pane: Awaited<ReturnType<HerdrPort["listPanes"]>>[number], project: ProjectConfig): Promise<void> {
     const id = randomUUID();
-    let binding = this.store.createPendingBinding({ id, workspaceId: this.config.herdr.workspaceId, chatId: this.config.lark.chatId, topicId: null, rootMessageId: null, title });
-    const createdEvent = this.event(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, paneId });
+    const title = formatProjectPaneTitle(pane.cwd, pane.label, pane.paneId);
+    let binding = this.store.createPendingBinding({ id, projectId: project.id, workspaceId: pane.workspaceId, chatId: this.config.lark.chatId, topicId: null, rootMessageId: null, title });
+    const createdEvent = this.event(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, paneId: pane.paneId });
     const initialView = reduceTopicView(initialTopicView(binding.id), createdEvent);
     this.store.saveTopicView(initialView);
     const topic = await this.lark.createTopic(renderRunCard(initialView));
     this.store.recordBridgeMessage(topic.rootMessageId);
     binding = this.store.updateBinding(binding.id, {
-      paneId, topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId, state: "active"
+      paneId: pane.paneId, topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId, state: "active"
     });
     await this.bus.publish(createdEvent);
-    await this.publish(binding.id, "BindingActivated", "bridge", { paneId, topicId: topic.topicId });
+    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: topic.topicId });
   }
 
   private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<void> {
@@ -327,7 +432,8 @@ export class SyncCoordinator {
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
-          const parsed = parseTraexOutput(previousObservation, output, this.config.herdr.workspaceCwd);
+          const projectCwd = this.config.projects.find((project) => project.id === binding?.projectId)?.cwd ?? this.config.herdr.workspaceCwd;
+          const parsed = parseTraexOutput(previousObservation, output, projectCwd);
           previousObservation = output;
           if (parsed.answerDelta || parsed.progressEvents.length) {
             await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerDelta: parsed.answerDelta, progressEvents: parsed.progressEvents });
@@ -402,6 +508,12 @@ export class SyncCoordinator {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function parseProjectAction(value: unknown): { selectionId: string; projectId: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.action !== "select_project" || typeof candidate.selectionId !== "string" || typeof candidate.projectId !== "string") return null;
+  return { selectionId: candidate.selectionId, projectId: candidate.projectId };
+}
 function requestTitle(body: string): string {
   const normalized = body.replace(/\s+/g, " " ).trim();
   return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request";

@@ -1,0 +1,129 @@
+import pino from "pino";
+import { describe, expect, it } from "vitest";
+import type { BridgeConfig } from "../src/config.js";
+import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
+import type { IncomingLarkCardAction } from "../src/domain/types.js";
+import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
+import { CardProjector } from "../src/events/card-projector.js";
+import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+
+describe("project selection flow", () => {
+  it("creates exactly one pane in the clicked project and does not submit an initial prompt", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
+    const created: Array<[string, string]> = [];
+    const started: string[] = [];
+    const prompts: string[] = [];
+    const cards: object[] = [];
+    const updates: object[] = [];
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { cards.push(card); return { messageId: "selector-card-1" }; },
+      async updateCard(_messageId, card) { updates.push(card); }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane(workspaceId, cwd) { created.push([workspaceId, cwd]); return { paneId: "wD:p9", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async startTraex(paneId) { started.push(paneId); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; },
+      async readOutput() { return ""; }, async renamePane() {}
+    };
+    const config = {
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      herdr: { workspaceId: "wH", workspaceCwd: "/work/bridge", executable: "herdr" },
+      projects: [
+        { id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" },
+        { id: "datasage", displayName: "DataSage", description: "Semantic knowledge", workspaceId: "wD", cwd: "/work/datasage" }
+      ], defaultProjectId: "bridge", projectsConfigPath: "config/projects.json",
+      traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
+      commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "topic-1", rootMessageId: "command-1", actorOpenId: "user-1", text: "/herdr new Fix login", mentionsBot: true, isRootMessage: true });
+    expect(created).toEqual([]);
+    expect(cards).toHaveLength(1);
+    const button = findProjectButton(cards[0]!, "datasage");
+    const value = button.value as { selectionId: string; projectId: string; action: string };
+    expect(store.getProjectSelection(value.selectionId)).toMatchObject({ selectorMessageId: "selector-card-1", requestedTitle: "Fix login" });
+
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "another-user", value });
+    expect(updates).toEqual([]);
+    expect(created).toEqual([]);
+
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+
+    expect(created).toEqual([["wD", "/work/datasage"]]);
+    expect(started).toEqual(["wD:p9"]);
+    expect(prompts).toEqual([]);
+    expect(store.findBindingByPane("wD:p9")).toMatchObject({ projectId: "datasage", workspaceId: "wD", title: "datasage / Fix login", state: "active" });
+    expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
+    expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
+  it("reconciles each workspace independently and skips an unavailable workspace", async () => {
+    const listed: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "card-1" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes(workspaceId) {
+        listed.push(workspaceId);
+        if (workspaceId === "w1") throw new Error("w1 unavailable");
+        return [{ paneId: "w2:p1", workspaceId: "w2", cwd: "/work/beta", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }];
+      },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const multiProjectConfig = {
+      ...configForTests(),
+      projects: [
+        { id: "alpha", displayName: "Alpha", description: "Alpha project", workspaceId: "w1", cwd: "/work/alpha" },
+        { id: "beta", displayName: "Beta", description: "Beta project", workspaceId: "w2", cwd: "/work/beta" }
+      ]
+    } satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b2", projectId: "beta", workspaceId: "w2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", title: "beta / task" });
+    store.updateBinding("b2", { paneId: "w2:p1", state: "active" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(multiProjectConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+
+    await coordinator.start();
+
+    expect(new Set(listed)).toEqual(new Set(["w1", "w2"]));
+    expect(store.findBindingByPane("w2:p1")).toMatchObject({ state: "active", projectId: "beta" });
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+});
+
+function configForTests(): BridgeConfig {
+  return {
+    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+    herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" },
+    projects: [{ id: "alpha", displayName: "Alpha", description: "Alpha project", workspaceId: "w1", cwd: "/work/alpha" }],
+    defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" },
+    databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
+    commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+  };
+}
+
+function findProjectButton(card: object, projectId: string): { value: unknown } {
+  const elements = (card as { body: { elements: Array<{ value?: { projectId?: string } }> } }).body.elements;
+  const button = elements.find((element) => element.value?.projectId === projectId);
+  if (!button) throw new Error(`Missing project button: ${projectId}`);
+  return { value: button.value };
+}
