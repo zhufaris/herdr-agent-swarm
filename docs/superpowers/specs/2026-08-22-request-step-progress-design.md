@@ -38,7 +38,14 @@ adding a duplicate.
 
 ## Request-card rendering
 
-The expanded region is renamed from `执行进度` to `任务步骤`. It contains only
+Each request owns two sibling cards under the project topic:
+
+1. The task card contains the original request, lifecycle, queue position,
+   approval or error notice, and the real todo steps.
+2. The answer card contains only the newest user-facing TraeX answer and its
+   answer lifecycle. It uses the existing 12,000-character tail window.
+
+The task card's expanded region is named `任务步骤`. It contains only
 protocol-derived steps, in protocol order:
 
 - `☐` pending;
@@ -48,11 +55,27 @@ protocol-derived steps, in protocol order:
 Read, edit, search, and test command observations are no longer rendered as
 steps. If TraeX has not emitted a valid plan, the region shows only a concise
 lifecycle message such as `正在等待 TraeX 提供任务计划` or `任务已完成`. The
-answer region and lifecycle footer remain unchanged.
+answer is never rendered in the task card, so long output cannot displace the
+plan. The answer card does not repeat the request or steps.
 
 Steering messages are submitted unchanged. They affect the active turn, whose
 original protocol instruction already asks TraeX to publish an updated plan
 when the plan changes.
+
+## Persistence and delivery
+
+The existing run-card record remains the request projection. Its existing
+`lark_message_id` becomes the task-card message ID for backward compatibility.
+It gains an `answer_message_id` and independent delivered version for the answer
+card. Existing rows migrate with a null answer-card ID and receive an answer
+card only when a future update needs one.
+
+Prompt acceptance atomically persists the prompt, run view, task-card create,
+and answer-card create outbox records. Each create has a distinct stable
+idempotency key and card role. A prompt becomes runnable only after both create
+records are delivered and both message IDs are known. Task and answer updates
+use independent scheduler keys and outbox versions, so failure or coalescing on
+one card cannot suppress the other.
 
 ## Failure and compatibility
 
@@ -60,6 +83,8 @@ when the plan changes.
   from visible answers.
 - Existing persisted tool-activity events are filtered out by the renderer, so
   old cards do not continue presenting operations as steps.
+- Existing request cards keep their current message ID as the task card. A
+  missing answer-card ID is created lazily before any further prompt execution.
 - A model that ignores the protocol still completes normally; its card shows
   lifecycle and answer without fabricated steps.
 - Prompt deduplication, queue semantics, steering, and terminal-only approval
@@ -69,6 +94,7 @@ when the plan changes.
 
 Tests cover protocol injection without modifying persisted user text, streaming
 step creation and status replacement, protocol removal from visible answers,
-malformed-block fallback, suppression of legacy tool activity, and the 2,500
-character project-card preview. Existing integration, typecheck, and build
-checks must continue to pass.
+malformed-block fallback, suppression of legacy tool activity, two independent
+card IDs and update streams, restart migration, execution gating until both
+cards exist, and the 2,500-character project-card preview. Existing integration,
+typecheck, and build checks must continue to pass.
