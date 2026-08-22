@@ -137,6 +137,15 @@ export class SyncCoordinator {
       await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${deadLetter.replyId}:${outcome}`, cards[0]!);
       return;
     }
+    const paneClaim = parsePaneClaimAction(action.value);
+    if (paneClaim) {
+      const project = this.config.projects.find((candidate) => candidate.id === paneClaim.projectId && candidate.workspaceId === paneClaim.workspaceId);
+      if (!project) return;
+      const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/herdr attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
+      const outcome = await this.attachExistingPane(synthetic, projectSpaceName(project), paneClaim.paneId);
+      this.logger.info({ event: "space-pane-claim-decided", projectId: project.id, workspaceId: project.workspaceId, paneId: paneClaim.paneId, outcome: outcome ? "attached" : "rejected" }, "processed Space pane claim");
+      return;
+    }
     const value = parseProjectAction(action.value);
     if (!value) return;
     const claim = this.store.claimProjectSelection({
@@ -463,6 +472,15 @@ export class SyncCoordinator {
     }
 
     const groups = buildSpaceDirectoryGroups(this.config.projects, panesByWorkspace, errorsByWorkspace);
+    const bindings = this.store.listBindings();
+    for (const group of groups) for (const pane of group.panes) {
+      const binding = bindings.find((candidate) => candidate.paneId === pane.paneId);
+      if (binding?.chatId === message.chatId && binding.rootMessageId) pane.bindingId = binding.id;
+      if (!binding && !group.unregistered && pane.foregroundExecutables.includes("traex")) {
+        const projects = this.config.projects.filter((project) => project.workspaceId === group.workspaceId && projectSpaceName(project) === group.spaceName && project.cwd === panesByWorkspace.get(group.workspaceId)?.find((candidate) => candidate.paneId === pane.paneId)?.cwd);
+        if (projects.length === 1) pane.claimProjectId = projects[0]!.id;
+      }
+    }
     const cards = renderSpaceDirectoryCards(groups);
     const rootMessageId = message.rootMessageId ?? message.messageId;
     for (const [index, card] of cards.entries()) {
@@ -981,6 +999,12 @@ function parseDeadLetterAction(value: unknown): { action: "retry_dead_letter" | 
   const candidate = value as Record<string, unknown>;
   if ((candidate.action !== "retry_dead_letter" && candidate.action !== "dismiss_dead_letter") || typeof candidate.replyId !== "string") return null;
   return { action: candidate.action, replyId: candidate.replyId };
+}
+function parsePaneClaimAction(value: unknown): { projectId: string; workspaceId: string; paneId: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.action !== "claim_pane" || typeof candidate.projectId !== "string" || typeof candidate.workspaceId !== "string" || typeof candidate.paneId !== "string") return null;
+  return { projectId: candidate.projectId, workspaceId: candidate.workspaceId, paneId: candidate.paneId };
 }
 function parseProjectAction(value: unknown): { selectionId: string; projectId: string } | null {
   if (!value || typeof value !== "object") return null;

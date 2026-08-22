@@ -83,4 +83,41 @@ describe("space directory command", () => {
       { spaceName: "later", directories: ["/c"] }
     ]);
   });
+
+  it("opens bound panes and force-refreshes before claiming an eligible pane", async () => {
+    let onAction: Parameters<LarkPort["start"]>[1];
+    let expose = false;
+    const cards: object[] = [];
+    const shareThread = vi.fn(async () => ({ messageId: "shared" }));
+    const listPanes = vi.fn(async (_workspaceId: string, options?: { forceRefresh?: boolean }) => expose || options?.forceRefresh ? [{ paneId: "w1:p2", workspaceId: "w1", cwd: "/work/alpha", label: "Free", agentState: "idle" as const, foregroundExecutables: ["traex"] }] : []);
+    const lark: LarkPort = { async start(_message, action) { onAction = action; }, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "omt-new", rootMessageId: "root-new" }; }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: `card-${cards.length}` }; }, shareThread, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator({
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+    expose = true;
+    await coordinator.handleMessage({ eventId: "spaces-action", messageId: "spaces-message", chatId: "chat", topicId: null, rootMessageId: "spaces-message", actorOpenId: "user", text: "/herdr spaces", mentionsBot: true, isRootMessage: true });
+    const claim = findAction(cards.at(-1)!, "claim_pane");
+    await onAction!({ messageId: "spaces-card", chatId: "chat", operatorOpenId: "user", value: claim });
+    expect(listPanes.mock.calls.some(([, options]) => options?.forceRefresh === true)).toBe(true);
+    expect(store.findBindingByPane("w1:p2")).toMatchObject({ projectId: "alpha", chatId: "chat" });
+
+    await coordinator.handleMessage({ eventId: "spaces-bound", messageId: "spaces-bound-message", chatId: "chat", topicId: null, rootMessageId: "spaces-bound-message", actorOpenId: "user", text: "/herdr spaces", mentionsBot: true, isRootMessage: true });
+    const open = findAction(cards.at(-1)!, "open_project_thread");
+    await onAction!({ messageId: "spaces-bound-card", chatId: "chat", operatorOpenId: "user", value: open });
+    expect(shareThread).toHaveBeenCalledWith("omt-new", "chat");
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
 });
+
+function findAction(card: object, action: string): unknown {
+  const elements = (card as { body: { elements: Array<{ value?: { action?: string } }> } }).body.elements;
+  const item = elements.find((element) => element.value?.action === action);
+  if (!item) throw new Error(`Missing action: ${action}`);
+  return item.value;
+}

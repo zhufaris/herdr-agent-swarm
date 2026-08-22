@@ -8,6 +8,8 @@ export interface SpaceDirectoryPane {
   name: string;
   agentState: AgentState;
   foregroundExecutables: string[];
+  bindingId?: string;
+  claimProjectId?: string;
 }
 
 export interface SpaceDirectoryGroup {
@@ -41,8 +43,18 @@ export function renderSpaceDirectoryCards(groups: SpaceDirectoryGroup[]): object
       title: { tag: "plain_text", content: pages.length > 1 ? `Herdr Spaces · ${index + 1}/${pages.length}` : "Herdr Spaces" },
       template: groups.some((group) => group.error) ? "orange" : "blue"
     },
-    body: { elements: [{ tag: "markdown", content: sectionsForPage.join("\n\n") }] }
+    body: { elements: [{ tag: "markdown", content: sectionsForPage.join("\n\n") }, ...directoryActions(groups, sectionsForPage.join("\n\n"))] }
   }));
+}
+
+function directoryActions(groups: SpaceDirectoryGroup[], pageContent: string): object[] {
+  const actions: object[] = [];
+  for (const group of groups) for (const pane of group.panes) {
+    if (!pageContent.includes(`\`${escapeCode(bound(pane.paneId))}\``)) continue;
+    if (pane.bindingId) actions.push({ tag: "button", text: { tag: "plain_text", content: `打开 ${bound(normalizedName(pane))}` }, type: "primary", value: { action: "open_project_thread", bindingId: pane.bindingId } });
+    else if (pane.claimProjectId) actions.push({ tag: "button", text: { tag: "plain_text", content: `认领 ${bound(normalizedName(pane))}` }, value: { action: "claim_pane", projectId: pane.claimProjectId, workspaceId: group.workspaceId, paneId: pane.paneId } });
+  }
+  return actions;
 }
 
 function groupSections(group: SpaceDirectoryGroup): string[] {

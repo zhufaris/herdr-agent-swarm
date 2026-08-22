@@ -28,4 +28,15 @@ describe("space directory card", () => {
     expect(cards.length).toBeGreaterThan(1);
     for (const pane of panes) expect(serialized).toContain(pane.paneId);
   });
+
+  it("renders only open and claim actions and never a close action", () => {
+    const cards = renderSpaceDirectoryCards([{ spaceName: "alpha", workspaceId: "w1", directories: ["/work/a"], panes: [
+      { paneId: "w1:p1", name: "Bound", agentState: "idle", foregroundExecutables: ["traex"], bindingId: "b1" },
+      { paneId: "w1:p2", name: "Free", agentState: "idle", foregroundExecutables: ["traex"], claimProjectId: "alpha" }
+    ] }]);
+    const serialized = JSON.stringify(cards);
+    expect(serialized).toContain("open_project_thread");
+    expect(serialized).toContain("claim_pane");
+    expect(serialized).not.toContain("close");
+  });
 });
