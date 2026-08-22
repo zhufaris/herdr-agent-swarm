@@ -19,6 +19,25 @@ describe("space directory card", () => {
     expect(serialized).toContain("workspace unavailable");
   });
 
+  it("renders a row-aligned table with short pane ids and full action payloads", () => {
+    const cards = renderSpaceDirectoryCards([{ spaceName: "datasage", workspaceId: "w5", directories: ["/work/datasage"], panes: [
+      { paneId: "w5:p20", name: "Working pane", agentState: "working", foregroundExecutables: ["traex"], bindingId: "binding-20" },
+      { paneId: "w5:p21", name: "Free pane", agentState: "idle", foregroundExecutables: ["traex"], claimProjectId: "datasage" },
+      { paneId: "w5:p22", name: "Shell", agentState: "idle", foregroundExecutables: ["bash"] }
+    ] }]);
+    const elements = bodyElements(cards[0]!);
+    const rows = elements.filter((element) => element.tag === "column_set");
+
+    expect(JSON.stringify(cards)).not.toContain("`w5`");
+    expect(rows).toHaveLength(4);
+    expect(columnText(rows[0]!)).toEqual(["**Pane**", "**状态**", "**前台进程**", "**话题**"]);
+    expect(columnText(rows[1]!)).toEqual(expect.arrayContaining([expect.stringContaining("p21"), "idle", "traex", "认领"]));
+    expect(columnText(rows[2]!)).toEqual(expect.arrayContaining([expect.stringContaining("p22"), "idle", "bash", "—"]));
+    expect(columnText(rows[3]!)).toEqual(expect.arrayContaining([expect.stringContaining("p20"), "working", "traex", "打开话题"]));
+    expect(JSON.stringify(rows[3])).toContain('"bindingId":"binding-20"');
+    expect(JSON.stringify(rows[1])).toContain('"paneId":"w5:p21"');
+  });
+
   it("splits large groups without dropping panes", () => {
     const panes = Array.from({ length: 120 }, (_, index) => ({
       paneId: `w1:p${index}`, name: `pane-${String(index).padStart(3, "0")}-${"x".repeat(100)}`, agentState: "idle" as const, foregroundExecutables: ["shell"]
@@ -26,7 +45,8 @@ describe("space directory card", () => {
     const cards = renderSpaceDirectoryCards([{ spaceName: "large", workspaceId: "w1", directories: ["/work/large"], panes }]);
     const serialized = JSON.stringify(cards);
     expect(cards.length).toBeGreaterThan(1);
-    for (const pane of panes) expect(serialized).toContain(pane.paneId);
+    for (const card of cards) expect(JSON.stringify(card).length).toBeLessThanOrEqual(12_500);
+    for (const pane of panes) expect(serialized).toContain(`\`p${pane.paneId.split(":p")[1]}\``);
   });
 
   it("renders only open and claim actions and never a close action", () => {
@@ -40,3 +60,16 @@ describe("space directory card", () => {
     expect(serialized).not.toContain("close");
   });
 });
+
+type CardElement = { tag?: string; content?: string; text?: { content?: string }; columns?: Array<{ elements?: CardElement[] }> };
+
+function bodyElements(card: object): CardElement[] {
+  return (card as { body: { elements: CardElement[] } }).body.elements;
+}
+
+function columnText(row: CardElement): string[] {
+  return (row.columns ?? []).map((column) => {
+    const element = column.elements?.[0];
+    return element?.text?.content ?? element?.content ?? "";
+  });
+}

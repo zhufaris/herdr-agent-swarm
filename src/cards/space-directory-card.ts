@@ -1,6 +1,7 @@
 import type { AgentState } from "../domain/types.js";
 
-const MAX_CARD_MARKDOWN_LENGTH = 12_000;
+const MAX_CARD_SERIALIZED_LENGTH = 12_000;
+const MAX_PANE_ROWS_PER_PAGE = 16;
 const MAX_FIELD_LENGTH = 160;
 
 export interface SpaceDirectoryPane {
@@ -21,70 +22,119 @@ export interface SpaceDirectoryGroup {
   unregistered?: boolean;
 }
 
+interface SpaceSection {
+  elements: object[];
+  paneRows: number;
+}
+
 export function renderSpaceDirectoryCards(groups: SpaceDirectoryGroup[]): object[] {
   const sections = groups.flatMap(groupSections);
-  const pages: string[][] = [];
-  let page: string[] = [];
-  let pageLength = 0;
+  const pages: object[][] = [];
+  let page: object[] = [];
+  let paneRows = 0;
+
   for (const section of sections) {
-    const separator = page.length ? 2 : 0;
-    if (page.length && pageLength + separator + section.length > MAX_CARD_MARKDOWN_LENGTH) {
-      pages.push(page); page = []; pageLength = 0;
+    const separator = page.length ? [{ tag: "hr" }] : [];
+    const candidate = [...page, ...separator, ...section.elements];
+    if (page.length && (paneRows + section.paneRows > MAX_PANE_ROWS_PER_PAGE || JSON.stringify(candidate).length > MAX_CARD_SERIALIZED_LENGTH)) {
+      pages.push(page);
+      page = [...section.elements];
+      paneRows = section.paneRows;
+    } else {
+      page = candidate;
+      paneRows += section.paneRows;
     }
-    page.push(section);
-    pageLength += (page.length > 1 ? 2 : 0) + section.length;
   }
+
   if (page.length) pages.push(page);
-  if (!pages.length) pages.push(["暂无已配置 Space。"]);
-  return pages.map((sectionsForPage, index) => ({
+  if (!pages.length) pages.push([{ tag: "markdown", content: "暂无已配置 Space。" }]);
+
+  return pages.map((elements, index) => ({
     schema: "2.0",
     config: { update_multi: true, summary: { content: "Herdr Space 目录" } },
     header: {
       title: { tag: "plain_text", content: pages.length > 1 ? `Herdr Spaces · ${index + 1}/${pages.length}` : "Herdr Spaces" },
       template: groups.some((group) => group.error) ? "orange" : "blue"
     },
-    body: { elements: [{ tag: "markdown", content: sectionsForPage.join("\n\n") }, ...directoryActions(groups, sectionsForPage.join("\n\n"))] }
+    body: { elements }
   }));
 }
 
-function directoryActions(groups: SpaceDirectoryGroup[], pageContent: string): object[] {
-  const actions: object[] = [];
-  for (const group of groups) for (const pane of group.panes) {
-    if (!pageContent.includes(`\`${escapeCode(bound(pane.paneId))}\``)) continue;
-    if (pane.bindingId) actions.push({ tag: "button", text: { tag: "plain_text", content: `打开 ${bound(normalizedName(pane))}` }, type: "primary", value: { action: "open_project_thread", bindingId: pane.bindingId } });
-    else if (pane.claimProjectId) actions.push({ tag: "button", text: { tag: "plain_text", content: `认领 ${bound(normalizedName(pane))}` }, value: { action: "claim_pane", projectId: pane.claimProjectId, workspaceId: group.workspaceId, paneId: pane.paneId } });
-  }
-  return actions;
-}
-
-function groupSections(group: SpaceDirectoryGroup): string[] {
-  const heading = `**${escapeMarkdown(bound(group.spaceName))}**  ·  \`${escapeCode(bound(group.workspaceId))}\``;
-  const directories = group.directories.length
-    ? `目录：${group.directories.map((value) => `\`${escapeCode(bound(value))}\``).join("、")}`
-    : "目录：未注册";
-  if (group.error) return [`${heading}\n${directories}\n⚠ ${escapeMarkdown(bound(group.error))}`];
+function groupSections(group: SpaceDirectoryGroup): SpaceSection[] {
   const panes = [...group.panes].sort((left, right) =>
     normalizedName(left).localeCompare(normalizedName(right)) || left.paneId.localeCompare(right.paneId)
   );
-  if (!panes.length) return [`${heading}\n${directories}\n暂无 Pane`];
+  if (group.error) return [{ elements: groupPrefix(group, [statusRow(`⚠ ${bound(group.error)}`)]), paneRows: 0 }];
+  if (!panes.length) return [{ elements: groupPrefix(group, [statusRow("暂无 Pane")]), paneRows: 0 }];
 
-  const prefix = `${heading}\n${directories}`;
-  const sections: string[] = [];
-  let rows: string[] = [];
-  for (const pane of panes) {
-    const row = paneRow(pane);
-    if (rows.length && `${prefix}\n${rows.join("\n")}\n${row}`.length > MAX_CARD_MARKDOWN_LENGTH) {
-      sections.push(`${prefix}\n${rows.join("\n")}`); rows = [];
-    }
-    rows.push(row);
+  const sections: SpaceSection[] = [];
+  for (let index = 0; index < panes.length; index += MAX_PANE_ROWS_PER_PAGE) {
+    const chunk = panes.slice(index, index + MAX_PANE_ROWS_PER_PAGE);
+    sections.push({ elements: groupPrefix(group, [tableHeader(), ...chunk.map((pane) => paneRow(group, pane))]), paneRows: chunk.length });
   }
-  sections.push(`${prefix}\n${rows.join("\n")}`);
   return sections;
 }
 
-function paneRow(pane: SpaceDirectoryPane): string {
-  const executables = pane.foregroundExecutables.length ? pane.foregroundExecutables.map((value) => escapeCode(bound(value))).join(", ") : "-";
-  return `- **${escapeMarkdown(bound(normalizedName(pane)))}** · \`${escapeCode(bound(pane.paneId))}\` · ${pane.agentState} · \`${executables}\``;
+function groupPrefix(group: SpaceDirectoryGroup, rows: object[]): object[] {
+  const directories = group.directories.length
+    ? group.directories.map((value) => `\`${escapeCode(bound(value))}\``).join("、")
+    : "未注册";
+  return [
+    { tag: "markdown", content: `**${escapeMarkdown(bound(group.spaceName))}**\n目录：${directories}` },
+    ...rows
+  ];
+}
+
+function tableHeader(): object {
+  return columnSet([
+    textColumn("**Pane**", 3),
+    textColumn("**状态**", 2),
+    textColumn("**前台进程**", 2),
+    textColumn("**话题**", 2)
+  ]);
+}
+
+function paneRow(group: SpaceDirectoryGroup, pane: SpaceDirectoryPane): object {
+  const executables = pane.foregroundExecutables.length
+    ? pane.foregroundExecutables.map((value) => escapeMarkdown(bound(value))).join(", ")
+    : "—";
+  return columnSet([
+    textColumn(`**${escapeMarkdown(bound(normalizedName(pane)))}**\n\`${escapeCode(shortPaneId(pane.paneId))}\``, 3),
+    textColumn(escapeMarkdown(pane.agentState), 2),
+    textColumn(executables, 2),
+    actionColumn(group, pane)
+  ]);
+}
+
+function actionColumn(group: SpaceDirectoryGroup, pane: SpaceDirectoryPane): object {
+  if (pane.bindingId) return buttonColumn("打开话题", { action: "open_project_thread", bindingId: pane.bindingId });
+  if (pane.claimProjectId) return buttonColumn("认领", {
+    action: "claim_pane", projectId: pane.claimProjectId, workspaceId: group.workspaceId, paneId: pane.paneId
+  });
+  return textColumn("—", 2);
+}
+
+function statusRow(content: string): object {
+  return columnSet([textColumn(escapeMarkdown(content), 1)]);
+}
+
+function columnSet(columns: object[]): object {
+  return { tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", vertical_align: "center", columns };
+}
+
+function textColumn(content: string, weight: number): object {
+  return { tag: "column", width: "weighted", weight, elements: [{ tag: "markdown", content }] };
+}
+
+function buttonColumn(content: string, value: object): object {
+  return { tag: "column", width: "weighted", weight: 2, elements: [{
+    tag: "button", text: { tag: "plain_text", content }, type: "primary", size: "small", value
+  }] };
+}
+
+function shortPaneId(paneId: string): string {
+  const separator = paneId.indexOf(":");
+  return bound(separator >= 0 ? paneId.slice(separator + 1) : paneId);
 }
 
 function normalizedName(pane: SpaceDirectoryPane): string {
@@ -93,4 +143,4 @@ function normalizedName(pane: SpaceDirectoryPane): string {
 
 function bound(value: string): string { return value.length > MAX_FIELD_LENGTH ? `${value.slice(0, MAX_FIELD_LENGTH - 1)}…` : value; }
 function escapeCode(value: string): string { return value.replaceAll("`", "'"); }
-function escapeMarkdown(value: string): string { return value.replace(/[\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
+function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[\]()#+.!|>-]/g, "\\$&"); }

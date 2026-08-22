@@ -61,9 +61,9 @@ describe("space directory command", () => {
     expect(rendered).toContain("space\\\\-empty");
     expect(rendered).toContain("space\\\\-failed");
     expect(rendered).toContain("未注册");
-    expect(rendered).toContain("w1:p1");
-    expect(rendered).toContain("w1:p2");
-    expect(rendered).toContain("w1:p3");
+    expect(rendered).toContain("`p1`");
+    expect(rendered).toContain("`p2`");
+    expect(rendered).toContain("`p3`");
     expect(rendered).toContain("workspace unavailable");
     expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(["w1", "w2"]);
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "space-directory-workspace-failed", workspaceId: "w2" }), expect.any(String));
@@ -116,8 +116,18 @@ describe("space directory command", () => {
 });
 
 function findAction(card: object, action: string): unknown {
-  const elements = (card as { body: { elements: Array<{ value?: { action?: string } }> } }).body.elements;
-  const item = elements.find((element) => element.value?.action === action);
+  const elements = (card as { body: { elements: unknown[] } }).body.elements;
+  const item = findElement(elements, (element) => element.value?.action === action);
   if (!item) throw new Error(`Missing action: ${action}`);
   return item.value;
+}
+
+function findElement(value: unknown, predicate: (value: { value?: { action?: string } }) => boolean): { value?: { action?: string } } | null {
+  if (!value || typeof value !== "object") return null;
+  if (predicate(value as { value?: { action?: string } })) return value as { value?: { action?: string } };
+  for (const child of Array.isArray(value) ? value : Object.values(value)) {
+    const match = findElement(child, predicate);
+    if (match) return match;
+  }
+  return null;
 }
