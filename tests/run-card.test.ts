@@ -34,10 +34,11 @@ describe("run card", () => {
     expect(serialized).not.toContain('**WORKSPACE**\n`wG`');
   });
 
-  it("keeps the group project entry card lightweight", () => {
+  it("shows only the newest compact answer preview on the group project entry card", () => {
+    const answer = `old answer ${"x".repeat(700)} newest conclusion`;
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "datasage / Fix login", spaceName: "datasage_semantic_knowledge", paneId: "wD:p9",
-      phase: "running", queueDepth: 2, answer: "private final answer", recentProgress: [{ key: "edit:a", kind: "edit", label: "changed secret.ts", state: "done", occurredAt: "now" }]
+      phase: "running", queueDepth: 2, answer, recentProgress: [{ key: "edit:a", kind: "edit", label: "changed secret.ts", state: "done", occurredAt: "now" }]
     });
     const serialized = JSON.stringify(card);
 
@@ -45,10 +46,18 @@ describe("run card", () => {
     expect(serialized).toContain("wD:p9");
     expect(serialized).toContain("TraeX 正在处理");
     expect(serialized).toContain("QUEUE");
-    expect(serialized).not.toContain("private final answer");
+    expect(serialized).toContain("最新消息");
+    expect(serialized).toContain("newest conclusion");
+    expect(serialized).not.toContain("old answer");
     expect(serialized).not.toContain("changed secret.ts");
     expect(serialized).not.toContain("执行进度");
-    expect(serialized).not.toContain("最近输出");
+  });
+
+  it("prioritizes actionable notices over answer previews", () => {
+    const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "blocked", answer: "stale answer", notice: "Approve in pane" });
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain("Approve in pane");
+    expect(serialized).not.toContain("stale answer");
   });
 
   it("renders blocked requests as warnings and preserves the supplied action notice", () => {
@@ -100,6 +109,17 @@ describe("run card", () => {
     expect(serialized).toContain("已省略 30 条较早记录");
     expect(serialized).not.toContain("已读取 file-0\"");
     expect(serialized).toContain("已读取 file-89");
+  });
+
+  it("keeps the newest answer window in request cards", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large answer", workspaceId: "w1", paneId: "p1", requestText: "Keep this request beginning", queuePosition: 1, occurredAt: "now" });
+    const answer = `old answer ${"x".repeat(13_000)} newest conclusion`;
+    const card = renderRequestRunCard({ ...view, phase: "completed", answer });
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain("Keep this request beginning");
+    expect(serialized).toContain("newest conclusion");
+    expect(serialized).not.toContain("old answer");
+    expect(serialized).toContain("较早内容已省略");
   });
 
   it("shows request, queue state, and semantic emoji for every progress kind", () => {

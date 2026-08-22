@@ -33,11 +33,11 @@ describe("event-driven card projection", () => {
     await publisher.drain();
     expect(updates).toHaveLength(2);
     expect(JSON.stringify(updates.at(-1))).toContain("已完成");
-    expect(JSON.stringify(updates.at(-1))).not.toContain("Finished");
+    expect(JSON.stringify(updates.at(-1))).toContain("Finished");
     stop(); stopPublisher(); store.close();
   });
 
-  it("keeps live output in the request card while updating only primary-card lifecycle", async () => {
+  it("previews live output on the primary card and prioritizes a blocked notice", async () => {
     const updates: Array<{ messageId: string; card: object }> = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
@@ -65,8 +65,11 @@ describe("event-driven card projection", () => {
     await publisher.drain();
 
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "blocked", answer: "live answer", recentProgress: [expect.objectContaining({ key: "edit:card" })] });
-    expect(updates.some((update) => update.messageId === "primary-card" && JSON.stringify(update.card).includes("等待用户处理"))).toBe(true);
-    expect(updates.some((update) => update.messageId === "primary-card" && (JSON.stringify(update.card).includes("live answer") || JSON.stringify(update.card).includes("更新主卡片")))).toBe(false);
+    const latestPrimary = updates.filter((update) => update.messageId === "primary-card").at(-1)!;
+    expect(JSON.stringify(latestPrimary.card)).toContain("等待用户处理");
+    expect(JSON.stringify(latestPrimary.card)).toContain("TraeX 需要人工审批");
+    expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
+    expect(JSON.stringify(latestPrimary.card)).not.toContain("更新主卡片");
     expect(updates.some((update) => update.messageId === "request-card" && JSON.stringify(update.card).includes("live answer"))).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();

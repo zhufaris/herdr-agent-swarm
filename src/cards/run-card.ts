@@ -95,6 +95,23 @@ export function renderRunCard(input: TopicViewState): object {
 
 export function renderProjectEntryCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
+  const preview = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned"
+    ? input.notice
+    : input.answer?.trim();
+  const elements: object[] = [
+    {
+      tag: "column_set",
+      horizontal_spacing: "8px",
+      columns: [
+        metric("SPACE", input.spaceName),
+        metric("PANE", input.paneId ?? "provisioning"),
+        metric("QUEUE", String(input.queueDepth))
+      ]
+    },
+    { tag: "hr" }
+  ];
+  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(preview, 500)}` });
+  elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: view.label } },
@@ -103,19 +120,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
       subtitle: { tag: "plain_text", content: "HERDR PROJECT" },
       template: view.color
     },
-    body: { elements: [
-      {
-        tag: "column_set",
-        horizontal_spacing: "8px",
-        columns: [
-          metric("SPACE", input.spaceName),
-          metric("PANE", input.paneId ?? "provisioning"),
-          metric("QUEUE", String(input.queueDepth))
-        ]
-      },
-      { tag: "hr" },
-      { tag: "markdown", content: `${view.icon} ${view.label}` }
-    ] }
+    body: { elements }
   };
 }
 
@@ -144,7 +149,7 @@ export function renderRequestRunCard(input: RunCardView): object {
       header: { title: { tag: "plain_text", content: input.progressEvents.length ? `共 ${input.progressEvents.length} 项` : "请求详情" } },
       elements: [{ tag: "markdown", content: progressContent }] }
   ];
-  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdown(input.answer, 12_000)}` });
+  if (input.answer) elements.push({ tag: "markdown", content: `**回答**\n\n${truncateLarkMarkdownTail(input.answer, 12_000)}` });
   else if (input.phase === "completed" && input.notice) elements.push({ tag: "markdown", content: `**结果**\n\n${truncateLarkMarkdown(input.notice, 2_000)}` });
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**回答**\n\n正在生成…" });
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));

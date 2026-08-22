@@ -182,7 +182,7 @@ describe("Herdr discovery", () => {
     await publisher.drain();
 
     expect(JSON.stringify(updates.at(-1))).toContain("已完成");
-    expect(JSON.stringify(updates.at(-1))).not.toContain("TraeX local answer");
+    expect(JSON.stringify(updates.at(-1))).toContain("TraeX local answer");
     expect(replies).toEqual([]);
     await coordinator.stop(); stopProjector(); stopChannelPublisher(); store.close();
   });
