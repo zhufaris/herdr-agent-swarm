@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderHelpCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestRunCard } from "../cards/run-card.js";
+import { renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestRunCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -164,6 +164,8 @@ export class SyncCoordinator {
         await this.replyStandalone(message.rootMessageId ?? message.messageId, renderHelpCard());
       } else if (command?.kind === "new" || command?.kind === "projects") {
         await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
+      } else if (command?.kind === "attach") {
+        await this.attachExistingPane(message, command.spaceName, command.paneId);
       } else if (command?.kind === "status") {
         if (!binding) throw new Error("This topic is not bound to Herdr");
         await this.emitState(binding, binding.lastAgentState);
@@ -526,6 +528,49 @@ export class SyncCoordinator {
 
   private async emitState(binding: Binding, state: Binding["lastAgentState"]): Promise<void> {
     await this.publish(binding.id, "AgentStateChanged", "bridge", { state, queueDepth: this.store.countPendingPrompts(binding.id) });
+  }
+
+  private async attachExistingPane(message: IncomingLarkMessage, spaceName: string, paneId: string): Promise<void> {
+    const projects = this.config.projects.filter((project) => project.spaceName === spaceName);
+    if (projects.length !== 1) {
+      const reason = projects.length === 0 ? `未找到空间 ${spaceName}。` : `空间 ${spaceName} 对应多个项目，无法确定要连接哪一个。`;
+      await this.rejectAttach(message, reason);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneId, outcome: projects.length === 0 ? "unknown_space" : "ambiguous_space" });
+      return;
+    }
+
+    const project = projects[0]!;
+    const existing = this.store.findBindingByPane(paneId);
+    if (existing) {
+      if (existing.chatId === this.config.lark.chatId && existing.projectId === project.id && existing.state === "active") {
+        await this.rejectAttach(message, `Pane ${paneId} 已经连接到空间 ${spaceName}，无需重复连接。`);
+        this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "already_attached" });
+        return;
+      }
+      await this.rejectAttach(message, `Pane ${paneId} 已绑定到其他会话，不能在这里重新连接。`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "bound_elsewhere" });
+      return;
+    }
+
+    const pane = (await this.herdr.listPanes(project.workspaceId)).find((candidate) => candidate.paneId === paneId && candidate.workspaceId === project.workspaceId);
+    if (!pane) {
+      await this.rejectAttach(message, `在空间 ${spaceName} 的 Herdr workspace ${project.workspaceId} 中未找到 Pane ${paneId}。`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneId, outcome: "pane_not_found" });
+      return;
+    }
+    if (!pane.foregroundExecutables.includes("traex")) {
+      await this.rejectAttach(message, `Pane ${paneId} 当前没有运行 TraeX，未执行连接。`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneId, outcome: "traex_not_running" });
+      return;
+    }
+
+    await this.createFromHerdr(pane, project);
+    const binding = this.store.findBindingByPane(paneId);
+    this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: binding?.id ?? paneId, outcome: "success" });
+  }
+
+  private async rejectAttach(message: IncomingLarkMessage, reason: string): Promise<void> {
+    await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason));
   }
 
   private spaceNameFor(binding: Binding): string {

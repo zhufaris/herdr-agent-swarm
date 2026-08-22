@@ -93,7 +93,7 @@ describe("Herdr discovery", () => {
     await publisher.drain();
     expect({ created, replied, updated }).toEqual({ created: 1, replied: 0, updated: 2 });
     expect(store.findBindingByPane("w1:p1")).toMatchObject({ title: "repo / task", statusMessageId: "root-1", state: "active" });
-    expect(JSON.stringify(rootCard)).toContain("repo / task");
+    expect(JSON.stringify(rootCard)).toContain("TraeX · repo / w1:p1");
 
     await coordinator.stop(); stopProjector(); stopChannelPublisher(); store.close();
   });

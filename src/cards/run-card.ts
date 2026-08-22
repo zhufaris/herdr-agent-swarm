@@ -85,7 +85,7 @@ export function renderRunCard(input: TopicViewState): object {
     schema: "2.0",
     config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: view.label } },
     header: {
-      title: { tag: "plain_text", content: `TraeX · ${truncate(input.title, 64)}` },
+      title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) },
       subtitle: { tag: "plain_text", content: "HERDR REMOTE PANEL" },
       template: view.color
     },
@@ -116,7 +116,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     schema: "2.0",
     config: { update_multi: true, summary: { content: view.label } },
     header: {
-      title: { tag: "plain_text", content: `TraeX · ${truncate(input.title, 64)}` },
+      title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) },
       subtitle: { tag: "plain_text", content: "HERDR PROJECT" },
       template: view.color
     },
@@ -153,7 +153,7 @@ export function renderRequestRunCard(input: RunCardView): object {
   elements.push({ tag: "markdown", content: `${state.icon} ${state.label}` });
   return {
     schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: state.label } },
-    header: { title: { tag: "plain_text", content: `TraeX · ${truncate(input.title, 64)}` }, subtitle: { tag: "plain_text", content: "HERDR REQUEST" }, template: state.color },
+    header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: "HERDR REQUEST" }, template: state.color },
     body: { elements }
   };
 }
@@ -168,6 +168,7 @@ export function renderHelpCard(): object {
         "**从飞书控制 Herdr 中的 TraeX pane**", "",
         "`/herdr new [标题]`  选择项目并创建 TraeX pane",
         "`/herdr projects`  打开项目选择卡片",
+        "`/herdr attach <space> <pane-id>`  将已有 TraeX pane 连接到群聊",
         "`/herdr status`  查看当前绑定",
         "`/herdr rename <标题>`  重命名当前 pane",
         "`/herdr close`  归档映射（不会强杀 TraeX）",
@@ -176,6 +177,14 @@ export function renderHelpCard(): object {
       ].join("\n") },
       { tag: "markdown", content: "高风险审批必须在 Herdr 终端完成" }
     ] }
+  };
+}
+
+export function renderMessageRejectedCard(message: string): object {
+  return {
+    schema: "2.0", config: { update_multi: true, summary: { content: "请求未执行" } },
+    header: { title: { tag: "plain_text", content: "⚠ 请求未执行" }, template: "orange" },
+    body: { elements: [{ tag: "markdown", content: message }] }
   };
 }
 
@@ -194,6 +203,9 @@ function callout(color: string, content: string): object {
 function escapeCode(value: string): string { return value.replaceAll("`", "'"); }
 function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
+function agentPaneTitle(spaceName: string, paneId: string | null): string {
+  return truncate(`TraeX · ${spaceName} / ${paneId ?? "provisioning"}`, 96);
+}
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${event.label}`;
   if (event.state === "failed") return `❌ ${event.label}`;

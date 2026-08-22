@@ -209,6 +209,7 @@ Available commands:
 /herdr new <title>
 /herdr new
 /herdr projects
+/herdr attach <space> <pane-id>
 /herdr status
 /herdr rename <title>
 /herdr close
@@ -217,6 +218,9 @@ Available commands:
 
 The `new` and `projects` commands open a project selector. Only the command
 initiator can use it, and each resulting topic remains bound to that project.
+The `attach` command creates a normal project topic for an existing TraeX pane
+in the exact configured space without creating, renaming, restarting, or writing
+to that pane. Repeating it for the same healthy binding is idempotent.
 An `@Bot` root message creates a topic in the default project and uses the
 message body as its first prompt. A reply received while a bridge-owned turn is actively `working`
 steers that turn; replies received while idle, blocked, or in an unknown state

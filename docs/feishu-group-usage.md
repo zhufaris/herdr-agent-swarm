@@ -41,6 +41,20 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 打开同一个项目选择卡片。只有发起命令的人可以点击，选择结果在当前话题绑定后不可切换。
 
+### `/herdr attach <space> <pane-id>`
+
+把已经运行 TraeX 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。
+这个命令不会创建、重命名或重启 pane，也不会向 pane 发送文字。
+
+```text
+/herdr attach datasage_semantic_knowledge w5:p3G
+```
+
+`space` 必须精确匹配项目配置中显式声明的 `spaceName`。Bridge 只会在该项目的
+Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
+不会创建第二个绑定，而会返回已有连接信息。未知或重复的 space、其他 workspace
+中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。
+
 ### `/herdr status`
 
 刷新当前话题的绑定状态，包括 workspace、pane、TraeX 状态和队列深度。
@@ -103,7 +117,7 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 
 - 批准或绕过 TraeX 权限；
 - 向审批界面发送 steering；
-- 指定任意 pane ID；
+- 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
 - 强制终止正在工作的 TraeX。
 
 ## 已设计但尚未上线

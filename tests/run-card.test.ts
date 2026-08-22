@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
+import { renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("run card", () => {
+  it("documents how to attach an existing pane", () => {
+    expect(JSON.stringify(renderHelpCard())).toContain("/herdr attach <space> <pane-id>");
+  });
+
   it("renders project buttons with opaque ids and no host routing details", () => {
     const card = renderProjectSelectorCard({
       selectionId: "selection-1",
@@ -42,6 +46,7 @@ describe("run card", () => {
     });
     const serialized = JSON.stringify(card);
 
+    expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / wD:p9" } } });
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).toContain("wD:p9");
     expect(serialized).toContain("TraeX 正在处理");
@@ -99,6 +104,11 @@ describe("run card", () => {
     expect(answer).toContain("Fixed.");
     expect(answer).not.toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
+  });
+
+  it("identifies the agent, space, and pane in request card headers", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "Fix login", queuePosition: 1, occurredAt: "now" });
+    expect(renderRequestRunCard(view)).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" } } });
   });
 
   it("filters legacy tool activity and renders real steps", () => {

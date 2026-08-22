@@ -18,6 +18,10 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "projects" };
     case "status":
       return { kind: "status" };
+    case "attach": {
+      const parts = argument.split(/\s+/).filter(Boolean);
+      return parts.length === 2 ? { kind: "attach", spaceName: parts[0]!, paneId: parts[1]! } : { kind: "help" };
+    }
     case "rename":
       return argument ? { kind: "rename", title: argument } : { kind: "help" };
     case "close":
