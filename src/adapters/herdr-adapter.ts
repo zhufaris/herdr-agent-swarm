@@ -118,12 +118,13 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   private async submitPromptText(paneId: string, text: string, before: string): Promise<void> {
-    const previousOccurrences = countOccurrences(before, text);
+    const comparableText = normalizePromptEcho(text);
+    const previousOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
     await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
       const output = await this.readOutput(paneId, 240);
-      if (countOccurrences(output, text) > previousOccurrences) {
+      if (countOccurrences(normalizePromptEcho(output), comparableText) > previousOccurrences) {
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
         return;
       }
@@ -232,4 +233,8 @@ function countOccurrences(haystack: string, needle: string): number {
     offset += needle.length;
   }
   return count;
+}
+
+function normalizePromptEcho(value: string): string {
+  return value.replace(/[▍\s]+/gu, "");
 }

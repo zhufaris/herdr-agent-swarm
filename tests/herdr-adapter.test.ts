@@ -141,6 +141,27 @@ describe("Herdr adapter", () => {
     expect(readsBeforeEnter).toHaveLength(3);
   });
 
+  it("confirms prompt text when a narrow pane soft-wraps it", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "❯ Explain this codebase",
+      "▍ 你好，请回复当前工作目\n▍ 录"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ 当前工作目录：/repo", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "你好，请回复当前工作目录"))
+      .resolves.toBe("injected");
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+  });
+
   it("does not send Enter when the composer never confirms the prompt text", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
