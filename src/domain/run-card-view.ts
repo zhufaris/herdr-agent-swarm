@@ -39,7 +39,7 @@ export type RunCardChange =
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerSnapshot: string; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
+  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string }
   | { type: "failed"; occurredAt: string; notice: string };
 
@@ -74,8 +74,8 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "blocked", notice: change.notice };
       break;
     case "output": {
+      const answer = mergeAnswerSnapshot(state.answer, change.answerSnapshot, change.previousAnswerSnapshot ?? "", change.answerUpdate ?? "replace");
       if (change.hasProgressSnapshot) {
-        const answer = change.answerSnapshot;
         if (answer === state.answer && sameProgress(change.progressEvents, state.progressEvents)) return state;
         patch = { answer, progressEvents: change.progressEvents };
         break;
@@ -87,19 +87,31 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
         if (position === undefined) { positions.set(event.key, events.length); events.push(event); }
         else events[position] = event;
       }
-      const answer = change.answerSnapshot;
       if (answer === state.answer && sameProgress(events, state.progressEvents)) return state;
       patch = { answer, progressEvents: events };
       break;
     }
     case "completed":
-      patch = { phase: "completed", answer: change.answer, finishedAt: change.occurredAt, queuePosition: 0, notice: null };
+      patch = { phase: "completed", answer: mergeFinalAnswer(state.answer, change.answer), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
       break;
     case "failed":
       patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }
   return { ...state, ...patch, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
+}
+
+function mergeAnswerSnapshot(current: string, next: string, previous: string, update: "append" | "replace"): string {
+  if (update === "append") return [current.trimEnd(), next.trim()].filter(Boolean).join("\n\n");
+  if (previous && current.endsWith(previous)) return `${current.slice(0, -previous.length)}${next}`;
+  return next;
+}
+
+function mergeFinalAnswer(current: string, finalAnswer: string): string {
+  const currentValue = current.trimEnd();
+  const finalValue = finalAnswer.trim();
+  if (!currentValue || currentValue.endsWith(finalValue)) return currentValue || finalValue;
+  return `${currentValue}\n\n${finalValue}`;
 }
 
 function sameProgress(left: RunProgressEvent[], right: RunProgressEvent[]): boolean {

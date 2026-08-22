@@ -26,7 +26,7 @@ describe("request run-card view", () => {
     expect(running).toMatchObject({ phase: "running", startedAt: "2026-08-22T10:00:01.000Z", viewVersion: 2 });
     expect(duplicate).toMatchObject({ answer: "Working on it", viewVersion: 4 });
     expect(duplicate.progressEvents).toHaveLength(1);
-    expect(completed).toMatchObject({ phase: "completed", answer: "Fixed login.", finishedAt: "2026-08-22T10:00:04.000Z", viewVersion: 5 });
+    expect(completed).toMatchObject({ phase: "completed", answer: "Working on it\n\nFixed login.", finishedAt: "2026-08-22T10:00:04.000Z", viewVersion: 5 });
   });
 
   it("replaces a live status snapshot and ignores an identical refresh", () => {
@@ -41,6 +41,19 @@ describe("request run-card view", () => {
     expect(second.answer).toBe("Working (2m)\n9 tasks (8 done)");
     expect(second.answer).not.toContain("Working (1m)");
     expect(duplicate).toBe(second);
+  });
+
+  it("accumulates distinct answer blocks while replacing growth of the current block", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const first = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "First", previousAnswerSnapshot: "", answerUpdate: "replace", progressEvents: [] });
+    const grown = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "First complete", previousAnswerSnapshot: "First", answerUpdate: "replace", progressEvents: [] });
+    const second = reduceRunCard(grown, { type: "output", occurredAt: "three", answerSnapshot: "Second", previousAnswerSnapshot: "First complete", answerUpdate: "append", progressEvents: [] });
+    const secondGrown = reduceRunCard(second, { type: "output", occurredAt: "four", answerSnapshot: "Second complete", previousAnswerSnapshot: "Second", answerUpdate: "replace", progressEvents: [] });
+
+    expect(secondGrown.answer).toBe("First complete\n\nSecond complete");
+    expect(reduceRunCard(secondGrown, { type: "completed", occurredAt: "done", answer: "Second complete" }).answer).toBe("First complete\n\nSecond complete");
   });
 
   it("ignores an identical structured progress snapshot with a newer observation time", () => {

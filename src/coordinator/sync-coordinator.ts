@@ -748,7 +748,7 @@ export class SyncCoordinator {
           const parsed = parseTraexOutput(previousObservation, output, projectCwd);
           previousObservation = output;
           if (parsed.answerSnapshot || parsed.hasProgressSnapshot) {
-            await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.answerSnapshot, progressEvents: parsed.progressEvents, hasProgressSnapshot: parsed.hasProgressSnapshot });
+            await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.answerSnapshot, previousAnswerSnapshot: parsed.previousAnswerSnapshot, answerUpdate: parsed.answerUpdate, progressEvents: parsed.progressEvents, hasProgressSnapshot: parsed.hasProgressSnapshot });
           }
           const previousState = this.observedAgentStates.get(paneId) ?? binding?.lastAgentState ?? "unknown";
           const activeRun = this.activeRuns.get(bindingId);

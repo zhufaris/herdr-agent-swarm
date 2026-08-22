@@ -52,6 +52,8 @@ describe("Herdr discovery", () => {
   it("publishes repeated working state once while preserving distinct output observations", async () => {
     let output = "initial terminal";
     const events: string[] = [];
+    const answerSnapshots: string[] = [];
+    const answerUpdates: string[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
@@ -83,7 +85,13 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const stopObserver = bus.onBridgeEvent((event) => { if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : "")); });
+    const stopObserver = bus.onBridgeEvent((event) => {
+      if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
+      if (event.type === "TurnOutputObserved") {
+        answerSnapshots.push(event.payload.answerSnapshot);
+        answerUpdates.push(event.payload.answerUpdate ?? "replace");
+      }
+    });
     const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new CardProjector(bus, store, publisher, pino({ enabled: false })).start();
@@ -96,6 +104,9 @@ describe("Herdr discovery", () => {
     expect(events.filter((event) => event === "AgentStateChanged:working")).toHaveLength(1);
     expect(events.filter((event) => event === "TurnOutputObserved")).toHaveLength(3);
     expect(events.filter((event) => event === "AgentStateChanged:done")).toHaveLength(1);
+    expect(answerSnapshots).toEqual(["Ran first", "Ran second", "done"]);
+    expect(answerUpdates).toEqual(["replace", "append", "append"]);
+    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("Ran first\n\nRan second\n\ndone");
 
     await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
   });

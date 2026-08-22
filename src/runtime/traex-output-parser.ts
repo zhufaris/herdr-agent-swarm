@@ -2,7 +2,13 @@ import type { ProgressEventKind, ProgressEventState } from "../domain/run-card-v
 import { stripTerminalControl } from "./output.js";
 
 export interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
-export interface ParsedTraexOutput { answerSnapshot: string; progressEvents: ParsedProgressEvent[]; hasProgressSnapshot: boolean }
+export interface ParsedTraexOutput {
+  answerSnapshot: string;
+  previousAnswerSnapshot: string;
+  answerUpdate: "append" | "replace";
+  progressEvents: ParsedProgressEvent[];
+  hasProgressSnapshot: boolean;
+}
 
 const UNSAFE = /<\/?(?:think|reasoning)>|authorization\s*[:=]|bearer\s+[a-z0-9._-]+|private[ _-]?key|\$(?:token|secret|password)|"(?:command|arguments|tool_call)"\s*:/i;
 const PROGRESS_BLOCK = /\n?<herdr_progress>\s*([\s\S]*?)(?:<\/herdr_progress>|$)\n?/g;
@@ -21,10 +27,18 @@ export function parseTraexOutput(previousRaw: string, currentRaw: string, _works
   const previous = stripTerminalControl(previousRaw).trim();
   const current = stripTerminalControl(currentRaw).trim();
   const rawDelta = current.startsWith(previous) ? current.slice(previous.length) : current;
-  if (UNSAFE.test(rawDelta)) return { answerSnapshot: "", progressEvents: [], hasProgressSnapshot: false };
+  if (UNSAFE.test(rawDelta)) return { answerSnapshot: "", previousAnswerSnapshot: "", answerUpdate: "replace", progressEvents: [], hasProgressSnapshot: false };
+  const previousAnswer = safeAnswer(visibleAnswer(previous));
   const currentAnswer = visibleAnswer(current);
   const progress = structuredProgress(current);
-  return { answerSnapshot: safeAnswer(currentAnswer), progressEvents: progress.steps, hasProgressSnapshot: progress.found };
+  const unchangedPriorAnswer = current.startsWith(previous) && !/^\s*◆\s+/m.test(rawDelta) && currentAnswer === previousAnswer;
+  const answerSnapshot = unchangedPriorAnswer ? "" : safeAnswer(currentAnswer);
+  const appendedBlock = Boolean(previousAnswer) && current.startsWith(previous) && /^\s*◆\s+/m.test(rawDelta);
+  return {
+    answerSnapshot, previousAnswerSnapshot: previousAnswer,
+    answerUpdate: appendedBlock && !isNativeStatusFrame(answerSnapshot) ? "append" : "replace",
+    progressEvents: progress.steps, hasProgressSnapshot: progress.found
+  };
 }
 
 export function extractFinalTraexAnswer(output: string): string { return safeAnswer(visibleAnswer(stripTerminalControl(output))).trim(); }
@@ -66,3 +80,6 @@ function extractAnswer(output: string): string {
 }
 
 function safeAnswer(value: string): string { return !value || UNSAFE.test(value) ? "" : value; }
+function isNativeStatusFrame(value: string): boolean {
+  return /^.*\([^)]*(?:tokens?|esc to)[^)]*\)\s*\n\s*\d+\s+tasks?\s*\(/im.test(value);
+}
