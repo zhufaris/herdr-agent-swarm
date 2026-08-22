@@ -46,6 +46,45 @@ describe("pane/thread lifecycle integration", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("bounds shutdown, cancels only the active waiter, and leaves queued work durable", async () => {
+    const submitted: string[] = [];
+    const warnings: object[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, text, _timeout, _observation, signal) {
+        submitted.push(text);
+        await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry")), { once: true }));
+        return "done";
+      },
+      async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const logger = { info: vi.fn(), warn: (value: object) => warnings.push(value), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(), trace: vi.fn(), silent: vi.fn(), level: "silent", child: () => logger } as unknown as ReturnType<typeof pino>;
+    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, logger, 10);
+    await coordinator.start();
+
+    await coordinator.handleMessage(message(20, "active"));
+    await vi.waitFor(() => expect(submitted).toHaveLength(1));
+    await coordinator.handleMessage(message(21, "queued"));
+    await coordinator.stop();
+
+    expect(submitted).toHaveLength(1);
+    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, failed: 1, queued: 1 });
+    expect(warnings).toContainEqual(expect.objectContaining({ event: "bridge-shutdown-turns-aborted", activeTurns: 1 }));
+    await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("reattaches an orphaned session without replay, then resumes explicitly", async () => {
     const submitted: string[] = [];
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };

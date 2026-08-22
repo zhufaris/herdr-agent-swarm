@@ -58,8 +58,8 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     return pane;
   }
   async startTraex(paneId: string, executable: string): Promise<void> { await this.delegate.startTraex(paneId, executable); }
-  async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: Parameters<HerdrPort["runPrompt"]>[3]): Promise<import("../domain/types.js").AgentState> {
-    return this.delegate.runPrompt(paneId, text, timeoutMs, onObservation);
+  async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: Parameters<HerdrPort["runPrompt"]>[3], signal?: AbortSignal): Promise<import("../domain/types.js").AgentState> {
+    return this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal);
   }
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
     return this.delegate.steerPrompt ? this.delegate.steerPrompt(paneId, text) : "not_working";

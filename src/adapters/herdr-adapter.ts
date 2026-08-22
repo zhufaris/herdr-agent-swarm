@@ -66,11 +66,13 @@ export class HerdrCliAdapter implements HerdrPort {
     paneId: string,
     text: string,
     timeoutMs: number,
-    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
+    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
+    signal?: AbortSignal
   ): Promise<AgentState> {
+    throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
-    await this.submitPromptText(paneId, text, before);
-    return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation);
+    await this.submitPromptText(paneId, text, before, signal);
+    return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation, signal);
   }
 
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
@@ -120,18 +122,19 @@ export class HerdrCliAdapter implements HerdrPort {
     throw new Error(`TraeX did not become ready in pane ${paneId}`);
   }
 
-  private async submitPromptText(paneId: string, text: string, before: string): Promise<void> {
+  private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal): Promise<void> {
     const comparableText = normalizePromptEcho(text);
     const previousOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
     await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
+      throwIfAborted(signal);
       const output = await this.readOutput(paneId, 240);
       if (countOccurrences(normalizePromptEcho(output), comparableText) > previousOccurrences) {
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await abortableDelay(25, signal);
     }
     throw new Error(`Timed out waiting for prompt text in pane ${paneId}`);
   }
@@ -140,7 +143,8 @@ export class HerdrCliAdapter implements HerdrPort {
     paneId: string,
     before: string,
     timeoutMs: number,
-    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
+    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
+    signal?: AbortSignal
   ): Promise<AgentState> {
     const deadline = Date.now() + timeoutMs;
     let observedWorking = false;
@@ -149,6 +153,7 @@ export class HerdrCliAdapter implements HerdrPort {
     let stableIdlePolls = 0;
 
     while (Date.now() < deadline) {
+      throwIfAborted(signal);
       let agentState: AgentState = "unknown";
       try {
         const pane = await this.getPane(paneId);
@@ -172,7 +177,7 @@ export class HerdrCliAdapter implements HerdrPort {
         if (stableIdlePolls >= 1) return "done";
       }
       lastOutput = output;
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await abortableDelay(250, signal);
     }
 
     throw new Error(`Timed out waiting for TraeX turn in pane ${paneId}`);
@@ -240,4 +245,21 @@ function countOccurrences(haystack: string, needle: string): number {
 
 function normalizePromptEcho(value: string): string {
   return value.replace(/[▍\s]+/gu, "");
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry");
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }

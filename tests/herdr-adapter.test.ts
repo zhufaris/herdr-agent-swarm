@@ -78,6 +78,37 @@ describe("Herdr adapter", () => {
     expect(observed.at(-1)?.output).toBe("terminal");
   });
 
+  it("fails promptly when the pane disappears during a turn", async () => {
+    let paneReads = 0;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: paneReads++ === 0 ? "before" : "before\n❯ hello", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") throw new Error("pane not found");
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 60_000))
+      .rejects.toThrow("Herdr pane not found: w1:p1");
+  });
+
+  it("cancels prompt polling without waiting for the turn timeout", async () => {
+    const controller = new AbortController();
+    const outputs = ["before", "before\n❯ hello"];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "working", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+    const turn = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 60_000, undefined, controller.signal);
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(turn).rejects.toThrow("Bridge shutdown interrupted prompt wait");
+  });
+
   it("steers only while structured pane state is working", async () => {
     const calls: string[][] = [];
     let state: "working" | "blocked" = "working";

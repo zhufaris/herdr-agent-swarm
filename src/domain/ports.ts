@@ -25,7 +25,8 @@ export interface HerdrPort {
     paneId: string,
     text: string,
     timeoutMs: number,
-    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>
+    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
+    signal?: AbortSignal
   ): Promise<AgentState>;
   steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;

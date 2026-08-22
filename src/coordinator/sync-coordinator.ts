@@ -19,7 +19,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 
 export class SyncCoordinator {
   private readonly workers = new Map<string, Promise<void>>();
-  private readonly activeRuns = new Map<string, { promptId: string; paneId: string; state: Binding["lastAgentState"] }>();
+  private readonly activeRuns = new Map<string, { promptId: string; paneId: string; state: Binding["lastAgentState"]; abortController: AbortController }>();
   private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly observedAgentStates = new Map<string, Binding["lastAgentState"]>();
   private readonly observedTerminalOutputs = new Map<string, string>();
@@ -36,7 +36,8 @@ export class SyncCoordinator {
     private readonly lark: LarkPort,
     private readonly bus: BridgeEventBus,
     private readonly channelPublisher: LarkChannelPublisher,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly shutdownGraceMs = 30_000
   ) {}
 
   async start(): Promise<void> {
@@ -94,7 +95,15 @@ export class SyncCoordinator {
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     await this.lark.stop();
     this.stopInboundSubscription?.();
-    await Promise.allSettled([...this.workers.values(), ...this.steeringWorkers.values(), ...this.activeReconciliations]);
+    const pending = [...this.workers.values(), ...this.steeringWorkers.values(), ...this.activeReconciliations];
+    if (!pending.length) return;
+    const settled = Promise.allSettled(pending);
+    const graceful = await settlesWithin(settled, this.shutdownGraceMs);
+    if (!graceful) {
+      this.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.activeRuns.size, graceMs: this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
+      for (const run of this.activeRuns.values()) run.abortController.abort();
+      await settled;
+    }
   }
 
   async handleMessage(message: IncomingLarkMessage): Promise<void> {
@@ -722,12 +731,13 @@ export class SyncCoordinator {
     let binding = this.store.listBindings().find((item) => item.id === bindingId);
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
-    for (let prompt = this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.store.claimNextReadyPrompt(bindingId)) {
+    for (let prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId)) {
       const queueDepth = this.store.countPendingPrompts(bindingId);
       const startedAt = Date.now();
       try {
         await this.refreshQueuePositions(bindingId);
-        this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "working" });
+        const abortController = new AbortController();
+        this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "working", abortController });
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
         this.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
         const before = await this.herdr.readOutput(paneId, 240);
@@ -750,7 +760,7 @@ export class SyncCoordinator {
             });
             if (observedState === "blocked") this.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding?.workspaceId, paneId, agentState: observedState, queueDepth: this.store.countPendingPrompts(bindingId), outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
-        });
+        }, abortController.signal);
         const stateBeforeReturn = binding.lastAgentState;
         const activeRun = this.activeRuns.get(bindingId);
         if (activeRun?.promptId === prompt.id) activeRun.state = state;
@@ -947,6 +957,14 @@ export class SyncCoordinator {
     const event = { eventId: randomUUID(), bindingId, type, origin, occurredAt: new Date().toISOString(), payload } as BridgeEvent;
     await this.bus.publish(event);
   }
+}
+
+function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref();
+    void promise.then(() => { clearTimeout(timer); resolve(true); });
+  });
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

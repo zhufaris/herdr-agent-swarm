@@ -45,4 +45,20 @@ describe("bridge runtime shutdown", () => {
     expect(calls).toEqual(["coordinator", "projector", "publisher", "health", "lease", "store"]);
     expect(errors).toEqual(["coordinator"]);
   });
+
+  it("still closes later resources after the coordinator performs bounded cancellation", async () => {
+    const calls: string[] = [];
+    const runtime = new BridgeRuntimeShutdown({
+      coordinator: { async stop() { calls.push("coordinator:abort"); } },
+      projector: { async stop() { calls.push("projector"); } },
+      publisher: { async stop() { calls.push("publisher"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { close() { calls.push("store"); } },
+      logger: { info() {}, error() {} }
+    });
+
+    await runtime.shutdown("SIGTERM");
+    expect(calls).toEqual(["coordinator:abort", "projector", "publisher", "health", "lease", "store"]);
+  });
 });
