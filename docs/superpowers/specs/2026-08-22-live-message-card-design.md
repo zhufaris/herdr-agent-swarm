@@ -13,6 +13,8 @@ three newest structured activity items and one latest concise message. The
 message is derived from the newest non-empty paragraph in the visible TraeX
 answer. If no visible answer exists, it falls back to the newest structured
 activity item. It never renders the full answer or the complete task plan.
+Tool activity uses a consistent `🛠️` prefix so it is visually distinct from
+ordinary prose and plan-state icons.
 
 The Request card remains the durable request-and-plan view. It shows the
 original request, structured execution plan, phase-aware status, warnings, and

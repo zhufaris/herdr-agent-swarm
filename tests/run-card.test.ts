@@ -50,7 +50,7 @@ describe("run card", () => {
     expect(serialized).not.toContain('**WORKSPACE**\n`wG`');
   });
 
-  it("shows only the newest compact answer preview on the group project entry card", () => {
+  it("shows the newest compact answer preview and recent activity on the group project entry card", () => {
     const answer = `old answer ${"x".repeat(2_700)} newest conclusion`;
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "datasage / Fix login", spaceName: "datasage_semantic_knowledge", paneId: "wD:p9",
@@ -66,8 +66,40 @@ describe("run card", () => {
     expect(serialized).toContain("最新消息");
     expect(serialized).toContain("newest conclusion");
     expect(serialized).not.toContain("old answer");
-    expect(serialized).not.toContain("changed secret.ts");
-    expect(serialized).not.toContain("执行进度");
+    expect(serialized).toContain("🛠️ changed secret.ts");
+    expect(serialized).toContain("最近动态");
+  });
+
+  it("shows the three newest tool activities and the latest answer paragraph on the project card", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
+      answer: "已检查项目配置。\n\n正在运行聚焦测试。",
+      recentProgress: [
+        { key: "read:old", kind: "read", label: "读取旧配置", state: "done", occurredAt: "1" },
+        { key: "edit:new", kind: "edit", label: "修改卡片渲染", state: "done", occurredAt: "2" },
+        { key: "test:new", kind: "test", label: "运行聚焦测试", state: "active", occurredAt: "3" },
+        { key: "search:new", kind: "search", label: "检查调用位置", state: "done", occurredAt: "4" }
+      ]
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("🛠️ 修改卡片渲染");
+    expect(serialized).toContain("🛠️ 运行聚焦测试");
+    expect(serialized).toContain("🛠️ 检查调用位置");
+    expect(serialized).not.toContain("读取旧配置");
+    expect(serialized).toContain("正在运行聚焦测试。");
+    expect(serialized).not.toContain("已检查项目配置。");
+  });
+
+  it("falls back to the newest formatted activity when the project has no answer prose", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", answer: null,
+      recentProgress: [{ key: "test:focused", kind: "test", label: "正在运行聚焦测试", state: "active", occurredAt: "now" }]
+    });
+    const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**最新消息**"))?.content;
+
+    expect(latestMessage).toContain("🛠️ 正在运行聚焦测试");
   });
 
   it("prioritizes actionable notices over answer previews", () => {

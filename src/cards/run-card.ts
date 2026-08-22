@@ -115,9 +115,12 @@ export function renderRunCard(input: TopicViewState): object {
 
 export function renderProjectEntryCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
-  const preview = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned"
+  const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned";
+  const recentProgress = (input.recentProgress ?? []).slice(-3);
+  const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
+  const preview = actionable
     ? input.notice
-    : input.answer?.trim();
+    : latestParagraph(visibleAnswer) ?? (recentProgress.at(-1) ? projectProgressLine(recentProgress.at(-1)!) : null);
   const elements: object[] = [
     {
       tag: "column_set",
@@ -131,6 +134,9 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     { tag: "hr" },
     { tag: "markdown", content: `**项目任务**  ${escapeMarkdown(input.title)}` }
   ];
+  if (recentProgress.length) {
+    elements.push({ tag: "markdown", content: `**最近动态**\n${recentProgress.map(projectProgressLine).join("\n")}` });
+  }
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(preview), 2_500)}` });
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
@@ -299,6 +305,13 @@ function stripNativeTraexStatus(source: string): string {
   let end = taskCount + 1;
   while (end < lines.length && /^(?:\s*[■◻✔□✓✕✖▪▫]\s+|\s*\d+[.)]\s+)/.test(lines[end]!)) end += 1;
   return [...lines.slice(0, start), ...lines.slice(end)].join("\n").replace(/^\s+|\s+$/g, "");
+}
+function latestParagraph(source: string): string | null {
+  const paragraphs = source.split(/\n\s*\n/).map((value) => value.trim()).filter(Boolean);
+  return paragraphs.at(-1) ?? null;
+}
+function projectProgressLine(event: RunCardView["progressEvents"][number]): string {
+  return event.kind === "step" ? progressLine(event) : `🛠️ ${event.label}`;
 }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${event.label}`;

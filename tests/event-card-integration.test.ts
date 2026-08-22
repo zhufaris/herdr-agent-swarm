@@ -1,5 +1,5 @@
 import pino from "pino";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { CardProjector } from "../src/events/card-projector.js";
@@ -71,7 +71,7 @@ describe("event-driven card projection", () => {
     expect(JSON.stringify(latestPrimary.card)).toContain("等待用户处理");
     expect(JSON.stringify(latestPrimary.card)).toContain("TraeX 需要人工审批");
     expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
-    expect(JSON.stringify(latestPrimary.card)).not.toContain("更新主卡片");
+    expect(JSON.stringify(latestPrimary.card)).toContain("🛠️ 更新主卡片");
     expect(updates.some((update) => update.messageId === "request-task-card" && JSON.stringify(update.card).includes("等待用户处理") && !JSON.stringify(update.card).includes("live answer"))).toBe(true);
     expect(updates.some((update) => {
       if (update.messageId !== "request-answer-card") return false;
@@ -80,6 +80,44 @@ describe("event-driven card projection", () => {
     })).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
+  });
+
+  it("updates the same answer card with the accumulated live message window", async () => {
+    vi.useFakeTimers();
+    const updates: Array<{ messageId: string; card: object }> = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
+      async replyText() { return { messageId: "text1" }; },
+      async replyCard() { return { messageId: "request-card" }; },
+      async updateCard(messageId, card) { updates.push({ messageId, card }); }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "primary-card" });
+    const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const stopPublisher = publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false }));
+    const stopProjector = projector.start();
+
+    await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
+    await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: "第一条中间消息。", progressEvents: [] } });
+    await bus.publish({ eventId: "second", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", answerSnapshot: "第一条中间消息。\n\n第二条中间消息。", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await publisher.drain();
+
+    const answerUpdates = updates.filter((update) => update.messageId === "request-answer-card");
+    expect(answerUpdates.length).toBeGreaterThan(0);
+    const latest = JSON.stringify(answerUpdates.at(-1)!.card);
+    expect(latest).toContain("第一条中间消息。");
+    expect(latest).toContain("第二条中间消息。");
+    expect(new Set(answerUpdates.map((update) => update.messageId))).toEqual(new Set(["request-answer-card"]));
+
+    stopProjector(); stopPublisher(); store.close(); vi.useRealTimers();
   });
 
   it("waits for an in-flight card update before stopping", async () => {
