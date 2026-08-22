@@ -25,16 +25,27 @@ independent group-level entry card and topic.
 
 ## Entry-card content and updates
 
-The project entry card uses the existing topic-view state and displays only:
+The project entry card uses the existing topic-view state and displays:
 
 - project/space name;
 - Herdr pane ID;
 - lifecycle state; and
-- current queue depth.
+- current queue depth; and
+- a compact preview of the newest message or actionable state.
 
-It deliberately omits request text, live terminal output, and final answers.
-Those remain in request cards inside the topic. This keeps the group timeline
-compact while preserving a stable project entry point.
+The preview keeps the newest 500 characters of the current answer. Starting a
+new request clears the previous preview and shows the current processing state.
+After completion it retains the tail of the final answer. In blocked and error
+states, the actionable notice or error takes precedence over answer text. Full
+request text, progress history, and answers remain in request cards inside the
+topic. This keeps the group timeline compact while preserving a stable project
+entry point and making the latest state visible.
+
+Request cards keep the beginning of the original request, but their live and
+final answers retain the newest 12,000 characters. Their progress region keeps
+the newest bounded entries in chronological order and reports how many older
+entries were omitted. Static selector, receipt, and help cards do not use a
+rolling window.
 
 The entry card updates only on meaningful lifecycle changes: provisioning,
 idle/ready, running, blocked, error, archived, orphaned, and queue-depth
@@ -77,9 +88,12 @@ Tests cover:
 1. `/herdr new` from the group and from an existing topic both create a new
    group root card after project selection.
 2. The returned group message ID becomes all three binding message IDs.
-3. The entry card contains project, pane, status, and queue but no detailed
-   answer or prompt text.
+3. The entry card contains project, pane, status, queue, and at most 500
+   characters from the newest answer, while omitting prompt text and progress
+   history.
 4. Duplicate callbacks do not create duplicate panes or entry cards.
 5. Group-card creation failure is visible and leaves no routable partial topic.
-6. Existing Herdr discovery, prompt routing, card projection, and authorization
+6. Request cards preserve the beginning of the request and the newest 12,000
+   answer characters, including after completion.
+7. Existing Herdr discovery, prompt routing, card projection, and authorization
    tests continue to pass.
