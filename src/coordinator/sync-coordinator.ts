@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
+import { renderAttachStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
 import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
@@ -790,7 +790,7 @@ export class SyncCoordinator {
     const existing = this.store.findBindingByPane(pane.paneId);
     if (existing) {
       if (existing.chatId === this.config.lark.chatId && existing.projectId === project.id && existing.state === "active") {
-        await this.reject(message, `Pane ${pane.paneId} 已经连接到空间 ${spaceName}，无需重复连接。`);
+        await this.publishAttachSuccess(message, existing, spaceName, true);
         this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "already_attached" });
         return true;
       }
@@ -817,14 +817,26 @@ export class SyncCoordinator {
       binding = await this.createSelectedProject(selection, project, false);
       this.store.completeProjectSelection(selection.id, binding.id);
       if (selection.selectorMessageId) await this.publishSelectionSuccess(selection.id, selection.selectorMessageId, project, binding);
+      await this.publishAttachSuccess(message, binding, spaceName, false);
       this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: binding.id, outcome: "recovered_provisioning" });
       return true;
     }
 
     await this.createFromHerdr(pane, project);
     const binding = this.store.findBindingByPane(pane.paneId);
+    if (binding) await this.publishAttachSuccess(message, binding, spaceName, false);
     this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: binding?.id ?? pane.paneId, outcome: "success" });
     return true;
+  }
+
+  private async publishAttachSuccess(message: IncomingLarkMessage, binding: Binding, spaceName: string, alreadyAttached: boolean): Promise<void> {
+    if (!binding.paneId) return;
+    const topicUrl = binding.rootMessageId ? larkTopicUrl(binding.chatId, binding.rootMessageId) : undefined;
+    await this.channelPublisher.enqueueCard(
+      message.rootMessageId ?? message.messageId,
+      `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`,
+      renderAttachStatusCard({ spaceName, paneId: binding.paneId, ...(topicUrl ? { topicUrl } : {}), alreadyAttached })
+    );
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string) {

@@ -65,7 +65,9 @@ pane。空 Space 仍会显示；配置目录之外的 pane 会归入对应 works
 `space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID，
 也可以是该 Space 中唯一的精确 Pane 名称；名称重名时会返回候选 ID。Bridge 只会在该项目的
 Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
-不会创建第二个绑定，而会返回已有连接信息。未知或重复的 space、其他 workspace
+不会创建第二个绑定，而会返回已有连接信息。首次连接成功和重复连接的结果卡都会提供
+“打开项目话题”按钮；如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题链接。
+未知或重复的 space、其他 workspace
 中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。
 
 ### `/herdr status`

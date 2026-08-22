@@ -53,6 +53,21 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
+export function renderAttachStatusCard(input: { spaceName: string; paneId: string; topicUrl?: string; alreadyAttached?: boolean }): object {
+  const title = input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
+  const elements: object[] = [{
+    tag: "markdown",
+    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。"}`
+  }];
+  if (input.topicUrl) elements.push({ tag: "button", text: { tag: "plain_text", content: "打开项目话题" }, type: "primary", url: input.topicUrl });
+  return {
+    schema: "2.0",
+    config: { update_multi: true, summary: { content: title } },
+    header: { title: { tag: "plain_text", content: `✅ ${title}` }, template: "green" },
+    body: { elements }
+  };
+}
+
 export function renderRunCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
   const elements: object[] = [

@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
+import { renderAttachStatusCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("run card", () => {
+  it("renders attach success without a navigation button when no topic URL exists", () => {
+    const card = JSON.stringify(renderAttachStatusCard({ spaceName: "datasage_semantic_knowledge", paneId: "w5:p3G" }));
+
+    expect(card).toContain("Pane 连接成功");
+    expect(card).toContain("datasage_semantic_knowledge");
+    expect(card).toContain("w5:p3G");
+    expect(card).not.toContain("打开项目话题");
+  });
+
   it("documents how to attach an existing pane", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/herdr attach <space> <pane>");

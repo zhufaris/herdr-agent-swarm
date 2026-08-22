@@ -12,10 +12,11 @@ describe("attach existing pane command", () => {
   it("resolves a unique exact pane label and stores the stable pane ID", async () => {
     let exposePane = false;
     const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    const replyCards: object[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, createTopic,
       async replyText() { return { messageId: "text-1" }; },
-      async replyCard() { return { messageId: "reply-1" }; }, async updateCard() {}
+      async replyCard(_root, card) { replyCards.push(card); return { messageId: "reply-1" }; }, async updateCard() {}
     };
     const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/different/cwd", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const herdr: HerdrPort = {
@@ -35,6 +36,8 @@ describe("attach existing pane command", () => {
 
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active" });
     expect(createTopic).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(replyCards.at(-1))).toContain("打开项目话题");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("openMessageId=root-attached");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -80,6 +83,9 @@ describe("attach existing pane command", () => {
     expect(store.listBindings()).toHaveLength(1);
     expect(JSON.stringify(replyCards.at(-1))).toContain("已经连接");
     expect(JSON.stringify(replyCards.at(-1))).toContain("w5:p3G");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("打开项目话题");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("openMessageId=root-attached");
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ statusMessageId: "root-attached" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -153,6 +159,28 @@ describe("attach existing pane command", () => {
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ state: "active" });
     expect(store.findBindingByPane("w5:p4H")).toBeNull();
     expect(createTopic).toHaveBeenCalledTimes(1);
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("does not expose another group's topic link", async () => {
+    let exposePane = false;
+    const cards: object[] = [];
+    const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/different/cwd", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "other-binding", projectId: "analytics", workspaceId: "w5", chatId: "other-chat", topicId: "secret-topic", rootMessageId: "secret-root", title: "secret" });
+    store.updateBinding("other-binding", { paneId: "w5:p3G", state: "active" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePane = true;
+
+    await coordinator.handleMessage(command(1, "tidy"));
+
+    const response = JSON.stringify(cards.at(-1));
+    expect(response).toContain("已绑定到其他会话");
+    expect(response).not.toContain("打开项目话题");
+    expect(response).not.toContain("secret-root");
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
