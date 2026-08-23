@@ -249,6 +249,36 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
   });
 
+  it("adds streaming run-card columns before rebuilding a legacy outbox", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-streaming-migration-order-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = undefined;
+
+    const database = new DatabaseSync(path);
+    database.exec(`
+      DROP VIEW run_cards_view;
+      ALTER TABLE run_cards DROP COLUMN answer_page_start;
+      ALTER TABLE run_cards DROP COLUMN answer_page_index;
+      ALTER TABLE run_cards DROP COLUMN answer_sequence;
+      ALTER TABLE run_cards DROP COLUMN answer_element_id;
+      ALTER TABLE run_cards DROP COLUMN answer_card_id;
+      CREATE VIEW run_cards_view AS SELECT *, json_object('answerCardId', answer_card_id) AS state_json FROM run_cards;
+      DROP TABLE outbound_replies;
+      CREATE TABLE outbound_replies(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT, prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT,
+        root_message_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update')), payload TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT,
+        next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+    `);
+    database.close();
+
+    expect(() => { store = new SqliteBindingStore(path); }).not.toThrow();
+    expect(store!.loadRunCard("missing")).toBeNull();
+  });
+
   it("does not duplicate the single answer-card create operation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

@@ -781,12 +781,12 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureRunCardSpaceName();
     this.ensureDualRequestCardColumns();
     this.ensureRunCardAnswerState();
+    this.ensureStreamingCardColumns();
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
     this.ensurePromptCancelledState();
     this.ensureOutboundDismissedState();
-    this.ensureStreamingCardColumns();
   }
 
   private ensureOutboundDismissedState(): void {
