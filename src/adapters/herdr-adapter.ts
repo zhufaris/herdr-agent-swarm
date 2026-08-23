@@ -89,6 +89,7 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async startTraex(paneId: string, executable: string): Promise<void> {
+    if (await this.isTraexReady(paneId)) return;
     await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", "auto"], this.commandTimeoutMs);
     await this.waitUntilTraex(paneId);
   }
@@ -186,11 +187,25 @@ export class HerdrCliAdapter implements HerdrPort {
   private async waitUntilTraex(paneId: string): Promise<void> {
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
-      const pane = await this.getPane(paneId);
-      if (pane?.foregroundExecutables.includes("traex")) return;
+      if (await this.isTraexReady(paneId)) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new Error(`TraeX did not become ready in pane ${paneId}`);
+  }
+
+  private async isTraexReady(paneId: string): Promise<boolean> {
+    const pane = await this.getPane(paneId);
+    if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
+    if (pane.foregroundExecutables.includes("traex")) return true;
+    try {
+      const result = await this.json(["pane", "process-info", "--pane", paneId]);
+      const processInfo = z.object({ process_info: processSchema }).parse(result).process_info;
+      return processInfo.foreground_processes.some((process) =>
+        [process.name, process.argv?.[0]].some((value) => value?.split("/").at(-1) === "traex")
+      );
+    } catch {
+      return false;
+    }
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal): Promise<void> {

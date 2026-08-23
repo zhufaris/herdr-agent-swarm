@@ -104,6 +104,63 @@ describe("Herdr adapter", () => {
     expect(panes[0]?.foregroundExecutables).toContain("traex");
   });
 
+  it("does not restart TraeX when snapshot is unknown but the pane process is already ready", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "api" && args[1] === "snapshot") {
+          return json({ snapshot: {
+            panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }],
+            agents: []
+          } });
+        }
+        if (args[0] === "pane" && args[1] === "process-info") {
+          return json({ process_info: { foreground_processes: [{ name: "traex", argv: ["/home/user/.local/bin/traex"] }] } });
+        }
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "traex"))
+      .resolves.toBeUndefined();
+    expect(calls).toEqual([
+      ["api", "snapshot"],
+      ["pane", "process-info", "--pane", "w1:p1"]
+    ]);
+  });
+
+  it("detects TraeX through process inspection after starting an unknown snapshot pane", async () => {
+    const calls: string[][] = [];
+    let started = false;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "api" && args[1] === "snapshot") {
+          return json({ snapshot: {
+            panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }],
+            agents: []
+          } });
+        }
+        if (args[0] === "pane" && args[1] === "process-info") {
+          return json({ process_info: { foreground_processes: started ? [{ name: "traex" }] : [] } });
+        }
+        if (args[0] === "pane" && args[1] === "run") {
+          started = true;
+          return { stdout: "", stderr: "" };
+        }
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "/usr/local/bin/traex"))
+      .resolves.toBeUndefined();
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "run")).toEqual([
+      ["pane", "run", "w1:p1", "/usr/local/bin/traex", "--permission-mode", "auto"]
+    ]);
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "process-info")).toHaveLength(2);
+  });
+
   it("injects a prompt into TraeX and waits for its terminal turn to finish", async () => {
     const calls: string[][] = [];
     const outputs = ["before", "before\n❯ hello", "✧ Working", "answer", "answer", "answer"];
