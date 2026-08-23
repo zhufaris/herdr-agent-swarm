@@ -4,6 +4,7 @@ import { extractFinalTraexAnswer, inferTraexAgentState, isTraexComposerReady, pa
 describe("TraeX output parser", () => {
   it("recognizes the visible TraeX composer without mistaking active output for readiness", () => {
     expect(isTraexComposerReady("◆ completed\n────────\n❯ Use /skills to list available skills")).toBe(true);
+    expect(isTraexComposerReady("header\n────────\n❯ Write tests for @filename\n────────\nGPT-5.6-Sol")).toBe(true);
     expect(isTraexComposerReady("◆ Working…\n2 tasks (1 in progress)\n• editing code")).toBe(false);
   });
 

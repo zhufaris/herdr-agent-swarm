@@ -191,6 +191,27 @@ describe("Herdr adapter", () => {
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });
 
+  it("uses the visible terminal when a new TraeX TUI has no recent scrollback", async () => {
+    const sources: string[] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "process-info") {
+          return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        }
+        if (args[0] === "pane" && args[1] === "read") {
+          const source = args[args.indexOf("--source") + 1]!;
+          sources.push(source);
+          return { stdout: source === "visible" ? "────────\n❯ Write tests for @filename\n────────" : "", stderr: "" };
+        }
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "traex"))
+      .resolves.toBeUndefined();
+    expect(sources).toEqual(["recent-unwrapped", "visible"]);
+  });
+
   it("detects TraeX through process inspection after starting an unknown snapshot pane", async () => {
     const calls: string[][] = [];
     let started = false;

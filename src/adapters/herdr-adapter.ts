@@ -69,7 +69,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const foregroundExecutables = await this.foregroundExecutables(paneId);
     const observed = { ...pane, foregroundExecutables };
     if (!foregroundExecutables.includes("traex")) return observed;
-    try { return { ...observed, agentState: inferTraexAgentState(await this.readOutput(paneId, 80)) }; }
+    try { return { ...observed, agentState: await this.inferTraexPaneState(paneId) }; }
     catch { return observed; }
   }
 
@@ -155,8 +155,12 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async readOutput(paneId: string, lines: number): Promise<string> {
+    return this.readOutputSource(paneId, lines, "recent-unwrapped");
+  }
+
+  private async readOutputSource(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
     const { stdout } = await this.runner.run(this.executable, [
-      "pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines), "--format", "text"
+      "pane", "read", paneId, "--source", source, "--lines", String(lines), "--format", "text"
     ], this.commandTimeoutMs);
     return unwrapText(stdout);
   }
@@ -231,8 +235,14 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private async isTraexComposerReady(paneId: string): Promise<boolean> {
     if (!await this.isTraexProcessRunning(paneId)) return false;
-    try { return isTraexComposerReady(await this.readOutput(paneId, 80)); }
+    try { return await this.inferTraexPaneState(paneId) === "idle"; }
     catch { return false; }
+  }
+
+  private async inferTraexPaneState(paneId: string): Promise<AgentState> {
+    const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
+    if (recentState !== "unknown") return recentState;
+    return inferTraexAgentState(await this.readOutputSource(paneId, 80, "visible"));
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {

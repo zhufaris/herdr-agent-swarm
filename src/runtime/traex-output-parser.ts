@@ -24,7 +24,7 @@ export interface ParsedTerminalStreamDelta { delta: string; snapshot: string; up
 /** True when TraeX is visibly waiting at its composer despite missing structured agent state. */
 export function isTraexComposerReady(output: string): boolean {
   const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
-  return lines.slice(-8).some((line) => /^\s*[❯›]\s*(?:Use \/skills\b.*)?$/u.test(line));
+  return lines.slice(-8).some((line) => /^\s*[❯›](?:\s+\S.*)?$/u.test(line));
 }
 
 /** Infer state only from strong markers near the live end of a TraeX terminal. */
