@@ -1,4 +1,7 @@
-# Terminal output window
+# Historical: Terminal output window
+
+> Superseded by the current Answer pagination and render-safe fence behavior.
+> This record is retained for decision history and must not be treated as current.
 
 ## Goal
 

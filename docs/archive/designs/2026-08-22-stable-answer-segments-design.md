@@ -1,4 +1,7 @@
-# Stable Answer Segments Design
+# Historical: Stable Answer Segments Design
+
+> Superseded by the current terminal-stream and continuation-page behavior. This
+> record is retained for decision history and must not be treated as current.
 
 ## Goal
 

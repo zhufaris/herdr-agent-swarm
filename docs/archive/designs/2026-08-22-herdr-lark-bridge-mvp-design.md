@@ -1,4 +1,8 @@
-# Herdr to Lark Bridge MVP Design
+# Historical: Herdr to Lark Bridge MVP Design
+
+> Superseded by the current architecture and terminal-streaming documents. This
+> record is retained for decision history and must not be treated as the current
+> runtime contract.
 
 ## 1. Goal
 

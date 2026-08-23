@@ -3,7 +3,7 @@
 ## Objective
 
 Implement the approved request-scoped live-card design in
-`docs/superpowers/specs/2026-08-22-request-live-card-design.md`. Every accepted
+`docs/archive/designs/2026-08-22-request-live-card-design.md`. Every accepted
 ordinary prompt gets one CardKit message that is updated in place from queued
 through completion or failure. The card streams filtered answer content and a
 separate simplified progress trail, with ordinary patches coalesced to at most

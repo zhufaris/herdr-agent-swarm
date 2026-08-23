@@ -1,4 +1,7 @@
-# Request-scoped live Lark cards
+# Historical: Request-scoped live Lark cards
+
+> Superseded by the Answer CardKit streaming model. This record is retained for
+> decision history and must not be treated as the current card contract.
 
 ## Goal
 

@@ -55,10 +55,11 @@ ANSI sequences, cursor-control instructions, duplicated terminal redraws, input
 echoes, decorative separators, and bridge protocol blocks are not displayed.
 Carriage-return redraws are normalized into the latest visible line rather than
 appended as repeated frames. Snapshot overlap is removed before persistence, so
-polling the same screen twice is a no-op. If the terminal window rolls over or
-is rewritten and a safe overlap cannot be established, the bridge appends a
-short boundary marker and the new visible tail instead of replacing previously
-delivered text.
+polling the same screen twice is a no-op. If the terminal window is redrawn and
+no safe overlap can be established, the bridge replaces the active transient
+terminal view with the new safe screen (`replace-all`). This avoids appending a
+complete redraw to the previous screen. A later final TraeX answer remains
+terminal-authoritative for the completed Answer.
 
 Output is rendered as readable Markdown. Tool and shell material uses bounded
 code blocks where doing so does not break the stream. Individual observations
@@ -112,13 +113,12 @@ hidden.
 
 ## Streaming state and delivery
 
-The run-card projection persists the sanitized cumulative Answer stream and the
-last normalized Herdr snapshot. Answer delivery is represented by ordered page
-records. Each page stores its page index, `card_id`, message ID, fixed
-`element_id`, monotonically increasing CardKit `sequence`, source start offset,
-delivered offset, and lifecycle state (`active`, `freezing`, or `frozen`). This
-state makes rollover, retry, and restart deterministic. Exactly one page may be
-active for a prompt.
+The run-card projection persists the sanitized Answer and the active page's
+message ID, `card_id`, fixed `element_id`, page index, source start offset, and
+monotonically increasing CardKit `sequence`. Exactly one page is active for a
+prompt. Durable outbox records retain the creation and delivery history for
+earlier pages. A dedicated per-page lifecycle table is future work; this design
+does not claim that frozen-page metadata is independently materialized today.
 
 Although the bridge computes and stores only new deltas, Feishu's content API
 accepts the full current text for the element. Each update therefore sends the
@@ -132,7 +132,9 @@ The durable outbox gains a streaming-element operation distinct from full-card
 updates. Pending stream operations for the same card may be coalesced to the
 newest cumulative snapshot, but an in-flight operation must finish before the
 next sequence is sent. Failures retain the newest desired snapshot for retry.
-Answer-stream delivery for one request cannot block unrelated bindings.
+Answer-stream delivery preserves ordering for one CardKit target. The current
+publisher drains the durable outbox serially, so a hung Lark request can delay
+unrelated targets; target-lane concurrency with request timeouts is future work.
 
 When the active page reaches its safe limit, the bridge splits at a Markdown-safe
 newline boundary, flushes and finishes that page, marks it frozen, creates the

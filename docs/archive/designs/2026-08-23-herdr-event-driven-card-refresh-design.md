@@ -1,4 +1,7 @@
-# Herdr Event-Driven Card Refresh Design
+# Historical: Herdr Event-Driven Card Refresh Design
+
+> Superseded by the current reconciliation and CardKit Answer streaming model.
+> This record is retained for decision history and must not be treated as current.
 
 ## Goal
 

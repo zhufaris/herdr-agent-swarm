@@ -4,33 +4,32 @@ Herdr Lark Bridge connects a Lark topic to a TraeX process running in a real
 Herdr pane. People can submit work from Lark while developers observe or take
 over the same terminal session in Herdr.
 
-Each ordinary Lark message gets its own CardKit 2.0 run card. The bridge updates
-that card in place from queued to running, blocked, completed, or failed. During
-execution it shows filtered answer text and a simplified activity trail such as
-file reads, edits, and test runs. It does not post separate acknowledgement or
-final-answer text messages.
+Each ordinary Lark message gets an Answer CardKit entity. The bridge streams safe
+terminal output into its fixed Markdown element as the request moves from queued
+to running, blocked, completed, or failed. Large answers continue in a new
+continuation card without rewriting the frozen earlier card. It does not post
+separate acknowledgement or final-answer text messages.
 
 ## How it works
 
 ```text
 Lark message -> durable turn or steering job -> Herdr pane -> TraeX
      |                                  |
-     +-> request card <--- safe output parser + lifecycle events
+     +-> SQLite workflow state <--- authoritative Herdr observation
               |
-              +-> SQLite snapshot -> 800 ms coalescer -> Lark card patch
+              +-> durable Lark outbox -> CardKit Answer stream
 ```
 
-SQLite stores topic-to-pane bindings, FIFO prompt jobs, request-card snapshots,
-deduplication keys, a durable Lark outbox, and audit records. Runtime events stay
-inside the Node.js process. An interrupted running prompt is not replayed after a
+SQLite stores topic-to-pane bindings, FIFO prompt jobs, run-card projections,
+deduplication keys, a durable Lark outbox, and audit records. Herdr snapshots
+are authoritative for pane and agent state; plugin events only wake the bridge
+for reconciliation. An interrupted running prompt is not replayed after a
 restart; it remains detached while the bridge observes the existing Herdr turn.
 Prompts that have not started remain queued.
 
-The card interaction follows the useful patterns from
-[`lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge):
-compact status, in-place updates, visible progress, and the final response in the
-primary content area. This bridge deliberately omits remote stop and approval
-actions. High-risk approval stays in Herdr.
+This bridge deliberately omits remote stop and approval actions. High-risk
+approval stays in Herdr. For the reliability model, recovery path, and module
+ownership, see [Architecture](docs/architecture.md).
 
 ## Prerequisites
 
@@ -364,12 +363,13 @@ npm run build
 Then perform a Lark smoke test:
 
 1. Send two prompts in one bound topic.
-2. Confirm that two distinct cards appear and no acknowledgement text is posted.
-3. Confirm that the first card updates in place while TraeX works.
-4. Confirm that its progress area stays expanded and contains only simplified
-   activity.
-5. Confirm that completion updates the same card with the final answer and does
-   not post another text message.
+2. Confirm that two distinct Answer cards appear and no acknowledgement text is
+   posted.
+3. Confirm that the first Answer card streams safe terminal output while TraeX
+   works.
+4. Confirm that an approval request remains actionable only in Herdr.
+5. Confirm that completion flushes the Answer card and does not post another
+   text message.
 6. Confirm that the second card advances from queued to running.
 
 ## Troubleshooting
@@ -389,9 +389,9 @@ Then perform a Lark smoke test:
   Herdr turn and does not replay the prompt because doing so could repeat side
   effects. If completion cannot be observed reliably, inspect the pane before
   deciding whether a fresh request is safe.
-- Updates are delayed during high output volume: ordinary card changes are
-  coalesced to protect Lark from update storms; blocked, completed, and failed
-  states flush immediately.
+- Updates are delayed during high output volume: streaming content is delivered
+  through the durable outbox; terminal states flush the active Answer page before
+  CardKit streaming is finished.
 
-The request-card behavior and recovery contract are specified in
-[`docs/superpowers/specs/2026-08-22-request-live-card-design.md`](docs/superpowers/specs/2026-08-22-request-live-card-design.md).
+For module ownership, fact sources, recovery, and Answer pagination, see
+[Architecture](docs/architecture.md).

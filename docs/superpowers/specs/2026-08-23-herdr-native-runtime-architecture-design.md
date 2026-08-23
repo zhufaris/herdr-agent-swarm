@@ -97,17 +97,19 @@ against missed event hints.
 
 ### 2.5 Herdr command execution
 
-Normal agent operations use Herdr's agent facade:
+Normal turn submission uses Herdr's agent facade, while runtime start retains a
+supported pane command in the current implementation:
 
-- start TraeX through `herdr agent start`;
-- submit a new turn through `herdr agent prompt`;
+- start TraeX through `herdr pane run <pane> <traex> --permission-mode auto`;
+- submit a new turn through `herdr agent prompt` when available;
 - wait for lifecycle changes through Herdr agent state and plugin events; and
 - read terminal output through the supported Herdr read interface.
 
-Raw pane text and key injection remain an internal compatibility adapter only
-for operations without an equivalent agent command, including active-turn
-steering and TraeX-local slash commands. This fallback is explicit in logs and
-is not exposed as a separate domain interface.
+If `herdr agent prompt` reports that the agent is not ready or not found, the
+adapter uses a bounded pane text-and-Enter fallback. Raw pane text and key
+injection are also required for active-turn steering and TraeX-local slash
+commands. These fallbacks remain internal to the Herdr adapter and are not
+exposed as a separate domain interface.
 
 ## 3. Module Shape
 
