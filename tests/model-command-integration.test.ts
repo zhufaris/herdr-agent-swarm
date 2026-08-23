@@ -106,7 +106,7 @@ async function setup(
   const pane = options.pane ?? { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
     async assertWorkspace() {}, listPanes: options.listPanes ?? (async () => [pane]), async getPane() { return pane; },
-    ...(options.observeRuntime ? { observeRuntime: options.observeRuntime } : {}),
+    observeRuntime: options.observeRuntime ?? (async () => ({ pane, state: pane.agentState, traexProcess: pane.foregroundExecutables.includes("traex"), composerReady: pane.agentState === "idle", evidenceSource: "structured" })),
     ...(options.selectPaneModel ? { selectPaneModel: options.selectPaneModel } : {}),
     async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; },
     runPaneCommand, async readOutput() { return ""; }, async renamePane() {}

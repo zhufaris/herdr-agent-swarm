@@ -68,14 +68,12 @@ describe("workspace snapshot cache", () => {
     expect(listPanes).toHaveBeenCalledOnce();
   });
 
-  it("preserves pane evidence when runtime observation is unsupported", async () => {
-    const getPane = vi.fn(async () => pane("w1", 1));
-    const cache = new WorkspaceSnapshotCache(adapter({ getPane }));
+  it("returns an explicit missing observation from the runtime observer", async () => {
+    const observeRuntime = vi.fn(async () => ({ pane: null, state: "unknown" as const, traexProcess: false, composerReady: false, evidenceSource: "none" as const }));
+    const cache = new WorkspaceSnapshotCache(adapter({ observeRuntime }));
 
-    expect(await cache.observeRuntime("w1:p1")).toEqual({
-      pane: pane("w1", 1), state: "idle", traexProcess: true, composerReady: false, evidenceSource: "structured"
-    });
-    expect(getPane).toHaveBeenCalledWith("w1:p1");
+    expect(await cache.observeRuntime("w1:p1")).toEqual({ pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" });
+    expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
   });
 
   it("preserves validation semantics and forwards pane close while invalidating the snapshot", async () => {
@@ -100,6 +98,7 @@ function pane(workspaceId: string, version: number) {
 function adapter(overrides: Partial<HerdrPort>): HerdrPort {
   return {
     async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+    async observeRuntime() { return { pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" }; },
     async createPane(workspaceId) { return pane(workspaceId, 99); }, async startTraex() {}, async runPrompt() { return "done"; },
     async readOutput() { return ""; }, async renamePane() {}, ...overrides
   };

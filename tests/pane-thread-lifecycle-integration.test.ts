@@ -175,6 +175,7 @@ describe("pane/thread lifecycle integration", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane(id) { return id === pane.paneId ? pane : null; },
+      async observeRuntime(id) { return { pane: id === pane.paneId ? pane : null, state: id === pane.paneId ? "idle" : "unknown", traexProcess: id === pane.paneId, composerReady: id === pane.paneId, evidenceSource: id === pane.paneId ? "structured" : "none" }; },
       async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt(_paneId, text) { submitted.push(text); return "done"; },
       async readOutput() { return "◆ done\n────────"; }, async renamePane() {}
     };

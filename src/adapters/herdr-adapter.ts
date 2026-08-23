@@ -63,10 +63,6 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  async observeBoundPane(paneId: string): Promise<HerdrPane | null> {
-    return (await this.observeRuntime(paneId)).pane;
-  }
-
   async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const pane = await this.getPane(paneId);
     if (!pane) return { pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" };

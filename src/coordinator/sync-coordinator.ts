@@ -832,18 +832,15 @@ export class SyncCoordinator {
     let observedActive = binding.lastAgentState === "working" || binding.lastAgentState === "blocked";
     try {
       while (!this.stopping) {
-        const observation = this.herdr.observeRuntime
-          ? await this.herdr.observeRuntime(paneId)
-          : null;
-        const pane = observation?.pane ?? await this.herdr.getPane(paneId);
+        const observation = await this.herdr.observeRuntime(paneId);
+        const pane = observation.pane;
         if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
-        const state = observation?.state ?? pane.agentState;
+        const state = observation.state;
         this.turns.updateState(binding.id, prompt.id, state);
         if (state === "working" || state === "blocked") observedActive = true;
         const unknownOutput = state === "unknown" ? await this.herdr.readOutput(paneId, 240) : null;
-        const completed = observation
-          ? observation.traexProcess && (state === "done" || state === "idle" && (observedActive || observation.composerReady))
-          : state === "done" || observedActive && state === "idle" || unknownOutput !== null && isTraexComposerReady(unknownOutput);
+        const completed = observation.traexProcess
+          && (state === "done" || state === "idle" && (observedActive || observation.composerReady));
         if (completed) {
           const output = unknownOutput ?? await this.herdr.readOutput(paneId, 240);
           const answer = extractFinalTraexAnswer(output);
@@ -1021,10 +1018,7 @@ export class SyncCoordinator {
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string) {
-    const observation = this.herdr.observeRuntime
-      ? await this.herdr.observeRuntime(paneId)
-      : (await this.herdr.listPanes(binding.workspaceId, { forceRefresh: true })).find((candidate) => candidate.paneId === paneId) ?? null;
-    const pane = observation && "pane" in observation ? observation.pane : observation;
+    const pane = (await this.herdr.observeRuntime(paneId)).pane;
     if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
     if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
     const project = this.config.projects.find((item) => item.id === binding.projectId);

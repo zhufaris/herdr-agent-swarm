@@ -147,7 +147,7 @@ export class SessionReconciler {
         continue;
       }
       let existing = bindingByPaneId.get(pane.paneId) ?? this.options.store.findBindingByPane(pane.paneId);
-      if (existing && pane.agentState === "unknown" && this.options.herdr.observeRuntime) {
+      if (existing && pane.agentState === "unknown") {
         try {
           const observation = await this.options.herdr.observeRuntime(pane.paneId);
           pane = observation.pane ?? pane;
