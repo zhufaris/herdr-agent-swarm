@@ -139,10 +139,8 @@ LARK_MESSAGE_CHUNK_SIZE=3500
 
 `projects.json` is the project allowlist shown by `/herdr new`. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
-and absolute `cwd`; `defaultProjectId` must reference one entry. If the file is
-absent, the legacy `HERDR_WORKSPACE_ID` and `HERDR_WORKSPACE_CWD` variables are
-accepted as a temporary single-project fallback. An invalid existing file is
-never ignored.
+and absolute `cwd`; `defaultProjectId` must reference one entry. The registry is
+required; a missing or invalid file prevents startup.
 
 The plugin defaults `PROJECTS_CONFIG_PATH` to its config directory and
 `BRIDGE_DATABASE_PATH` to `$HERDR_PLUGIN_STATE_DIR/bridge.db`. Explicit absolute

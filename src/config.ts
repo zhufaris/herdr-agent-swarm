@@ -32,8 +32,6 @@ const environmentSchema = z.object({
   LARK_APP_SECRET: z.string().min(1),
   LARK_CHAT_ID: z.string().min(1),
   LARK_BOT_OPEN_ID: z.string().min(1),
-  HERDR_WORKSPACE_ID: z.string().min(1).optional(),
-  HERDR_WORKSPACE_CWD: z.string().min(1).optional(),
   PROJECTS_CONFIG_PATH: z.string().min(1).default("./config/projects.json"),
   BRIDGE_DATABASE_PATH: z.string().min(1).default("./var/bridge.db"),
   BRIDGE_HTTP_HOST: z.string().min(1).default("127.0.0.1"),
@@ -54,7 +52,7 @@ export type BridgeConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const value = environmentSchema.parse(withPluginDefaults(environment));
-  const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH, value.HERDR_WORKSPACE_ID, value.HERDR_WORKSPACE_CWD);
+  const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH);
   if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
     throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
   }
@@ -88,18 +86,10 @@ export function withPluginDefaults(environment: NodeJS.ProcessEnv): NodeJS.Proce
   };
 }
 
-function loadProjectRegistry(path: string, legacyWorkspaceId?: string, legacyCwd?: string): { defaultProjectId: string; projects: ProjectConfig[] } {
-  if (existsSync(path)) {
-    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-    return projectRegistrySchema.parse(raw);
-  }
-  if (!legacyWorkspaceId || !legacyCwd) throw new Error(`Project registry not found at ${path} and legacy Herdr project is incomplete`);
-  if (!isAbsolute(legacyCwd)) throw new Error("HERDR_WORKSPACE_CWD must be an absolute path");
-  const registry = {
-    defaultProjectId: "default",
-    projects: [{ id: "default", displayName: "Default project", description: "Legacy Herdr workspace", workspaceId: legacyWorkspaceId, cwd: legacyCwd }]
-  };
-  return registry;
+function loadProjectRegistry(path: string): { defaultProjectId: string; projects: ProjectConfig[] } {
+  if (!existsSync(path)) throw new Error(`Project registry not found at ${path}`);
+  const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  return projectRegistrySchema.parse(raw);
 }
 
 export function validateProjectRegistryFile(path: string): void {

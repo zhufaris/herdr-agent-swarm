@@ -4,9 +4,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig, validateProjectDirectories, withPluginDefaults } from "../src/config.js";
 
+const defaultDirectory = mkdtempSync(join(tmpdir(), "herdr-default-projects-"));
+const defaultRegistryPath = join(defaultDirectory, "projects.json");
+writeFileSync(defaultRegistryPath, JSON.stringify({
+  defaultProjectId: "default",
+  projects: [{ id: "default", displayName: "Default project", description: "Default project", workspaceId: "w1", cwd: "/work/default" }]
+}));
 const requiredEnvironment = {
   LARK_APP_ID: "app", LARK_APP_SECRET: "secret", LARK_CHAT_ID: "chat", LARK_BOT_OPEN_ID: "bot",
-  HERDR_WORKSPACE_ID: "legacy-workspace", HERDR_WORKSPACE_CWD: "/legacy/project"
+  PROJECTS_CONFIG_PATH: defaultRegistryPath
 };
 
 describe("project registry configuration", () => {
@@ -25,12 +31,12 @@ describe("project registry configuration", () => {
     expect(config.herdr.workspaceId).toBe("wH");
   });
 
-  it("synthesizes one legacy project only when the registry is absent", () => {
+  it("requires the project registry even when legacy workspace variables are present", () => {
     const missingPath = join(mkdtempSync(join(tmpdir(), "herdr-projects-")), "missing.json");
-    const config = loadConfig({ ...requiredEnvironment, PROJECTS_CONFIG_PATH: missingPath });
-
-    expect(config.defaultProjectId).toBe("default");
-    expect(config.projects).toEqual([{ id: "default", displayName: "Default project", description: "Legacy Herdr workspace", workspaceId: "legacy-workspace", cwd: "/legacy/project" }]);
+    expect(() => loadConfig({
+      ...requiredEnvironment, PROJECTS_CONFIG_PATH: missingPath,
+      HERDR_WORKSPACE_ID: "legacy-workspace", HERDR_WORKSPACE_CWD: "/legacy/project"
+    })).toThrow(`Project registry not found at ${missingPath}`);
   });
 
   it("rejects a present but invalid registry instead of falling back", () => {
