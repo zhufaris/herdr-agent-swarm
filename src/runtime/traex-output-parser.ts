@@ -29,7 +29,7 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
   const continuous = current.startsWith(previous) || hasSuffixPrefixOverlap(previous, current);
   const rawDelta = current.startsWith(previous)
     ? current.slice(previous.length).replace(/^\n/, "")
-    : continuous ? appendAfterOverlap(previous, current) : current;
+    : continuous ? appendAfterOverlap(previous, current) : outputAfterPromptEcho(current, promptEcho);
   const visible = redactTerminalSecrets(
     rawDelta
       .replace(REASONING_BLOCK, "\n")
@@ -44,6 +44,17 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
     ? visible
     : `${visible.slice(0, MAX_TERMINAL_DELTA_CHARS)}\n… [OUTPUT TRUNCATED]`;
   return { delta, snapshot: currentRaw, update: continuous || !previous ? "append" : "replace" };
+}
+
+function outputAfterPromptEcho(current: string, promptEcho: string): string {
+  const prompt = promptEcho.trim();
+  if (!prompt) return "";
+  const lines = current.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!.trim().replace(/^[›❯▍]\s*/, "");
+    if (line === prompt) return lines.slice(index + 1).join("\n");
+  }
+  return "";
 }
 
 function hasSuffixPrefixOverlap(previous: string, current: string): boolean {

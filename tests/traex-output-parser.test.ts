@@ -19,24 +19,54 @@ describe("TraeX output parser", () => {
       "PASS parser.test.ts"
     ].join("\n");
     const current = [
+      "▍ deploy",
       "◆ Running tests (1m 12s)",
       "PASS parser.test.ts",
       "PASS card-projector.test.ts"
     ].join("\n");
 
     expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
-      delta: current,
+      delta: current.split("\n").slice(1).join("\n"),
       update: "replace",
       snapshot: current
     });
   });
 
+  it("does not replay output from earlier prompts when a new prompt window is redrawn", () => {
+    const previous = [
+      "TraeCode CLI banner",
+      "▍ previous request",
+      "◆ previous answer"
+    ].join("\n");
+    const current = [
+      "TraeCode CLI banner",
+      "▍ previous request",
+      "◆ previous answer",
+      "▍ switch to native worktree",
+      "◆ switched to feat/native"
+    ].join("\n");
+
+    expect(parseTerminalStreamDelta(previous + "\nold footer", current, "switch to native worktree")).toMatchObject({
+      delta: "◆ switched to feat/native",
+      update: "replace"
+    });
+  });
+
+  it("keeps the active card unchanged when neither continuity nor the current prompt boundary is visible", () => {
+    const previous = "old terminal window";
+    const current = "unrelated redrawn terminal history";
+
+    expect(parseTerminalStreamDelta(previous, current, "current prompt")).toMatchObject({
+      delta: "", update: "replace", snapshot: current
+    });
+  });
+
   it("does not treat an incidental short overlap as append-only continuity", () => {
     const previous = `old window ${"x".repeat(80)}same`;
-    const current = `same${"y".repeat(80)} new window`;
+    const current = `same${"y".repeat(80)}\n▍ deploy\nnew window`;
 
     expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
-      delta: current, update: "replace"
+      delta: "new window", update: "replace"
     });
   });
 
