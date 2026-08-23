@@ -55,6 +55,7 @@ describe("event-driven card projection", () => {
       store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
     }
     store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
+    store.listBindings = () => { throw new Error("CardProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
     const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
@@ -139,6 +140,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.listBindings = () => { throw new Error("CardProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
     const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
     const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();

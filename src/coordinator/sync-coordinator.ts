@@ -132,7 +132,7 @@ export class SyncCoordinator {
     if (action.chatId !== this.config.lark.chatId) return;
     const openThread = parseOpenThreadAction(action.value);
     if (openThread) {
-      const binding = this.store.listBindings().find((item) => item.id === openThread.bindingId);
+      const binding = this.store.getBinding(openThread.bindingId);
       if (!binding || binding.chatId !== action.chatId) return;
       const topicOrRootMessageId = binding.topicId ?? binding.rootMessageId;
       if (!topicOrRootMessageId) return;
@@ -179,7 +179,7 @@ export class SyncCoordinator {
     }
     if (claim.outcome === "processing") return;
     if (claim.outcome === "completed") {
-      const binding = selection.bindingId ? this.store.listBindings().find((item) => item.id === selection.bindingId) : null;
+      const binding = selection.bindingId ? this.store.getBinding(selection.bindingId) : null;
       const project = this.config.projects.find((item) => item.id === selection.selectedProjectId);
       if (binding && project) await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
       return;
@@ -342,7 +342,10 @@ export class SyncCoordinator {
         this.logger.error({ event: "workspace-reconciliation-failed", err: safeLogError(error), workspaceId, outcome: "failed" }, "workspace reconciliation failed");
       }
     }
-    for (const binding of this.store.listBindings().filter((item) => item.state === "active")) {
+    const activeBindings = this.store.listBindingsByState("active");
+    const bindingByPaneId = new Map(activeBindings.flatMap((binding) => binding.paneId ? [[binding.paneId, binding] as const] : []));
+    let pendingBindings: Binding[] | null = null;
+    for (const binding of activeBindings) {
       const workspacePanes = panesByWorkspace.get(binding.workspaceId);
       if (!workspacePanes) {
         const next = this.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
@@ -354,13 +357,12 @@ export class SyncCoordinator {
       if (binding.paneId && !paneIds.has(binding.paneId)) {
         this.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
         const occurredAt = new Date().toISOString();
-        for (const view of this.store.listRunCards(binding.id).filter((item) => item.phase === "running" || item.phase === "blocked")) {
-          const next = { ...view, phase: "failed" as const, notice: `Herdr pane ${binding.paneId} no longer exists`, finishedAt: occurredAt, queuePosition: 0, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
-          this.store.saveRunCard(next);
-          if (!next.answerCardId && next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
-        }
-        for (const view of this.store.listRunCards(binding.id).filter((item) => item.phase === "queued")) {
-          const next = { ...view, phase: "blocked" as const, notice: `Herdr pane ${binding.paneId} no longer exists，请恢复绑定后重试。`, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
+        const affectedRunCards = this.store.listRunCardsByPhases(binding.id, ["running", "blocked", "queued"]);
+        for (const view of affectedRunCards) {
+          const terminal = view.phase === "running" || view.phase === "blocked";
+          const next = terminal
+            ? { ...view, phase: "failed" as const, notice: `Herdr pane ${binding.paneId} no longer exists`, finishedAt: occurredAt, queuePosition: 0, viewVersion: view.viewVersion + 1, updatedAt: occurredAt }
+            : { ...view, phase: "blocked" as const, notice: `Herdr pane ${binding.paneId} no longer exists，请恢复绑定后重试。`, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
           this.store.saveRunCard(next);
           if (!next.answerCardId && next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
         }
@@ -375,7 +377,7 @@ export class SyncCoordinator {
         continue;
       }
       if (!pane.foregroundExecutables.includes("traex")) continue;
-      const existing = this.store.findBindingByPane(pane.paneId);
+      const existing = bindingByPaneId.get(pane.paneId) ?? this.store.findBindingByPane(pane.paneId);
       if (!existing) {
         const projects = this.config.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
         if (projects.length !== 1) {
@@ -387,7 +389,8 @@ export class SyncCoordinator {
           }
           continue;
         }
-        const interruptedProvisioning = this.store.listBindings().find((candidate) =>
+        pendingBindings ??= this.store.listBindingsByState("pending");
+        const interruptedProvisioning = pendingBindings.find((candidate) =>
           candidate.lifecycle === "provisioning" && candidate.provisioningCheckpoint === "selected" && candidate.projectId === projects[0]!.id
         );
         if (interruptedProvisioning) {
@@ -402,6 +405,8 @@ export class SyncCoordinator {
           this.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: projects[0]!.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
         }
         await this.createFromHerdr(pane, projects[0]!);
+        const created = this.store.findBindingByPane(pane.paneId);
+        if (created) bindingByPaneId.set(pane.paneId, created);
         const output = cleanTerminalOutput(await this.herdr.readOutput(pane.paneId, 240));
         this.observedTerminalOutputs.set(pane.paneId, output);
         this.observedAgentStates.set(pane.paneId, pane.agentState);
@@ -441,7 +446,7 @@ export class SyncCoordinator {
       }
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
-    for (const binding of this.store.listBindings().filter((item) => item.state === "active")) this.scheduleWorker(binding.id);
+    for (const binding of this.store.listBindingsByState("active")) this.scheduleWorker(binding.id);
   }
 
   private async captureOutputBaselines(): Promise<void> {
@@ -527,7 +532,7 @@ export class SyncCoordinator {
   ): Promise<Binding> {
     const bindingId = selection.bindingId ?? randomUUID();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, selection.requestedTitle ?? project.displayName, "TraeX pane");
-    let binding = selection.bindingId ? this.store.listBindings().find((item) => item.id === selection.bindingId) : null;
+    let binding = selection.bindingId ? this.store.getBinding(selection.bindingId) : null;
     if (!binding) {
       binding = this.store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title });
       this.store.linkProjectSelectionBinding(selection.id, binding.id);
@@ -745,7 +750,7 @@ export class SyncCoordinator {
   }
 
   private async drain(bindingId: string): Promise<void> {
-    let binding = this.store.listBindings().find((item) => item.id === bindingId);
+    let binding = this.store.getBinding(bindingId);
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
     for (let prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId)) {
@@ -807,7 +812,7 @@ export class SyncCoordinator {
         if (steeringWorker) await steeringWorker;
         if (this.store.requeueQueuedSteering(bindingId, prompt.id) > 0) await this.refreshQueuePositions(bindingId);
         if (this.activeRuns.get(bindingId)?.promptId === prompt.id) this.activeRuns.delete(bindingId);
-        const latestBinding = this.store.listBindings().find((item) => item.id === bindingId);
+        const latestBinding = this.store.getBinding(bindingId);
         if (latestBinding?.lifecycle === "draining") {
           await this.transitionAndPublish(latestBinding, { type: "drain_completed" }, "BindingArchived", "bridge", { reason: "当前任务已结束，话题归档完成；Herdr pane 与 TraeX 保持运行。" });
         }
@@ -914,7 +919,7 @@ export class SyncCoordinator {
 
     const interruptedSelections = this.store.listProcessingProjectSelections().filter((selection) => {
       if (!selection.bindingId || selection.selectedProjectId !== project.id) return false;
-      const binding = this.store.listBindings().find((candidate) => candidate.id === selection.bindingId);
+      const binding = this.store.getBinding(selection.bindingId);
       return binding?.lifecycle === "provisioning" && binding.provisioningCheckpoint === "selected";
     });
     if (interruptedSelections.length === 1) {

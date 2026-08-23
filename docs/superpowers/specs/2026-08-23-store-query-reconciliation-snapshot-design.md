@@ -39,15 +39,12 @@ query.
 ## Reconciliation snapshot
 
 At the beginning of the binding portion of one `reconcileOnce()` pass, load
-active bindings exactly once with `listBindingsByState("active")`. Build two
-maps from that result:
+active bindings exactly once with `listBindingsByState("active")`. Build a Pane
+ID to binding map from that result for matching discovered Panes.
 
-- binding ID to binding, for interrupted-provisioning and identity checks;
-- Pane ID to binding, for matching discovered Panes.
-
-The maps are a pass-local observation snapshot, not a cache across passes. They
+The map is a pass-local observation snapshot, not a cache across passes. It
 must not replace fresh results returned by mutations. If reconciliation creates
-a binding for a newly discovered Pane, update the pass-local maps immediately
+a binding for a newly discovered Pane, update the pass-local map immediately
 so another Pane in the same pass cannot claim the same binding. Final worker
 scheduling uses a fresh `listBindingsByState("active")` query because earlier
 steps may have created or transitioned bindings.
@@ -80,10 +77,10 @@ message retain the current no-op behavior.
 Add idempotent indexes only for query shapes introduced or already present on
 hot paths:
 
-- `bindings(state, created_at)` for active reconciliation;
-- `bindings(pane_id, created_at DESC)` for Pane ownership lookup;
-- `bindings(topic_id, created_at DESC)` and
-  `bindings(root_message_id, created_at DESC)` for Lark routing;
+- `bindings(state, created_at, id)` for active reconciliation and deterministic
+  ordering;
+- `bindings(root_message_id, created_at DESC)` for Lark routing. Pane and topic
+  lookup already use the unique indexes created by their column constraints;
 - `run_cards(binding_id, phase, created_at, prompt_id)` for phase-filtered card
   loading.
 

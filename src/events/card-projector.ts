@@ -47,7 +47,7 @@ export class CardProjector {
           const nextElementId = answerElementId(promptId, pageIndex);
           const nextPage = splitAnswerStreamPage(remainder, ANSWER_STREAM_PAGE_LIMIT).page;
           const nextView = { ...view, answerElementId: nextElementId };
-          const binding = this.store.listBindings().find((candidate) => candidate.id === view!.bindingId);
+          const binding = this.store.getBinding(view.bindingId);
           if (!binding?.rootMessageId) return;
           await this.channelPublisher.enqueueStreamCardCreate({
             bindingId: view.bindingId, promptId, rootMessageId: binding.rootMessageId, pageIndex, pageStart, elementId: nextElementId, viewVersion: view.viewVersion,
@@ -97,7 +97,7 @@ export class CardProjector {
     this.store.saveTopicView(next);
     this.views.set(event.bindingId, next);
 
-    const binding = this.store.listBindings().find((candidate) => candidate.id === event.bindingId);
+    const binding = this.store.getBinding(event.bindingId);
     if (!binding?.rootMessageId) return;
     const card = renderProjectEntryCard(next);
     try {

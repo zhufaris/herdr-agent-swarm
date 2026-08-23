@@ -76,7 +76,9 @@ export interface BindingStorePort {
   findBindingByTopic(topicId: string): Binding | null;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   findBindingByPane(paneId: string): Binding | null;
+  getBinding(id: string): Binding | null;
   listBindings(): Binding[];
+  listBindingsByState(state: Binding["state"]): Binding[];
   listSessions(chatId: string): SessionSummary[];
   listFailures(chatId: string): FailureSummary[];
   countPendingPrompts(bindingId: string): number;
@@ -106,4 +108,5 @@ export interface BindingStorePort {
   saveRunCard(view: RunCardView): RunCardView;
   loadRunCard(promptId: string): RunCardView | null;
   listRunCards(bindingId: string): RunCardView[];
+  listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
 }

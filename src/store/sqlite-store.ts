@@ -182,7 +182,7 @@ export class SqliteBindingStore implements BindingStorePort {
         id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
     `).run(input.id, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
-    return this.getBinding(input.id);
+    return this.requireBinding(input.id);
   }
 
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection {
@@ -273,16 +273,16 @@ export class SqliteBindingStore implements BindingStorePort {
     }
     const entries = Object.entries(normalized).filter(([key]) => key !== "id" && key !== "createdAt");
     entries.push(["updatedAt", now()]);
-    if (entries.length === 0) return this.getBinding(id);
+    if (entries.length === 0) return this.requireBinding(id);
     const assignments = entries.map(([key]) => `${BINDING_COLUMNS[key as keyof Binding]} = ?`).join(", ");
     const values = entries.map(([, value]) => typeof value === "boolean" ? Number(value) : value as SqlValue);
     const result = this.database.prepare(`UPDATE bindings SET ${assignments} WHERE id = ?`).run(...values, id);
     if (result.changes === 0) throw new Error(`Binding not found: ${id}`);
-    return this.getBinding(id);
+    return this.requireBinding(id);
   }
 
   transitionBinding(id: string, transition: SessionTransition): Binding {
-    const binding = this.getBinding(id);
+    const binding = this.requireBinding(id);
     const next = transitionSession({
       lifecycle: binding.lifecycle, attachment: binding.attachment, runtime: binding.lastAgentState, generation: binding.generation,
       provisioningCheckpoint: binding.provisioningCheckpoint, degradationCount: binding.degradationCount, hasCompletedTurn: binding.hasCompletedTurn
@@ -317,7 +317,7 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   attachBindingPane(id: string, pane: import("../domain/types.js").HerdrPane, replacement: boolean): Binding {
-    const binding = this.getBinding(id);
+    const binding = this.requireBinding(id);
     const next = transitionSession({
       lifecycle: binding.lifecycle, attachment: binding.attachment, runtime: binding.lastAgentState, generation: binding.generation,
       provisioningCheckpoint: binding.provisioningCheckpoint, degradationCount: binding.degradationCount, hasCompletedTurn: binding.hasCompletedTurn
@@ -328,7 +328,7 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
         .run(pane.paneId, pane.terminalId ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
       this.database.exec("COMMIT");
-      return this.getBinding(id);
+      return this.requireBinding(id);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -352,8 +352,17 @@ export class SqliteBindingStore implements BindingStorePort {
     return row ? mapBinding(row) : null;
   }
 
+  getBinding(id: string): Binding | null {
+    const row = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(id) as BindingRow | undefined;
+    return row ? mapBinding(row) : null;
+  }
+
   listBindings(): Binding[] {
     return (this.database.prepare("SELECT * FROM bindings ORDER BY created_at").all() as BindingRow[]).map(mapBinding);
+  }
+
+  listBindingsByState(state: Binding["state"]): Binding[] {
+    return (this.database.prepare("SELECT * FROM bindings WHERE state = ? ORDER BY created_at, id").all(state) as BindingRow[]).map(mapBinding);
   }
 
   listSessions(chatId: string): SessionSummary[] {
@@ -691,12 +700,25 @@ export class SqliteBindingStore implements BindingStorePort {
     return (this.database.prepare("SELECT state_json FROM run_cards_view WHERE binding_id = ? ORDER BY created_at, prompt_id").all(bindingId) as Array<{ state_json: string }>).map((row) => JSON.parse(row.state_json) as RunCardView);
   }
 
+  listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[] {
+    if (phases.length === 0) return [];
+    const placeholders = phases.map(() => "?").join(", ");
+    const rows = this.database.prepare(`
+      SELECT view.state_json FROM run_cards AS card INDEXED BY run_cards_binding_phase_created
+      JOIN run_cards_view AS view ON view.prompt_id = card.prompt_id
+      WHERE card.binding_id = ? AND card.phase IN (${placeholders})
+      ORDER BY card.created_at, card.prompt_id
+    `)
+      .all(bindingId, ...phases) as Array<{ state_json: string }>;
+    return rows.map((row) => JSON.parse(row.state_json) as RunCardView);
+  }
+
   private insertRunCard(view: RunCardView): void {
     this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(view.promptId, view.bindingId, view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
   }
 
-  private getBinding(id: string): Binding {
+  private requireBinding(id: string): Binding {
     const row = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(id) as BindingRow | undefined;
     if (!row) throw new Error(`Binding not found: ${id}`);
     return mapBinding(row);
@@ -787,6 +809,15 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureBindingLifecycleColumns();
     this.ensurePromptCancelledState();
     this.ensureOutboundDismissedState();
+    this.ensureQueryIndexes();
+  }
+
+  private ensureQueryIndexes(): void {
+    this.database.exec(`
+      CREATE INDEX IF NOT EXISTS bindings_state_created ON bindings(state, created_at, id);
+      CREATE INDEX IF NOT EXISTS bindings_root_created ON bindings(root_message_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS run_cards_binding_phase_created ON run_cards(binding_id, phase, created_at, prompt_id);
+    `);
   }
 
   private ensureOutboundDismissedState(): void {

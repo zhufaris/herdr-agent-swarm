@@ -86,6 +86,33 @@ describe("SQLite store", () => {
     expect(store.loadTopicView("b1")).toEqual(view);
   });
 
+  it("queries bindings and run cards by their exact reconciliation scope", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["b2", "b1", "b3"]) {
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: `t-${id}`, rootMessageId: `m-${id}`, title: id });
+    }
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    store.updateBinding("b2", { paneId: "w1:p2", state: "active" });
+
+    expect(store.getBinding("b1")).toMatchObject({ id: "b1", state: "active" });
+    expect(store.getBinding("missing")).toBeNull();
+    const active = store.listBindingsByState("active");
+    expect(active.map(({ id }) => id).sort()).toEqual(["b1", "b2"]);
+    expect(active.map(({ createdAt, id }) => `${createdAt}:${id}`)).toEqual(
+      [...active].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).map(({ createdAt, id }) => `${createdAt}:${id}`)
+    );
+    expect(store.listBindingsByState("pending").map(({ id }) => id)).toEqual(["b3"]);
+
+    for (const [promptId, phase] of [["p3", "completed"], ["p1", "running"], ["p2", "queued"]] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-08-23T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "m-b1", answerCard: {} });
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, phase });
+    }
+    expect(store.listRunCardsByPhases("b1", ["queued", "running"]).map(({ promptId }) => promptId)).toEqual(["p1", "p2"]);
+    expect(store.listRunCardsByPhases("b1", [])).toEqual([]);
+    expect(store.listRunCardsByPhases("b2", ["queued", "running", "completed"])).toEqual([]);
+  });
+
   it("backfills and persists orthogonal pane/thread lifecycle state", () => {
     store = new SqliteBindingStore(":memory:");
     const pending = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: null, rootMessageId: null, title: "Task" });

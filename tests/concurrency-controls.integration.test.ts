@@ -6,6 +6,7 @@ import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("coordinator concurrency controls", () => {
   it("coalesces concurrent reconciliation calls into one workspace scan", async () => {
@@ -30,6 +31,45 @@ describe("coordinator concurrency controls", () => {
     await Promise.all([first, second]);
     expect(scans).toBe(1);
 
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("uses scoped binding queries for one reconciliation pass", async () => {
+    const { coordinator, publisher, store } = fixture(emptyHerdr());
+    await coordinator.start();
+    const original = store.listBindingsByState.bind(store);
+    const states: string[] = [];
+    store.listBindingsByState = (state) => { states.push(state); return original(state); };
+    store.listBindings = () => { throw new Error("reconcile must not load every binding"); };
+
+    await coordinator.reconcile();
+
+    expect(states).toEqual(["active", "active"]);
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("loads affected run cards once when a Pane is missing", async () => {
+    const { coordinator, publisher, store } = fixture(emptyHerdr());
+    await coordinator.start();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    for (const [promptId, phase] of [["running", "running"], ["blocked", "blocked"], ["queued", "queued"], ["done", "completed"]] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-08-23T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "m1", answerCard: {} });
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, phase });
+    }
+    const original = store.listRunCardsByPhases.bind(store);
+    const calls: string[][] = [];
+    store.listRunCardsByPhases = (bindingId, phases) => { calls.push([...phases]); return original(bindingId, phases); };
+    store.listRunCards = () => { throw new Error("missing-Pane reconciliation must use a phase query"); };
+
+    await coordinator.reconcile();
+
+    expect(calls).toEqual([["running", "blocked", "queued"]]);
+    expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.loadRunCard("blocked")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.loadRunCard("queued")).toMatchObject({ phase: "blocked", queuePosition: 1 });
+    expect(store.loadRunCard("done")).toMatchObject({ phase: "completed", viewVersion: 1 });
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
