@@ -1,7 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { CommandError } from "../src/infra/command-runner.js";
+import { CommandError, ExecFileCommandRunner } from "../src/infra/command-runner.js";
 
 describe("command error redaction", () => {
+  it("reports process start before waiting for command completion", async () => {
+    let started = false;
+    const result = await new ExecFileCommandRunner(1000).run(process.execPath, ["-e", "setTimeout(() => {}, 10)"], undefined, () => { started = true; });
+    expect(started).toBe(true);
+    expect(result.stdout).toBe("");
+  });
+
+  it("does not report command completion before the dispatch receipt is durable", async () => {
+    let releaseReceipt: (() => void) | undefined;
+    let completed = false;
+    const receipt = new Promise<void>((resolve) => { releaseReceipt = resolve; });
+    const command = new ExecFileCommandRunner(1000)
+      .run(process.execPath, ["-e", ""], undefined, () => receipt)
+      .then(() => { completed = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(completed).toBe(false);
+    releaseReceipt?.();
+    await command;
+    expect(completed).toBe(true);
+  });
+
+  it("does not report dispatch when the process cannot spawn", async () => {
+    let started = false;
+    await expect(new ExecFileCommandRunner(1000).run("/definitely/missing/herdr", [], undefined, () => { started = true; })).rejects.toThrow();
+    expect(started).toBe(false);
+  });
   it("never exposes pane send-text content through error fields", () => {
     const secret = "private user prompt";
     const error = new CommandError("herdr", ["pane", "send-text", "w1:p1", secret], `failed to send ${secret}`, false);

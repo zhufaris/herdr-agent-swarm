@@ -66,7 +66,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     };
   }
 
-  async assertWorkspace(workspaceId: string): Promise<void> { await this.listPanes(workspaceId); }
+  async assertWorkspace(workspaceId: string): Promise<void> { await this.delegate.assertWorkspace(workspaceId); }
   async getPane(paneId: string): Promise<HerdrPane | null> { return this.delegate.getPane(paneId); }
   async createPane(workspaceId: string, cwd: string, options?: Parameters<HerdrPort["createPane"]>[2]): Promise<HerdrPane> {
     const pane = await this.delegate.createPane(workspaceId, cwd, options);
@@ -74,8 +74,8 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     return pane;
   }
   async startTraex(paneId: string, executable: string): Promise<void> { await this.delegate.startTraex(paneId, executable); }
-  async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: Parameters<HerdrPort["runPrompt"]>[3], signal?: AbortSignal): Promise<import("../domain/types.js").AgentState> {
-    return this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal);
+  async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: Parameters<HerdrPort["runPrompt"]>[3], signal?: AbortSignal, onDispatched?: Parameters<HerdrPort["runPrompt"]>[5]): Promise<import("../domain/types.js").AgentState> {
+    return this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched);
   }
   async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
     if (!this.delegate.runPaneCommand) throw new Error("Herdr adapter does not support Pane commands");
@@ -87,6 +87,12 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   async readOutput(paneId: string, lines: number): Promise<string> { return this.delegate.readOutput(paneId, lines); }
   async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {
     await this.delegate.renamePane(paneId, title, options);
+    const workspaceId = paneId.split(":", 1)[0];
+    if (workspaceId) this.invalidate(workspaceId);
+  }
+  async closePane(paneId: string): Promise<void> {
+    if (!this.delegate.closePane) throw new Error("Herdr adapter does not support closing panes");
+    await this.delegate.closePane(paneId);
     const workspaceId = paneId.split(":", 1)[0];
     if (workspaceId) this.invalidate(workspaceId);
   }

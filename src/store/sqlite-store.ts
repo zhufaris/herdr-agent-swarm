@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptState, RequestCardRole, SessionSummary } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, RequestCardRole, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -21,6 +21,7 @@ type BindingRow = Record<string, SqlValue> & {
 type PromptRow = Record<string, SqlValue> & {
   id: string; binding_id: string; lark_message_id: string; actor_open_id: string; body: string; state: string;
   dispatch_kind: string; parent_prompt_id: string | null;
+  observation_state: string;
   attempt_count: number; error: string | null; created_at: string; updated_at: string;
 };
 type OutboundReplyRow = Record<string, SqlValue> & {
@@ -277,24 +278,36 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }): "consumed" | "invalid" | "unauthorized" | "expired" | "stale" {
+  consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }):
+    | { outcome: "consumed"; operationId: string; paneId: string }
+    | { outcome: "invalid" | "unauthorized" | "expired" | "stale" } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const row = this.database.prepare("SELECT id, pane_id, actor_open_id, code_hash, expires_at FROM pane_close_requests WHERE binding_id = ? AND state = 'pending' ORDER BY created_at DESC, id DESC LIMIT 1")
         .get(input.bindingId) as { id: string; pane_id: string; actor_open_id: string; code_hash: string; expires_at: string } | undefined;
-      if (!row) { this.database.exec("COMMIT"); return "stale"; }
-      if (row.actor_open_id !== input.actorOpenId) { this.database.exec("COMMIT"); return "unauthorized"; }
-      if (row.pane_id !== input.paneId || row.code_hash !== input.codeHash) { this.database.exec("COMMIT"); return "invalid"; }
+      if (!row) { this.database.exec("COMMIT"); return { outcome: "stale" }; }
+      if (row.actor_open_id !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized" }; }
+      if (row.pane_id !== input.paneId || row.code_hash !== input.codeHash) { this.database.exec("COMMIT"); return { outcome: "invalid" }; }
       if (row.expires_at <= input.now) {
         this.database.prepare("UPDATE pane_close_requests SET state = 'expired', updated_at = ? WHERE id = ? AND state = 'pending'").run(input.now, row.id);
         this.database.exec("COMMIT");
-        return "expired";
+        return { outcome: "expired" };
       }
-      const result = this.database.prepare("UPDATE pane_close_requests SET state = 'consumed', consumed_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'")
+      const result = this.database.prepare("UPDATE pane_close_requests SET state = 'executing', consumed_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'")
         .run(input.now, input.now, row.id);
       this.database.exec("COMMIT");
-      return result.changes === 1 ? "consumed" : "stale";
+      return result.changes === 1 ? { outcome: "consumed", operationId: row.id, paneId: row.pane_id } : { outcome: "stale" };
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail: string | undefined = undefined): void {
+    this.database.prepare("UPDATE pane_close_requests SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('executing','uncertain')")
+      .run(state, detail ?? null, now(), operationId);
+  }
+
+  listUnresolvedPaneCloseOperations(): PaneCloseOperation[] {
+    return (this.database.prepare("SELECT id, binding_id, pane_id, state FROM pane_close_requests WHERE state IN ('executing','uncertain') ORDER BY created_at, id").all() as Array<{ id: string; binding_id: string; pane_id: string; state: PaneCloseOperation["state"] }>)
+      .map((row) => ({ id: row.id, bindingId: row.binding_id, paneId: row.pane_id, state: row.state }));
   }
 
   updateBinding(id: string, patch: Partial<Binding>): Binding {
@@ -445,18 +458,42 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'turn', parent_prompt_id = NULL, updated_at = ? WHERE state = 'queued' AND dispatch_kind = 'steering'").run(timestamp);
+      const undispatched = this.database.prepare("SELECT id FROM prompt_jobs WHERE state = 'running' AND observation_state = 'not_started'").all() as Array<{ id: string }>;
+      this.database.prepare("UPDATE prompt_jobs SET state = 'queued', observation_state = 'not_started', error = NULL, updated_at = ? WHERE state = 'running' AND observation_state = 'not_started'").run(timestamp);
+      for (const prompt of undispatched) {
+        this.database.prepare("UPDATE run_cards SET phase = 'queued', started_at = NULL, notice = NULL, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?").run(timestamp, prompt.id);
+      }
       const running = this.database.prepare("SELECT id, dispatch_kind FROM prompt_jobs WHERE state = 'running'").all() as Array<{ id: string; dispatch_kind: string }>;
-      const result = this.database.prepare("UPDATE prompt_jobs SET state = 'failed', error = CASE dispatch_kind WHEN 'steering' THEN 'Steering delivery was interrupted and may already have reached Herdr; inspect the pane before retrying' ELSE 'Interrupted by bridge restart; resend the Lark message to retry' END, updated_at = ? WHERE state = 'running'").run(timestamp);
+      const result = this.database.prepare("UPDATE prompt_jobs SET state = CASE dispatch_kind WHEN 'steering' THEN 'failed' ELSE state END, observation_state = CASE dispatch_kind WHEN 'steering' THEN 'completed' ELSE 'detached' END, error = CASE dispatch_kind WHEN 'steering' THEN 'Steering delivery may already have reached Herdr; inspect the pane before retrying' ELSE 'Bridge restarted after dispatch; observing the existing TraeX turn without replay' END, updated_at = ? WHERE state = 'running'").run(timestamp);
       for (const prompt of running) {
-        const notice = prompt.dispatch_kind === "steering" ? "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" : "Bridge 重启导致本次执行中断";
-        this.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?").run(notice, timestamp, timestamp, prompt.id);
+        const notice = prompt.dispatch_kind === "steering" ? "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" : "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求";
+        this.database.prepare("UPDATE run_cards SET phase = CASE WHEN ? = 'steering' THEN 'failed' ELSE 'running' END, finished_at = CASE WHEN ? = 'steering' THEN ? ELSE NULL END, queue_position = 0, notice = ?, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
+          .run(prompt.dispatch_kind, prompt.dispatch_kind, timestamp, notice, timestamp, prompt.id);
       }
       this.database.exec("COMMIT");
-      return Number(result.changes);
+      return undispatched.length + Number(result.changes);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean } {
+  listDetachedPrompts(): PromptJob[] {
+    return (this.database.prepare("SELECT * FROM prompt_jobs WHERE state = 'running' AND observation_state = 'detached' ORDER BY created_at, id").all() as PromptRow[]).map(mapPrompt);
+  }
+
+  markPromptObservationDetached(id: string, notice: string): void {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare("UPDATE prompt_jobs SET observation_state = 'detached', error = ?, updated_at = ? WHERE id = ? AND state = 'running' AND observation_state = 'attached'").run(notice, timestamp, id);
+      if (result.changes > 0) this.database.prepare("UPDATE run_cards SET notice = ?, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ? AND phase IN ('running','blocked')").run(notice, timestamp, id);
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  markPromptDispatched(id: string): void {
+    this.database.prepare("UPDATE prompt_jobs SET observation_state = 'attached', error = NULL, updated_at = ? WHERE id = ? AND state = 'running'").run(now(), id);
+  }
+
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean } {
     const timestamp = now();
     const result = this.database.prepare(`
       INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, state, attempt_count, created_at, updated_at)
@@ -468,7 +505,7 @@ export class SqliteBindingStore implements BindingStorePort {
     return { prompt: mapPrompt(row), inserted };
   }
 
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.prompt.larkMessageId) as PromptRow | undefined;
@@ -514,7 +551,7 @@ export class SqliteBindingStore implements BindingStorePort {
         "SELECT * FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' ORDER BY created_at, id LIMIT 1"
       ).get(bindingId) as PromptRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
-      this.database.prepare("UPDATE prompt_jobs SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
+      this.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
         .run(now(), row.id);
       this.database.exec("COMMIT");
       return this.getPrompt(row.id);
@@ -530,12 +567,13 @@ export class SqliteBindingStore implements BindingStorePort {
       const row = this.database.prepare(`
         SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
         WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
+          AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
         ORDER BY p.created_at, p.rowid LIMIT 1
       `).get(bindingId) as PromptRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
       const ready = this.database.prepare("SELECT lark_message_id, answer_message_id, answer_card_id FROM run_cards WHERE prompt_id = ?").get(row.id) as { lark_message_id: string | null; answer_message_id: string | null; answer_card_id: string | null };
       if (!ready.answer_message_id || (!ready.answer_card_id && !ready.lark_message_id)) { this.database.exec("COMMIT"); return null; }
-      this.database.prepare("UPDATE prompt_jobs SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(now(), row.id);
+      this.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(now(), row.id);
       this.database.exec("COMMIT");
       return this.getPrompt(row.id);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
@@ -569,8 +607,9 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   updatePrompt(id: string, state: PromptState, error: string | null = null): void {
-    this.database.prepare("UPDATE prompt_jobs SET state = ?, error = ?, updated_at = ? WHERE id = ?")
-      .run(state, error, now(), id);
+    const observationState: PromptObservationState = state === "queued" ? "not_started" : state === "running" ? "attached" : "completed";
+    this.database.prepare("UPDATE prompt_jobs SET state = ?, observation_state = ?, error = ?, updated_at = ? WHERE id = ?")
+      .run(state, observationState, error, now(), id);
   }
 
   cancelQueuedPrompts(bindingId: string, reason: string): number {
@@ -795,7 +834,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE IF NOT EXISTS prompt_jobs(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
         actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
-        state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')),
+        state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
@@ -813,7 +852,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS pane_close_requests(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, actor_open_id TEXT NOT NULL, code_hash TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('pending','consumed','expired','cancelled')), expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        state TEXT NOT NULL CHECK(state IN ('pending','consumed','executing','succeeded','rejected','uncertain','expired','cancelled')), detail TEXT, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
       CREATE TABLE IF NOT EXISTS audit_log(
@@ -847,7 +886,9 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
     this.ensurePromptCancelledState();
+    this.ensurePromptObservationColumn();
     this.ensureOutboundDismissedState();
+    this.ensurePaneCloseOperationState();
     this.ensureQueryIndexes();
   }
 
@@ -898,10 +939,10 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE prompt_jobs_next(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
         actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
-        state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')),
+        state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO prompt_jobs_next SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
+      INSERT INTO prompt_jobs_next(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, state, attempt_count, error, created_at, updated_at) SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
       DROP TABLE prompt_jobs;
       ALTER TABLE prompt_jobs_next RENAME TO prompt_jobs;
       CREATE INDEX prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
@@ -948,6 +989,35 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!names.has("dispatch_kind")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering'))");
     if (!names.has("parent_prompt_id")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN parent_prompt_id TEXT");
     this.database.exec("CREATE INDEX IF NOT EXISTS prompt_jobs_dispatch ON prompt_jobs(binding_id, dispatch_kind, parent_prompt_id, state, created_at)");
+  }
+
+  private ensurePromptObservationColumn(): void {
+    const columns = this.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "observation_state")) {
+      this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed'))");
+    }
+    this.database.exec("UPDATE prompt_jobs SET observation_state = CASE WHEN state = 'running' THEN 'attached' WHEN state = 'queued' THEN 'not_started' ELSE 'completed' END WHERE observation_state = 'not_started' AND state != 'queued'");
+  }
+
+  private ensurePaneCloseOperationState(): void {
+    const columns = this.database.prepare("PRAGMA table_info(pane_close_requests)").all() as Array<{ name: string }>;
+    const schema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pane_close_requests'").get() as { sql: string } | undefined;
+    if (columns.some((column) => column.name === "detail") && schema?.sql.includes("'uncertain'")) return;
+    this.database.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN IMMEDIATE;
+      ALTER TABLE pane_close_requests RENAME TO pane_close_requests_legacy;
+      CREATE TABLE pane_close_requests(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, actor_open_id TEXT NOT NULL, code_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','consumed','executing','succeeded','rejected','uncertain','expired','cancelled')), detail TEXT, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO pane_close_requests(id, binding_id, pane_id, actor_open_id, code_hash, state, expires_at, consumed_at, created_at, updated_at)
+      SELECT id, binding_id, pane_id, actor_open_id, code_hash, state, expires_at, consumed_at, created_at, updated_at FROM pane_close_requests_legacy;
+      DROP TABLE pane_close_requests_legacy;
+      CREATE INDEX pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
   }
 
   private ensureRequestCardOutboxColumns(): void {
@@ -1055,7 +1125,7 @@ function mapBinding(row: BindingRow): Binding {
 function mapPrompt(row: PromptRow): PromptJob {
   return {
     id: row.id, bindingId: row.binding_id, larkMessageId: row.lark_message_id, actorOpenId: row.actor_open_id,
-    body: row.body, dispatchKind: row.dispatch_kind as PromptDispatchKind, parentPromptId: row.parent_prompt_id, state: row.state as PromptState, attemptCount: Number(row.attempt_count), error: row.error,
+    body: row.body, dispatchKind: row.dispatch_kind as PromptDispatchKind, parentPromptId: row.parent_prompt_id, observationState: row.observation_state as PromptObservationState, state: row.state as PromptState, attemptCount: Number(row.attempt_count), error: row.error,
     createdAt: row.created_at, updatedAt: row.updated_at
   };
 }

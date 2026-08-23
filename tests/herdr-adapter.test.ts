@@ -37,8 +37,9 @@ describe("Herdr adapter", () => {
   it("creates a dedicated unfocused Lark tab and returns its root pane", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
-      async run(_executable, args) {
+      async run(_executable, args, _timeout, onStarted) {
         calls.push(args);
+        await onStarted?.();
         if (args[0] === "tab" && args[1] === "create") return json({
           tab: { tab_id: "w1:t7", workspace_id: "w1", label: "lark_space / Task" },
           root_pane: { pane_id: "w1:p7", workspace_id: "w1", cwd: "/repo", terminal_id: "term-7" }
@@ -203,15 +204,18 @@ describe("Herdr adapter", () => {
     const calls: string[][] = [];
     const outputs = ["before", "before\n❯ hello", "✧ Working", "answer", "answer", "answer"];
     const runner: CommandRunner = {
-      async run(_executable, args) {
+      async run(_executable, args, _timeout, onStarted) {
         calls.push(args);
+        await onStarted?.();
         if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
         if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: outputs.length > 2 ? "working" : "done" }], agents: [] } });
         return { stdout: "", stderr: "" };
       }
     };
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 1000)).resolves.toBe("done");
+    let dispatched = false;
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 1000, undefined, undefined, () => { dispatched = true; })).resolves.toBe("done");
+    expect(dispatched).toBe(true);
     expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "hello"]);
     expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
   });
@@ -327,7 +331,7 @@ describe("Herdr adapter", () => {
     const turn = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 60_000, undefined, controller.signal);
     setTimeout(() => controller.abort(), 10);
 
-    await expect(turn).rejects.toThrow("Bridge shutdown interrupted prompt wait");
+    await expect(turn).rejects.toThrow("Bridge shutdown detached from an in-flight TraeX turn");
   });
 
   it("steers only while structured pane state is working", async () => {

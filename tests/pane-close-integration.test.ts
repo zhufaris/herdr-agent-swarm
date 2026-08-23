@@ -25,7 +25,20 @@ describe("Lark pane close", () => {
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     expect(fixture.closePane).toHaveBeenCalledWith("w1:p1");
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed", state: "archived", attachment: "unattached" });
+    expect(fixture.store.database.prepare("SELECT state FROM pane_close_requests ORDER BY created_at DESC LIMIT 1").get()).toEqual({ state: "succeeded" });
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("已关闭");
+    await fixture.close();
+  });
+
+  it("allows a done pane to close after confirmation", async () => {
+    const fixture = await setup("done");
+    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+
+    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+
+    expect(fixture.closePane).toHaveBeenCalledWith("w1:p1");
+    expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed", state: "archived" });
     await fixture.close();
   });
 
@@ -61,6 +74,54 @@ describe("Lark pane close", () => {
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "active", state: "active" });
+
+    fixture.setAgentState("idle");
+    await fixture.coordinator.handleMessage(message(3, `/herdr pane close confirm ${code}`));
+    expect(fixture.closePane).not.toHaveBeenCalled();
+    expect(JSON.stringify(fixture.cards.at(-1))).toContain("没有待确认");
+    await fixture.close();
+  });
+
+  it("fails closed when a persisted terminal identity cannot be verified", async () => {
+    const fixture = await setup("idle");
+    fixture.setTerminalId(null);
+
+    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+
+    expect(fixture.closePane).not.toHaveBeenCalled();
+    expect(JSON.stringify(fixture.cards.at(-1))).toContain("identity");
+    await fixture.close();
+  });
+
+  it("does not close the captured pane when the binding changes after confirmation is consumed", async () => {
+    const fixture = await setup("idle");
+    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    const consume = fixture.store.consumePaneCloseRequest.bind(fixture.store);
+    fixture.store.consumePaneCloseRequest = (input) => {
+      const result = consume(input);
+      if (result.outcome === "consumed") fixture.store.updateBinding(fixture.bindingId, { paneId: "w1:p2" });
+      return result;
+    };
+
+    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+
+    expect(fixture.closePane).not.toHaveBeenCalled();
+    expect(JSON.stringify(fixture.cards.at(-1))).toContain("identity");
+    await fixture.close();
+  });
+
+  it("marks the binding orphaned when the pane disappears before confirmation", async () => {
+    const fixture = await setup("idle");
+    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    fixture.setPanePresent(false);
+
+    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+
+    expect(fixture.closePane).not.toHaveBeenCalled();
+    expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ attachment: "orphaned", state: "orphaned" });
+    expect(JSON.stringify(fixture.cards.at(-1))).toContain("已不存在");
     await fixture.close();
   });
 
@@ -73,6 +134,7 @@ describe("Lark pane close", () => {
 
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "active", state: "active" });
+    expect(fixture.store.database.prepare("SELECT state FROM pane_close_requests ORDER BY created_at DESC LIMIT 1").get()).toEqual({ state: "uncertain" });
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("关闭失败");
     await fixture.close();
   });
@@ -82,7 +144,8 @@ async function setup(initialAgentState: AgentState, failClose = false) {
   const cards: object[] = [];
   let panePresent = true;
   let agentState = initialAgentState;
-  const pane = () => ({ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState, foregroundExecutables: ["traex"] });
+  let terminalId: string | null = "term-1";
+  const pane = () => ({ paneId: "w1:p1", terminalId, workspaceId: "w1", cwd: "/repo", label: "task", agentState, foregroundExecutables: ["traex"] });
   const closePane = vi.fn(async () => { if (failClose) throw new Error("pane remained present"); panePresent = false; });
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,
@@ -103,7 +166,7 @@ async function setup(initialAgentState: AgentState, failClose = false) {
   const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;
-  return { cards, closePane, coordinator, store, bindingId, setAgentState(state: AgentState) { agentState = state; }, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
+  return { cards, closePane, coordinator, store, bindingId, setAgentState(state: AgentState) { agentState = state; }, setTerminalId(value: string | null) { terminalId = value; }, setPanePresent(value: boolean) { panePresent = value; }, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }
 
 function message(index: number, text: string) {

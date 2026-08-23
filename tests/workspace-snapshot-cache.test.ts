@@ -52,6 +52,21 @@ describe("workspace snapshot cache", () => {
 
     await expect(cache.listAllPanes()).rejects.toThrow(/does not support an all-workspace snapshot/);
   });
+
+  it("preserves validation semantics and forwards pane close while invalidating the snapshot", async () => {
+    const assertWorkspace = vi.fn(async () => { throw new Error("workspace missing"); });
+    const closePane = vi.fn(async () => undefined);
+    const listPanes = vi.fn(async (workspaceId: string) => [pane(workspaceId, 1)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ assertWorkspace, closePane, listPanes }));
+
+    await cache.listPanes("w1");
+    await expect(cache.assertWorkspace("w1")).rejects.toThrow("workspace missing");
+    await cache.closePane("w1:p1");
+
+    expect(assertWorkspace).toHaveBeenCalledWith("w1");
+    expect(closePane).toHaveBeenCalledWith("w1:p1");
+    expect(cache.status().entries).toBe(0);
+  });
 });
 
 function pane(workspaceId: string, version: number) {

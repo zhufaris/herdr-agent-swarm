@@ -20,10 +20,11 @@ import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
 import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { SessionReconciler } from "./session-reconciler.js";
+import { TurnSupervisor } from "./turn-supervisor.js";
 
 export class SyncCoordinator {
   private readonly workers = new Map<string, Promise<void>>();
-  private readonly activeRuns = new Map<string, { promptId: string; paneId: string; state: Binding["lastAgentState"]; abortController: AbortController }>();
+  private readonly turns = new TurnSupervisor();
   private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly reconciler: SessionReconciler;
   private inboundDrain: Promise<void> | null = null;
@@ -50,7 +51,7 @@ export class SyncCoordinator {
 
   async start(): Promise<void> {
     const recovered = this.store.recoverRunningPrompts();
-    if (recovered > 0) this.logger.warn({ event: "startup-prompts-recovered", recovered, outcome: "failed_without_replay" }, "marked interrupted prompt jobs as failed without replay");
+    if (recovered > 0) this.logger.warn({ event: "startup-prompts-recovered", recovered, outcome: "detached_without_replay" }, "detached from interrupted prompt observers without replay");
     for (const binding of this.store.listBindings()) {
       const spaceName = this.spaceNameFor(binding);
       const topicView = this.store.loadTopicView(binding.id);
@@ -79,7 +80,9 @@ export class SyncCoordinator {
     const recoverableSelections = this.store.listProcessingProjectSelections();
     for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) await this.herdr.assertWorkspace(workspaceId);
     await this.reconciler.captureBaselines();
+    await this.recoverPaneCloseOperations();
     await this.reconciler.reconcile();
+    for (const prompt of this.store.listDetachedPrompts()) this.scheduleDetachedObserver(prompt);
     this.reconciler.start(this.config.reconcileIntervalMs);
     this.stopInboundSubscription = this.bus.onInboundMessage((event) => this.acceptInboundMessage(event.payload));
     await this.lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
@@ -107,8 +110,10 @@ export class SyncCoordinator {
     const settled = Promise.allSettled(pending);
     const graceful = await settlesWithin(settled, this.shutdownGraceMs);
     if (!graceful) {
-      this.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.activeRuns.size, graceMs: this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
-      for (const run of this.activeRuns.values()) run.abortController.abort();
+      this.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.turns.size(), graceMs: this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
+      this.turns.abortAll((run) => {
+        this.store.markPromptObservationDetached(run.promptId, "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。");
+      });
       await settled;
     }
   }
@@ -321,7 +326,7 @@ export class SyncCoordinator {
   }
 
   private async archiveBinding(binding: Binding, actorOpenId: string): Promise<void> {
-    const hasActiveTurn = this.activeRuns.has(binding.id) || this.workers.has(binding.id) && binding.lastAgentState === "working";
+    const hasActiveTurn = this.turns.has(binding.id) || this.workers.has(binding.id) && binding.lastAgentState === "working";
     const reason = hasActiveTurn ? "停止接收新消息；当前任务完成后归档。" : "已从飞书归档；Herdr pane 与 TraeX 保持运行。";
     for (const view of this.store.listRunCards(binding.id).filter((item) => item.phase === "queued")) {
       await this.publish(binding.id, "PromptCancelled", "bridge", { promptId: view.promptId, reason: "话题已归档，排队任务已取消。" });
@@ -348,48 +353,81 @@ export class SyncCoordinator {
     return true;
   }
 
+  private async recoverPaneCloseOperations(): Promise<void> {
+    for (const operation of this.store.listUnresolvedPaneCloseOperations()) {
+      const binding = this.store.getBinding(operation.bindingId);
+      if (binding?.lifecycle === "closed" && binding.paneId === operation.paneId) {
+        this.store.finishPaneCloseRequest(operation.id, "succeeded", "binding was already closed before recovery");
+        continue;
+      }
+      if (!binding || binding.paneId !== operation.paneId) {
+        this.store.finishPaneCloseRequest(operation.id, "uncertain", "binding identity changed before recovery");
+        continue;
+      }
+      try {
+        const pane = await this.herdr.getPane(operation.paneId);
+        if (pane) {
+          this.store.finishPaneCloseRequest(operation.id, "uncertain", "pane still present after restart; close was not replayed");
+          continue;
+        }
+        let next = this.store.transitionBinding(binding.id, { type: "archive_requested", hasActiveTurn: false });
+        next = this.store.transitionBinding(next.id, { type: "closed" });
+        this.store.finishPaneCloseRequest(operation.id, "succeeded", "pane absence verified after restart");
+        await this.publish(next.id, "BindingArchived", "bridge", { reason: `Herdr pane ${operation.paneId} 的关闭结果已在 Bridge 重启后确认。` });
+      } catch (error) {
+        this.store.finishPaneCloseRequest(operation.id, "uncertain", `restart verification failed: ${errorMessage(error)}`);
+      }
+    }
+  }
+
   private async confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean> {
-    const checked = await this.checkPaneCloseSafety(message, binding);
-    if (!checked) return false;
+    if (!binding?.paneId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached") {
+      await this.reject(message, "这个话题没有可关闭的活动 Pane。");
+      return false;
+    }
     const outcome = this.store.consumePaneCloseRequest({
-      bindingId: checked.binding.id, paneId: checked.pane.paneId, actorOpenId: message.actorOpenId,
+      bindingId: binding.id, paneId: binding.paneId, actorOpenId: message.actorOpenId,
       codeHash: paneCloseCodeHash(code), now: new Date().toISOString()
     });
-    if (outcome !== "consumed") {
-      const reason = outcome === "unauthorized" ? "只有发起关闭请求的用户可以确认。"
-        : outcome === "expired" ? "确认码已过期，请重新发送 `/herdr pane close`。"
-          : outcome === "stale" ? "没有待确认的关闭请求，请重新发送 `/herdr pane close`。"
+    if (outcome.outcome !== "consumed") {
+      const reason = outcome.outcome === "unauthorized" ? "只有发起关闭请求的用户可以确认。"
+        : outcome.outcome === "expired" ? "确认码已过期，请重新发送 `/herdr pane close`。"
+          : outcome.outcome === "stale" ? "没有待确认的关闭请求，请重新发送 `/herdr pane close`。"
             : "确认码无效。";
       await this.reject(message, reason);
-      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: checked.binding.id, outcome });
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: outcome.outcome });
       return false;
     }
-    if (!this.herdr.closePane) {
-      await this.reject(message, "当前 Herdr adapter 不支持关闭 Pane。");
-      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unsupported" });
-      return false;
-    }
+    const checked = await this.checkPaneCloseSafety(message, this.store.getBinding(binding.id), outcome.paneId);
+    if (!checked) { this.store.finishPaneCloseRequest(outcome.operationId, "rejected", "safety_recheck_failed"); return false; }
     try {
       await this.herdr.closePane(checked.pane.paneId);
       let next = this.store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false });
       next = this.store.transitionBinding(next.id, { type: "closed" });
+      this.store.finishPaneCloseRequest(outcome.operationId, "succeeded");
       await this.publish(next.id, "BindingArchived", "lark", { reason: `Herdr pane ${checked.pane.paneId} 已由飞书确认关闭。` });
       await this.replyStandalone(message.rootMessageId ?? message.messageId, renderPaneCloseResultCard({ paneId: checked.pane.paneId }));
       this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" });
       return true;
     } catch (error) {
+      this.store.finishPaneCloseRequest(outcome.operationId, "uncertain", errorMessage(error));
       await this.reject(message, `Pane 关闭失败或无法验证：${errorMessage(error)}`);
       this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" });
       return false;
     }
   }
 
-  private async checkPaneCloseSafety(message: IncomingLarkMessage, binding: Binding | null): Promise<{ binding: Binding; pane: NonNullable<Awaited<ReturnType<HerdrPort["getPane"]>>> } | null> {
+  private async checkPaneCloseSafety(message: IncomingLarkMessage, binding: Binding | null, expectedPaneId?: string): Promise<{ binding: Binding; pane: NonNullable<Awaited<ReturnType<HerdrPort["getPane"]>>> } | null> {
     if (!binding?.paneId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached") {
       await this.reject(message, "这个话题没有可关闭的活动 Pane。");
       return null;
     }
-    if (this.activeRuns.has(binding.id) || this.workers.has(binding.id) || this.steeringWorkers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0) {
+    if (expectedPaneId !== undefined && binding.paneId !== expectedPaneId) {
+      await this.reject(message, "Pane identity 已变化，不能关闭。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" });
+      return null;
+    }
+    if (this.turns.has(binding.id) || this.workers.has(binding.id) || this.steeringWorkers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0) {
       await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，不能关闭。");
       this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "busy" });
       return null;
@@ -401,7 +439,7 @@ export class SyncCoordinator {
       await this.reject(message, `Pane ${binding.paneId} 已不存在，绑定已标记为 orphaned。`);
       return null;
     }
-    if (pane.workspaceId !== binding.workspaceId || binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) {
+    if (pane.workspaceId !== binding.workspaceId || binding.traexSessionId !== null && pane.terminalId !== binding.traexSessionId) {
       await this.reject(message, "Pane identity 已变化，不能关闭。");
       this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" });
       return null;
@@ -618,7 +656,7 @@ export class SyncCoordinator {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const promptId = randomUUID();
     const occurredAt = new Date().toISOString();
-    const activeRun = this.activeRuns.get(binding.id);
+    const activeRun = this.turns.get(binding.id);
     const parentPromptId = activeRun?.state === "working" ? activeRun.promptId : null;
     const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({
@@ -658,7 +696,7 @@ export class SyncCoordinator {
   }
 
   private async drainSteering(bindingId: string, parentPromptId: string): Promise<void> {
-    const activeRun = this.activeRuns.get(bindingId);
+    const activeRun = this.turns.get(bindingId);
     if (!activeRun || activeRun.promptId !== parentPromptId) return;
     for (let prompt = this.store.claimNextReadySteering(bindingId, parentPromptId); prompt; prompt = this.store.claimNextReadySteering(bindingId, parentPromptId)) {
       try {
@@ -697,10 +735,11 @@ export class SyncCoordinator {
     for (let prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId)) {
       const queueDepth = this.store.countPendingPrompts(bindingId);
       const startedAt = Date.now();
+      const abortController = this.turns.attach(bindingId, prompt.id, paneId);
+      let observerDetached = false;
+      let dispatched = false;
       try {
         await this.refreshQueuePositions(bindingId);
-        const abortController = new AbortController();
-        this.activeRuns.set(bindingId, { promptId: prompt.id, paneId, state: "working", abortController });
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
         this.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
         const before = await this.herdr.readOutput(paneId, 240);
@@ -712,8 +751,7 @@ export class SyncCoordinator {
             await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [] });
           }
           const previousState = binding?.lastAgentState ?? "unknown";
-          const activeRun = this.activeRuns.get(bindingId);
-          if (activeRun?.promptId === prompt.id) activeRun.state = observedState;
+          this.turns.updateState(bindingId, prompt.id, observedState);
           if (previousState !== observedState) {
             binding = this.store.transitionBinding(bindingId, { type: "pane_observed", runtime: observedState });
             await this.publish(bindingId, "AgentStateChanged", "herdr", {
@@ -721,10 +759,9 @@ export class SyncCoordinator {
             });
             if (observedState === "blocked") this.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding?.workspaceId, paneId, agentState: observedState, queueDepth: this.store.countPendingPrompts(bindingId), outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
-        }, abortController.signal);
+        }, abortController.signal, () => { dispatched = true; this.store.markPromptDispatched(prompt.id); });
         const stateBeforeReturn = binding.lastAgentState;
-        const activeRun = this.activeRuns.get(bindingId);
-        if (activeRun?.promptId === prompt.id) activeRun.state = state;
+        this.turns.updateState(bindingId, prompt.id, state);
         binding = this.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) {
           await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
@@ -740,6 +777,20 @@ export class SyncCoordinator {
         this.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
         await this.refreshQueuePositions(bindingId);
       } catch (error) {
+        if (dispatched) {
+          const notice = this.stopping
+            ? "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。"
+            : `TraeX 请求已尝试投递，但 Bridge 无法确认最终结果：${errorMessage(error)}；不会自动重发。`;
+          observerDetached = true;
+          this.store.markPromptObservationDetached(prompt.id, notice);
+          this.logger.warn({ event: "turn-observer-detached", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "detached_without_replay" }, "detached Bridge waiter from possibly in-flight TraeX turn");
+          return;
+        }
+        if (abortController.signal.aborted && this.stopping) {
+          observerDetached = true;
+          this.logger.info({ event: "turn-dispatch-interrupted", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "recoverable_before_dispatch" }, "turn stopped before dispatch and will return to the durable queue on restart");
+          return;
+        }
         this.store.updatePrompt(prompt.id, "failed", errorMessage(error));
         await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.store.countPendingPrompts(bindingId) });
         this.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
@@ -749,12 +800,55 @@ export class SyncCoordinator {
         const steeringWorker = this.steeringWorkers.get(bindingId);
         if (steeringWorker) await steeringWorker;
         if (this.store.requeueQueuedSteering(bindingId, prompt.id) > 0) await this.refreshQueuePositions(bindingId);
-        if (this.activeRuns.get(bindingId)?.promptId === prompt.id) this.activeRuns.delete(bindingId);
+        this.turns.detach(bindingId, prompt.id);
         const latestBinding = this.store.getBinding(bindingId);
-        if (latestBinding?.lifecycle === "draining") {
+        if (!observerDetached && latestBinding?.lifecycle === "draining") {
           await this.transitionAndPublish(latestBinding, { type: "drain_completed" }, "BindingArchived", "bridge", { reason: "当前任务已结束，话题归档完成；Herdr pane 与 TraeX 保持运行。" });
         }
       }
+    }
+  }
+
+  private scheduleDetachedObserver(prompt: import("../domain/types.js").PromptJob): void {
+    if (this.workers.has(prompt.bindingId)) return;
+    const worker = this.observeDetachedTurn(prompt).finally(() => {
+      this.workers.delete(prompt.bindingId);
+      if (!this.stopping) this.scheduleWorker(prompt.bindingId);
+    });
+    this.workers.set(prompt.bindingId, worker);
+  }
+
+  private async observeDetachedTurn(prompt: import("../domain/types.js").PromptJob): Promise<void> {
+    const binding = this.store.getBinding(prompt.bindingId);
+    if (!binding?.paneId || binding.state !== "active") return;
+    const paneId = binding.paneId;
+    const abortController = this.turns.attach(binding.id, prompt.id, paneId, binding.lastAgentState);
+    let observedActive = binding.lastAgentState === "working" || binding.lastAgentState === "blocked";
+    try {
+      while (!this.stopping) {
+        const pane = await this.herdr.getPane(paneId);
+        if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
+        this.turns.updateState(binding.id, prompt.id, pane.agentState);
+        if (pane.agentState === "working" || pane.agentState === "blocked") observedActive = true;
+        if (pane.agentState === "done" || observedActive && pane.agentState === "idle") {
+          const output = await this.herdr.readOutput(paneId, 240);
+          const answer = extractFinalTraexAnswer(output);
+          this.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(answer) });
+          this.store.updatePrompt(prompt.id, "delivered");
+          this.store.transitionBinding(binding.id, { type: "pane_observed", runtime: pane.agentState });
+          this.store.transitionBinding(binding.id, { type: "turn_completed" });
+          await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: answer || "TraeX 已完成；Bridge 重连后未能恢复更多文本，请查看 Herdr pane。", queueDepth: this.store.countPendingPrompts(binding.id) });
+          this.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
+          return;
+        }
+        await abortableWait(500, abortController.signal);
+      }
+    } catch (error) {
+      if (abortController.signal.aborted || this.stopping) return;
+      this.store.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
+      this.logger.warn({ event: "detached-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId, outcome: "uncertain" }, "could not observe existing TraeX turn");
+    } finally {
+      this.turns.detach(binding.id, prompt.id);
     }
   }
 
@@ -788,7 +882,7 @@ export class SyncCoordinator {
       this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "inactive_binding" });
       return false;
     }
-    if (this.activeRuns.has(binding.id) || this.workers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
+    if (this.turns.has(binding.id) || this.workers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
       await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，请在当前任务或队列完成后重试。");
       this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "busy" });
       return false;
@@ -957,6 +1051,14 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function paneCloseCodeHash(code: string): string { return createHash("sha256").update(code.trim().toUpperCase()).digest("hex"); }
+function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new Error("observer detached"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
+    const onAbort = () => { clearTimeout(timer); reject(new Error("observer detached")); };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export function buildSpaceDirectoryGroups(
   projects: readonly ProjectConfig[],

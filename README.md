@@ -23,8 +23,8 @@ Lark message -> durable turn or steering job -> Herdr pane -> TraeX
 SQLite stores topic-to-pane bindings, FIFO prompt jobs, request-card snapshots,
 deduplication keys, a durable Lark outbox, and audit records. Runtime events stay
 inside the Node.js process. An interrupted running prompt is not replayed after a
-restart; its existing card is marked failed. Prompts that have not started remain
-queued.
+restart; it remains detached while the bridge observes the existing Herdr turn.
+Prompts that have not started remain queued.
 
 The card interaction follows the useful patterns from
 [`lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge):
@@ -179,8 +179,8 @@ Use `/herdr spaces` to list every configured space and all of its live Herdr
 panes, including panes that are not running TraeX. Eligible unbound TraeX panes
 can be claimed from the card, while a same-group bound pane can open its topic.
 Use `/herdr sessions` for the current group's session inventory and `/herdr
-failures` for actionable failures. Only failed Lark delivery can be retried; a
-failed TraeX prompt is never replayed.
+failures` for actionable failures. Only failed Lark delivery can be retried; an
+already-dispatched TraeX prompt is never replayed automatically.
 
 The process holds a fenced SQLite lease. A second process using the same database
 fails startup while the current lease is live. `/ready` requires lease ownership,
@@ -387,9 +387,10 @@ Then perform a Lark smoke test:
 - A service action fails: inspect `systemctl --user status
   herdr-lark-bridge.service` and `journalctl --user -u
   herdr-lark-bridge.service -n 100 --no-pager`.
-- A running card becomes failed after restart: this is intentional. The bridge
-  does not replay an interrupted prompt because doing so could repeat side
-  effects. Send the prompt again if retry is safe.
+- A running card becomes detached after restart. The bridge observes the existing
+  Herdr turn and does not replay the prompt because doing so could repeat side
+  effects. If completion cannot be observed reliably, inspect the pane before
+  deciding whether a fresh request is safe.
 - Updates are delayed during high output volume: ordinary card changes are
   coalesced to protect Lark from update storms; blocked, completed, and failed
   states flush immediately.

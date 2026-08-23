@@ -5,10 +5,12 @@ export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
+export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
+export type PaneCloseOperationState = "executing" | "uncertain";
 
 export interface InstanceLease {
   ownerId: string;
@@ -101,11 +103,19 @@ export interface PromptJob {
   body: string;
   dispatchKind: PromptDispatchKind;
   parentPromptId: string | null;
+  observationState: PromptObservationState;
   state: PromptState;
   attemptCount: number;
   error: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PaneCloseOperation {
+  id: string;
+  bindingId: string;
+  paneId: string;
+  state: PaneCloseOperationState;
 }
 
 export interface OutboundReply {

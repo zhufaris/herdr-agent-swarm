@@ -25,10 +25,26 @@ describe("SQLite store", () => {
     store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
     store.createPaneCloseRequest({ id: "r2", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
 
-    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("invalid");
-    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "other", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("unauthorized");
-    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("consumed");
-    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("stale");
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", now: "2026-08-23T00:00:00.000Z" })).toEqual({ outcome: "invalid" });
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "other", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toEqual({ outcome: "unauthorized" });
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toEqual({ outcome: "consumed", operationId: "r2", paneId: "w1:p1" });
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toEqual({ outcome: "stale" });
+    expect(store.database.prepare("SELECT state FROM pane_close_requests WHERE id = 'r2'").get()).toEqual({ state: "executing" });
+    store.finishPaneCloseRequest("r2", "succeeded");
+    expect(store.database.prepare("SELECT state, detail FROM pane_close_requests WHERE id = 'r2'").get()).toEqual({ state: "succeeded", detail: null });
+  });
+
+  it("preserves an uncertain pane-close operation without replaying it", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", expiresAt: "2099-01-01T00:00:00.000Z" });
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:00:00.000Z" }).outcome).toBe("consumed");
+    store.finishPaneCloseRequest("r1", "uncertain", "verification timeout");
+
+    expect(store.database.prepare("SELECT state, detail FROM pane_close_requests WHERE id = 'r1'").get()).toEqual({ state: "uncertain", detail: "verification timeout" });
+    expect(store.listUnresolvedPaneCloseOperations()).toEqual([{ id: "r1", bindingId: "b1", paneId: "w1:p1", state: "uncertain" }]);
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:00:01.000Z" })).toEqual({ outcome: "stale" });
   });
 
   it("expires a pane-close confirmation without consuming another request", () => {
@@ -37,8 +53,8 @@ describe("SQLite store", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", expiresAt: "2026-08-23T00:01:00.000Z" });
 
-    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:01:00.000Z" })).toBe("expired");
-    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:01:01.000Z" })).toBe("stale");
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:01:00.000Z" })).toEqual({ outcome: "expired" });
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:01:01.000Z" })).toEqual({ outcome: "stale" });
   });
 
   it("durably creates, links, and atomically claims a project selection", () => {
@@ -89,7 +105,7 @@ describe("SQLite store", () => {
     store.enqueuePrompt({ id: "p2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "second" });
     expect(store.claimNextPrompt("b1")?.id).toBe("p1");
     expect(store.recoverRunningPrompts()).toBe(1);
-    expect(store.claimNextPrompt("b1")?.id).toBe("p2");
+    expect(store.claimNextPrompt("b1")?.id).toBe("p1");
     const inbound = { eventId: "e1", messageId: "m2", chatId: "c1", topicId: "t1", rootMessageId: "m1", actorOpenId: "u1", text: "first", mentionsBot: false, isRootMessage: false };
     expect(store.recordInboundMessage(inbound)).toBe(true);
     expect(store.recordInboundMessage(inbound)).toBe(false);
@@ -243,12 +259,14 @@ describe("SQLite store", () => {
       larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
     });
     expect(store.claimNextReadyPrompt("b1")?.id).toBe("p1");
+    store.markPromptDispatched("p1");
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false });
     expect(store.loadRunCard("p1")).toMatchObject({
       answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false
     });
     expect(store.recoverRunningPrompts()).toBe(1);
-    expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed", notice: "Bridge 重启导致本次执行中断", queuePosition: 0, viewVersion: 2 });
+    expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "running", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求", queuePosition: 0, viewVersion: 2 });
   });
 
   it("backfills original request text when migrating an existing run-card database", () => {
@@ -363,6 +381,7 @@ describe("SQLite store", () => {
     expect(store.claimNextReadyPrompt("b1")).toBeNull();
     expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
     expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
+    store.markPromptDispatched("s1");
     store.updatePrompt("s1", "delivered");
     expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s2");
     store.requeueSteeringAsTurn("s2");
@@ -381,6 +400,7 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `${reply.cardRole}-card-s1`, "cardkit-s1");
     expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
+    store.markPromptDispatched("s1");
 
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" });

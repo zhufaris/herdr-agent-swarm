@@ -99,15 +99,16 @@ export class HerdrCliAdapter implements HerdrPort {
     text: string,
     timeoutMs: number,
     onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onDispatched?: () => void | Promise<void>
   ): Promise<AgentState> {
     throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
     try {
-      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
+      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs, onDispatched);
     } catch (error) {
       if (!isUnsupportedAgentPromptError(error)) throw error;
-      await this.submitPromptText(paneId, text, before, signal);
+      await this.submitPromptText(paneId, text, before, signal, onDispatched);
     }
     return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation, signal);
   }
@@ -224,7 +225,7 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal): Promise<void> {
+  private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {
     const comparableText = normalizePromptEcho(text);
     const previousOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
     await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
@@ -233,7 +234,7 @@ export class HerdrCliAdapter implements HerdrPort {
       throwIfAborted(signal);
       const output = await this.readOutput(paneId, 240);
       if (countOccurrences(normalizePromptEcho(output), comparableText) > previousOccurrences) {
-        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs, onDispatched);
         return;
       }
       await abortableDelay(25, signal);
@@ -360,7 +361,7 @@ function redactTerminalSecrets(value: string): string {
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry");
+  if (signal?.aborted) throw new Error("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed");
 }
 
 function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -370,7 +371,7 @@ function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<voi
     const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry"));
+      reject(new Error("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });

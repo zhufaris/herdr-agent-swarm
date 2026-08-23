@@ -57,8 +57,9 @@ describe("pane/thread lifecycle integration", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt(_paneId, text, _timeout, _observation, signal) {
+      async runPrompt(_paneId, text, _timeout, _observation, signal, onDispatched) {
         submitted.push(text);
+        await onDispatched?.();
         await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry")), { once: true }));
         return "done";
       },
@@ -80,7 +81,10 @@ describe("pane/thread lifecycle integration", () => {
     await coordinator.stop();
 
     expect(submitted).toHaveLength(1);
-    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, failed: 1, queued: 1 });
+    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, failed: 0, queued: 1 });
+    expect(store.database.prepare("SELECT id, state, observation_state, error FROM prompt_jobs ORDER BY created_at").all()).toMatchObject([
+      { state: "running", observation_state: "detached" }, { state: "queued", observation_state: "not_started" }
+    ]);
     expect(warnings).toContainEqual(expect.objectContaining({ event: "bridge-shutdown-turns-aborted", activeTurns: 1 }));
     await projector.stop(); await publisher.stop(); store.close();
   });

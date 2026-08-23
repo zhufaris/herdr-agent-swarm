@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, ProjectSelection, ProjectSelectionClaim, PromptJob, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -36,13 +36,14 @@ export interface HerdrPort {
     text: string,
     timeoutMs: number,
     onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onDispatched?: () => void | Promise<void>
   ): Promise<AgentState>;
   runPaneCommand?(paneId: string, command: string, timeoutMs: number): Promise<string>;
   steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
   renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;
-  closePane?(paneId: string): Promise<void>;
+  closePane(paneId: string): Promise<void>;
 }
 
 export interface BindingStorePort {
@@ -78,7 +79,11 @@ export interface BindingStorePort {
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
   createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void;
-  consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }): "consumed" | "invalid" | "unauthorized" | "expired" | "stale";
+  consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }):
+    | { outcome: "consumed"; operationId: string; paneId: string }
+    | { outcome: "invalid" | "unauthorized" | "expired" | "stale" };
+  finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail?: string): void;
+  listUnresolvedPaneCloseOperations(): PaneCloseOperation[];
   updateBinding(id: string, patch: Partial<Binding>): Binding;
   transitionBinding(id: string, transition: SessionTransition): Binding;
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
@@ -94,8 +99,11 @@ export interface BindingStorePort {
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
-  enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  listDetachedPrompts(): PromptJob[];
+  markPromptObservationDetached(id: string, notice: string): void;
+  markPromptDispatched(id: string): void;
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   claimNextPrompt(bindingId: string): PromptJob | null;
   claimNextReadyPrompt(bindingId: string): PromptJob | null;

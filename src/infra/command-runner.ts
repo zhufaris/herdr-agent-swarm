@@ -1,28 +1,39 @@
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
 
 export interface CommandRunner {
-  run(executable: string, args: string[], timeoutMs?: number): Promise<{ stdout: string; stderr: string }>;
+  run(executable: string, args: string[], timeoutMs?: number, onStarted?: () => void | Promise<void>): Promise<{ stdout: string; stderr: string }>;
 }
 
 export class ExecFileCommandRunner implements CommandRunner {
   constructor(private readonly defaultTimeoutMs: number) {}
 
-  async run(executable: string, args: string[], timeoutMs = this.defaultTimeoutMs) {
-    try {
-      const result = await execFileAsync(executable, args, {
-        timeout: timeoutMs,
-        maxBuffer: 10 * 1024 * 1024,
-        encoding: "utf8"
+  run(executable: string, args: string[], timeoutMs = this.defaultTimeoutMs, onStarted?: () => void | Promise<void>): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let startReceipt: Promise<void> | null = null;
+      const child = execFile(executable, args, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, encoding: "utf8" }, (cause, stdout, stderr) => {
+        if (settled) return;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (!cause) { resolve({ stdout, stderr }); return; }
+          const error = cause as NodeJS.ErrnoException & { stdout?: string; stderr?: string; killed?: boolean };
+          const detail = [error.message, error.stderr?.trim()].filter(Boolean).join(": " );
+          reject(new CommandError(executable, args, detail, error.killed === true, cause));
+        };
+        if (startReceipt) void startReceipt.then(finish, () => undefined);
+        else finish();
       });
-      return { stdout: result.stdout, stderr: result.stderr };
-    } catch (cause) {
-      const error = cause as NodeJS.ErrnoException & { stdout?: string; stderr?: string; killed?: boolean };
-      const detail = [error.message, error.stderr?.trim()].filter(Boolean).join(": " );
-      throw new CommandError(executable, args, detail, error.killed === true, cause);
-    }
+      child.once("spawn", () => {
+        startReceipt = Promise.resolve().then(() => onStarted?.());
+        void startReceipt.catch((error) => {
+          if (settled) return;
+          settled = true;
+          child.kill();
+          reject(error);
+        });
+      });
+    });
   }
 }
 
