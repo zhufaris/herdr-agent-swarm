@@ -45,6 +45,7 @@ export class CommandError extends Error {
 function redactCommandArgs(args: string[]): string[] {
   const safe = [...args];
   if (safe[0] === "pane" && safe[1] === "send-text" && safe.length > 3) safe[3] = "[REDACTED]";
+  if (safe[0] === "agent" && safe[1] === "prompt" && safe.length > 3) safe[3] = "[REDACTED]";
   return safe;
 }
 

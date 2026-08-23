@@ -102,7 +102,12 @@ export class HerdrCliAdapter implements HerdrPort {
   ): Promise<AgentState> {
     throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
-    await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
+    try {
+      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
+    } catch (error) {
+      if (!isUnsupportedAgentPromptError(error)) throw error;
+      await this.submitPromptText(paneId, text, before, signal);
+    }
     return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation, signal);
   }
 
@@ -264,6 +269,10 @@ function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
     if (parsed.success) return parsed.data;
   }
   return null;
+}
+
+function isUnsupportedAgentPromptError(error: unknown): boolean {
+  return /"code"\s*:\s*"agent_(?:not_ready|not_found)"/.test(error instanceof Error ? error.message : String(error));
 }
 
 function unwrapText(stdout: string): string {

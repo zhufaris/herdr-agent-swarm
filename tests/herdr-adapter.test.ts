@@ -121,6 +121,40 @@ describe("Herdr adapter", () => {
     expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
   });
 
+  it("falls back to pane input when Herdr rejects a detected TraeX pane as an unnamed agent", async () => {
+    const calls: string[][] = [];
+    const outputs = ["before", "before", "before\n❯ continue", "✧ Working", "answer", "answer"];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "agent" && args[1] === "prompt") {
+          throw new Error('{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"}}');
+        }
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
+        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: outputs.length > 2 ? "working" : "done" }], agents: [] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 1000)).resolves.toBe("done");
+    expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "continue"]);
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "continue"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+  });
+
+  it("does not retry through pane input after an ambiguous native prompt failure", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "pane" && args[1] === "read") return { stdout: "before", stderr: "" };
+      throw new Error("connection lost after prompt submission");
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 1000))
+      .rejects.toThrow(/connection lost/);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "send-text")).toBe(false);
+  });
+
   it("runs a pane slash command and returns only its stable native output", async () => {
     const calls: string[][] = [];
     const outputs = [

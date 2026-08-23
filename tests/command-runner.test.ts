@@ -10,4 +10,13 @@ describe("command error redaction", () => {
     expect(error.message).not.toContain(secret);
     expect(JSON.stringify(error)).not.toContain(secret);
   });
+
+  it("never exposes agent prompt content through error fields", () => {
+    const secret = "private Lark prompt";
+    const error = new CommandError("herdr", ["agent", "prompt", "w1:p1", secret], `failed to submit ${secret}`, false);
+
+    expect(error.args).toEqual(["agent", "prompt", "w1:p1", "[REDACTED]"]);
+    expect(error.message).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
+  });
 });
