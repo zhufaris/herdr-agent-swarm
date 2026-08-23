@@ -835,7 +835,7 @@ export class SyncCoordinator {
         const observation = await this.herdr.observeRuntime(paneId);
         const pane = observation.pane;
         if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
-        const state = observation.state;
+        const state = pane.agentState;
         this.turns.updateState(binding.id, prompt.id, state);
         if (state === "working" || state === "blocked") observedActive = true;
         const unknownOutput = state === "unknown" ? await this.herdr.readOutput(paneId, 240) : null;

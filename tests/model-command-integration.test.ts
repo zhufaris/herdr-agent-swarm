@@ -30,7 +30,7 @@ describe("model command", () => {
     const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
     const snapshotPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, foregroundExecutables: [] };
     const observedPane = { ...snapshotPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const observeRuntime = vi.fn(async () => ({ pane: observedPane, state: "idle" as const, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
+    const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
     let snapshotReads = 0;
     const selectPaneModel = vi.fn(async () => undefined);
     const fixture = await setup(cards, runPaneCommand, {
@@ -106,7 +106,7 @@ async function setup(
   const pane = options.pane ?? { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
     async assertWorkspace() {}, listPanes: options.listPanes ?? (async () => [pane]), async getPane() { return pane; },
-    observeRuntime: options.observeRuntime ?? (async () => ({ pane, state: pane.agentState, traexProcess: pane.foregroundExecutables.includes("traex"), composerReady: pane.agentState === "idle", evidenceSource: "structured" })),
+    observeRuntime: options.observeRuntime ?? (async () => ({ pane, traexProcess: pane.foregroundExecutables.includes("traex"), composerReady: pane.agentState === "idle", evidenceSource: "structured" })),
     ...(options.selectPaneModel ? { selectPaneModel: options.selectPaneModel } : {}),
     async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; },
     runPaneCommand, async readOutput() { return ""; }, async renamePane() {}

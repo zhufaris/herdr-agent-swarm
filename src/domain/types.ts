@@ -193,7 +193,6 @@ export interface HerdrPane {
 
 export interface RuntimeObservation {
   pane: HerdrPane | null;
-  state: AgentState;
   traexProcess: boolean;
   composerReady: boolean;
   evidenceSource: "structured" | "recent" | "visible" | "process" | "none";

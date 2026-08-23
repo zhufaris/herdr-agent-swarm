@@ -57,7 +57,7 @@ describe("workspace snapshot cache", () => {
     const unknown = { ...pane("w1", 1), agentState: "unknown" as const, foregroundExecutables: [] };
     const observed = { ...unknown, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const listPanes = vi.fn(async () => [unknown]);
-    const observation = { pane: observed, state: "idle" as const, traexProcess: true, composerReady: true, evidenceSource: "visible" as const };
+    const observation = { pane: observed, traexProcess: true, composerReady: true, evidenceSource: "visible" as const };
     const observeRuntime = vi.fn(async () => observation);
     const cache = new WorkspaceSnapshotCache(adapter({ listPanes, observeRuntime }));
 
@@ -69,10 +69,10 @@ describe("workspace snapshot cache", () => {
   });
 
   it("returns an explicit missing observation from the runtime observer", async () => {
-    const observeRuntime = vi.fn(async () => ({ pane: null, state: "unknown" as const, traexProcess: false, composerReady: false, evidenceSource: "none" as const }));
+    const observeRuntime = vi.fn(async () => ({ pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" as const }));
     const cache = new WorkspaceSnapshotCache(adapter({ observeRuntime }));
 
-    expect(await cache.observeRuntime("w1:p1")).toEqual({ pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" });
+    expect(await cache.observeRuntime("w1:p1")).toEqual({ pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" });
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
   });
 
@@ -98,7 +98,7 @@ function pane(workspaceId: string, version: number) {
 function adapter(overrides: Partial<HerdrPort>): HerdrPort {
   return {
     async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
-    async observeRuntime() { return { pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" }; },
+    async observeRuntime() { return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" }; },
     async createPane(workspaceId) { return pane(workspaceId, 99); }, async startTraex() {}, async runPrompt() { return "done"; },
     async readOutput() { return ""; }, async renamePane() {}, ...overrides
   };

@@ -101,7 +101,7 @@ describe("pane/thread lifecycle integration", () => {
     const pane = () => ({ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: (restarted ? "idle" : firstDispatched ? "working" : "idle") as AgentState, foregroundExecutables: ["traex"] });
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane()]; }, async getPane() { return pane(); },
-      async observeRuntime() { return { pane: pane(), state: pane().agentState, traexProcess: true, composerReady: restarted, evidenceSource: "structured" }; },
+      async observeRuntime() { return { pane: pane(), traexProcess: true, composerReady: restarted, evidenceSource: "structured" }; },
       async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeout, _observation, signal, onDispatched) {
         submitted.push(text);
@@ -142,7 +142,7 @@ describe("pane/thread lifecycle integration", () => {
     const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, foregroundExecutables: ["traex"] };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
-      async observeRuntime() { return { pane, state: "unknown", traexProcess: true, composerReady: false, evidenceSource: "process" }; },
+      async observeRuntime() { return { pane, traexProcess: true, composerReady: false, evidenceSource: "process" }; },
       async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { throw new Error("must not replay"); },
       async readOutput() { return "ambiguous output"; }, async renamePane() {}
     };
@@ -175,7 +175,7 @@ describe("pane/thread lifecycle integration", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane(id) { return id === pane.paneId ? pane : null; },
-      async observeRuntime(id) { return { pane: id === pane.paneId ? pane : null, state: id === pane.paneId ? "idle" : "unknown", traexProcess: id === pane.paneId, composerReady: id === pane.paneId, evidenceSource: id === pane.paneId ? "structured" : "none" }; },
+      async observeRuntime(id) { return { pane: id === pane.paneId ? pane : null, traexProcess: id === pane.paneId, composerReady: id === pane.paneId, evidenceSource: id === pane.paneId ? "structured" : "none" }; },
       async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt(_paneId, text) { submitted.push(text); return "done"; },
       async readOutput() { return "◆ done\n────────"; }, async renamePane() {}
     };

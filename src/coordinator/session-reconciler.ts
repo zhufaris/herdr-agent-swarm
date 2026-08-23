@@ -153,7 +153,7 @@ export class SessionReconciler {
           pane = observation.pane ?? pane;
           this.options.logger.debug({
             event: "binding-runtime-observed", bindingId: existing.id, paneId: pane.paneId,
-            agentState: observation.state, evidenceSource: observation.evidenceSource
+            agentState: observation.pane?.agentState ?? "unknown", evidenceSource: observation.evidenceSource
           }, "enriched bound pane from runtime evidence");
         }
         catch (error) {

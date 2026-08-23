@@ -172,7 +172,7 @@ describe("SessionReconciler", () => {
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "unknown" });
     const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, stateChangeSeq: 9, foregroundExecutables: [] };
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const observeRuntime = vi.fn(async () => ({ pane: observedPane, state: "idle" as const, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
+    const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
     const scheduleBinding = vi.fn();
     const reconciler = new SessionReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],

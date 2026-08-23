@@ -19,7 +19,7 @@ describe("Herdr adapter", () => {
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeRuntime("w1:p1")).resolves.toMatchObject({
       pane: { paneId: "w1:p1", terminalId: "term-1", agentState: "idle", foregroundExecutables: ["traex"] },
-      state: "idle", traexProcess: true, composerReady: true, evidenceSource: "recent"
+      traexProcess: true, composerReady: true, evidenceSource: "recent"
     });
   });
 
@@ -36,7 +36,7 @@ describe("Herdr adapter", () => {
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeRuntime("w1:p1")).resolves.toMatchObject({
       pane: { agentState: "unknown", foregroundExecutables: ["bash"] },
-      state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "process"
+      traexProcess: false, composerReady: false, evidenceSource: "process"
     });
   });
 
@@ -166,7 +166,7 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "traex"))
       .resolves.toBeUndefined();
     expect(calls).toEqual([
-      ["pane", "process-info", "--pane", "w1:p1"],
+      ["api", "snapshot"],
       ["pane", "process-info", "--pane", "w1:p1"],
       ["pane", "read", "w1:p1", "--source", "recent-unwrapped", "--lines", "80", "--format", "text"]
     ]);
@@ -197,6 +197,9 @@ describe("Herdr adapter", () => {
     const sources: string[] = [];
     const runner: CommandRunner = {
       async run(_executable, args) {
+        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: {
+          panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }], agents: []
+        } });
         if (args[0] === "pane" && args[1] === "process-info") {
           return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
         }

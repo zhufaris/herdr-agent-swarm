@@ -65,19 +65,19 @@ export class HerdrCliAdapter implements HerdrPort {
 
   async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const pane = await this.getPane(paneId);
-    if (!pane) return { pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" };
+    if (!pane) return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" };
     const foregroundExecutables = await this.foregroundExecutables(paneId);
     const traexProcess = foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
-    if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, state: "unknown", traexProcess, composerReady: false, evidenceSource: "process" };
-    if (pane.agentState !== "unknown") return { pane: observed, state: pane.agentState, traexProcess, composerReady: pane.agentState === "idle", evidenceSource: "structured" };
+    if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
+    if (pane.agentState !== "unknown") return { pane: observed, traexProcess, composerReady: pane.agentState === "idle", evidenceSource: "structured" };
     try {
       const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
       if (recentState !== "unknown") return this.runtimeObservation(observed, recentState, "recent");
       const visibleState = inferTraexAgentState(await this.readOutputSource(paneId, 80, "visible"));
       return this.runtimeObservation(observed, visibleState, visibleState === "unknown" ? "process" : "visible");
     } catch {
-      return { pane: observed, state: "unknown", traexProcess, composerReady: false, evidenceSource: "process" };
+      return { pane: observed, traexProcess, composerReady: false, evidenceSource: "process" };
     }
   }
 
@@ -108,7 +108,9 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async startTraex(paneId: string, executable: string): Promise<void> {
-    if (!await this.isTraexProcessRunning(paneId)) {
+    const initial = await this.observeRuntime(paneId);
+    if (initial.composerReady) return;
+    if (!initial.traexProcess) {
       await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", "auto"], this.commandTimeoutMs);
     }
     await this.waitUntilTraexComposer(paneId);
@@ -256,30 +258,14 @@ export class HerdrCliAdapter implements HerdrPort {
   private async waitUntilTraexComposer(paneId: string): Promise<void> {
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
-      if (await this.isTraexComposerReady(paneId)) return;
+      if ((await this.observeRuntime(paneId)).composerReady) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new Error(`TraeX composer did not become ready in pane ${paneId}`);
   }
 
-  private async isTraexProcessRunning(paneId: string): Promise<boolean> {
-    return (await this.foregroundExecutables(paneId)).includes("traex");
-  }
-
-  private async isTraexComposerReady(paneId: string): Promise<boolean> {
-    if (!await this.isTraexProcessRunning(paneId)) return false;
-    try { return await this.inferTraexPaneState(paneId) === "idle"; }
-    catch { return false; }
-  }
-
-  private async inferTraexPaneState(paneId: string): Promise<AgentState> {
-    const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
-    if (recentState !== "unknown") return recentState;
-    return inferTraexAgentState(await this.readOutputSource(paneId, 80, "visible"));
-  }
-
   private runtimeObservation(pane: HerdrPane, state: AgentState, evidenceSource: RuntimeObservation["evidenceSource"]): RuntimeObservation {
-    return { pane: { ...pane, agentState: state }, state, traexProcess: true, composerReady: state === "idle", evidenceSource };
+    return { pane: { ...pane, agentState: state }, traexProcess: true, composerReady: state === "idle", evidenceSource };
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {
