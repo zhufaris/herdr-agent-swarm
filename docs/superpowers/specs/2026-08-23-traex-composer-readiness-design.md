@@ -25,7 +25,7 @@ Process existence alone means only that launch has started. It must not advance 
 - If the configured command timeout expires, throw a readiness-specific error naming the pane.
 - Do not launch a second TraeX process merely because the first process has not rendered its composer yet.
 
-Structured Herdr agent state may confirm readiness when it is non-`unknown` and the exact TraeX process is present, but an `unknown` state requires composer evidence. Empty or ambiguous terminal output fails closed.
+Structured Herdr agent state remains useful for later turn observation, but it does not replace the startup gate. Startup always requires both the exact TraeX process and composer evidence. Empty or ambiguous terminal output fails closed.
 
 ## Provisioning and Recovery
 
