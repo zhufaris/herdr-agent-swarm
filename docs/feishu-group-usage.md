@@ -187,18 +187,20 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
 - 强制终止正在工作的 TraeX。
 
-## 已设计但尚未上线
+## 从飞书关闭 Pane
 
-以下命令已有设计，但当前线上版本还不能使用：
+真正关闭当前话题绑定的 Pane 使用两步确认：
 
 ```text
 /herdr pane close
 /herdr pane close confirm <code>
 ```
 
-它们将用于真正关闭当前话题绑定的 pane。关闭采用 60 秒一次性确认码，并且
-仅允许关闭 `idle` 或 `done` 的 pane；`working`、`blocked` 和 `unknown` 状态均
-会被拒绝。现阶段如需真正关闭 pane，请在 Herdr 中操作。
+第一条命令生成 60 秒一次性确认码，第二条必须由同一飞书用户在同一话题中
+发送。Bridge 会在确认时重新检查 Pane identity、队列和运行状态，仅允许关闭
+Herdr 明确报告为 `idle` 或 `done` 的 Pane；`working`、`blocked` 和 `unknown`
+都会被拒绝。关闭成功后，Bridge 还会验证 Pane 已从 Herdr 消失，再归档话题。
+确认码只可使用一次，服务重启不会自动重放关闭操作。
 
 ## 常见问题
 
@@ -209,8 +211,8 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 
 ### `/herdr close` 后 pane 还在
 
-这是预期行为。`/herdr close` 只归档绑定，不会关闭 pane。真正的远程 pane
-关闭功能尚未上线。
+这是预期行为。`/herdr close` 只归档绑定，不会关闭 pane。需要真正关闭时，
+请在仍处于 active 的绑定话题中发送 `/herdr pane close` 并按卡片提示确认。
 
 ### 可以从飞书批准权限吗
 

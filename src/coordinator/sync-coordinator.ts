@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderAttachStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
 import { renderFailureCards, renderSessionCards } from "../cards/operations-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { renderModelResultCard } from "../cards/model-card.js";
+import { renderPaneCloseConfirmationCard, renderPaneCloseResultCard } from "../cards/pane-close-card.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -277,6 +278,10 @@ export class SyncCoordinator {
           await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard("这个话题没有可归档的活动会话。"));
           disposition = "rejected";
         } else await this.archiveBinding(binding, message.actorOpenId);
+      } else if (command?.kind === "pane_close_request") {
+        disposition = await this.requestPaneClose(message, binding) ? "command_completed" : "rejected";
+      } else if (command?.kind === "pane_close_confirm") {
+        disposition = await this.confirmPaneClose(message, binding, command.code) ? "command_completed" : "rejected";
       } else if (command?.kind === "reattach") {
         if (!binding || binding.attachment !== "orphaned") {
           await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected";
@@ -325,6 +330,88 @@ export class SyncCoordinator {
     const type = hasActiveTurn ? "BindingDraining" as const : "BindingArchived" as const;
     const next = await this.transitionAndPublish(binding, { type: "archive_requested", hasActiveTurn }, type, "lark", { reason });
     this.store.audit({ actorOpenId, action: "binding.archive", target: binding.id, outcome: next.lifecycle });
+  }
+
+  private async requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
+    const checked = await this.checkPaneCloseSafety(message, binding);
+    if (!checked) return false;
+    const code = randomBytes(3).toString("hex").toUpperCase();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    this.store.createPaneCloseRequest({
+      id: randomUUID(), bindingId: checked.binding.id, paneId: checked.pane.paneId, actorOpenId: message.actorOpenId,
+      codeHash: paneCloseCodeHash(code), expiresAt
+    });
+    await this.replyStandalone(message.rootMessageId ?? message.messageId, renderPaneCloseConfirmationCard({
+      spaceName: this.spaceNameFor(checked.binding), paneId: checked.pane.paneId, agentState: checked.pane.agentState, code, expiresAt
+    }));
+    this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.requested", target: checked.binding.id, outcome: "confirmation_issued" });
+    return true;
+  }
+
+  private async confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean> {
+    const checked = await this.checkPaneCloseSafety(message, binding);
+    if (!checked) return false;
+    const outcome = this.store.consumePaneCloseRequest({
+      bindingId: checked.binding.id, paneId: checked.pane.paneId, actorOpenId: message.actorOpenId,
+      codeHash: paneCloseCodeHash(code), now: new Date().toISOString()
+    });
+    if (outcome !== "consumed") {
+      const reason = outcome === "unauthorized" ? "只有发起关闭请求的用户可以确认。"
+        : outcome === "expired" ? "确认码已过期，请重新发送 `/herdr pane close`。"
+          : outcome === "stale" ? "没有待确认的关闭请求，请重新发送 `/herdr pane close`。"
+            : "确认码无效。";
+      await this.reject(message, reason);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: checked.binding.id, outcome });
+      return false;
+    }
+    if (!this.herdr.closePane) {
+      await this.reject(message, "当前 Herdr adapter 不支持关闭 Pane。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unsupported" });
+      return false;
+    }
+    try {
+      await this.herdr.closePane(checked.pane.paneId);
+      let next = this.store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false });
+      next = this.store.transitionBinding(next.id, { type: "closed" });
+      await this.publish(next.id, "BindingArchived", "lark", { reason: `Herdr pane ${checked.pane.paneId} 已由飞书确认关闭。` });
+      await this.replyStandalone(message.rootMessageId ?? message.messageId, renderPaneCloseResultCard({ paneId: checked.pane.paneId }));
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" });
+      return true;
+    } catch (error) {
+      await this.reject(message, `Pane 关闭失败或无法验证：${errorMessage(error)}`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" });
+      return false;
+    }
+  }
+
+  private async checkPaneCloseSafety(message: IncomingLarkMessage, binding: Binding | null): Promise<{ binding: Binding; pane: NonNullable<Awaited<ReturnType<HerdrPort["getPane"]>>> } | null> {
+    if (!binding?.paneId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached") {
+      await this.reject(message, "这个话题没有可关闭的活动 Pane。");
+      return null;
+    }
+    if (this.activeRuns.has(binding.id) || this.workers.has(binding.id) || this.steeringWorkers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0) {
+      await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，不能关闭。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "busy" });
+      return null;
+    }
+    const pane = await this.herdr.getPane(binding.paneId);
+    if (!pane) {
+      const orphaned = this.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 1 });
+      await this.publish(orphaned.id, "BindingOrphaned", "herdr", { reason: `Herdr pane ${binding.paneId} no longer exists` });
+      await this.reject(message, `Pane ${binding.paneId} 已不存在，绑定已标记为 orphaned。`);
+      return null;
+    }
+    if (pane.workspaceId !== binding.workspaceId || binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) {
+      await this.reject(message, "Pane identity 已变化，不能关闭。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" });
+      return null;
+    }
+    if (pane.agentState !== "idle" && pane.agentState !== "done") {
+      await this.reject(message, `Pane 当前状态为 ${pane.agentState}，不能关闭；仅 idle/done 状态允许关闭。`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: pane.agentState });
+      return null;
+    }
+    return { binding, pane };
   }
 
   async reconcile(): Promise<void> {
@@ -869,6 +956,7 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function paneCloseCodeHash(code: string): string { return createHash("sha256").update(code.trim().toUpperCase()).digest("hex"); }
 
 export function buildSpaceDirectoryGroups(
   projects: readonly ProjectConfig[],

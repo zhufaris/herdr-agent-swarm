@@ -36,6 +36,11 @@ export function parseCommand(text: string): BridgeCommand | null {
       return argument ? { kind: "rename", title: argument } : { kind: "help" };
     case "close":
       return { kind: "close" };
+    case "pane": {
+      if (argument === "close") return { kind: "pane_close_request" };
+      const confirm = /^close\s+confirm\s+(\S+)$/i.exec(argument);
+      return confirm ? { kind: "pane_close_confirm", code: confirm[1]! } : { kind: "help" };
+    }
     case "reattach":
       return argument ? { kind: "reattach", paneId: argument } : { kind: "help" };
     case "replace":

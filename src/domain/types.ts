@@ -203,6 +203,8 @@ export type BridgeCommand =
   | { kind: "attach"; spaceName: string; paneId: string }
   | { kind: "rename"; title: string }
   | { kind: "close" }
+  | { kind: "pane_close_request" }
+  | { kind: "pane_close_confirm"; code: string }
   | { kind: "reattach"; paneId: string }
   | { kind: "replace" }
   | { kind: "resume" }

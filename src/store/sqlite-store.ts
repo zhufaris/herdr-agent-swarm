@@ -34,7 +34,7 @@ type ProjectSelectionRow = Record<string, SqlValue> & {
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "project_selections", "audit_log", "lifecycle_events", "topic_views", "run_cards"
+  "project_selections", "pane_close_requests", "audit_log", "lifecycle_events", "topic_views", "run_cards"
 ] as const;
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -261,6 +261,40 @@ export class SqliteBindingStore implements BindingStorePort {
     const selection = this.getProjectSelection(id);
     if (!selection) throw new Error(`Project selection not found: ${id}`);
     return selection;
+  }
+
+  createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const timestamp = now();
+      this.database.prepare("UPDATE pane_close_requests SET state = 'cancelled', updated_at = ? WHERE binding_id = ? AND state = 'pending'")
+        .run(timestamp, input.bindingId);
+      this.database.prepare(`
+        INSERT INTO pane_close_requests(id, binding_id, pane_id, actor_open_id, code_hash, state, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      `).run(input.id, input.bindingId, input.paneId, input.actorOpenId, input.codeHash, input.expiresAt, timestamp, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }): "consumed" | "invalid" | "unauthorized" | "expired" | "stale" {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare("SELECT id, pane_id, actor_open_id, code_hash, expires_at FROM pane_close_requests WHERE binding_id = ? AND state = 'pending' ORDER BY created_at DESC, id DESC LIMIT 1")
+        .get(input.bindingId) as { id: string; pane_id: string; actor_open_id: string; code_hash: string; expires_at: string } | undefined;
+      if (!row) { this.database.exec("COMMIT"); return "stale"; }
+      if (row.actor_open_id !== input.actorOpenId) { this.database.exec("COMMIT"); return "unauthorized"; }
+      if (row.pane_id !== input.paneId || row.code_hash !== input.codeHash) { this.database.exec("COMMIT"); return "invalid"; }
+      if (row.expires_at <= input.now) {
+        this.database.prepare("UPDATE pane_close_requests SET state = 'expired', updated_at = ? WHERE id = ? AND state = 'pending'").run(input.now, row.id);
+        this.database.exec("COMMIT");
+        return "expired";
+      }
+      const result = this.database.prepare("UPDATE pane_close_requests SET state = 'consumed', consumed_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'")
+        .run(input.now, input.now, row.id);
+      this.database.exec("COMMIT");
+      return result.changes === 1 ? "consumed" : "stale";
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   updateBinding(id: string, patch: Partial<Binding>): Binding {
@@ -777,6 +811,11 @@ export class SqliteBindingStore implements BindingStorePort {
         requested_title TEXT, selected_project_id TEXT, binding_id TEXT REFERENCES bindings(id), state TEXT NOT NULL CHECK(state IN ('pending','processing','completed','failed','expired')),
         error TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS pane_close_requests(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, actor_open_id TEXT NOT NULL, code_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','consumed','expired','cancelled')), expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
       CREATE TABLE IF NOT EXISTS audit_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, actor_open_id TEXT NOT NULL, action TEXT NOT NULL,
         target TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL

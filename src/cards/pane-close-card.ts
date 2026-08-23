@@ -1,0 +1,24 @@
+export function renderPaneCloseConfirmationCard(input: { spaceName: string; paneId: string; agentState: string; code: string; expiresAt: string }): object {
+  return {
+    schema: "2.0",
+    config: { update_multi: true, summary: { content: `确认关闭 Pane ${input.paneId}` } },
+    header: { title: { tag: "plain_text", content: "⚠ 确认关闭 Herdr Pane" }, template: "orange" },
+    body: { elements: [{ tag: "markdown", content: [
+      `**Space**  ${input.spaceName}`,
+      `**Pane**  \`${input.paneId}\``,
+      `**状态**  \`${input.agentState}\``, "",
+      "此操作会关闭 Pane 并终止其中的 TraeX。确认码 60 秒内有效：",
+      `\`/herdr pane close confirm ${input.code}\``,
+      `有效期至：${input.expiresAt}`
+    ].join("\n") }] }
+  };
+}
+
+export function renderPaneCloseResultCard(input: { paneId: string }): object {
+  return {
+    schema: "2.0",
+    config: { update_multi: true, summary: { content: `Pane ${input.paneId} 已关闭` } },
+    header: { title: { tag: "plain_text", content: "✓ Herdr Pane 已关闭" }, template: "green" },
+    body: { elements: [{ tag: "markdown", content: `Pane \`${input.paneId}\` 已关闭并完成消失验证。当前飞书话题已归档。` }] }
+  };
+}

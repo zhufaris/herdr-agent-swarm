@@ -280,6 +280,8 @@ Available commands:
 /herdr status
 /herdr rename <title>
 /herdr close
+/herdr pane close
+/herdr pane close confirm <code>
 /herdr reattach <pane-id>
 /herdr replace
 /herdr resume
@@ -314,6 +316,13 @@ When TraeX needs high-risk approval, the card changes to orange and directs the
 operator to the associated Herdr pane. Approve or reject the operation in Herdr;
 the Lark card cannot bypass that boundary. `/herdr close` archives the binding
 but does not kill TraeX or delete Lark history.
+To close the actual pane, send `/herdr pane close` from its bound topic, then
+send the generated `/herdr pane close confirm <code>` command within 60
+seconds as the same Lark user. The bridge rechecks the binding identity, queue,
+active workers, and current Herdr agent state immediately before closing. Only
+an explicit `idle` or `done` state is accepted; `working`, `blocked`, and
+`unknown` are rejected. A successful result is reported only after Herdr no
+longer returns the pane.
 If a pane becomes orphaned, `reattach` verifies the original pane identity and
 `replace` creates a new generation. Both leave the session archived until an
 explicit `resume`, so uncertain work is never replayed automatically.

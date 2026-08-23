@@ -47,7 +47,8 @@ describe("SQLite instance lease", () => {
     const timestamp = (offset: number) => new Date(base + offset).toISOString();
     const firstLease = first.acquireInstanceLease("owner-a", timestamp(0), timestamp(15_000))!;
     first.activateWriteFence(firstLease.ownerId, firstLease.fencingToken);
-    expect(first.database.prepare("SELECT COUNT(*) AS count FROM sqlite_temp_master WHERE type = 'trigger' AND name LIKE 'bridge_fence_%'").get()).toEqual({ count: 30 });
+    const applicationTables = first.database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name NOT IN ('schema_migrations', 'instance_lease', 'sqlite_sequence')").get() as { count: number };
+    expect(first.database.prepare("SELECT COUNT(*) AS count FROM sqlite_temp_master WHERE type = 'trigger' AND name LIKE 'bridge_fence_%'").get()).toEqual({ count: applicationTables.count * 3 });
     first.createPendingBinding({ id: "before", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Before" });
 
     const secondLease = second.acquireInstanceLease("owner-b", timestamp(15_000), timestamp(30_000))!;
@@ -60,6 +61,7 @@ describe("SQLite instance lease", () => {
     expect(() => first.audit({ actorOpenId: "u1", action: "stale", target: "b1", outcome: "rejected" })).toThrow(/stale_instance_lease/);
     expect(() => first.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES ('before', '{}', 'now')").run()).toThrow(/stale_instance_lease/);
     expect(() => first.database.prepare("INSERT INTO lifecycle_events(event_id, binding_id, event_type, payload_json, occurred_at) VALUES ('le1', 'before', 'test', '{}', 'now')").run()).toThrow(/stale_instance_lease/);
+    expect(() => first.createPaneCloseRequest({ id: "close-1", bindingId: "before", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", expiresAt: timestamp(60_000) })).toThrow(/stale_instance_lease/);
 
     expect(second.createPendingBinding({ id: "current", workspaceId: "w1", chatId: "c1", topicId: "t3", rootMessageId: "m3", title: "Current" })).toMatchObject({ id: "current" });
     first.deactivateWriteFence();

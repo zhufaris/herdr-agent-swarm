@@ -232,6 +232,8 @@ export function renderHelpCard(): object {
         "`/herdr model [name]`  `/model` 的等价别名",
         "`/herdr rename <标题>`  重命名当前 pane",
         "`/herdr close`  归档映射（不会强杀 TraeX）",
+        "`/herdr pane close`  请求关闭空闲 Pane（需要 60 秒内二次确认）",
+        "`/herdr pane close confirm <code>`  确认关闭当前话题绑定的 Pane",
         "`/herdr reattach <pane>`  重新连接已验证的原 Pane",
         "`/herdr replace`  创建新的 Pane generation（不会重放任务）",
         "`/herdr resume`  验证后恢复已归档会话",

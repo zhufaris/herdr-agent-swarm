@@ -42,6 +42,7 @@ export interface HerdrPort {
   steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
   renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;
+  closePane?(paneId: string): Promise<void>;
 }
 
 export interface BindingStorePort {
@@ -76,6 +77,8 @@ export interface BindingStorePort {
   pauseProjectSelection(id: string, error: string): ProjectSelection;
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
+  createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void;
+  consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }): "consumed" | "invalid" | "unauthorized" | "expired" | "stale";
   updateBinding(id: string, patch: Partial<Binding>): Binding;
   transitionBinding(id: string, transition: SessionTransition): Binding;
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;

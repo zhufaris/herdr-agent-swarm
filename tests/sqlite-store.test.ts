@@ -17,6 +17,30 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("atomically supersedes and consumes pane-close confirmations", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+
+    store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
+    store.createPaneCloseRequest({ id: "r2", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
+
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("invalid");
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "other", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("unauthorized");
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("consumed");
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", now: "2026-08-23T00:00:00.000Z" })).toBe("stale");
+  });
+
+  it("expires a pane-close confirmation without consuming another request", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", expiresAt: "2026-08-23T00:01:00.000Z" });
+
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:01:00.000Z" })).toBe("expired");
+    expect(store.consumePaneCloseRequest({ bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "hash", now: "2026-08-23T00:01:01.000Z" })).toBe("stale");
+  });
+
   it("durably creates, links, and atomically claims a project selection", () => {
     store = new SqliteBindingStore(":memory:");
     const selection = store.createProjectSelection({

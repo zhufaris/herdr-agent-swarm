@@ -157,6 +157,22 @@ export class HerdrCliAdapter implements HerdrPort {
     await this.runner.run(this.executable, ["tab", "rename", pane.tab_id, options.tabTitle], this.commandTimeoutMs);
   }
 
+  async closePane(paneId: string): Promise<void> {
+    let closeError: unknown;
+    try {
+      await this.runner.run(this.executable, ["pane", "close", paneId], this.commandTimeoutMs);
+    } catch (error) {
+      closeError = error;
+    }
+    const deadline = Date.now() + this.commandTimeoutMs;
+    while (Date.now() < deadline) {
+      if (!await this.getPane(paneId)) return;
+      await abortableDelay(100);
+    }
+    if (closeError) throw closeError;
+    throw new Error(`Herdr pane ${paneId} remained present after close`);
+  }
+
   private async enrichPane(raw: z.infer<typeof paneSchema>): Promise<HerdrPane> {
     let foregroundExecutables: string[] = [];
     try {

@@ -161,6 +161,44 @@ describe("Herdr adapter", () => {
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "process-info")).toHaveLength(2);
   });
 
+  it("closes a pane and verifies that it disappeared", async () => {
+    const calls: string[][] = [];
+    let exists = true;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "close") {
+          exists = false;
+          return { stdout: "", stderr: "" };
+        }
+        if (args[0] === "api" && args[1] === "snapshot") {
+          return json({ snapshot: {
+            panes: exists ? [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle" }] : [],
+            agents: []
+          } });
+        }
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).closePane("w1:p1"))
+      .resolves.toBeUndefined();
+    expect(calls).toEqual([["pane", "close", "w1:p1"], ["api", "snapshot"]]);
+  });
+
+  it("treats a close command error as success when the pane nevertheless disappeared", async () => {
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "close") throw new Error("connection closed");
+        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [], agents: [] } });
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).closePane("w1:p1"))
+      .resolves.toBeUndefined();
+  });
+
   it("injects a prompt into TraeX and waits for its terminal turn to finish", async () => {
     const calls: string[][] = [];
     const outputs = ["before", "before\n❯ hello", "✧ Working", "answer", "answer", "answer"];
