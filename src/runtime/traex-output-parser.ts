@@ -17,6 +17,7 @@ const UNSAFE = /<\/?(?:think|reasoning)>|authorization\s*[:=]|bearer\s+[a-z0-9._
 const REASONING_BLOCK = /\n?<(?:think|reasoning)>[\s\S]*?(?:<\/(?:think|reasoning)>|$)\n?/gi;
 const MAX_TERMINAL_DELTA_CHARS = 12_000;
 const MIN_RELIABLE_TERMINAL_OVERLAP = 64;
+const LIVE_WINDOW_NOTICE = "较早的实时输出已省略，以下为最新状态。";
 
 export interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace-all" }
 
@@ -42,7 +43,7 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
   if (current === previous) return { delta: "", snapshot: currentRaw, update: "append" };
 
   const overlap = terminalDelta(previous, current, promptEcho);
-  const update = previous && overlap.fullSnapshot ? "replace-all" : "append";
+  let update: ParsedTerminalStreamDelta["update"] = previous && overlap.fullSnapshot ? "replace-all" : "append";
   const visible = redactTerminalSecrets(
     normalizeTerminalForLark(overlap.value, promptEcho)
       .replace(REASONING_BLOCK, "\n")
@@ -54,8 +55,15 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
   );
   const delta = visible.length <= MAX_TERMINAL_DELTA_CHARS
     ? visible
-    : `${visible.slice(0, MAX_TERMINAL_DELTA_CHARS)}\n… [OUTPUT TRUNCATED]`;
+    : newestTerminalWindow(visible);
+  if (visible.length > MAX_TERMINAL_DELTA_CHARS) update = "replace-all";
   return { delta, snapshot: currentRaw, update };
+}
+
+function newestTerminalWindow(value: string): string {
+  const prefix = `${LIVE_WINDOW_NOTICE}\n\n`;
+  const tail = value.slice(-(MAX_TERMINAL_DELTA_CHARS - prefix.length)).trimStart();
+  return `${prefix}${tail}`;
 }
 
 function terminalDelta(previous: string, current: string, promptEcho: string): { value: string; fullSnapshot: boolean } {

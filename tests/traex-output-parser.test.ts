@@ -69,6 +69,19 @@ describe("TraeX output parser", () => {
     expect(delta).not.toContain("\u001b");
   });
 
+  it("replaces an oversized live delta with its newest user-facing window", () => {
+    const newest = "◆ Final live status: all focused tests passed";
+    const oversized = `very first live output\n${"older output\n".repeat(1_100)}${newest}`;
+
+    const parsed = parseTerminalStreamDelta("previous terminal window", oversized, "run tests");
+
+    expect(parsed.update).toBe("replace-all");
+    expect(parsed.delta).toContain("较早的实时输出已省略，以下为最新状态。");
+    expect(parsed.delta).toContain(newest);
+    expect(parsed.delta).not.toContain("[OUTPUT TRUNCATED]");
+    expect(parsed.delta).not.toContain("very first live output");
+  });
+
   it("extracts answer growth and normalized safe progress", () => {
     const previous = "✧ Working\n• Read /repo/src/a.ts\n◆ Fixed";
     const current = "✧ Working\n• Read /repo/src/a.ts\n• Edit /repo/src/b.ts\n• Bash npm test\n◆ Fixed login safely";
