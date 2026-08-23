@@ -29,12 +29,26 @@ describe("Lark streaming Answer cards", () => {
     replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
     const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
 
-    await expect(adapter.replyStreamingCard("root-1", { schema: "2.0" })).resolves.toEqual({ messageId: "answer-1", cardId: "card-1" });
-    expect(createCard).toHaveBeenCalledWith({ data: { type: "card_json", data: JSON.stringify({ schema: "2.0" }) } });
+    await expect(adapter.replyStreamingCard("root-1", { schema: "2.0", body: { elements: [{ element_id: "answer-content-p1-0" }] } })).resolves.toEqual({ messageId: "answer-1", cardId: "card-1" });
+    expect(createCard).toHaveBeenCalledWith({ data: { type: "card_json", data: JSON.stringify({ schema: "2.0", body: { elements: [{ element_id: "answer_content_p1_0" }] } }) } });
     expect(replyMessage).toHaveBeenCalledWith({
       path: { message_id: "root-1" },
       data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: "card-1" } }), reply_in_thread: true }
     });
+  });
+
+  it("reports safe CardKit response metadata when creation returns no card id", async () => {
+    createCard.mockResolvedValue({
+      code: 99991672,
+      msg: "Access denied",
+      data: { request_id: "req-1" },
+      raw_token: "must-not-leak"
+    });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.replyStreamingCard("root-1", { schema: "2.0" })).rejects.toThrow(
+      'Lark CardKit create returned no card_id (code=99991672, msg="Access denied", dataKeys=[request_id], responseKeys=[code,data,msg,raw_token])'
+    );
   });
 
   it("streams cumulative content and finalizes with monotonic sequences", async () => {
@@ -44,7 +58,7 @@ describe("Lark streaming Answer cards", () => {
     await adapter.streamCardContent("card-1", "answer-content-p1", "one\ntwo", 4);
     await adapter.finishStreamingCard("card-1", 5, "Completed");
 
-    expect(streamContent).toHaveBeenCalledWith({ path: { card_id: "card-1", element_id: "answer-content-p1" }, data: { content: "one\ntwo", sequence: 4, uuid: "stream-card-1-4" } });
+    expect(streamContent).toHaveBeenCalledWith({ path: { card_id: "card-1", element_id: "answer_content_p1" }, data: { content: "one\ntwo", sequence: 4, uuid: "stream-card-1-4" } });
     expect(updateSettings).toHaveBeenCalledWith({ path: { card_id: "card-1" }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: "Completed" } } }), sequence: 5, uuid: "finish-card-1-5" } });
   });
 });

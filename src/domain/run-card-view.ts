@@ -64,8 +64,8 @@ export function createQueuedRunCard(input: {
 }
 
 export function answerElementId(promptId: string, pageIndex: number): string {
-  const base = promptId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 54);
-  return `answer-content-${base}-${pageIndex}`;
+  const base = promptId.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 54);
+  return `answer_content_${base}_${pageIndex}`;
 }
 
 export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCardView {

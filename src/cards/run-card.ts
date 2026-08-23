@@ -209,7 +209,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
 }
 
 export function answerElementId(promptId: string): string {
-  return `answer-content-${promptId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 64)}`;
+  return `answer_content_${promptId.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 64)}`;
 }
 
 export function renderHelpCard(): object {

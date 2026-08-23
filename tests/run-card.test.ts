@@ -166,7 +166,9 @@ describe("run card", () => {
     ]));
     expect(answerCard).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" }, subtitle: { content: "HERDR ANSWER · Fix login" } } });
     expect(answerCard).toMatchObject({ config: { summary: { content: "完成 · Fix login" } } });
-    expect(answerCard).toMatchObject({ body: { elements: [expect.objectContaining({ tag: "markdown", element_id: "answer-content-p1-0" })] } });
+    expect(answerCard).toMatchObject({ body: { elements: [expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" })] } });
+    const elementId = (answerCard as { body: { elements: Array<{ element_id: string }> } }).body.elements[0]!.element_id;
+    expect(elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
   });
 
   it("keeps native TraeX task status out of the answer card", () => {

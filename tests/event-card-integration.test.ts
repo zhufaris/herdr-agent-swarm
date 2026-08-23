@@ -150,14 +150,14 @@ describe("event-driven card projection", () => {
 
     expect(created).toHaveLength(2);
     expect(streamed.map(({ cardId, elementId, content }) => ({ cardId, elementId, content }))).toEqual([
-      { cardId: "cardkit-1", elementId: "answer-content-p1-0", content: `⏳ 已接收请求\n\n${"a".repeat(20_000)}` },
-      { cardId: "cardkit-2", elementId: "answer-content-p1-1", content: "b".repeat(12_000) }
+      { cardId: "cardkit-1", elementId: "answer_content_p1_0", content: `⏳ 已接收请求\n\n${"a".repeat(20_000)}` },
+      { cardId: "cardkit-2", elementId: "answer_content_p1_1", content: "b".repeat(12_000) }
     ]);
     expect(finished.map(({ cardId, summary }) => ({ cardId, summary }))).toEqual([
       { cardId: "cardkit-1", summary: "Continued on part 2" }, { cardId: "cardkit-2", summary: "Completed" }
     ]);
     expect(JSON.stringify(created[1])).toContain("HERDR ANSWER · 续 2");
-    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: 20_010, answerElementId: "answer-content-p1-1" });
+    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: 20_010, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();
   });

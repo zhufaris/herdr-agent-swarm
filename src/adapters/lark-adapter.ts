@@ -92,9 +92,9 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   async replyStreamingCard(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }> {
-    const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(card) } });
+    const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(normalizeCardElementIds(card)) } });
     const cardId = created.data?.card_id;
-    if (!cardId) throw new Error("Lark response did not contain card_id");
+    if (!cardId) throw new Error(`Lark CardKit create returned no card_id (${safeResponseMetadata(created)})`);
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
       data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), reply_in_thread: true }
@@ -104,7 +104,7 @@ export class LarkSdkAdapter implements LarkPort {
 
   async streamCardContent(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
     await this.client.cardkit.v1.cardElement.content({
-      path: { card_id: cardId, element_id: elementId },
+      path: { card_id: cardId, element_id: normalizeCardElementId(elementId) },
       data: { content, sequence, uuid: `stream-${cardId}-${sequence}` }
     });
   }
@@ -184,4 +184,32 @@ export function normalizeCardActionEvent(data: lark.RawCardActionEvent): Incomin
 function requireMessageId(value: string | undefined): string {
   if (!value) throw new Error("Lark response did not contain message_id");
   return value;
+}
+
+function safeResponseMetadata(response: unknown): string {
+  if (!isRecord(response)) return `responseType=${typeof response}`;
+  const data = isRecord(response.data) ? response.data : null;
+  const code = typeof response.code === "number" || typeof response.code === "string" ? String(response.code) : "missing";
+  const msg = typeof response.msg === "string" ? JSON.stringify(response.msg.slice(0, 200)) : "missing";
+  const dataKeys = data ? Object.keys(data).sort().join(",") : "";
+  const responseKeys = Object.keys(response).sort().join(",");
+  return `code=${code}, msg=${msg}, dataKeys=[${dataKeys}], responseKeys=[${responseKeys}]`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeCardElementIds(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeCardElementIds);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    key === "element_id" && typeof item === "string" ? normalizeCardElementId(item) : normalizeCardElementIds(item)
+  ]));
+}
+
+function normalizeCardElementId(value: string): string {
+  const normalized = value.replace(/[^a-zA-Z0-9_]/g, "_");
+  return /^[a-zA-Z]/.test(normalized) ? normalized : `element_${normalized}`;
 }
