@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig, validateProjectDirectories } from "../src/config.js";
+import { loadConfig, validateProjectDirectories, withPluginDefaults } from "../src/config.js";
 
 const requiredEnvironment = {
   LARK_APP_ID: "app", LARK_APP_SECRET: "secret", LARK_CHAT_ID: "chat", LARK_BOT_OPEN_ID: "bot",
@@ -44,6 +44,16 @@ describe("project registry configuration", () => {
   it("requires the lease heartbeat to be less than half the TTL", () => {
     expect(() => loadConfig({ ...requiredEnvironment, INSTANCE_LEASE_TTL_MS: "10000", INSTANCE_LEASE_HEARTBEAT_MS: "5000" })).toThrow(/less than half/);
     expect(loadConfig({ ...requiredEnvironment }).instanceLease).toEqual({ ttlMs: 15_000, heartbeatMs: 5_000 });
+  });
+
+  it("uses plugin-native paths unless explicit paths override them", () => {
+    expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
+      PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"
+    });
+    expect(withPluginDefaults({
+      HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state",
+      PROJECTS_CONFIG_PATH: "/custom/projects.json", BRIDGE_DATABASE_PATH: "/custom/bridge.db"
+    })).toMatchObject({ PROJECTS_CONFIG_PATH: "/custom/projects.json", BRIDGE_DATABASE_PATH: "/custom/bridge.db" });
   });
 
   it("rejects project paths that are missing or not directories", () => {

@@ -47,7 +47,7 @@ describe("project selection flow", () => {
 
   it("creates exactly one pane in the clicked project and does not submit an initial prompt", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
-    const created: Array<[string, string]> = [];
+    const created: Array<[string, string, unknown]> = [];
     const started: string[] = [];
     const prompts: string[] = [];
     const cards: object[] = [];
@@ -63,7 +63,7 @@ describe("project selection flow", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
-      async createPane(workspaceId, cwd) { created.push([workspaceId, cwd]); return { paneId: "wD:p9", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async createPane(workspaceId, cwd, options) { created.push([workspaceId, cwd, options]); return { paneId: "wD:p9", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
       async startTraex(paneId) { started.push(paneId); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; },
       async readOutput() { return ""; }, async renamePane() {}
     };
@@ -100,7 +100,9 @@ describe("project selection flow", () => {
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
 
-    expect(created).toEqual([["wD", "/work/datasage"]]);
+    expect(created).toEqual([["wD", "/work/datasage", {
+      bindingId: expect.any(String), generation: 1, projectId: "datasage", title: "datasage_semantic_knowledge / Fix login", placement: "dedicated-tab"
+    }]]);
     expect(started).toEqual(["wD:p9"]);
     expect(prompts).toEqual([]);
     expect(groupCards).toHaveLength(1);

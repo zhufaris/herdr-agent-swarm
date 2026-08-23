@@ -38,6 +38,22 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     finally { this.refreshes.delete(workspaceId); }
   }
 
+  async listAllPanes(): Promise<HerdrPane[]> {
+    if (!this.delegate.listAllPanes) {
+      throw new Error("Herdr adapter does not support an all-workspace snapshot");
+    }
+    const panes = await this.delegate.listAllPanes();
+    const capturedAt = this.clock();
+    const byWorkspace = new Map<string, HerdrPane[]>();
+    for (const pane of panes) {
+      const group = byWorkspace.get(pane.workspaceId) ?? [];
+      group.push(pane);
+      byWorkspace.set(pane.workspaceId, group);
+    }
+    for (const [workspaceId, workspacePanes] of byWorkspace) this.snapshots.set(workspaceId, { panes: clonePanes(workspacePanes), capturedAt });
+    return clonePanes(panes);
+  }
+
   invalidate(workspaceId: string): void { this.snapshots.delete(workspaceId); }
 
   status(): WorkspaceCacheStatus {
@@ -52,8 +68,8 @@ export class WorkspaceSnapshotCache implements HerdrPort {
 
   async assertWorkspace(workspaceId: string): Promise<void> { await this.listPanes(workspaceId); }
   async getPane(paneId: string): Promise<HerdrPane | null> { return this.delegate.getPane(paneId); }
-  async createPane(workspaceId: string, cwd: string, identity?: { bindingId: string; generation: number; projectId: string }): Promise<HerdrPane> {
-    const pane = await this.delegate.createPane(workspaceId, cwd, identity);
+  async createPane(workspaceId: string, cwd: string, options?: Parameters<HerdrPort["createPane"]>[2]): Promise<HerdrPane> {
+    const pane = await this.delegate.createPane(workspaceId, cwd, options);
     this.invalidate(workspaceId);
     return pane;
   }
@@ -69,8 +85,8 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     return this.delegate.steerPrompt ? this.delegate.steerPrompt(paneId, text) : "not_working";
   }
   async readOutput(paneId: string, lines: number): Promise<string> { return this.delegate.readOutput(paneId, lines); }
-  async renamePane(paneId: string, title: string): Promise<void> {
-    await this.delegate.renamePane(paneId, title);
+  async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {
+    await this.delegate.renamePane(paneId, title, options);
     const workspaceId = paneId.split(":", 1)[0];
     if (workspaceId) this.invalidate(workspaceId);
   }

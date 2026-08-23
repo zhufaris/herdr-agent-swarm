@@ -1,0 +1,105 @@
+id = "herdr-lark-bridge"
+name = "Herdr Lark Bridge"
+version = "0.2.0"
+min_herdr_version = "0.7.5"
+description = "Operate TraeX agents in Herdr from Lark topics with durable queues and live cards."
+platforms = ["linux"]
+
+[[build]]
+command = ["bash", "plugin/build.sh"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[events]]
+on = "pane.created"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[events]]
+on = "pane.closed"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[events]]
+on = "pane.exited"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[actions]]
+id = "setup"
+title = "Herdr Lark Bridge: Setup"
+description = "Configure Lark credentials and projects, then start the bridge."
+command = ["bash", "plugin/open-pane.sh", "setup", "zoomed"]
+
+[[actions]]
+id = "start"
+title = "Herdr Lark Bridge: Start"
+description = "Start the managed bridge and wait for readiness."
+command = ["bash", "plugin/service.sh", "start"]
+
+[[actions]]
+id = "stop"
+title = "Herdr Lark Bridge: Stop"
+description = "Stop the managed bridge without deleting configuration or data."
+command = ["bash", "plugin/service.sh", "stop"]
+
+[[actions]]
+id = "restart"
+title = "Herdr Lark Bridge: Restart"
+description = "Gracefully restart the bridge on the current plugin build."
+command = ["bash", "plugin/service.sh", "restart"]
+
+[[actions]]
+id = "status"
+title = "Herdr Lark Bridge: Status"
+description = "Inspect configuration, service state, health, readiness, and recent failures."
+command = ["bash", "plugin/open-pane.sh", "status", "overlay"]
+
+[[actions]]
+id = "logs"
+title = "Herdr Lark Bridge: Logs"
+description = "Show a bounded tail of bridge logs in a Herdr split pane."
+command = ["bash", "plugin/open-pane.sh", "logs", "split"]
+
+[[actions]]
+id = "configure-projects"
+title = "Herdr Lark Bridge: Configure Projects"
+description = "Edit and validate the project registry, then restart on success."
+command = ["bash", "plugin/open-pane.sh", "configure-projects", "zoomed"]
+
+[[actions]]
+id = "uninstall-service"
+title = "Herdr Lark Bridge: Uninstall Service"
+description = "Remove the user service while preserving configuration and bridge state."
+command = ["bash", "plugin/service.sh", "uninstall"]
+
+[[panes]]
+id = "setup"
+title = "Herdr Lark Bridge: Setup"
+placement = "zoomed"
+command = ["bash", "plugin/setup.sh"]
+
+[[panes]]
+id = "status"
+title = "Herdr Lark Bridge: Status"
+placement = "overlay"
+command = ["bash", "plugin/status.sh"]
+
+[[panes]]
+id = "logs"
+title = "Herdr Lark Bridge: Logs"
+placement = "split"
+command = ["bash", "plugin/logs.sh"]
+
+[[panes]]
+id = "configure-projects"
+title = "Herdr Lark Bridge: Configure Projects"
+placement = "zoomed"
+command = ["bash", "plugin/configure-projects.sh"]

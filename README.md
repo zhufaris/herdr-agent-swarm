@@ -69,43 +69,54 @@ In the Lark developer console:
 
 The bridge accepts messages only from the configured chat ID.
 
-## Install
+## Install as a Herdr plugin
 
-Clone or copy the repository, enter it, and install the locked dependencies:
+Clone or copy the repository, install the locked dependencies, build it, then
+link and enable the checkout. Local `plugin link` intentionally skips the
+manifest build step; packaged `plugin install` runs it.
 
 ```bash
-cd /path/to/herdr-lark-bridge
+cd /absolute/path/to/herdr-lark-bridge
 npm ci
 npm run build
+herdr plugin link /absolute/path/to/herdr-lark-bridge --enabled
+herdr plugin list --json
 ```
 
-For active dependency development, use `npm install` instead of `npm ci`.
+The plugin requires Herdr 0.7.5 or newer on Linux and a working user systemd
+session. Action IDs are local to the plugin namespace.
 
 ## Configure the bridge
 
-Create the local environment file:
+Invoke the setup action:
 
 ```bash
-cp .env.example .env
-chmod 600 .env
+herdr plugin action invoke setup --plugin herdr-lark-bridge
 ```
 
-Edit `.env` and set at least these values:
+The setup pane creates private files under the Herdr plugin config directory,
+opens them in `$EDITOR` (default `vim`), validates them, and starts the bridge:
+
+```text
+$HERDR_PLUGIN_CONFIG_DIR/.env
+$HERDR_PLUGIN_CONFIG_DIR/projects.json
+```
+
+Set at least these values in `.env`:
 
 ```dotenv
 LARK_APP_ID=cli_xxxxxxxxxxxxxxxx
 LARK_APP_SECRET=replace-me
 LARK_CHAT_ID=oc_xxxxxxxxxxxxxxxx
 LARK_BOT_OPEN_ID=ou_xxxxxxxxxxxxxxxx
-PROJECTS_CONFIG_PATH=./config/projects.json
 ```
 
 The remaining settings have defaults:
 
 ```dotenv
-BRIDGE_DATABASE_PATH=./var/bridge.db
 BRIDGE_HTTP_HOST=127.0.0.1
 BRIDGE_HTTP_PORT=8787
+HERDR_BRIDGE_EVENT_PORT=18787
 HERDR_BIN=herdr
 TRAEX_BIN=traex
 LOG_LEVEL=info
@@ -118,21 +129,20 @@ MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
 
-`config/projects.json` is the project allowlist shown by `/herdr new`. Every
+`projects.json` is the project allowlist shown by `/herdr new`. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
 and absolute `cwd`; `defaultProjectId` must reference one entry. If the file is
 absent, the legacy `HERDR_WORKSPACE_ID` and `HERDR_WORKSPACE_CWD` variables are
 accepted as a temporary single-project fallback. An invalid existing file is
 never ignored.
 
-Use absolute `HERDR_BIN` and `TRAEX_BIN` paths so the PM2 process does not depend
-on an interactive shell's `PATH`. Every project `cwd` must be an absolute,
-accessible directory. Keep `.env` private because it contains the Lark app
-secret.
-
-The application reads process environment variables; it does not load `.env`
-itself. Source the file for foreground operation. The included PM2 configuration
-loads it before starting the application.
+The plugin defaults `PROJECTS_CONFIG_PATH` to its config directory and
+`BRIDGE_DATABASE_PATH` to `$HERDR_PLUGIN_STATE_DIR/bridge.db`. Explicit absolute
+values still override those locations. Use absolute `HERDR_BIN` and `TRAEX_BIN`
+paths because plugin commands do not depend on an interactive shell's `PATH`.
+Every project `cwd` must be absolute and accessible. Keep `.env` private because
+it contains the Lark app secret. The plugin parses it as data and never evaluates
+it as shell code.
 
 ## Start in the foreground
 
@@ -168,23 +178,37 @@ The process holds a fenced SQLite lease. A second process using the same databas
 fails startup while the current lease is live. `/ready` requires lease ownership,
 and `/status` reports bounded lease and two-second workspace-cache diagnostics.
 
-## Run with PM2
+## Operate through Herdr
 
-Install PM2 once for the service account, then start the checked-in process
-definition from the repository root:
-
-```bash
-npm install --global pm2
-pm2 start ecosystem.config.cjs
-pm2 save
-```
-
-Inspect service state and logs:
+The setup action installs `herdr-lark-bridge.service` as a user systemd service.
+Herdr remains the operator entry point while systemd owns the long-running
+process:
 
 ```bash
-pm2 describe herdr-lark-bridge
-pm2 logs herdr-lark-bridge
+herdr plugin action invoke start --plugin herdr-lark-bridge
+herdr plugin action invoke status --plugin herdr-lark-bridge
+herdr plugin action invoke logs --plugin herdr-lark-bridge
+herdr plugin action invoke restart --plugin herdr-lark-bridge
+herdr plugin action invoke stop --plugin herdr-lark-bridge
+herdr plugin action invoke uninstall-service --plugin herdr-lark-bridge
 ```
+
+`start` waits for process-local `/health`; dependency failures remain visible as
+degraded `/ready` state without killing the service. systemd applies restart and
+bounded stop policy. Structured logs are available from the logs action and the
+user journal. Durable bridge state remains under `$HERDR_PLUGIN_STATE_DIR`.
+
+Native Herdr pane lifecycle and agent-status events wake the bridge through a
+bounded loopback UDP hint. Event bursts are coalesced and only affected
+workspaces are reconciled when the event context identifies them. One fresh
+`herdr api snapshot` is authoritative for pane and agent state; terminal parsing
+still supplies TraeX answer and task content. `RECONCILE_INTERVAL_MS` is a
+full-scan recovery fallback for missed events and defaults to five minutes in
+the plugin template.
+
+Disabling or exiting Herdr does not stop the user service. Invoke
+`uninstall-service` before unlinking the plugin so the unit never points at a
+removed checkout. Configuration and SQLite state are preserved.
 
 For final acceptance, start the read-only observer and follow its checklist from
 a genuine Feishu user account:
@@ -197,29 +221,38 @@ The script never sends a Lark message and never bypasses the bot-message filter.
 Set `SMOKE_TIMEOUT_MS` or `BRIDGE_STATUS_URL` only when a different observation
 window or local endpoint is needed.
 
-Logs are newline-delimited Pino JSON with a stable `event` field. Correlate a
+Logs are newline-delimited Pino JSON with a stable `event` field. The logs action
+prints the most recent bounded tail. Correlate a
 request using `eventId`, `bindingId`, `promptId`, `paneId`, or `replyId`. The
 bridge deliberately excludes Lark message bodies, terminal output, card payloads,
 and credentials from operational logs. For example:
 
-```bash
-pm2 logs herdr-lark-bridge --raw | jq 'select(.event == "turn-failed")'
-pm2 logs herdr-lark-bridge --raw | jq 'select(.promptId == "PROMPT_ID")'
-```
-
-After code or configuration changes:
+After source changes, rebuild and restart the linked checkout:
 
 ```bash
 npm ci
 npm run build
-pm2 restart ecosystem.config.cjs --only herdr-lark-bridge
-pm2 save
+herdr plugin action invoke restart --plugin herdr-lark-bridge
 ```
 
-To start the saved process list after a host reboot, run `pm2 startup` and follow
-the command it prints. This one-time host integration may require administrator
-permission. The configured shutdown timeout lets an active TraeX turn finish
-before PM2 force-stops the bridge.
+To edit the project registry later, invoke
+`configure-projects`. It edits a temporary copy and atomically replaces the
+registry only after validation succeeds.
+The stop action terminates the process while preserving credentials, project
+configuration, SQLite state, and logs. Stop it before `herdr plugin unlink
+herdr-lark-bridge` when removing the linked plugin.
+
+### Migrate an existing PM2 deployment
+
+Wait until `/status` reports no running or queued prompts and `pendingOutbox` is
+zero. Copy the old `.env` and `config/projects.json` into the plugin config
+directory with mode `600`. Before switching, replace repository-relative values
+such as `./var/bridge.db` or `./config/projects.json` with absolute paths to the
+existing files. This preserves the current SQLite database and avoids creating
+an empty plugin-local database. Then stop and remove the PM2 app, invoke the
+plugin setup action to install the user service, and verify `/health`, `/ready`,
+and the status action. Never copy a live SQLite database without its WAL/SHM
+files; prefer an absolute `BRIDGE_DATABASE_PATH` during migration.
 
 ## Use the bridge
 
@@ -330,10 +363,13 @@ Then perform a Lark smoke test:
   long-connection subscription, app publication, and bot installation.
 - Herdr workspace errors: run `herdr workspace get <workspace-id>` as the same
   account that runs the service.
-- `herdr` or `traex` is not found under PM2: set absolute `HERDR_BIN` and
+- `herdr` or `traex` is not found from the plugin: set absolute `HERDR_BIN` and
   `TRAEX_BIN` paths in `.env`.
-- The service cannot write SQLite: create the database directory and ensure the
-  service account can write the repository's `var` directory.
+- The service cannot write SQLite: verify that `$HERDR_PLUGIN_STATE_DIR` exists
+  and is writable by the Herdr account.
+- A service action fails: inspect `systemctl --user status
+  herdr-lark-bridge.service` and `journalctl --user -u
+  herdr-lark-bridge.service -n 100 --no-pager`.
 - A running card becomes failed after restart: this is intentional. The bridge
   does not replay an interrupted prompt because doing so could repeat side
   effects. Send the prompt again if retry is safe.

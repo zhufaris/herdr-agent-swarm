@@ -11,7 +11,7 @@ const projectSchema = z.object({
   workspaceId: z.string().trim().min(1),
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path")
 });
-const projectRegistrySchema = z.object({
+export const projectRegistrySchema = z.object({
   defaultProjectId: z.string().min(1),
   projects: z.array(projectSchema).min(1)
 }).superRefine((registry, context) => {
@@ -53,7 +53,7 @@ const environmentSchema = z.object({
 export type BridgeConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
-  const value = environmentSchema.parse(environment);
+  const value = environmentSchema.parse(withPluginDefaults(environment));
   const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH, value.HERDR_WORKSPACE_ID, value.HERDR_WORKSPACE_CWD);
   if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
     throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
@@ -78,6 +78,16 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   } as const;
 }
 
+export function withPluginDefaults(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const configDirectory = environment.HERDR_PLUGIN_CONFIG_DIR;
+  const stateDirectory = environment.HERDR_PLUGIN_STATE_DIR;
+  return {
+    ...environment,
+    ...(!environment.PROJECTS_CONFIG_PATH && configDirectory ? { PROJECTS_CONFIG_PATH: `${configDirectory}/projects.json` } : {}),
+    ...(!environment.BRIDGE_DATABASE_PATH && stateDirectory ? { BRIDGE_DATABASE_PATH: `${stateDirectory}/bridge.db` } : {})
+  };
+}
+
 function loadProjectRegistry(path: string, legacyWorkspaceId?: string, legacyCwd?: string): { defaultProjectId: string; projects: ProjectConfig[] } {
   if (existsSync(path)) {
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -90,6 +100,11 @@ function loadProjectRegistry(path: string, legacyWorkspaceId?: string, legacyCwd
     projects: [{ id: "default", displayName: "Default project", description: "Legacy Herdr workspace", workspaceId: legacyWorkspaceId, cwd: legacyCwd }]
   };
   return registry;
+}
+
+export function validateProjectRegistryFile(path: string): void {
+  const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  projectRegistrySchema.parse(raw);
 }
 
 export function validateProjectDirectories(projects: readonly ProjectConfig[]): void {

@@ -6,6 +6,7 @@ export interface ShutdownLogger {
 }
 
 interface ShutdownDependencies {
+  herdrEventInbox?: { stop(): Promise<void> };
   coordinator: { stop(): Promise<void> };
   projector: { stop(): Promise<void> };
   publisher: { stop(): Promise<void> };
@@ -27,8 +28,9 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<void> {
-    const { coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+    const { herdrEventInbox, coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     logger.info({ event: "bridge-shutdown-started", signal }, "shutting down");
+    if (herdrEventInbox) await stopSafely("herdrEventInbox", () => herdrEventInbox.stop(), logger);
     await stopSafely("coordinator", () => coordinator.stop(), logger);
     await stopSafely("projector", () => projector.stop(), logger);
     await stopSafely("publisher", () => publisher.stop(), logger);

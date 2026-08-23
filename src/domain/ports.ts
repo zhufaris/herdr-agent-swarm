@@ -20,9 +20,16 @@ export interface LarkPort {
 
 export interface HerdrPort {
   assertWorkspace(workspaceId: string): Promise<void>;
+  listAllPanes?(): Promise<HerdrPane[]>;
   listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;
-  createPane(workspaceId: string, cwd: string, identity?: { bindingId: string; generation: number; projectId: string }): Promise<HerdrPane>;
+  createPane(workspaceId: string, cwd: string, options?: {
+    bindingId: string;
+    generation: number;
+    projectId: string;
+    title?: string;
+    placement?: "split" | "dedicated-tab";
+  }): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string): Promise<void>;
   runPrompt(
     paneId: string,
@@ -34,7 +41,7 @@ export interface HerdrPort {
   runPaneCommand?(paneId: string, command: string, timeoutMs: number): Promise<string>;
   steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
-  renamePane(paneId: string, title: string): Promise<void>;
+  renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;
 }
 
 export interface BindingStorePort {

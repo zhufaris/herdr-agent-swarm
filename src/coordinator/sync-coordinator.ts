@@ -112,6 +112,10 @@ export class SyncCoordinator {
     }
   }
 
+  reconcileHerdrWorkspaces(workspaceIds?: readonly string[]): Promise<void> {
+    return this.reconciler.requestReconciliation(workspaceIds);
+  }
+
   async handleMessage(message: IncomingLarkMessage): Promise<void> {
     if (message.chatId !== this.config.lark.chatId) {
       this.logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "chat_not_allowed" }, "ignored Lark message");
@@ -263,7 +267,7 @@ export class SyncCoordinator {
           const pane = await this.herdr.getPane(binding.paneId);
           const project = this.config.projects.find((candidate) => candidate.id === binding.projectId);
           const title = formatProjectPaneTitle(project ? projectSpaceName(project) : null, pane?.cwd ?? this.config.herdr.workspaceCwd, command.title, binding.paneId);
-          await this.herdr.renamePane(binding.paneId, command.title);
+          await this.herdr.renamePane(binding.paneId, command.title, { tabTitle: `lark_${command.title}` });
           this.store.updateBinding(binding.id, { title });
           await this.publish(binding.id, "BindingRenamed", "lark", { title });
           this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" });
@@ -395,7 +399,7 @@ export class SyncCoordinator {
         if (!allowPaneCreation) {
           throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /herdr attach <space> <pane>");
         }
-        pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id });
+        pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, title: binding.title, placement: "dedicated-tab" });
         binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
         binding = this.store.transitionBinding(binding.id, { type: "pane_created" });
       }
@@ -483,7 +487,7 @@ export class SyncCoordinator {
     });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(defaultProject), paneId: null });
     try {
-      const pane = await this.herdr.createPane(binding.workspaceId, defaultProject.cwd, { bindingId: binding.id, generation: binding.generation, projectId: defaultProject.id });
+      const pane = await this.herdr.createPane(binding.workspaceId, defaultProject.cwd, { bindingId: binding.id, generation: binding.generation, projectId: defaultProject.id, title: binding.title, placement: "dedicated-tab" });
       binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
       binding = this.store.transitionBinding(binding.id, { type: "pane_created" });
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
@@ -820,7 +824,7 @@ export class SyncCoordinator {
   private async replaceBinding(binding: Binding, actorOpenId: string): Promise<void> {
     const project = this.config.projects.find((item) => item.id === binding.projectId);
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
-    const pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation + 1, projectId: project.id });
+    const pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation + 1, projectId: project.id, title: binding.title, placement: "dedicated-tab" });
     await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
     const next = this.store.attachBindingPane(binding.id, pane, true);
     await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });

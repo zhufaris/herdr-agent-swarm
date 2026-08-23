@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "config:validate": "node dist/cli/validate-config.js",
+    "plugin": "node dist/cli/plugin-lifecycle.js",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run",

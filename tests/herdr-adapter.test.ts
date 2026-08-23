@@ -3,6 +3,79 @@ import { HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 
 describe("Herdr adapter", () => {
+  it("uses one Herdr snapshot command for all panes in a workspace", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      return json({ snapshot: {
+        panes: [
+          { pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent: "traex", agent_status: "working", terminal_id: "term-1" },
+          { pane_id: "w2:p1", workspace_id: "w2", cwd: "/other", agent_status: "idle" }
+        ],
+        agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "blocked", state_change_seq: 42 }]
+      } });
+    } };
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1")).resolves.toEqual([{
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
+    }]);
+    expect(calls).toEqual([["api", "snapshot"]]);
+  });
+
+  it("falls back to pane process inspection when snapshot is incompatible", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "api") return json({ incompatible: true });
+      if (args[1] === "list") return json({ panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent_status: "idle" }] });
+      return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+    } };
+    const panes = await new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1");
+    expect(panes[0]?.foregroundExecutables).toEqual(["traex"]);
+    expect(calls).toEqual([["api", "snapshot"], ["pane", "list", "--workspace", "w1"], ["pane", "process-info", "--pane", "w1:p1"]]);
+  });
+
+  it("creates a dedicated unfocused Lark tab and returns its root pane", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "tab" && args[1] === "create") return json({
+          tab: { tab_id: "w1:t7", workspace_id: "w1", label: "lark_space / Task" },
+          root_pane: { pane_id: "w1:p7", workspace_id: "w1", cwd: "/repo", terminal_id: "term-7" }
+        });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo", {
+      bindingId: "binding-7", generation: 2, projectId: "project-7", title: "space / Task", placement: "dedicated-tab"
+    })).resolves.toMatchObject({ paneId: "w1:p7", workspaceId: "w1", cwd: "/repo", terminalId: "term-7" });
+    expect(calls[0]).toEqual([
+      "tab", "create", "--workspace", "w1", "--cwd", "/repo", "--label", "lark_space / Task",
+      "--env", "HERDR_BRIDGE_BINDING_ID=binding-7", "--env", "HERDR_BRIDGE_GENERATION=2",
+      "--env", "HERDR_PROJECT_ID=project-7", "--no-focus"
+    ]);
+  });
+
+  it("renames a managed pane and its containing Lark tab", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p7", workspace_id: "w1", tab_id: "w1:t7" } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await new HerdrCliAdapter(runner, "herdr", 1000).renamePane("w1:p7", "Better pane", { tabTitle: "lark_Better pane" });
+    expect(calls).toEqual([
+      ["pane", "rename", "w1:p7", "Better pane"],
+      ["pane", "get", "w1:p7"],
+      ["tab", "rename", "w1:t7", "lark_Better pane"]
+    ]);
+  });
+
   it("reads terminal output from the pane without requiring an agent registration", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
@@ -38,17 +111,14 @@ describe("Herdr adapter", () => {
       async run(_executable, args) {
         calls.push(args);
         if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
+        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: outputs.length > 2 ? "working" : "done" }], agents: [] } });
         return { stdout: "", stderr: "" };
       }
     };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 1000)).resolves.toBe("done");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "hello"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-    const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
-    const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read");
-    expect(readsBeforeEnter).toHaveLength(2);
-    expect(calls.some((args) => args[0] === "agent" && args[1] === "prompt")).toBe(false);
+    expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "hello"]);
+    expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
   });
 
   it("runs a pane slash command and returns only its stable native output", async () => {

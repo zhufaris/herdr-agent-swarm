@@ -1,0 +1,61 @@
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { runPluginLifecycle } from "../src/cli/plugin-lifecycle.js";
+
+describe("plugin lifecycle", () => {
+  it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {
+    const fixture = createFixture();
+    await expect(runPluginLifecycle("install", fixture.environment)).resolves.toBe(0);
+    const unit = readFileSync(join(fixture.units, "test-bridge.service"), "utf8");
+    expect(unit).toContain(`WorkingDirectory=${fixture.root}`);
+    expect(unit).toContain(`EnvironmentFile=${fixture.config}/.env`);
+    expect(unit).toContain(`ExecStart=${process.execPath} ${fixture.root}/dist/main.js`);
+    expect(unit).toContain("Restart=on-failure");
+    await expect(runPluginLifecycle("stop", fixture.environment)).resolves.toBe(0);
+    expect(readFileSync(fixture.calls, "utf8").trim().split(/\n/)).toEqual([
+      "--user daemon-reload", "--user enable test-bridge.service", "--user stop test-bridge.service"
+    ]);
+  });
+
+  it("preserves config and state while uninstalling only the service", async () => {
+    const fixture = createFixture();
+    await runPluginLifecycle("install", fixture.environment);
+    await expect(runPluginLifecycle("uninstall", fixture.environment)).resolves.toBe(0);
+    expect(() => readFileSync(join(fixture.units, "test-bridge.service"))).toThrow();
+    expect(readFileSync(join(fixture.config, ".env"), "utf8")).toContain("LARK_APP_ID");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable --now test-bridge.service");
+  });
+
+  it("refuses service control before installation", async () => {
+    const fixture = createFixture();
+    await expect(runPluginLifecycle("start", fixture.environment)).rejects.toThrow(/service is not installed/);
+  });
+});
+
+function createFixture() {
+  const root = mkdtempSync(join(tmpdir(), "bridge-plugin-root-"));
+  const config = join(root, "config");
+  const state = join(root, "state");
+  const dist = join(root, "dist");
+  const units = join(root, "units");
+  const bin = join(root, "bin");
+  const calls = join(root, "systemctl.calls");
+  for (const directory of [config, state, dist, units, bin]) mkdirSync(directory);
+  writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: root }] }));
+  writeFileSync(join(config, ".env"), [
+    "LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot",
+    "BRIDGE_HTTP_PORT=39001", "BRIDGE_HTTP_HOST=127.0.0.1"
+  ].join("\n") + "\n");
+  writeFileSync(join(dist, "main.js"), "// fixture\n");
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n[ "$2" != "is-active" ]\n`);
+  writeFileSync(join(bin, "journalctl"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(bin, "systemctl"), 0o755);
+  chmodSync(join(bin, "journalctl"), 0o755);
+  return { root, config, state, units, calls, environment: {
+    PATH: `${bin}:${process.env.PATH}`,
+    HERDR_PLUGIN_ROOT: root, HERDR_PLUGIN_CONFIG_DIR: config, HERDR_PLUGIN_STATE_DIR: state,
+    BRIDGE_SYSTEMD_UNIT_DIR: units, BRIDGE_SYSTEMD_SERVICE_NAME: "test-bridge.service"
+  } };
+}

@@ -171,6 +171,8 @@ export type ProjectSelectionClaim =
 export interface HerdrPane {
   paneId: string;
   terminalId?: string | null;
+  agentKind?: string | null;
+  stateChangeSeq?: number | null;
   workspaceId: string;
   cwd: string | null;
   label: string | null;

@@ -26,9 +26,11 @@ interface SessionReconcilerOptions {
 
 export class SessionReconciler {
   private reconciliation: Promise<void> | null = null;
+  private pendingReconciliation: Set<string> | null | undefined;
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly observedTerminalOutputs = new Map<string, string>();
+  private readonly observedStateSequences = new Map<string, number>();
   private skippedPaneReasons = new Map<string, string>();
 
   constructor(private readonly options: SessionReconcilerOptions) {}
@@ -47,13 +49,38 @@ export class SessionReconciler {
     }
   }
 
-  async reconcile(): Promise<void> {
+  async reconcile(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
     if (this.reconciliation) return this.reconciliation;
-    const work = this.reconcileOnce();
+    this.enqueueReconciliation(workspaceIds);
+    const work = this.drainReconciliations();
     this.reconciliation = work;
     try { await work; }
     finally { if (this.reconciliation === work) this.reconciliation = null; }
+  }
+
+  async requestReconciliation(workspaceIds?: readonly string[]): Promise<void> {
+    if (this.stopping) return;
+    this.enqueueReconciliation(workspaceIds);
+    if (this.reconciliation) return this.reconciliation;
+    const work = this.drainReconciliations();
+    this.reconciliation = work;
+    try { await work; }
+    finally { if (this.reconciliation === work) this.reconciliation = null; }
+  }
+
+  private enqueueReconciliation(workspaceIds?: readonly string[]): void {
+    if (workspaceIds === undefined || this.pendingReconciliation === null) { this.pendingReconciliation = null; return; }
+    this.pendingReconciliation ??= new Set<string>();
+    for (const workspaceId of workspaceIds) this.pendingReconciliation.add(workspaceId);
+  }
+
+  private async drainReconciliations(): Promise<void> {
+    while (this.pendingReconciliation !== undefined && !this.stopping) {
+      const requested = this.pendingReconciliation;
+      this.pendingReconciliation = undefined;
+      await this.reconcileOnce(requested === null ? undefined : requested);
+    }
   }
 
   start(intervalMs: number): void {
@@ -71,18 +98,29 @@ export class SessionReconciler {
     if (this.reconciliation) await this.reconciliation;
   }
 
-  private async reconcileOnce(): Promise<void> {
+  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
     await this.options.channelPublisher.drain();
     const panesByWorkspace = new Map<string, HerdrPane[]>();
-    for (const workspaceId of new Set(this.options.projects.map((project) => project.workspaceId))) {
+    const configuredWorkspaceIds = new Set(this.options.projects.map((project) => project.workspaceId));
+    const workspaceIds = requestedWorkspaceIds
+      ? [...requestedWorkspaceIds].filter((workspaceId) => configuredWorkspaceIds.has(workspaceId))
+      : [...configuredWorkspaceIds];
+    if (this.options.herdr.listAllPanes) {
       try {
-        panesByWorkspace.set(workspaceId, await this.options.herdr.listPanes(workspaceId));
+        const requested = new Set(workspaceIds);
+        const snapshot = await this.options.herdr.listAllPanes();
+        for (const workspaceId of workspaceIds) panesByWorkspace.set(workspaceId, []);
+        for (const pane of snapshot) if (requested.has(pane.workspaceId)) panesByWorkspace.get(pane.workspaceId)!.push(pane);
       } catch (error) {
-        this.options.logger.error({ event: "workspace-reconciliation-failed", err: safeLogError(error), workspaceId, outcome: "failed" }, "workspace reconciliation failed");
+        this.options.logger.warn({ event: "herdr-snapshot-fallback", err: safeLogError(error), workspaceIds, outcome: "fallback" }, "Herdr snapshot unavailable; falling back to workspace pane discovery");
+        await this.loadWorkspacePanes(workspaceIds, panesByWorkspace);
       }
-    }
+    } else await this.loadWorkspacePanes(workspaceIds, panesByWorkspace);
 
-    const activeBindings = this.options.store.listBindingsByState("active");
+    const allActiveBindings = this.options.store.listBindingsByState("active");
+    const activeBindings = requestedWorkspaceIds
+      ? allActiveBindings.filter((binding) => requestedWorkspaceIds.has(binding.workspaceId))
+      : allActiveBindings;
     const bindingByPaneId = new Map(activeBindings.flatMap((binding) => binding.paneId ? [[binding.paneId, binding] as const] : []));
     let pendingBindings: Binding[] | null = null;
     for (const binding of activeBindings) {
@@ -97,7 +135,7 @@ export class SessionReconciler {
       if (binding.paneId && !paneIds.has(binding.paneId)) await this.orphanMissingPane(binding);
     }
 
-    const nextSkippedPaneReasons = new Map<string, string>();
+    const nextSkippedPaneReasons = requestedWorkspaceIds ? new Map(this.skippedPaneReasons) : new Map<string, string>();
     for (const [requestedWorkspaceId, panes] of panesByWorkspace) for (const pane of panes) {
       if (pane.workspaceId !== requestedWorkspaceId) {
         this.options.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId, reportedWorkspaceId: pane.workspaceId, paneId: pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
@@ -127,6 +165,7 @@ export class SessionReconciler {
         bindingByPaneId.set(pane.paneId, existing);
         const output = cleanTerminalOutput(await this.options.herdr.readOutput(pane.paneId, 240));
         this.observedTerminalOutputs.set(pane.paneId, output);
+        if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) this.observedStateSequences.set(pane.paneId, pane.stateChangeSeq);
         continue;
       }
       if (!existing.projectId) {
@@ -147,10 +186,21 @@ export class SessionReconciler {
         await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth: this.options.store.countPendingPrompts(existing.id) });
       }
       if (previous === "blocked" && pane.agentState !== "blocked" && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduleBinding(existing.id);
+      if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined && this.observedStateSequences.get(pane.paneId) === pane.stateChangeSeq) continue;
+      if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) this.observedStateSequences.set(pane.paneId, pane.stateChangeSeq);
       await this.publishChangedLocalOutput(existing, pane.paneId);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
-    for (const binding of this.options.store.listBindingsByState("active")) this.options.scheduleBinding(binding.id);
+    for (const binding of activeBindings) this.options.scheduleBinding(binding.id);
+  }
+
+  private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {
+    for (const workspaceId of workspaceIds) {
+      try { panesByWorkspace.set(workspaceId, await this.options.herdr.listPanes(workspaceId)); }
+      catch (error) {
+        this.options.logger.error({ event: "workspace-reconciliation-failed", err: safeLogError(error), workspaceId, outcome: "failed" }, "workspace reconciliation failed");
+      }
+    }
   }
 
   private async orphanMissingPane(binding: Binding): Promise<void> {

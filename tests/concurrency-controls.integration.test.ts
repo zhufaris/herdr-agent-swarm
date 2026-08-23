@@ -44,7 +44,7 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.reconcile();
 
-    expect(states).toEqual(["active", "active"]);
+    expect(states).toEqual(["active"]);
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 

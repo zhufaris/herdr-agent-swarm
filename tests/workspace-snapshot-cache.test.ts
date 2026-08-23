@@ -46,6 +46,12 @@ describe("workspace snapshot cache", () => {
     await cache.renamePane("w1:p1", "new");
     expect(cache.status().entries).toBe(0);
   });
+
+  it("signals that callers must use workspace fallback when the delegate has no all-pane snapshot", async () => {
+    const cache = new WorkspaceSnapshotCache(adapter({ async listPanes(workspaceId) { return [pane(workspaceId, 1)]; } }));
+
+    await expect(cache.listAllPanes()).rejects.toThrow(/does not support an all-workspace snapshot/);
+  });
 });
 
 function pane(workspaceId: string, version: number) {

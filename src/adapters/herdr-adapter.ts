@@ -6,12 +6,20 @@ import { stripTerminalControl } from "../runtime/output.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
-  pane_id: z.string(), workspace_id: z.string(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
+  pane_id: z.string(), workspace_id: z.string(), tab_id: z.string().nullish(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
   agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).default("unknown")
 }).passthrough();
 const processSchema = z.object({
   foreground_processes: z.array(z.object({ name: z.string().optional(), argv: z.array(z.string()).optional() }).passthrough()).default([])
 }).passthrough();
+const snapshotPaneSchema = paneSchema.extend({
+  agent: z.string().nullish(),
+  revision: z.number().int().nullish(),
+  state_change_seq: z.number().int().nullish()
+});
+const snapshotSchema = z.object({
+  snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
+});
 
 export class HerdrCliAdapter implements HerdrPort {
   constructor(
@@ -27,13 +35,25 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async listPanes(workspaceId: string): Promise<HerdrPane[]> {
-    const result = await this.json(["pane", "list", "--workspace", workspaceId]);
-    const panes = z.object({ panes: z.array(paneSchema) }).parse(result).panes;
-    return Promise.all(panes.map((pane) => this.enrichPane(pane)));
+    try {
+      return (await this.listAllPanes()).filter((pane) => pane.workspaceId === workspaceId);
+    } catch {
+      const result = await this.json(["pane", "list", "--workspace", workspaceId]);
+      const panes = z.object({ panes: z.array(paneSchema) }).parse(result).panes;
+      return Promise.all(panes.map((pane) => this.enrichPane(pane)));
+    }
+  }
+
+  async listAllPanes(): Promise<HerdrPane[]> {
+    const result = snapshotSchema.parse(await this.json(["api", "snapshot"])).snapshot;
+    const agents = new Map(result.agents.map((agent) => [agent.pane_id, agent]));
+    return result.panes.map((pane) => this.fromSnapshot(pane, agents.get(pane.pane_id)));
   }
 
   async getPane(paneId: string): Promise<HerdrPane | null> {
     try {
+      try { return (await this.listAllPanes()).find((pane) => pane.paneId === paneId) ?? null; }
+      catch { /* Compatibility fallback for older Herdr snapshots. */ }
       const result = await this.json(["pane", "get", paneId]);
       return this.enrichPane(z.object({ pane: paneSchema }).parse(result).pane);
     } catch (error) {
@@ -42,13 +62,23 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  async createPane(workspaceId: string, cwd: string, identity?: { bindingId: string; generation: number; projectId: string }): Promise<HerdrPane> {
+  async createPane(workspaceId: string, cwd: string, options?: { bindingId: string; generation: number; projectId: string; title?: string; placement?: "split" | "dedicated-tab" }): Promise<HerdrPane> {
+    const identityArgs = options ? [
+      "--env", `HERDR_BRIDGE_BINDING_ID=${options.bindingId}`, "--env", `HERDR_BRIDGE_GENERATION=${options.generation}`, "--env", `HERDR_PROJECT_ID=${options.projectId}`
+    ] : [];
+    if (options?.placement === "dedicated-tab") {
+      if (!options.title) throw new Error("Cannot create a dedicated Herdr tab without a title");
+      const result = await this.json([
+        "tab", "create", "--workspace", workspaceId, "--cwd", cwd, "--label", `lark_${options.title}`,
+        ...identityArgs, "--no-focus"
+      ]);
+      const candidate = findPaneRecord(result);
+      if (!candidate) throw new Error("Herdr tab create response did not contain a root pane");
+      return this.enrichPane(candidate);
+    }
     const panes = await this.listPanes(workspaceId);
     const anchor = panes[0];
     if (!anchor) throw new Error(`Cannot create pane: workspace ${workspaceId} has no anchor pane`);
-    const identityArgs = identity ? [
-      "--env", `HERDR_BRIDGE_BINDING_ID=${identity.bindingId}`, "--env", `HERDR_BRIDGE_GENERATION=${identity.generation}`, "--env", `HERDR_PROJECT_ID=${identity.projectId}`
-    ] : [];
     const result = await this.json([
       "pane", "split", "--pane", anchor.paneId, "--direction", "right", "--ratio", "0.5",
       "--cwd", cwd, ...identityArgs, "--no-focus"
@@ -72,7 +102,7 @@ export class HerdrCliAdapter implements HerdrPort {
   ): Promise<AgentState> {
     throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
-    await this.submitPromptText(paneId, text, before, signal);
+    await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
     return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation, signal);
   }
 
@@ -112,8 +142,13 @@ export class HerdrCliAdapter implements HerdrPort {
     return unwrapText(stdout);
   }
 
-  async renamePane(paneId: string, title: string): Promise<void> {
+  async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> {
     await this.runner.run(this.executable, ["pane", "rename", paneId, title], this.commandTimeoutMs);
+    if (!options?.tabTitle) return;
+    const result = await this.json(["pane", "get", paneId]);
+    const pane = z.object({ pane: paneSchema }).parse(result).pane;
+    if (!pane.tab_id) throw new Error(`Herdr pane ${paneId} did not report its containing tab`);
+    await this.runner.run(this.executable, ["tab", "rename", pane.tab_id, options.tabTitle], this.commandTimeoutMs);
   }
 
   private async enrichPane(raw: z.infer<typeof paneSchema>): Promise<HerdrPane> {
@@ -131,6 +166,15 @@ export class HerdrCliAdapter implements HerdrPort {
     return {
       paneId: raw.pane_id, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentState: raw.agent_status, foregroundExecutables: [...new Set(foregroundExecutables)]
+    };
+  }
+
+  private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
+    const kind = agent?.agent ?? raw.agent ?? null;
+    return {
+      paneId: raw.pane_id, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
+      agentKind: kind, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
+      agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables: kind ? [kind] : []
     };
   }
 
@@ -215,24 +259,11 @@ export class HerdrCliAdapter implements HerdrPort {
 function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  for (const candidate of [record.pane, record.created_pane, value]) {
+  for (const candidate of [record.root_pane, record.pane, record.created_pane, value]) {
     const parsed = paneSchema.safeParse(candidate);
     if (parsed.success) return parsed.data;
   }
   return null;
-}
-
-function findAgentState(value: unknown): AgentState | null {
-  const valid = new Set<AgentState>(["idle", "working", "blocked", "done", "unknown"]);
-  const visit = (candidate: unknown): AgentState | null => {
-    if (typeof candidate === "string" && valid.has(candidate as AgentState)) return candidate as AgentState;
-    if (!candidate || typeof candidate !== "object") return null;
-    const record = candidate as Record<string, unknown>;
-    for (const key of ["agent_status", "status", "state"]) { const found = visit(record[key]); if (found) return found; }
-    for (const nested of Object.values(record)) { const found = visit(nested); if (found) return found; }
-    return null;
-  };
-  return visit(value);
 }
 
 function unwrapText(stdout: string): string {

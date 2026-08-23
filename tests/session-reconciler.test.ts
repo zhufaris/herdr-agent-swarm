@@ -75,6 +75,96 @@ describe("SessionReconciler", () => {
     expect(discoverPane).toHaveBeenCalledTimes(1);
     store.close();
   });
+
+  it("scans only requested workspaces for event-driven reconciliation", async () => {
+    const listPanes = vi.fn(async () => []);
+    const store = new SqliteBindingStore(":memory:");
+    const reconciler = new SessionReconciler({
+      projects: [
+        { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+        { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
+      ],
+      store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
+      channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduleBinding() {}, isBindingBusy: () => false
+    });
+
+    await reconciler.requestReconciliation(["w2"]);
+
+    expect(listPanes).toHaveBeenCalledTimes(1);
+    expect(listPanes).toHaveBeenCalledWith("w2");
+    store.close();
+  });
+
+  it("runs a follow-up pass when an event arrives during reconciliation", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const listPanes = vi.fn(async (workspaceId: string) => { if (workspaceId === "w1") await blocked; return []; });
+    const store = new SqliteBindingStore(":memory:");
+    const reconciler = new SessionReconciler({
+      projects: [
+        { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+        { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
+      ],
+      store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
+      channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduleBinding() {}, isBindingBusy: () => false
+    });
+
+    const first = reconciler.requestReconciliation(["w1"]);
+    await vi.waitFor(() => expect(listPanes).toHaveBeenCalledWith("w1"));
+    const second = reconciler.requestReconciliation(["w2"]);
+    release();
+    await Promise.all([first, second]);
+
+    expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(["w1", "w2"]);
+    store.close();
+  });
+
+  it("skips terminal reads when the Herdr state sequence is unchanged", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const readOutput = vi.fn(async () => "unchanged");
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", stateChangeSeq: 7, foregroundExecutables: ["traex"] };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(readOutput).toHaveBeenCalledTimes(1);
+    store.close();
+  });
+
+  it("does not orphan panes when the authoritative snapshot is unavailable", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const herdr = { async listAllPanes() { throw new Error("Herdr unavailable"); }, async listPanes() { throw new Error("legacy pane discovery unavailable"); } } as unknown as HerdrPort;
+    const reconciler = fixture(store, herdr);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ attachment: "degraded", degradationCount: 1 });
+    store.close();
+  });
+
+  it("falls back to workspace pane discovery when the authoritative snapshot is unavailable", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const listPanes = vi.fn(async () => [pane]);
+    const herdr = { async listAllPanes() { throw new Error("snapshot schema unsupported"); }, listPanes, async readOutput() { return ""; } } as unknown as HerdrPort;
+    const reconciler = fixture(store, herdr);
+
+    await reconciler.reconcile();
+
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledWith("w1");
+    expect(store.getBinding(binding.id)).toMatchObject({ attachment: "attached", degradationCount: 0 });
+    store.close();
+  });
 });
 
 function fixture(
