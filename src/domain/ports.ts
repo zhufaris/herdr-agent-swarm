@@ -101,6 +101,7 @@ export interface BindingStorePort {
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
+  convergePromptBacklog(): { cancelled: number };
   listDetachedPrompts(): PromptJob[];
   markPromptObservationDetached(id: string, notice: string): void;
   markPromptDispatched(id: string): void;

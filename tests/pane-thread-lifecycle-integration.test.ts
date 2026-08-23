@@ -89,7 +89,7 @@ describe("pane/thread lifecycle integration", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("resumes the FIFO when a detached turn has returned to the TraeX composer with unknown agent state", async () => {
+  it("resumes the FIFO when a detached turn is already idle at the TraeX composer after restart", async () => {
     const submitted: string[] = [];
     let firstController: AbortSignal | undefined;
     let firstDispatched = false;
@@ -98,9 +98,10 @@ describe("pane/thread lifecycle integration", () => {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
       async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {}
     };
-    const pane = () => ({ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: (restarted ? "unknown" : firstDispatched ? "working" : "idle") as AgentState, foregroundExecutables: ["traex"] });
+    const pane = () => ({ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: (restarted ? "idle" : firstDispatched ? "working" : "idle") as AgentState, foregroundExecutables: ["traex"] });
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane()]; }, async getPane() { return pane(); },
+      async observeRuntime() { return { pane: pane(), state: pane().agentState, traexProcess: true, composerReady: restarted, evidenceSource: "structured" }; },
       async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeout, _observation, signal, onDispatched) {
         submitted.push(text);
@@ -128,12 +129,41 @@ describe("pane/thread lifecycle integration", () => {
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1 });
 
     restarted = true;
+    store.updateBinding("b1", { lastAgentState: "idle" });
     const secondRuntime = runtime(store, herdr, lark);
     await secondRuntime.coordinator.start();
     await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
 
     await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();
+  });
+
+  it("keeps a detached turn uncertain when runtime evidence cannot prove completion", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, foregroundExecutables: ["traex"] };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+      async observeRuntime() { return { pane, state: "unknown", traexProcess: true, composerReady: false, evidenceSource: "process" }; },
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { throw new Error("must not replay"); },
+      async readOutput() { return "ambiguous output"; }, async renamePane() {}
+    };
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "user", body: "already sent" });
+    expect(store.claimNextPrompt("b1")).toMatchObject({ id: "p1" });
+    store.markPromptDispatched("p1");
+    expect(store.recoverRunningPrompts()).toBe(1);
+
+    const active = runtime(store, herdr, lark, 10);
+    await active.coordinator.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
+
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
   it("reattaches an orphaned session without replay, then resumes explicitly", async () => {

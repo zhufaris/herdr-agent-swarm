@@ -827,17 +827,24 @@ export class SyncCoordinator {
     let observedActive = binding.lastAgentState === "working" || binding.lastAgentState === "blocked";
     try {
       while (!this.stopping) {
-        const pane = await this.herdr.getPane(paneId);
+        const observation = this.herdr.observeRuntime
+          ? await this.herdr.observeRuntime(paneId)
+          : null;
+        const pane = observation?.pane ?? await this.herdr.getPane(paneId);
         if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
-        this.turns.updateState(binding.id, prompt.id, pane.agentState);
-        if (pane.agentState === "working" || pane.agentState === "blocked") observedActive = true;
-        const unknownOutput = pane.agentState === "unknown" ? await this.herdr.readOutput(paneId, 240) : null;
-        if (pane.agentState === "done" || observedActive && pane.agentState === "idle" || unknownOutput !== null && isTraexComposerReady(unknownOutput)) {
+        const state = observation?.state ?? pane.agentState;
+        this.turns.updateState(binding.id, prompt.id, state);
+        if (state === "working" || state === "blocked") observedActive = true;
+        const unknownOutput = state === "unknown" ? await this.herdr.readOutput(paneId, 240) : null;
+        const completed = observation
+          ? observation.traexProcess && (state === "done" || state === "idle" && (observedActive || observation.composerReady))
+          : state === "done" || observedActive && state === "idle" || unknownOutput !== null && isTraexComposerReady(unknownOutput);
+        if (completed) {
           const output = unknownOutput ?? await this.herdr.readOutput(paneId, 240);
           const answer = extractFinalTraexAnswer(output);
           this.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(answer) });
           this.store.updatePrompt(prompt.id, "delivered");
-          this.store.transitionBinding(binding.id, { type: "pane_observed", runtime: pane.agentState });
+          this.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
           this.store.transitionBinding(binding.id, { type: "turn_completed" });
           await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: answer || "TraeX 已完成；Bridge 重连后未能恢复更多文本，请查看 Herdr pane。", queueDepth: this.store.countPendingPrompts(binding.id) });
           this.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");

@@ -388,6 +388,26 @@ describe("SQLite store", () => {
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
+  it("cancels queued prompts whose bindings can no longer dispatch", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const [bindingId, state, lifecycle, attachment] of [
+      ["archived", "archived", "archived", "attached"],
+      ["orphaned", "orphaned", "active", "orphaned"],
+      ["pending", "pending", "provisioning", "unattached"]
+    ] as const) {
+      store.createPendingBinding({ id: bindingId, workspaceId: "w1", chatId: "c1", topicId: bindingId, rootMessageId: bindingId, title: bindingId });
+      store.updateBinding(bindingId, { paneId: `w1:${bindingId}`, state, lifecycle, attachment });
+      store.enqueuePrompt({ id: `prompt-${bindingId}`, bindingId, larkMessageId: `message-${bindingId}`, actorOpenId: "u1", body: "must not run" });
+    }
+
+    expect(store.convergePromptBacklog()).toEqual({ cancelled: 2 });
+    expect(store.getOperationalSummary().prompts).toMatchObject({ queued: 1, cancelled: 2 });
+    expect(store.listFailures("c1").filter((failure) => failure.kind === "prompt").map((failure) => failure.error)).toEqual([
+      "Session can no longer dispatch queued work",
+      "Session can no longer dispatch queued work"
+    ]);
+  });
+
   it("classifies, claims, falls back, and recovers steering jobs without replay", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

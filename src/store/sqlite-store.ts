@@ -475,6 +475,31 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
+  convergePromptBacklog(): { cancelled: number } {
+    const timestamp = now();
+    const reason = "Session can no longer dispatch queued work";
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const terminalBindings = `
+        SELECT id FROM bindings
+        WHERE state IN ('archived', 'orphaned', 'failed')
+          OR lifecycle IN ('archived', 'closed', 'failed')
+          OR attachment = 'orphaned'
+      `;
+      const result = this.database.prepare(`
+        UPDATE prompt_jobs SET state = 'cancelled', observation_state = 'completed', error = ?, updated_at = ?
+        WHERE state = 'queued' AND binding_id IN (${terminalBindings})
+      `).run(reason, timestamp);
+      this.database.prepare(`
+        UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0,
+          view_version = view_version + 1, updated_at = ?
+        WHERE phase = 'queued' AND binding_id IN (${terminalBindings})
+      `).run(reason, timestamp, timestamp);
+      this.database.exec("COMMIT");
+      return { cancelled: Number(result.changes) };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
   listDetachedPrompts(): PromptJob[] {
     return (this.database.prepare("SELECT * FROM prompt_jobs WHERE state = 'running' AND observation_state = 'detached' ORDER BY created_at, id").all() as PromptRow[]).map(mapPrompt);
   }

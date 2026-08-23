@@ -100,6 +100,10 @@ export class SessionReconciler {
 
   private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
     await this.options.channelPublisher.drain();
+    const converged = this.options.store.convergePromptBacklog();
+    if (converged.cancelled > 0) this.options.logger.info({
+      event: "prompt-backlog-converged", cancelled: converged.cancelled, outcome: "cancelled"
+    }, "cancelled queued prompts whose bindings can no longer dispatch");
     const panesByWorkspace = new Map<string, HerdrPane[]>();
     const configuredWorkspaceIds = new Set(this.options.projects.map((project) => project.workspaceId));
     const workspaceIds = requestedWorkspaceIds
