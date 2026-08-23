@@ -1,15 +1,16 @@
 import { z } from "zod";
 import type { HerdrPort } from "../domain/ports.js";
-import type { AgentState, HerdrPane, RuntimeObservation } from "../domain/types.js";
+import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import { stripTerminalControl } from "../runtime/output.js";
 import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-output-parser.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
-  pane_id: z.string(), workspace_id: z.string(), tab_id: z.string().nullish(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
+  pane_id: z.string(), tab_id: z.string().nullish(), workspace_id: z.string(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
   agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).default("unknown")
 }).passthrough();
+const tabSchema = z.object({ tab_id: z.string(), label: z.string() }).passthrough();
 const processSchema = z.object({
   foreground_processes: z.array(z.object({ name: z.string().optional(), argv: z.array(z.string()).optional() }).passthrough()).default([])
 }).passthrough();
@@ -81,25 +82,27 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  async createPane(workspaceId: string, cwd: string, options?: { bindingId: string; generation: number; projectId: string; title?: string; placement?: "split" | "dedicated-tab" }): Promise<HerdrPane> {
+  async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> {
     const identityArgs = options ? [
       "--env", `HERDR_BRIDGE_BINDING_ID=${options.bindingId}`, "--env", `HERDR_BRIDGE_GENERATION=${options.generation}`, "--env", `HERDR_PROJECT_ID=${options.projectId}`
     ] : [];
     if (options?.placement === "dedicated-tab") {
-      if (!options.title) throw new Error("Cannot create a dedicated Herdr tab without a title");
       const result = await this.json([
-        "tab", "create", "--workspace", workspaceId, "--cwd", cwd, "--label", `lark_${options.title}`,
-        ...identityArgs, "--no-focus"
+        "tab", "create", "--workspace", workspaceId, "--cwd", cwd,
+        "--label", larkTabTitle(options.title), ...identityArgs, "--no-focus"
       ]);
       const candidate = findPaneRecord(result);
       if (!candidate) throw new Error("Herdr tab create response did not contain a root pane");
+      if (options.title) {
+        await this.runner.run(this.executable, ["pane", "rename", candidate.pane_id, normalizePaneTitle(options.title)], this.commandTimeoutMs);
+      }
       return this.enrichPane(candidate);
     }
     const panes = await this.listPanes(workspaceId);
     const anchor = panes[0];
     if (!anchor) throw new Error(`Cannot create pane: workspace ${workspaceId} has no anchor pane`);
     const result = await this.json([
-      "pane", "split", "--pane", anchor.paneId, "--direction", "right", "--ratio", "0.5",
+      "pane", "split", "--pane", anchor.paneId, "--direction", "down", "--ratio", "0.5",
       "--cwd", cwd, ...identityArgs, "--no-focus"
     ]);
     const candidate = findPaneRecord(result);
@@ -201,12 +204,16 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> {
+    const pane = options?.tabTitle ? await this.getPane(paneId) : null;
     await this.runner.run(this.executable, ["pane", "rename", paneId, title], this.commandTimeoutMs);
-    if (!options?.tabTitle) return;
-    const result = await this.json(["pane", "get", paneId]);
-    const pane = z.object({ pane: paneSchema }).parse(result).pane;
-    if (!pane.tab_id) throw new Error(`Herdr pane ${paneId} did not report its containing tab`);
-    await this.runner.run(this.executable, ["tab", "rename", pane.tab_id, options.tabTitle], this.commandTimeoutMs);
+    if (options?.tabTitle) {
+      if (!pane?.tabId) throw new Error(`Cannot rename Herdr tab: pane ${paneId} has no tab id`);
+      const result = await this.json(["tab", "get", pane.tabId]);
+      const tab = z.object({ tab: tabSchema }).parse(result).tab;
+      if (tab.label.startsWith("lark_")) {
+        await this.runner.run(this.executable, ["tab", "rename", pane.tabId, larkTabTitle(options.tabTitle)], this.commandTimeoutMs);
+      }
+    }
   }
 
   async closePane(paneId: string): Promise<void> {
@@ -228,7 +235,7 @@ export class HerdrCliAdapter implements HerdrPort {
   private async enrichPane(raw: z.infer<typeof paneSchema>): Promise<HerdrPane> {
     const foregroundExecutables = await this.foregroundExecutables(raw.pane_id);
     return {
-      paneId: raw.pane_id, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
+      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentState: raw.agent_status, foregroundExecutables: [...new Set(foregroundExecutables)]
     };
   }
@@ -249,7 +256,7 @@ export class HerdrCliAdapter implements HerdrPort {
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
     return {
-      paneId: raw.pane_id, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
+      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentKind: kind, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables: kind ? [kind] : []
     };
@@ -297,32 +304,40 @@ export class HerdrCliAdapter implements HerdrPort {
     let lastAgentState: AgentState = "unknown";
     let lastOutput = before;
     let stableIdlePolls = 0;
+    let outputChangedAfterSubmission = false;
 
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       let agentState: AgentState = "unknown";
+      let foregroundExecutables: string[] = [];
       try {
         const pane = await this.getPane(paneId);
         if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
         agentState = pane.agentState;
+        foregroundExecutables = pane.foregroundExecutables;
       } catch (error) {
         if (String(error).includes("pane not found")) throw error;
       }
       if (agentState === "working" || agentState === "blocked") observedWorking = true;
       const output = await this.readOutput(paneId, 240);
+      if (output !== before) outputChangedAfterSubmission = true;
       if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
         if (agentState !== "unknown") lastAgentState = agentState;
         await onObservation?.({ state: agentState, output });
       }
       if (observedWorking && (agentState === "done" || agentState === "idle")) return "done";
-      if (agentState === "unknown" && output !== before && isTraexComposerReady(output)) {
-        return "done";
+      const safelyIdle = agentState === "unknown" && outputChangedAfterSubmission && isTraexIdle(output) && !hasActiveTurnHelper(foregroundExecutables);
+      if (safelyIdle) {
+        stableIdlePolls = output === lastOutput ? stableIdlePolls + 1 : 0;
+        if (stableIdlePolls >= 2) return "done";
       } else if (agentState === "unknown" && isTraexWorking(output)) {
         observedWorking = true;
         stableIdlePolls = 0;
       } else if (agentState === "unknown" && observedWorking) {
         stableIdlePolls = output === lastOutput ? stableIdlePolls + 1 : 0;
         if (stableIdlePolls >= 1) return "done";
+      } else {
+        stableIdlePolls = 0;
       }
       lastOutput = output;
       await abortableDelay(250, signal);
@@ -352,6 +367,14 @@ function isUnsupportedAgentPromptError(error: unknown): boolean {
   return /"code"\s*:\s*"agent_(?:not_ready|not_found)"/.test(error instanceof Error ? error.message : String(error));
 }
 
+function larkTabTitle(title: string | undefined): string {
+  return `lark_${normalizePaneTitle(title)}`;
+}
+
+function normalizePaneTitle(title: string | undefined): string {
+  return (title ?? "TraeX pane").replace(/\s+/g, " " ).trim() || "TraeX pane";
+}
+
 function unwrapText(stdout: string): string {
   const trimmed = stdout.trim();
   try {
@@ -369,6 +392,22 @@ function unwrapText(stdout: string): string {
 
 function isTraexWorking(output: string): boolean {
   return /[✧◆]\s*Work(?:ing|i…)/u.test(output);
+}
+
+function isTraexIdle(output: string): boolean {
+  const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
+  const composerIndex = lines.findLastIndex((line) => /^\s*[❯›>]\s*(?:[^<].*)?$/u.test(line));
+  if (composerIndex < 0) return false;
+  const tail = lines.slice(composerIndex + 1);
+  if (/approve|approval|required|allow this|waiting for user|等待.*(?:批准|确认|用户)/iu.test(tail.join("\n"))) return false;
+  return tail.every((line) => {
+    const value = line.trim();
+    return !value || /^[─━-]{3,}$/u.test(value) || /(?:Context|Mode|left|ctrl\+|shift\+tab|to cycle|Auto Mode)/iu.test(value);
+  });
+}
+
+function hasActiveTurnHelper(executables: string[]): boolean {
+  return executables.some((name) => !["traex", "bash", "sh", "zsh", "fish"].includes(name));
 }
 
 function countOccurrences(haystack: string, needle: string): number {

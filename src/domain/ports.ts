@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -14,7 +14,7 @@ export interface LarkPort {
   replyStreamingCard?(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }>;
   streamCardContent?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   finishStreamingCard?(cardId: string, sequence: number, summary: string): Promise<void>;
-  shareThread(topicOrRootMessageId: string, chatId: string): Promise<{ messageId: string }>;
+  shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
 }
 
@@ -24,13 +24,7 @@ export interface HerdrPort {
   listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;
   observeRuntime(paneId: string): Promise<RuntimeObservation>;
-  createPane(workspaceId: string, cwd: string, options?: {
-    bindingId: string;
-    generation: number;
-    projectId: string;
-    title?: string;
-    placement?: "split" | "dedicated-tab";
-  }): Promise<HerdrPane>;
+  createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string): Promise<void>;
   runPrompt(
     paneId: string,
@@ -105,6 +99,7 @@ export interface BindingStorePort {
   listDetachedPrompts(): PromptJob[];
   markPromptObservationDetached(id: string, notice: string): void;
   markPromptDispatched(id: string): void;
+  recoverLegacyElementIdDeadLetters(): number;
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
   acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;

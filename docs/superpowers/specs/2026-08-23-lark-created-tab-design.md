@@ -13,9 +13,10 @@ Herdr tab instead of splitting an existing tab.
 - After project selection, the bridge creates a new tab in the selected Herdr
   workspace. The tab's root pane uses the selected project's working directory
   and receives the existing bridge identity environment variables.
-- The tab label is `lark_<title>`, where `title` is the normalized title already
-  stored on the binding. The root pane keeps the normal title without the
-  `lark_` marker.
+- The tab label is `lark_<title>`, where `title` is the normalized title supplied
+  by the Feishu user (or the configured project display name when omitted). The
+  root pane keeps that title without the `lark_` marker. The binding and Lark
+  cards may continue to show the richer `<space> / <title>` display title.
 - The new tab is created without stealing focus from the active local Herdr
   tab.
 - Topic-root creation through the Feishu bot follows the same provisioned-tab
@@ -27,8 +28,8 @@ Herdr tab instead of splitting an existing tab.
 ## Interface and adapter changes
 
 `HerdrPort.createPane` accepts the desired pane title and a creation placement.
-The Lark provisioning path requests a dedicated tab. The Herdr CLI adapter maps
-that request to:
+The Lark provisioning path requests a dedicated tab. The Herdr CLI adapter
+creates the tab and then names its root pane:
 
 ```text
 herdr tab create \
@@ -39,6 +40,7 @@ herdr tab create \
   --env HERDR_BRIDGE_GENERATION=<generation> \
   --env HERDR_PROJECT_ID=<project-id> \
   --no-focus
+herdr pane rename <root-pane-id> <title>
 ```
 
 The adapter parses `root_pane` from the `tab create` response and returns it as
@@ -48,10 +50,11 @@ workspace's current pane layout.
 
 ## Rename behavior
 
-`/herdr rename <name>` renames the pane to the normalized `<name>` and renames
-its containing tab to `lark_<name>`. The adapter obtains the pane's `tab_id`
-from Herdr metadata before issuing `herdr tab rename`. If pane rename succeeds
-but tab rename fails, the command reports failure and reconciliation may retry;
+`/herdr rename <name>` renames the pane to the normalized `<name>`. The adapter
+obtains the pane's `tab_id` and current tab label from Herdr; only a tab whose
+label already starts with `lark_` is renamed to `lark_<name>`. A local or
+manually attached pane therefore never causes an unrelated tab rename. If pane
+rename succeeds but a qualifying tab rename fails, the command reports failure;
 the binding remains usable and no pane or tab is deleted.
 
 ## Recovery and failure handling

@@ -101,7 +101,7 @@ describe("project selection flow", () => {
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
 
     expect(created).toEqual([["wD", "/work/datasage", {
-      bindingId: expect.any(String), generation: 1, projectId: "datasage", title: "datasage_semantic_knowledge / Fix login", placement: "dedicated-tab"
+      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: "Fix login"
     }]]);
     expect(started).toEqual(["wD:p9"]);
     expect(prompts).toEqual([]);
@@ -131,7 +131,7 @@ describe("project selection flow", () => {
 
     const openButton = findActionButton(completedCard, "open_project_thread");
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value: openButton.value });
-    expect(shareThread).toHaveBeenCalledWith("project-topic-1", "chat");
+    expect(shareThread).toHaveBeenCalledWith("project-topic-1", { messageId: "selector-card-1", chatId: "chat" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

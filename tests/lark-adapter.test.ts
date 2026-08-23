@@ -61,6 +61,29 @@ describe("Lark streaming Answer cards", () => {
     expect(streamContent).toHaveBeenCalledWith({ path: { card_id: "card-1", element_id: "answer_content_p1" }, data: { content: "one\ntwo", sequence: 4, uuid: "stream-card-1-4" } });
     expect(updateSettings).toHaveBeenCalledWith({ path: { card_id: "card-1" }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: "Completed" } } }), sequence: 5, uuid: "finish-card-1-5" } });
   });
+
+  it("retries an unsupported fenced language as a plain code fence", async () => {
+    streamContent
+      .mockRejectedValueOnce(new Error("unsupported markdown code fence language: bash"))
+      .mockResolvedValueOnce({});
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await adapter.streamCardContent("card-1", "answer-content-p1", "```bash\necho ok\n```", 4);
+
+    expect(streamContent).toHaveBeenCalledTimes(2);
+    expect(streamContent).toHaveBeenLastCalledWith({
+      path: { card_id: "card-1", element_id: "answer_content_p1" },
+      data: { content: "```\necho ok\n```", sequence: 4, uuid: "stream-card-1-4" }
+    });
+  });
+
+  it("does not alter content for unrelated CardKit failures", async () => {
+    streamContent.mockRejectedValueOnce(new Error("network unavailable"));
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.streamCardContent("card-1", "answer-content-p1", "```bash\necho ok\n```", 4)).rejects.toThrow("network unavailable");
+    expect(streamContent).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Lark topic creation", () => {
@@ -78,25 +101,46 @@ describe("Lark topic creation", () => {
 
 describe("Lark topic sharing", () => {
   it("resolves a root message to its thread and forwards the native topic card", async () => {
-    getMessage.mockResolvedValue({ data: { items: [{ message_id: "om_root", thread_id: "omt_thread" }] } });
+    getMessage
+      .mockResolvedValueOnce({ data: { items: [{ message_id: "om_root", thread_id: "omt_thread" }] } })
+      .mockResolvedValueOnce({ data: { items: [{ message_id: "om_spaces", thread_id: "omt_spaces" }] } });
     forwardThread.mockResolvedValue({ data: { message_id: "om_forwarded" } });
     const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
 
-    await expect(adapter.shareThread("om_root", "oc_target")).resolves.toEqual({ messageId: "om_forwarded" });
+    await expect(adapter.shareThread("om_root", { messageId: "om_spaces", chatId: "oc_target" })).resolves.toEqual({ messageId: "om_forwarded" });
     expect(getMessage).toHaveBeenCalledWith({ path: { message_id: "om_root" } });
+    expect(getMessage).toHaveBeenNthCalledWith(1, { path: { message_id: "om_root" } });
+    expect(getMessage).toHaveBeenNthCalledWith(2, { path: { message_id: "om_spaces" } });
     expect(forwardThread).toHaveBeenCalledWith({
-      path: { thread_id: "omt_thread" }, params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_target" }
+      path: { thread_id: "omt_thread" }, params: { receive_id_type: "thread_id" }, data: { receive_id: "omt_spaces" }
     });
   });
 
   it("forwards a persisted thread id without another lookup", async () => {
+    getMessage.mockResolvedValue({ data: { items: [{ message_id: "om_spaces", thread_id: "omt_spaces" }] } });
     forwardThread.mockResolvedValue({ data: { message_id: "om_forwarded" } });
     const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
 
-    await adapter.shareThread("omt_thread", "oc_target");
+    await adapter.shareThread("omt_thread", { messageId: "om_spaces", chatId: "oc_target" });
 
-    expect(getMessage).not.toHaveBeenCalled();
-    expect(forwardThread).toHaveBeenCalledWith(expect.objectContaining({ path: { thread_id: "omt_thread" } }));
+    expect(getMessage).toHaveBeenCalledWith({ path: { message_id: "om_spaces" } });
+    expect(forwardThread).toHaveBeenCalledWith({
+      path: { thread_id: "omt_thread" }, params: { receive_id_type: "thread_id" }, data: { receive_id: "omt_spaces" }
+    });
+  });
+
+  it("does not forward a topic into itself", async () => {
+    getMessage.mockResolvedValue({ data: { items: [{ message_id: "om_spaces", thread_id: "omt_thread" }] } });
+    replyMessage.mockResolvedValue({ data: { message_id: "om_notice" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.shareThread("omt_thread", { messageId: "om_spaces", chatId: "oc_target" })).resolves.toEqual({ messageId: "om_notice" });
+
+    expect(forwardThread).not.toHaveBeenCalled();
+    expect(replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "om_spaces" },
+      data: { msg_type: "text", content: JSON.stringify({ text: "当前已在该项目话题中。" }), reply_in_thread: true }
+    });
   });
 });
 

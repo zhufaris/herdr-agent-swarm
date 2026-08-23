@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports.js";
-import type { HerdrPane, RuntimeObservation, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, WorkspaceCacheStatus } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
 
 interface Snapshot { panes: HerdrPane[]; capturedAt: number }
@@ -77,7 +77,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     }
     return observation;
   }
-  async createPane(workspaceId: string, cwd: string, options?: Parameters<HerdrPort["createPane"]>[2]): Promise<HerdrPane> {
+  async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> {
     const pane = await this.delegate.createPane(workspaceId, cwd, options);
     this.invalidate(workspaceId);
     return pane;

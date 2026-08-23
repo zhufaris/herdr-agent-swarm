@@ -104,10 +104,17 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   async streamCardContent(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
-    await this.client.cardkit.v1.cardElement.content({
+    const request = (nextContent: string) => this.client.cardkit.v1.cardElement.content({
       path: { card_id: cardId, element_id: normalizeLarkElementId(elementId) },
-      data: { content, sequence, uuid: `stream-${cardId}-${sequence}` }
+      data: { content: nextContent, sequence, uuid: `stream-${cardId}-${sequence}` }
     });
+    try {
+      await request(content);
+    } catch (error) {
+      const fallback = stripFenceLanguages(content);
+      if (fallback === content || !isUnsupportedFenceLanguage(error)) throw error;
+      await request(fallback);
+    }
   }
 
   async finishStreamingCard(cardId: string, sequence: number, summary: string): Promise<void> {
@@ -117,14 +124,16 @@ export class LarkSdkAdapter implements LarkPort {
     });
   }
 
-  async shareThread(topicOrRootMessageId: string, chatId: string): Promise<{ messageId: string }> {
+  async shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }> {
     const threadId = topicOrRootMessageId.startsWith("omt_")
       ? topicOrRootMessageId
       : await this.resolveThreadId(topicOrRootMessageId);
+    const targetThreadId = await this.resolveOptionalThreadId(target.messageId);
+    if (targetThreadId === threadId) return this.replyText(target.messageId, "当前已在该项目话题中。");
     const response = await this.client.im.v1.thread.forward({
       path: { thread_id: threadId },
-      params: { receive_id_type: "chat_id" },
-      data: { receive_id: chatId }
+      params: { receive_id_type: targetThreadId ? "thread_id" : "chat_id" },
+      data: { receive_id: targetThreadId ?? target.chatId }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
@@ -137,11 +146,27 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   private async resolveThreadId(rootMessageId: string): Promise<string> {
-    const response = await this.client.im.v1.message.get({ path: { message_id: rootMessageId } });
-    const threadId = response.data?.items?.[0]?.thread_id;
+    const threadId = await this.resolveOptionalThreadId(rootMessageId);
     if (!threadId) throw new Error(`Lark message ${rootMessageId} does not belong to a thread`);
     return threadId;
   }
+
+  private async resolveOptionalThreadId(messageId: string): Promise<string | null> {
+    const response = await this.client.im.v1.message.get({ path: { message_id: messageId } });
+    const threadId = response.data?.items?.[0]?.thread_id;
+    return threadId ?? null;
+  }
+}
+
+function stripFenceLanguages(content: string): string {
+  return content.replace(/^( {0,3}`{3,})[A-Za-z0-9_+.-]{1,32}\s*$/gm, "$1");
+}
+
+function isUnsupportedFenceLanguage(error: unknown): boolean {
+  const candidate = error as { message?: unknown; response?: { data?: { msg?: unknown; message?: unknown } } };
+  const messages = [candidate?.message, candidate?.response?.data?.msg, candidate?.response?.data?.message]
+    .filter((value): value is string => typeof value === "string");
+  return messages.some((message) => /unsupported[^\n]*(?:fence|language)|(?:fence|language)[^\n]*unsupported/i.test(message));
 }
 
 type MessageEvent = Parameters<NonNullable<lark.EventHandles["im.message.receive_v1"]>>[0];

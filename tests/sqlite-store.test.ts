@@ -20,7 +20,7 @@ describe("SQLite store", () => {
   it("atomically supersedes and consumes pane-close confirmations", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
 
     store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
     store.createPaneCloseRequest({ id: "r2", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
@@ -267,6 +267,31 @@ describe("SQLite store", () => {
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
     expect(store.loadRunCard("p1")).toMatchObject({ phase: "running", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求", queuePosition: 0, viewVersion: 2 });
+  });
+
+  it("recovers only queued answer cards dead-lettered by the legacy element id format", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "legacy-id", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({
+      prompt: { id: "legacy-id", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" },
+      view: { ...view, answerElementId: "answer_content_legacy_identifier_that_is_too_long_0" }, rootMessageId: "m1",
+      answerCard: { schema: "2.0", body: { elements: [{ tag: "markdown", element_id: "answer_content_legacy_identifier_that_is_too_long_0", content: "waiting" }] } }
+    });
+    const [legacyReply] = store.listPendingOutboundReplies();
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed(legacyReply!.id, "ElementID answer_content_legacy_identifier_that_is_too_long_0: Code 1002: elementID format error");
+
+    store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", bindingId: "b1", rootMessageId: "m1", kind: "text", payload: "hello" });
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("unrelated", "network unavailable");
+
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.recoverLegacyElementIdDeadLetters()).toBe(1);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null })]);
+    expect(store.getOperationalSummary().deadLetters).toBe(1);
+
+    store.markOutboundReplyDelivered(legacyReply!.id, "answer-1", "cardkit-1");
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("legacy-id");
   });
 
   it("backfills original request text when migrating an existing run-card database", () => {

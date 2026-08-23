@@ -158,8 +158,8 @@ describe("Herdr discovery", () => {
   });
 
   it("uses the configured project for Lark creation and preserves it on rename", async () => {
-    const created: unknown[] = [];
     const renamed: Array<[string, string, unknown]> = [];
+    const created: unknown[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
@@ -168,8 +168,8 @@ describe("Herdr discovery", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; },
-      async getPane() { return { paneId: "w1:p2", workspaceId: "w1", cwd: "/work/my-project", label: "Initial pane", agentState: "idle", foregroundExecutables: ["traex"] }; },
-      async createPane(_workspaceId, _cwd, options) { created.push(options); return { paneId: "w1:p2", workspaceId: "w1", cwd: "/work/my-project", label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async getPane() { return { paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1", cwd: "/work/my-project", label: "Initial pane", agentState: "idle", foregroundExecutables: ["traex"] }; },
+      async createPane(workspaceId, cwd, options) { created.push(options); return { paneId: "w1:p2", tabId: "w1:t2", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
       async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; },
       async renamePane(paneId, title, options) { renamed.push([paneId, title, options]); }
     };
@@ -193,11 +193,11 @@ describe("Herdr discovery", () => {
     const selection = (store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("root-2") as { id: string }).id;
     expect(selection).toBeTruthy();
     await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
-    expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", title: "my-space / Initial pane", placement: "dedicated-tab" }]);
+    expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: "Initial pane" }]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Initial pane" });
 
     await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/herdr rename Better pane", mentionsBot: false, isRootMessage: false });
-    expect(renamed).toEqual([["w1:p2", "Better pane", { tabTitle: "lark_Better pane" }]]);
+    expect(renamed).toEqual([["w1:p2", "Better pane", { tabTitle: "Better pane" }]]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Better pane" });
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();

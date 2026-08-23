@@ -52,6 +52,8 @@ export class SyncCoordinator {
   async start(): Promise<void> {
     const recovered = this.store.recoverRunningPrompts();
     if (recovered > 0) this.logger.warn({ event: "startup-prompts-recovered", recovered, outcome: "detached_without_replay" }, "detached from interrupted prompt observers without replay");
+    const recoveredLegacyCards = this.store.recoverLegacyElementIdDeadLetters();
+    if (recoveredLegacyCards > 0) this.logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
     for (const binding of this.store.listBindings()) {
       const spaceName = this.spaceNameFor(binding);
       const topicView = this.store.loadTopicView(binding.id);
@@ -151,8 +153,14 @@ export class SyncCoordinator {
       if (!binding || binding.chatId !== action.chatId) return;
       const topicOrRootMessageId = binding.topicId ?? binding.rootMessageId;
       if (!topicOrRootMessageId) return;
-      await this.lark.shareThread(topicOrRootMessageId, action.chatId);
-      this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
+      try {
+        await this.lark.shareThread(topicOrRootMessageId, { messageId: action.messageId, chatId: action.chatId });
+        this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
+      } catch (error) {
+        this.logger.error({ event: "thread-entry-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share project thread entry");
+        await this.lark.replyText(action.messageId, "话题入口发送失败，请重新执行 `/herdr spaces` 后重试。");
+        this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "failed" });
+      }
       return;
     }
     const deadLetter = parseDeadLetterAction(action.value);
@@ -278,7 +286,7 @@ export class SyncCoordinator {
           const pane = await this.herdr.getPane(binding.paneId);
           const project = this.config.projects.find((candidate) => candidate.id === binding.projectId);
           const title = formatProjectPaneTitle(project ? projectSpaceName(project) : null, pane?.cwd ?? this.config.herdr.workspaceCwd, command.title, binding.paneId);
-          await this.herdr.renamePane(binding.paneId, command.title, { tabTitle: `lark_${command.title}` });
+          await this.herdr.renamePane(binding.paneId, command.title, { tabTitle: command.title });
           this.store.updateBinding(binding.id, { title });
           await this.publish(binding.id, "BindingRenamed", "lark", { title });
           this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" });
@@ -514,7 +522,8 @@ export class SyncCoordinator {
     allowPaneCreation: boolean
   ): Promise<Binding> {
     const bindingId = selection.bindingId ?? randomUUID();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, selection.requestedTitle ?? project.displayName, "TraeX pane");
+    const paneTitle = selection.requestedTitle ?? project.displayName;
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = selection.bindingId ? this.store.getBinding(selection.bindingId) : null;
     if (!binding) {
       binding = this.store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title });
@@ -529,7 +538,9 @@ export class SyncCoordinator {
         if (!allowPaneCreation) {
           throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /herdr attach <space> <pane>");
         }
-        pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, title: binding.title, placement: "dedicated-tab" });
+        pane = await this.herdr.createPane(project.workspaceId, project.cwd, {
+          bindingId: binding.id, generation: binding.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle
+        });
         binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
         binding = this.store.transitionBinding(binding.id, { type: "pane_created" });
       }
@@ -611,14 +622,17 @@ export class SyncCoordinator {
   private async createFromLark(message: IncomingLarkMessage, title: string, initialPrompt: string | null): Promise<void> {
     const bindingId = randomUUID();
     const defaultProject = this.config.projects.find((project) => project.id === this.config.defaultProjectId) ?? this.config.projects[0]!;
-    title = formatProjectPaneTitle(projectSpaceName(defaultProject), defaultProject.cwd, title, "TraeX pane");
+    const paneTitle = title;
+    title = formatProjectPaneTitle(projectSpaceName(defaultProject), defaultProject.cwd, paneTitle, "TraeX pane");
     let binding = this.store.createPendingBinding({
       id: bindingId, projectId: defaultProject.id, workspaceId: defaultProject.workspaceId, chatId: message.chatId,
       topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title
     });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(defaultProject), paneId: null });
     try {
-      const pane = await this.herdr.createPane(binding.workspaceId, defaultProject.cwd, { bindingId: binding.id, generation: binding.generation, projectId: defaultProject.id, title: binding.title, placement: "dedicated-tab" });
+      const pane = await this.herdr.createPane(binding.workspaceId, defaultProject.cwd, {
+        bindingId: binding.id, generation: binding.generation, projectId: defaultProject.id, placement: "dedicated-tab", title: paneTitle
+      });
       binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
       binding = this.store.transitionBinding(binding.id, { type: "pane_created" });
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
@@ -1039,7 +1053,11 @@ export class SyncCoordinator {
   private async replaceBinding(binding: Binding, actorOpenId: string): Promise<void> {
     const project = this.config.projects.find((item) => item.id === binding.projectId);
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
-    const pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation + 1, projectId: project.id, title: binding.title, placement: "dedicated-tab" });
+    const existingPane = binding.paneId ? await this.herdr.getPane(binding.paneId) : null;
+    const paneTitle = existingPane?.label?.trim() || binding.title.split(" / ").at(-1) || project.displayName;
+    const pane = await this.herdr.createPane(project.workspaceId, project.cwd, {
+      bindingId: binding.id, generation: binding.generation + 1, projectId: project.id, placement: "dedicated-tab", title: paneTitle
+    });
     await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
     const next = this.store.updateBinding(this.store.attachBindingPane(binding.id, pane, true).id, { lastAgentState: "idle" });
     await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });

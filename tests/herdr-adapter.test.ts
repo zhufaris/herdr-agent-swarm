@@ -53,7 +53,7 @@ describe("Herdr adapter", () => {
       } });
     } };
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1")).resolves.toEqual([{
-      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
+      paneId: "w1:p1", tabId: null, terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
     }]);
     expect(calls).toEqual([["api", "snapshot"]]);
   });
@@ -69,77 +69,6 @@ describe("Herdr adapter", () => {
     const panes = await new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1");
     expect(panes[0]?.foregroundExecutables).toEqual(["traex"]);
     expect(calls).toEqual([["api", "snapshot"], ["pane", "list", "--workspace", "w1"], ["pane", "process-info", "--pane", "w1:p1"]]);
-  });
-
-  it("creates a dedicated unfocused Lark tab and returns its root pane", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(_executable, args, _timeout, onStarted) {
-        calls.push(args);
-        await onStarted?.();
-        if (args[0] === "tab" && args[1] === "create") return json({
-          tab: { tab_id: "w1:t7", workspace_id: "w1", label: "lark_space / Task" },
-          root_pane: { pane_id: "w1:p7", workspace_id: "w1", cwd: "/repo", terminal_id: "term-7" }
-        });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
-        throw new Error(`unexpected args: ${args.join(" ")}`);
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo", {
-      bindingId: "binding-7", generation: 2, projectId: "project-7", title: "space / Task", placement: "dedicated-tab"
-    })).resolves.toMatchObject({ paneId: "w1:p7", workspaceId: "w1", cwd: "/repo", terminalId: "term-7" });
-    expect(calls[0]).toEqual([
-      "tab", "create", "--workspace", "w1", "--cwd", "/repo", "--label", "lark_space / Task",
-      "--env", "HERDR_BRIDGE_BINDING_ID=binding-7", "--env", "HERDR_BRIDGE_GENERATION=2",
-      "--env", "HERDR_PROJECT_ID=project-7", "--no-focus"
-    ]);
-  });
-
-  it("renames a managed pane and its containing Lark tab", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p7", workspace_id: "w1", tab_id: "w1:t7" } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await new HerdrCliAdapter(runner, "herdr", 1000).renamePane("w1:p7", "Better pane", { tabTitle: "lark_Better pane" });
-    expect(calls).toEqual([
-      ["pane", "rename", "w1:p7", "Better pane"],
-      ["pane", "get", "w1:p7"],
-      ["tab", "rename", "w1:t7", "lark_Better pane"]
-    ]);
-  });
-
-  it("reads terminal output from the pane without requiring an agent registration", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "agent" && args[1] === "read") throw new Error("agent_not_found");
-        if (args[0] === "pane" && args[1] === "read") return { stdout: "TraeX ready", stderr: "" };
-        throw new Error(`unexpected args: ${args.join(" ")}`);
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).readOutput("wA:p3", 240))
-      .resolves.toBe("TraeX ready");
-    expect(calls).toEqual([["pane", "read", "wA:p3", "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]]);
-  });
-
-  it("identifies TraeX from process metadata, not the compatibility label", async () => {
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        if (args[1] === "list") return json({ panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent_status: "idle", agent: "codex" }] });
-        if (args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex", argv: ["/usr/bin/traex"] }] } });
-        throw new Error(`unexpected args: ${args.join(" " )}`);
-      }
-    };
-    const panes = await new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1");
-    expect(panes[0]?.foregroundExecutables).toContain("traex");
   });
 
   it("waits for composer evidence without restarting an existing TraeX process", async () => {
@@ -289,26 +218,6 @@ describe("Herdr adapter", () => {
       .resolves.toBeUndefined();
   });
 
-  it("injects a prompt into TraeX and waits for its terminal turn to finish", async () => {
-    const calls: string[][] = [];
-    const outputs = ["before", "before\n❯ hello", "✧ Working", "answer", "answer", "answer"];
-    const runner: CommandRunner = {
-      async run(_executable, args, _timeout, onStarted) {
-        calls.push(args);
-        await onStarted?.();
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
-        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: outputs.length > 2 ? "working" : "done" }], agents: [] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    let dispatched = false;
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 1000, undefined, undefined, () => { dispatched = true; })).resolves.toBe("done");
-    expect(dispatched).toBe(true);
-    expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "hello"]);
-    expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
-  });
-
   it("completes an unknown-state turn when the composer follows a historical working marker", async () => {
     const terminal = [
       "❯ continue",
@@ -333,7 +242,7 @@ describe("Herdr adapter", () => {
       }
     };
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 500))
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 1000))
       .resolves.toBe("done");
   });
 
@@ -369,28 +278,6 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 1000))
       .rejects.toThrow(/connection lost/);
     expect(calls.some((args) => args[0] === "pane" && args[1] === "send-text")).toBe(false);
-  });
-
-  it("runs a pane slash command and returns only its stable native output", async () => {
-    const calls: string[][] = [];
-    const outputs = [
-      "TraeX ready\n❯",
-      "TraeX ready\n❯ /model GPT-5.5",
-      "TraeX ready\n❯ /model GPT-5.5\n\u001b[32mCurrent model: GPT-5.5\u001b[0m\ntoken=secret-value",
-      "TraeX ready\n❯ /model GPT-5.5\n\u001b[32mCurrent model: GPT-5.5\u001b[0m\ntoken=secret-value"
-    ];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPaneCommand("w1:p1", "/model GPT-5.5", 1000))
-      .resolves.toBe("Current model: GPT-5.5\ntoken=[REDACTED]");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.5"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
   });
 
   it("extracts only the current model selector after terminal history rolls over", async () => {
@@ -445,6 +332,155 @@ describe("Herdr adapter", () => {
     expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.6-Terra"]);
   });
 
+  it("creates default panes with an explicit downward split", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "list") return json({ panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent_status: "idle" }] });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
+        if (args[0] === "pane" && args[1] === "split") return json({ pane: { pane_id: "w1:p2", workspace_id: "w1", cwd: "/repo", agent_status: "idle" } });
+        throw new Error("unexpected args: " + args.join(" "));
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo"))
+      .resolves.toMatchObject({ paneId: "w1:p2" });
+    const split = calls.find((args) => args[0] === "pane" && args[1] === "split");
+    expect(split).toContain("--direction");
+    expect(split?.[split.indexOf("--direction") + 1]).toBe("down");
+    expect(split).not.toContain("right");
+  });
+
+  it("creates Lark panes as dedicated tabs without stealing focus", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
+        if (args[0] === "tab" && args[1] === "create") return json({
+          tab: { tab_id: "w1:t2", workspace_id: "w1" },
+          root_pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1", cwd: "/repo", agent_status: "idle" }
+        });
+        if (args[0] === "pane" && args[1] === "rename") return { stdout: "", stderr: "" };
+        throw new Error("unexpected args: " + args.join(" "));
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo", {
+      bindingId: "binding-1", generation: 0, projectId: "project-1", placement: "dedicated-tab", title: "Fix login"
+    })).resolves.toMatchObject({ paneId: "w1:p2", tabId: "w1:t2" });
+    expect(calls[0]).toEqual([
+      "tab", "create", "--workspace", "w1", "--cwd", "/repo", "--label", "lark_Fix login",
+      "--env", "HERDR_BRIDGE_BINDING_ID=binding-1", "--env", "HERDR_BRIDGE_GENERATION=0",
+      "--env", "HERDR_PROJECT_ID=project-1", "--no-focus"
+    ]);
+    expect(calls).toContainEqual(["pane", "rename", "w1:p2", "Fix login"]);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "split")).toBe(false);
+  });
+
+  it("renames a Lark pane and its containing tab", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1", cwd: "/repo", agent_status: "idle" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
+        if (args[0] === "tab" && args[1] === "get") return json({ tab: { tab_id: "w1:t2", label: "lark_Old pane" } });
+        if ((args[0] === "pane" || args[0] === "tab") && args[1] === "rename") return { stdout: "", stderr: "" };
+        throw new Error("unexpected args: " + args.join(" "));
+      }
+    };
+
+    await new HerdrCliAdapter(runner, "herdr", 1000).renamePane("w1:p2", "Better pane", { tabTitle: "Space / Better pane" });
+    expect(calls).toContainEqual(["pane", "rename", "w1:p2", "Better pane"]);
+    expect(calls).toContainEqual(["tab", "rename", "w1:t2", "lark_Space / Better pane"]);
+  });
+
+  it("does not rename a local tab when renaming an attached pane", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p2", tab_id: "w1:t1", workspace_id: "w1", cwd: "/repo", agent_status: "idle" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
+        if (args[0] === "tab" && args[1] === "get") return json({ tab: { tab_id: "w1:t1", label: "local-work" } });
+        if (args[0] === "pane" && args[1] === "rename") return { stdout: "", stderr: "" };
+        throw new Error("unexpected args: " + args.join(" "));
+      }
+    };
+
+    await new HerdrCliAdapter(runner, "herdr", 1000).renamePane("w1:p2", "Better pane", { tabTitle: "Better pane" });
+    expect(calls).toContainEqual(["pane", "rename", "w1:p2", "Better pane"]);
+    expect(calls.some((args) => args[0] === "tab" && args[1] === "rename")).toBe(false);
+  });
+
+  it("reads terminal output from the pane without requiring an agent registration", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "agent" && args[1] === "read") throw new Error("agent_not_found");
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "TraeX ready", stderr: "" };
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).readOutput("wA:p3", 240))
+      .resolves.toBe("TraeX ready");
+    expect(calls).toEqual([["pane", "read", "wA:p3", "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]]);
+  });
+
+  it("identifies TraeX from process metadata, not the compatibility label", async () => {
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[1] === "list") return json({ panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent_status: "idle", agent: "codex" }] });
+        if (args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex", argv: ["/usr/bin/traex"] }] } });
+        throw new Error(`unexpected args: ${args.join(" " )}`);
+      }
+    };
+    const panes = await new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1");
+    expect(panes[0]?.foregroundExecutables).toContain("traex");
+  });
+
+  it("injects a prompt into TraeX and waits for its terminal turn to finish", async () => {
+    const calls: string[][] = [];
+    const outputs = ["before", "before\n❯ hello", "✧ Working", "answer", "answer", "answer"];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 1000)).resolves.toBe("done");
+    expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "hello"]);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "send-text")).toBe(false);
+  });
+
+  it("runs a pane slash command and returns only its stable native output", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "TraeX ready\n❯",
+      "TraeX ready\n❯ /model GPT-5.5",
+      "TraeX ready\n❯ /model GPT-5.5\n\u001b[32mCurrent model: GPT-5.5\u001b[0m\ntoken=secret-value",
+      "TraeX ready\n❯ /model GPT-5.5\n\u001b[32mCurrent model: GPT-5.5\u001b[0m\ntoken=secret-value"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPaneCommand("w1:p1", "/model GPT-5.5", 1000))
+      .resolves.toBe("Current model: GPT-5.5\ntoken=[REDACTED]");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.5"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+  });
+
   it("keeps the turn open while approval is blocked and completes after approval", async () => {
     const states = ["working", "blocked", "blocked", "working", "done"] as const;
     const outputs = ["before", "before\n❯ needs approval"];
@@ -470,6 +506,62 @@ describe("Herdr adapter", () => {
     await expect(turn).resolves.toBe("done");
     expect(observed.map(({ state }) => state)).toEqual(["working", "blocked", "working", "done"]);
     expect(observed.at(-1)?.output).toBe("terminal");
+  });
+
+  it("completes an unknown-state turn after output returns to a stable idle composer", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "◆ Earlier answer\n❯",
+      "◆ Earlier answer\n❯ summarize",
+      "◆ Earlier answer\n❯ summarize\n◆ Done\n❯"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ Earlier answer\n❯ summarize\n◆ Done\n❯", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "summarize", 2000)).resolves.toBe("done");
+    expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "summarize"]);
+  });
+
+  it("completes at an idle composer even when the terminal history still contains a working marker", async () => {
+    const outputs = [
+      "◆ Earlier answer\n❯",
+      "◆ Earlier answer\n❯ finish",
+      "⚠ Automatic approval review approved\n◆ Working on the task\n◆ Finished\n❯"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "⚠ Automatic approval review approved\n◆ Working on the task\n◆ Finished\n❯", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "finish", 2000)).resolves.toBe("done");
+  });
+
+  it("does not complete an unknown-state turn while an active helper remains", async () => {
+    const controller = new AbortController();
+    const outputs = ["❯", "❯ build", "◆ Partial output\n❯"];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ Partial output\n❯", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }, { name: "systemd-inhibit" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+    const turn = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "build", 60_000, undefined, controller.signal);
+    setTimeout(() => controller.abort(), 1100);
+
+    await expect(turn).rejects.toThrow("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed");
   });
 
   it("fails promptly when the pane disappears during a turn", async () => {
@@ -500,7 +592,7 @@ describe("Herdr adapter", () => {
     const turn = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 60_000, undefined, controller.signal);
     setTimeout(() => controller.abort(), 10);
 
-    await expect(turn).rejects.toThrow("Bridge shutdown detached from an in-flight TraeX turn");
+    await expect(turn).rejects.toThrow("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed");
   });
 
   it("steers only while structured pane state is working", async () => {

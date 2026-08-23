@@ -518,6 +518,22 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.prepare("UPDATE prompt_jobs SET observation_state = 'attached', error = NULL, updated_at = ? WHERE id = ? AND state = 'running'").run(now(), id);
   }
 
+  recoverLegacyElementIdDeadLetters(): number {
+    const timestamp = now();
+    const result = this.database.prepare(`
+      UPDATE outbound_replies
+      SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, updated_at = ?
+      WHERE state = 'dead_letter' AND kind = 'stream_card_create' AND card_role = 'answer'
+        AND error LIKE '%elementID format error%'
+        AND prompt_id IN (
+          SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+          WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL
+            AND c.answer_element_id LIKE 'answer_content_%' AND length(c.answer_element_id) > 20
+        )
+    `).run(timestamp, timestamp);
+    return Number(result.changes);
+  }
+
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean } {
     const timestamp = now();
     const result = this.database.prepare(`

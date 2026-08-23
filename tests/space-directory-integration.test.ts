@@ -122,8 +122,35 @@ describe("space directory command", () => {
     await coordinator.handleMessage({ eventId: "spaces-bound", messageId: "spaces-bound-message", chatId: "chat", topicId: null, rootMessageId: "spaces-bound-message", actorOpenId: "user", text: "/herdr spaces", mentionsBot: true, isRootMessage: true });
     const open = findAction(cards.at(-1)!, "open_project_thread");
     await onAction!({ messageId: "spaces-bound-card", chatId: "chat", operatorOpenId: "user", value: open });
-    expect(shareThread).toHaveBeenCalledWith("omt-new", "chat");
+    expect(shareThread).toHaveBeenCalledWith("omt-new", { messageId: "spaces-bound-card", chatId: "chat" });
 
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("reports a thread-forward failure in the action card thread", async () => {
+    let onAction: Parameters<LarkPort["start"]>[1];
+    const notices: Array<{ root: string; text: string }> = [];
+    const lark: LarkPort = {
+      async start(_message, action) { onAction = action; }, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText(root, text) { notices.push({ root, text }); return { messageId: "notice" }; },
+      async replyCard() { return { messageId: "card" }; }, async updateCard() {},
+      async shareThread() { throw new Error("invalid request parameter"); }
+    };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "omt-target", rootMessageId: "om-target", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator({
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await onAction!({ messageId: "spaces-card", chatId: "chat", operatorOpenId: "user", value: { action: "open_project_thread", bindingId: "b1" } });
+
+    expect(notices).toEqual([{ root: "spaces-card", text: "话题入口发送失败，请重新执行 `/herdr spaces` 后重试。" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 });

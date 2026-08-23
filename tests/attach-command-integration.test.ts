@@ -95,7 +95,7 @@ describe("attach existing pane command", () => {
 
     const button = findActionButton(replyCards.at(-1)!, "open_project_thread");
     await onAction!({ messageId: "reply-2", chatId: "chat", operatorOpenId: "user-1", value: button.value });
-    expect(shareThread).toHaveBeenCalledWith("topic-attached", "chat");
+    expect(shareThread).toHaveBeenCalledWith("topic-attached", { messageId: "reply-2", chatId: "chat" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

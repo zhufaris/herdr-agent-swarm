@@ -181,6 +181,7 @@ export type ProjectSelectionClaim =
 
 export interface HerdrPane {
   paneId: string;
+  tabId?: string | null;
   terminalId?: string | null;
   agentKind?: string | null;
   stateChangeSeq?: number | null;
@@ -196,6 +197,14 @@ export interface RuntimeObservation {
   traexProcess: boolean;
   composerReady: boolean;
   evidenceSource: "structured" | "recent" | "visible" | "process" | "none";
+}
+
+export interface HerdrPaneCreationOptions {
+  bindingId: string;
+  generation: number;
+  projectId: string;
+  placement?: "split" | "dedicated-tab";
+  title?: string;
 }
 
 export interface IncomingLarkMessage {
