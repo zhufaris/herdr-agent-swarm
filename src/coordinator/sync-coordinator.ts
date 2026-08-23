@@ -17,7 +17,7 @@ import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage,
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
 import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
 import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
-import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
+import { extractFinalTraexAnswer, isTraexComposerReady, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { SessionReconciler } from "./session-reconciler.js";
 import { TurnSupervisor } from "./turn-supervisor.js";
@@ -731,6 +731,7 @@ export class SyncCoordinator {
   private async drain(bindingId: string): Promise<void> {
     let binding = this.store.getBinding(bindingId);
     if (!binding?.paneId || binding.state !== "active") return;
+    if (binding.lastAgentState === "working" || binding.lastAgentState === "blocked" || binding.lastAgentState === "unknown") return;
     const paneId = binding.paneId;
     for (let prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId)) {
       const queueDepth = this.store.countPendingPrompts(bindingId);
@@ -830,8 +831,9 @@ export class SyncCoordinator {
         if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
         this.turns.updateState(binding.id, prompt.id, pane.agentState);
         if (pane.agentState === "working" || pane.agentState === "blocked") observedActive = true;
-        if (pane.agentState === "done" || observedActive && pane.agentState === "idle") {
-          const output = await this.herdr.readOutput(paneId, 240);
+        const unknownOutput = pane.agentState === "unknown" ? await this.herdr.readOutput(paneId, 240) : null;
+        if (pane.agentState === "done" || observedActive && pane.agentState === "idle" || unknownOutput !== null && isTraexComposerReady(unknownOutput)) {
+          const output = unknownOutput ?? await this.herdr.readOutput(paneId, 240);
           const answer = extractFinalTraexAnswer(output);
           this.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(answer) });
           this.store.updatePrompt(prompt.id, "delivered");
@@ -984,7 +986,9 @@ export class SyncCoordinator {
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string) {
-    const pane = (await this.herdr.listPanes(binding.workspaceId, { forceRefresh: true })).find((candidate) => candidate.paneId === paneId) ?? null;
+    const pane = this.herdr.observeBoundPane
+      ? await this.herdr.observeBoundPane(paneId)
+      : (await this.herdr.listPanes(binding.workspaceId, { forceRefresh: true })).find((candidate) => candidate.paneId === paneId) ?? null;
     if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
     if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
     const project = this.config.projects.find((item) => item.id === binding.projectId);

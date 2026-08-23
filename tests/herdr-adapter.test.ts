@@ -3,6 +3,41 @@ import { HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 
 describe("Herdr adapter", () => {
+  it("recovers an unknown bound pane from exact TraeX process and composer evidence", async () => {
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: {
+          panes: [{ pane_id: "w1:p1", workspace_id: "w1", terminal_id: "term-1", agent_status: "unknown" }], agents: []
+        } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: {
+          foreground_processes: [{ name: "traex", argv: ["/home/user/.local/bin/traex", "--permission-mode", "auto"] }]
+        } });
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "◆ complete\n────────\n❯ Use /skills to list available skills", stderr: "" };
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeBoundPane("w1:p1")).resolves.toMatchObject({
+      paneId: "w1:p1", terminalId: "term-1", agentState: "idle", foregroundExecutables: ["traex"]
+    });
+  });
+
+  it("keeps unknown bound panes fail-closed without exact TraeX process evidence", async () => {
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: {
+          panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }], agents: []
+        } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "bash", argv: ["/bin/bash"] }] } });
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeBoundPane("w1:p1")).resolves.toMatchObject({
+      agentState: "unknown", foregroundExecutables: ["bash"]
+    });
+  });
+
   it("uses one Herdr snapshot command for all panes in a workspace", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {
@@ -218,6 +253,34 @@ describe("Herdr adapter", () => {
     expect(dispatched).toBe(true);
     expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "hello"]);
     expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
+  });
+
+  it("completes an unknown-state turn when the composer follows a historical working marker", async () => {
+    const terminal = [
+      "❯ continue",
+      "◆ Working…",
+      "The requested work is complete.",
+      "❯ Use /skills to list available skills"
+    ].join("\n");
+    let paneReads = 0;
+    const runner: CommandRunner = {
+      async run(_executable, args, _timeout, onStarted) {
+        await onStarted?.();
+        if (args[0] === "pane" && args[1] === "read") {
+          return { stdout: paneReads++ === 0 ? "❯" : terminal, stderr: "" };
+        }
+        if (args[0] === "api" && args[1] === "snapshot") {
+          return json({ snapshot: {
+            panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "unknown" }],
+            agents: []
+          } });
+        }
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 500))
+      .resolves.toBe("done");
   });
 
   it("falls back to pane input when Herdr rejects a detected TraeX pane as an unnamed agent", async () => {

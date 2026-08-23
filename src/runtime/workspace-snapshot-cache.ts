@@ -68,6 +68,14 @@ export class WorkspaceSnapshotCache implements HerdrPort {
 
   async assertWorkspace(workspaceId: string): Promise<void> { await this.delegate.assertWorkspace(workspaceId); }
   async getPane(paneId: string): Promise<HerdrPane | null> { return this.delegate.getPane(paneId); }
+  async observeBoundPane(paneId: string): Promise<HerdrPane | null> {
+    const pane = this.delegate.observeBoundPane ? await this.delegate.observeBoundPane(paneId) : await this.delegate.getPane(paneId);
+    if (pane) {
+      const snapshot = this.snapshots.get(pane.workspaceId);
+      if (snapshot) this.snapshots.set(pane.workspaceId, { ...snapshot, panes: snapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) });
+    }
+    return pane;
+  }
   async createPane(workspaceId: string, cwd: string, options?: Parameters<HerdrPort["createPane"]>[2]): Promise<HerdrPane> {
     const pane = await this.delegate.createPane(workspaceId, cwd, options);
     this.invalidate(workspaceId);

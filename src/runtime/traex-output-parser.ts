@@ -1,4 +1,5 @@
 import type { ProgressEventKind, ProgressEventState } from "../domain/run-card-view.js";
+import type { AgentState } from "../domain/types.js";
 import { stripTerminalControl } from "./output.js";
 import { findNativeTaskFrame } from "./native-task-frame.js";
 
@@ -19,6 +20,21 @@ const MAX_TERMINAL_DELTA_CHARS = 12_000;
 const MIN_RELIABLE_TERMINAL_OVERLAP = 64;
 
 export interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace" }
+
+/** True when TraeX is visibly waiting at its composer despite missing structured agent state. */
+export function isTraexComposerReady(output: string): boolean {
+  const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
+  return lines.slice(-8).some((line) => /^\s*[❯›]\s*(?:Use \/skills\b.*)?$/u.test(line));
+}
+
+/** Infer state only from strong markers near the live end of a TraeX terminal. */
+export function inferTraexAgentState(output: string): AgentState {
+  const tail = stripTerminalControl(output).replace(/\r/g, "").split("\n").slice(-12).join("\n");
+  if (isTraexComposerReady(tail)) return "idle";
+  if (/(?:Approve (?:command|action)?|approval required|waiting for (?:approval|user))/i.test(tail)) return "blocked";
+  if (/[✧◆]\s*Work(?:ing|i…)|\bAuto Mode\b.*\bactive turn\b/iu.test(tail)) return "working";
+  return "unknown";
+}
 
 /** Convert two Herdr terminal snapshots into a safe append or active-window replacement. */
 export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string, promptEcho: string): ParsedTerminalStreamDelta {

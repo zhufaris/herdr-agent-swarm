@@ -165,6 +165,28 @@ describe("SessionReconciler", () => {
     expect(store.getBinding(binding.id)).toMatchObject({ attachment: "attached", degradationCount: 0 });
     store.close();
   });
+
+  it("enriches an unknown bound pane and wakes its queued FIFO", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "unknown" });
+    const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, stateChangeSeq: 9, foregroundExecutables: [] };
+    const observeBoundPane = vi.fn(async () => ({ ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] }));
+    const scheduleBinding = vi.fn();
+    const reconciler = new SessionReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { async listAllPanes() { return [unknownPane]; }, observeBoundPane, async readOutput() { return "❯ Use /skills to list available skills"; } } as unknown as HerdrPort,
+      bus: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduleBinding, isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+
+    expect(observeBoundPane).toHaveBeenCalledWith("w1:p1");
+    expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "idle", attachment: "attached" });
+    expect(scheduleBinding).toHaveBeenCalledWith("b1");
+    store.close();
+  });
 });
 
 function fixture(

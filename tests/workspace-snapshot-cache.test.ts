@@ -53,6 +53,28 @@ describe("workspace snapshot cache", () => {
     await expect(cache.listAllPanes()).rejects.toThrow(/does not support an all-workspace snapshot/);
   });
 
+  it("forwards bound-pane observation and updates the cached pane without refreshing the workspace", async () => {
+    const unknown = { ...pane("w1", 1), agentState: "unknown" as const, foregroundExecutables: [] };
+    const observed = { ...unknown, agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const listPanes = vi.fn(async () => [unknown]);
+    const observeBoundPane = vi.fn(async () => observed);
+    const cache = new WorkspaceSnapshotCache(adapter({ listPanes, observeBoundPane }));
+
+    expect((await cache.listPanes("w1"))[0]?.agentState).toBe("unknown");
+    expect(await cache.observeBoundPane("w1:p1")).toEqual(observed);
+    expect((await cache.listPanes("w1"))[0]).toEqual(observed);
+    expect(observeBoundPane).toHaveBeenCalledWith("w1:p1");
+    expect(listPanes).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to getPane when bound-pane observation is unsupported", async () => {
+    const getPane = vi.fn(async () => pane("w1", 1));
+    const cache = new WorkspaceSnapshotCache(adapter({ getPane }));
+
+    expect(await cache.observeBoundPane("w1:p1")).toEqual(pane("w1", 1));
+    expect(getPane).toHaveBeenCalledWith("w1:p1");
+  });
+
   it("preserves validation semantics and forwards pane close while invalidating the snapshot", async () => {
     const assertWorkspace = vi.fn(async () => { throw new Error("workspace missing"); });
     const closePane = vi.fn(async () => undefined);

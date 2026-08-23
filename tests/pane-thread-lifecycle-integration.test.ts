@@ -89,6 +89,53 @@ describe("pane/thread lifecycle integration", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("resumes the FIFO when a detached turn has returned to the TraeX composer with unknown agent state", async () => {
+    const submitted: string[] = [];
+    let firstController: AbortSignal | undefined;
+    let firstDispatched = false;
+    let restarted = false;
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {}
+    };
+    const pane = () => ({ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: (restarted ? "unknown" : firstDispatched ? "working" : "idle") as AgentState, foregroundExecutables: ["traex"] });
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane()]; }, async getPane() { return pane(); },
+      async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, text, _timeout, _observation, signal, onDispatched) {
+        submitted.push(text);
+        firstDispatched = true;
+        await onDispatched?.();
+        if (text === "first") {
+          firstController = signal;
+          await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("observer detached")), { once: true }));
+        }
+        return "done";
+      },
+      async readOutput() { return restarted ? "◆ first complete\n────────\n❯ Use /skills to list available skills" : "◆ Working…"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active" });
+
+    const firstRuntime = runtime(store, herdr, lark, 10);
+    await firstRuntime.coordinator.start();
+    await firstRuntime.coordinator.handleMessage(message(30, "first"));
+    await vi.waitFor(() => expect(firstController).toBeDefined());
+    await firstRuntime.coordinator.handleMessage(message(31, "second"));
+    await firstRuntime.coordinator.stop();
+    await firstRuntime.projector.stop(); await firstRuntime.publisher.stop();
+    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1 });
+
+    restarted = true;
+    const secondRuntime = runtime(store, herdr, lark);
+    await secondRuntime.coordinator.start();
+    await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
+    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
+
+    await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();
+  });
+
   it("reattaches an orphaned session without replay, then resumes explicitly", async () => {
     const submitted: string[] = [];
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
@@ -145,6 +192,14 @@ describe("pane/thread lifecycle integration", () => {
 
 function message(index: number, text: string) {
   return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
+}
+
+function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000) {
+  const bus = new BridgeEventBus();
+  const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+  const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+  const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), shutdownGraceMs);
+  return { coordinator, projector, publisher };
 }
 
 function config(): BridgeConfig {

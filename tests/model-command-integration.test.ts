@@ -23,6 +23,27 @@ describe("model command", () => {
     await fixture.close();
   });
 
+  it("observes the bound pane when the workspace snapshot cannot identify TraeX", async () => {
+    const cards: object[] = [];
+    const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
+    const snapshotPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, foregroundExecutables: [] };
+    const observedPane = { ...snapshotPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const observeBoundPane = vi.fn(async () => observedPane);
+    let snapshotReads = 0;
+    const fixture = await setup(cards, runPaneCommand, {
+      pane: observedPane,
+      listPanes: async () => ++snapshotReads === 1 ? [observedPane] : [snapshotPane],
+      observeBoundPane
+    });
+
+    await fixture.coordinator.handleMessage(message("/model GPT-5.5"));
+
+    expect(observeBoundPane).toHaveBeenCalledWith("w1:p1");
+    expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model GPT-5.5", 1000);
+    expect(JSON.stringify(cards.at(-1))).toContain("Current model: GPT-5.5");
+    await fixture.close();
+  });
+
   it("rejects the command while the binding is busy without touching the pane", async () => {
     const cards: object[] = [];
     const runPaneCommand = vi.fn(async () => "unexpected");
@@ -37,7 +58,15 @@ describe("model command", () => {
   });
 });
 
-async function setup(cards: object[], runPaneCommand: HerdrPort["runPaneCommand"]) {
+async function setup(
+  cards: object[],
+  runPaneCommand: HerdrPort["runPaneCommand"],
+  options: {
+    pane?: Awaited<ReturnType<HerdrPort["getPane"]>> & {};
+    listPanes?: HerdrPort["listPanes"];
+    observeBoundPane?: HerdrPort["observeBoundPane"];
+  } = {}
+) {
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,
     async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
@@ -45,9 +74,10 @@ async function setup(cards: object[], runPaneCommand: HerdrPort["runPaneCommand"
     async replyCard(_root, card) { cards.push(card); return { messageId: `card-${cards.length}` }; },
     async updateCard() {}
   };
-  const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+  const pane = options.pane ?? { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
-    async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+    async assertWorkspace() {}, listPanes: options.listPanes ?? (async () => [pane]), async getPane() { return pane; },
+    ...(options.observeBoundPane ? { observeBoundPane: options.observeBoundPane } : {}),
     async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; },
     runPaneCommand, async readOutput() { return ""; }, async renamePane() {}
   };

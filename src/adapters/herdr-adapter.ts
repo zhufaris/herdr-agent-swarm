@@ -3,6 +3,7 @@ import type { HerdrPort } from "../domain/ports.js";
 import type { AgentState, HerdrPane } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import { stripTerminalControl } from "../runtime/output.js";
+import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-output-parser.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -60,6 +61,16 @@ export class HerdrCliAdapter implements HerdrPort {
       if (String(error).includes("not found")) return null;
       throw error;
     }
+  }
+
+  async observeBoundPane(paneId: string): Promise<HerdrPane | null> {
+    const pane = await this.getPane(paneId);
+    if (!pane || pane.agentState !== "unknown") return pane;
+    const foregroundExecutables = await this.foregroundExecutables(paneId);
+    const observed = { ...pane, foregroundExecutables };
+    if (!foregroundExecutables.includes("traex")) return observed;
+    try { return { ...observed, agentState: inferTraexAgentState(await this.readOutput(paneId, 80)) }; }
+    catch { return observed; }
   }
 
   async createPane(workspaceId: string, cwd: string, options?: { bindingId: string; generation: number; projectId: string; title?: string; placement?: "split" | "dedicated-tab" }): Promise<HerdrPane> {
@@ -175,21 +186,24 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   private async enrichPane(raw: z.infer<typeof paneSchema>): Promise<HerdrPane> {
-    let foregroundExecutables: string[] = [];
-    try {
-      const result = await this.json(["pane", "process-info", "--pane", raw.pane_id]);
-      const processInfo = z.object({ process_info: processSchema }).parse(result).process_info;
-      foregroundExecutables = processInfo.foreground_processes.flatMap((process) => {
-        const values = [process.name, process.argv?.[0]].filter((value): value is string => Boolean(value));
-        return values.map((value) => value.split("/").at(-1) ?? value);
-      });
-    } catch {
-      // A pane can disappear between list and process inspection. Reconciliation handles it.
-    }
+    const foregroundExecutables = await this.foregroundExecutables(raw.pane_id);
     return {
       paneId: raw.pane_id, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentState: raw.agent_status, foregroundExecutables: [...new Set(foregroundExecutables)]
     };
+  }
+
+  private async foregroundExecutables(paneId: string): Promise<string[]> {
+    try {
+      const result = await this.json(["pane", "process-info", "--pane", paneId]);
+      const processInfo = z.object({ process_info: processSchema }).parse(result).process_info;
+      return [...new Set(processInfo.foreground_processes.flatMap((process) => {
+        const values = [process.name, process.argv?.[0]].filter((value): value is string => Boolean(value));
+        return values.map((value) => value.split("/").at(-1) ?? value);
+      }))];
+    } catch {
+      return [];
+    }
   }
 
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
@@ -214,15 +228,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const pane = await this.getPane(paneId);
     if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
     if (pane.foregroundExecutables.includes("traex")) return true;
-    try {
-      const result = await this.json(["pane", "process-info", "--pane", paneId]);
-      const processInfo = z.object({ process_info: processSchema }).parse(result).process_info;
-      return processInfo.foreground_processes.some((process) =>
-        [process.name, process.argv?.[0]].some((value) => value?.split("/").at(-1) === "traex")
-      );
-    } catch {
-      return false;
-    }
+    return (await this.foregroundExecutables(paneId)).includes("traex");
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {
@@ -272,7 +278,9 @@ export class HerdrCliAdapter implements HerdrPort {
         await onObservation?.({ state: agentState, output });
       }
       if (observedWorking && (agentState === "done" || agentState === "idle")) return "done";
-      if (agentState === "unknown" && isTraexWorking(output)) {
+      if (agentState === "unknown" && output !== before && isTraexComposerReady(output)) {
+        return "done";
+      } else if (agentState === "unknown" && isTraexWorking(output)) {
         observedWorking = true;
         stableIdlePolls = 0;
       } else if (agentState === "unknown" && observedWorking) {

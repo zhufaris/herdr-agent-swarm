@@ -136,13 +136,20 @@ export class SessionReconciler {
     }
 
     const nextSkippedPaneReasons = requestedWorkspaceIds ? new Map(this.skippedPaneReasons) : new Map<string, string>();
-    for (const [requestedWorkspaceId, panes] of panesByWorkspace) for (const pane of panes) {
+    for (const [requestedWorkspaceId, panes] of panesByWorkspace) for (const snapshotPane of panes) {
+      let pane = snapshotPane;
       if (pane.workspaceId !== requestedWorkspaceId) {
         this.options.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId, reportedWorkspaceId: pane.workspaceId, paneId: pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
         continue;
       }
-      if (!pane.foregroundExecutables.includes("traex")) continue;
       let existing = bindingByPaneId.get(pane.paneId) ?? this.options.store.findBindingByPane(pane.paneId);
+      if (existing && pane.agentState === "unknown" && this.options.herdr.observeBoundPane) {
+        try { pane = await this.options.herdr.observeBoundPane(pane.paneId) ?? pane; }
+        catch (error) {
+          this.options.logger.warn({ event: "binding-agent-probe-failed", err: safeLogError(error), bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" }, "failed to enrich unknown bound pane");
+        }
+      }
+      if (!pane.foregroundExecutables.includes("traex")) continue;
       if (!existing) {
         const projects = this.options.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
         if (projects.length !== 1) {
@@ -185,7 +192,7 @@ export class SessionReconciler {
         this.options.store.updateBinding(existing.id, { lastAgentState: pane.agentState });
         await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth: this.options.store.countPendingPrompts(existing.id) });
       }
-      if (previous === "blocked" && pane.agentState !== "blocked" && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduleBinding(existing.id);
+      if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduleBinding(existing.id);
       if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined && this.observedStateSequences.get(pane.paneId) === pane.stateChangeSeq) continue;
       if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) this.observedStateSequences.set(pane.paneId, pane.stateChangeSeq);
       await this.publishChangedLocalOutput(existing, pane.paneId);
