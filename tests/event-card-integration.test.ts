@@ -158,7 +158,7 @@ describe("event-driven card projection", () => {
     expect(finished.map(({ cardId, summary }) => ({ cardId, summary }))).toEqual([
       { cardId: "cardkit-1", summary: "Continued on part 2" }, { cardId: "cardkit-2", summary: "Completed" }
     ]);
-    expect(JSON.stringify(created[1])).toContain("HERDR ANSWER · 续 2");
+    expect(JSON.stringify(created[1])).toContain("✨ TraeX 继续回复 · 2");
     expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: 20_010, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();

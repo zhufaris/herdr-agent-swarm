@@ -155,38 +155,24 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 
 export function renderRequestRunCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
-  const lifecycleLine = input.phase === "queued"
-    ? `⏳ 已进入队列 · 当前第 ${input.queuePosition} 位`
-    : input.phase === "running" ? "🧠 TraeX 正在处理"
-      : input.phase === "blocked" ? "⚠️ 等待用户处理"
-        : input.phase === "completed" ? "✅ 任务完成"
-          : input.phase === "failed" ? "❌ 执行失败" : null;
+  const duration = formatRunDuration(input);
   const elements: object[] = [
-    { tag: "column_set", horizontal_spacing: "8px", columns: [
-      metric("SPACE", input.spaceName), metric("PANE", input.paneId ?? "provisioning"),
-      input.phase === "queued"
-        ? metric("QUEUE", String(input.queuePosition))
-        : metric("STATUS", requestStatusLabel(input.phase))
-    ] },
+    { tag: "markdown", content: truncateLarkMarkdown(input.requestText, 2_000) },
     { tag: "hr" },
-    { tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: "原始请求" } },
-      elements: [{ tag: "markdown", content: `📩 **已接收请求**\n${truncateLarkMarkdown(input.requestText, 2_000)}` }] },
-    { tag: "markdown", content: lifecycleLine ?? state.label }
+    { tag: "markdown", content: conversationalMetadata(input, duration) }
   ];
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  const duration = formatRunDuration(input);
-  if (duration) elements.push({ tag: "markdown", content: `用时 ${duration}` });
   return {
     schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
-    header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: "HERDR REQUEST" }, template: state.color },
+    header: { title: { tag: "plain_text", content: "💬 你的请求" }, subtitle: { tag: "plain_text", content: boundedTitle(input.title) }, template: state.color },
     body: { elements }
   };
 }
 
 export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string } = {}): object {
   const state = RUN_STATE_VIEW[input.phase];
+  const pageNumber = options.pageNumber ?? 1;
   const structuredAnswer = Array.isArray(input.answerSegments) && typeof input.answerDraft === "string"
     ? [...input.answerSegments, input.answerDraft].filter((part) => part.trim()).join("\n\n")
     : "";
@@ -204,8 +190,16 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     : input.phase === "failed" ? `${baseContent}\n\n❌ ${input.notice ?? "执行失败"}` : baseContent);
   return {
     schema: "2.0", config: { update_multi: true, streaming_mode: true, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
-    header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: `HERDR ANSWER${options.pageNumber && options.pageNumber > 1 ? ` · 续 ${options.pageNumber}` : ""} · ${boundedTitle(input.title)}` }, template: state.color },
-    body: { elements: [{ tag: "markdown", element_id: input.answerElementId || answerElementId(input.promptId), content }] }
+    header: {
+      title: { tag: "plain_text", content: pageNumber > 1 ? `✨ TraeX 继续回复 · ${pageNumber}` : "✨ TraeX 回复" },
+      subtitle: { tag: "plain_text", content: boundedTitle(input.title) },
+      template: state.color
+    },
+    body: { elements: [
+      { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input)) },
+      { tag: "hr" },
+      { tag: "markdown", element_id: input.answerElementId || answerElementId(input.promptId), content }
+    ] }
   };
 }
 
@@ -291,6 +285,13 @@ function requestStatusLabel(phase: RunCardView["phase"]): string {
 }
 function requestSummaryLabel(phase: RunCardView["phase"]): string {
   return { queued: "排队中", running: "执行中", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
+}
+function conversationalMetadata(input: RunCardView, duration: string | null): string {
+  const state = RUN_STATE_VIEW[input.phase];
+  const details = input.phase === "queued"
+    ? `队列第 ${input.queuePosition} 位`
+    : duration ? `用时 ${duration}` : null;
+  return [`${state.icon} ${state.label}`, `Pane \`${escapeCode(input.paneId ?? "provisioning")}\``, details].filter(Boolean).join("  ·  " );
 }
 function formatRunDuration(input: RunCardView): string | null {
   if (!input.startedAt || !input.finishedAt) return null;

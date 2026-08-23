@@ -150,7 +150,7 @@ describe("run card", () => {
     const task = JSON.stringify(taskCard);
     const answer = JSON.stringify(answerCard);
     expect(taskCard).toMatchObject({ schema: "2.0", header: { template: "green" } });
-    expect(task).toContain("📩 **已接收请求**");
+    expect(taskCard).toMatchObject({ header: { title: { content: "💬 你的请求" }, subtitle: { content: "Fix login" } } });
     expect(task).toContain("## Request\\nFix **login**");
     expect(task).not.toContain("bad()");
     expect(task).toContain("✅ 任务完成");
@@ -161,16 +161,27 @@ describe("run card", () => {
     expect(answer).not.toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
-    expect(panels).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tag: "collapsible_panel", expanded: false, header: expect.objectContaining({ title: expect.objectContaining({ content: "原始请求" }) }) })
-    ]));
-    expect(answerCard).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" }, subtitle: { content: "HERDR ANSWER · Fix login" } } });
+    expect(panels).toEqual([]);
+    expect(answerCard).toMatchObject({ header: { title: { content: "✨ TraeX 回复" }, subtitle: { content: "Fix login" } } });
     expect(answerCard).toMatchObject({ config: { summary: { content: "完成 · Fix login" } } });
-    expect(answerCard).toMatchObject({ body: { elements: [expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" })] } });
-    const elementId = (answerCard as { body: { elements: Array<{ element_id: string }> } }).body.elements[0]!.element_id;
+    const answerElements = (answerCard as { body: { elements: Array<{ tag?: string; element_id?: string }> } }).body.elements;
+    expect(answerElements).toContainEqual(expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" }));
+    const elementId = answerElements.find((element) => element.element_id)?.element_id;
     expect(elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
     expect(elementId.length).toBeLessThanOrEqual(20);
     expect(createQueuedRunCard({ promptId: "3f0cea75-c8cd-41f0-8fca-87d402b2a2a1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" }).answerElementId).toBe("element_cbb6cb5f9c09");
+  });
+
+  it("renders a conversational answer with compact metadata and arbitrary continuation pages", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", workspaceId: "w1", paneId: "w1:p9", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
+    const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
+    const card = renderRequestAnswerCard(completed, { pageNumber: 7, initialContent: "Only page seven" }) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string; element_id?: string }> } };
+
+    expect(card.header).toMatchObject({ title: { content: "✨ TraeX 继续回复 · 7" }, subtitle: { content: "Explain rollout" } });
+    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s" });
+    expect(card.body.elements[1]).toEqual({ tag: "hr" });
+    expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });
+    expect(JSON.stringify(card)).not.toContain("older page");
   });
 
   it("keeps native TraeX task status out of the answer card", () => {
@@ -215,15 +226,19 @@ describe("run card", () => {
     const completed = { ...view, phase: "completed" as const, queuePosition: 0, startedAt: "2026-08-22T10:00:10Z", finishedAt: "2026-08-22T10:02:15Z" };
     const serialized = JSON.stringify(renderRequestRunCard(completed));
 
-    expect(serialized).toContain("STATUS");
-    expect(serialized).toContain("已完成");
-    expect(serialized).toContain("用时 2m 5s");
-    expect(serialized).not.toContain('**QUEUE**\n`—`');
+    expect(serialized).toContain("✅ 任务完成  ·  Pane `w1:p1`  ·  用时 2m 5s");
+    expect(serialized).not.toContain("STATUS");
+    expect(serialized).not.toContain("QUEUE");
   });
 
-  it("identifies the agent, space, and pane in request card headers", () => {
+  it("renders an expanded conversational request with one compact metadata line", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "Fix login", queuePosition: 1, occurredAt: "now" });
-    expect(renderRequestRunCard(view)).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" } } });
+    const card = renderRequestRunCard(view) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string }> } };
+
+    expect(card.header).toMatchObject({ title: { content: "💬 你的请求" }, subtitle: { content: "Fix login" } });
+    expect(card.body.elements.filter((element) => element.tag === "collapsible_panel")).toEqual([]);
+    expect(card.body.elements.filter((element) => element.content?.includes("Fix login"))).toHaveLength(1);
+    expect(card.body.elements.filter((element) => element.content?.includes("已排队  ·  Pane `w1:p2`  ·  队列第 1 位"))).toHaveLength(1);
   });
 
   it("ignores all legacy progress activity on the lifecycle-only request card", () => {
@@ -267,12 +282,12 @@ describe("run card", () => {
   it("shows request and lifecycle without an execution-plan panel", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
     const queued = JSON.stringify(renderRequestRunCard(view));
-    expect(queued).toContain("📩 **已接收请求**");
-    expect(queued).toContain("⏳ 已进入队列 · 当前第 3 位");
+    expect(queued).toContain("Do the work");
+    expect(queued).toContain("⏳ 已排队  ·  Pane `p1`  ·  队列第 3 位");
 
     const card = renderRequestRunCard({ ...view, phase: "running" });
     const serialized = JSON.stringify(card);
-    expect(serialized).toContain("🧠 TraeX 正在处理");
+    expect(serialized).toContain("🧠 TraeX 正在处理  ·  Pane `p1`");
     expect(serialized).not.toContain("执行计划");
   });
 });
