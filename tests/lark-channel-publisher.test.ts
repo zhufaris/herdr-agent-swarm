@@ -5,6 +5,7 @@ import type { LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("Lark channel publisher", () => {
   it("creates one CardKit answer and streams cumulative content without patching the message", async () => {
@@ -41,6 +42,36 @@ describe("Lark channel publisher", () => {
     expect(cards).toEqual([{ schema: "2.0" }]);
     expect(store.listPendingOutboundReplies()).toEqual([]);
     await publisher.stop(); store.close();
+  });
+
+  it("signals the projector after a continuation card succeeds on retry", async () => {
+    let fail = true;
+    const created = vi.fn(async () => {
+      if (fail) throw new Error("temporary");
+      return { messageId: "answer-2", cardId: "cardkit-2" };
+    });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, fakeLark({ replyStreamingCard: created }), pino({ enabled: false }));
+    const resumed = vi.fn();
+    publisher.onStreamCardCreated(resumed);
+    store.enqueueOutboundReply({
+      id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 7, cardRole: "answer",
+      rootMessageId: "root-1", kind: "stream_card_create",
+      payload: JSON.stringify({ card: { schema: "2.0" }, stream: { pageIndex: 1, pageStart: 28_000, elementId: "answer_content_p1_1" } })
+    });
+
+    await publisher.drain();
+    expect(resumed).not.toHaveBeenCalled();
+    fail = false;
+    await publisher.drain(true);
+
+    expect(created).toHaveBeenCalledTimes(2);
+    expect(resumed).toHaveBeenCalledWith("p1", 8);
+    store.close();
   });
 
   it("logs retry and dead-letter decisions without card payloads", async () => {

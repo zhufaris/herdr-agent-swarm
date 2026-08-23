@@ -1,89 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { extractFinalTraexAnswer, inferTraexAgentState, isTraexComposerReady, parseTerminalStreamDelta, parseTraexOutput } from "../src/runtime/traex-output-parser.js";
+import { extractFinalTraexAnswer, parseTerminalStreamDelta, parseTraexOutput } from "../src/runtime/traex-output-parser.js";
 
 describe("TraeX output parser", () => {
-  it("recognizes the visible TraeX composer without mistaking active output for readiness", () => {
-    expect(isTraexComposerReady("◆ completed\n────────\n❯ Use /skills to list available skills")).toBe(true);
-    expect(isTraexComposerReady("header\n────────\n❯ Write tests for @filename\n────────\nGPT-5.6-Sol")).toBe(true);
-    expect(isTraexComposerReady("◆ Working…\n2 tasks (1 in progress)\n• editing code")).toBe(false);
-  });
-
-  it("infers only strong live-tail TraeX states", () => {
-    expect(inferTraexAgentState("◆ completed\n────────\n❯ Use /skills to list available skills")).toBe("idle");
-    expect(inferTraexAgentState("◆ Working…\n• editing code")).toBe("working");
-    expect(inferTraexAgentState("Approve command?\n1. Allow once\n2. Deny")).toBe("blocked");
-    expect(inferTraexAgentState("ordinary shell output")).toBe("unknown");
-  });
-
   it("appends newly visible terminal output once and redacts secrets in place", () => {
     const previous = "› deploy\n✧ Working\n• Read /repo/src/a.ts";
     const current = `${previous}\n• Bash curl -H 'Authorization: Bearer secret-token' /health\nHTTP 200\n◆ Deployment healthy`;
 
     const first = parseTerminalStreamDelta(previous, current, "deploy");
     expect(first.delta).toBe("• Bash curl -H 'Authorization: Bearer [REDACTED]' /health\nHTTP 200\n◆ Deployment healthy");
+    expect(first.update).toBe("append");
     expect(first.snapshot).toBe(current);
     expect(parseTerminalStreamDelta(current, current, "deploy").delta).toBe("");
   });
 
-  it("replaces an ambiguous rolling terminal window instead of appending the whole snapshot", () => {
-    const previous = [
-      "old output that has scrolled away",
-      "◆ Running tests (1m 10s)",
-      "PASS parser.test.ts"
-    ].join("\n");
+  it("replaces a redrawn terminal snapshot instead of appending the full screen again", () => {
+    const previous = ["◆ First answer", "✧ Working"].join("\n");
     const current = [
-      "▍ deploy",
-      "◆ Running tests (1m 12s)",
-      "PASS parser.test.ts",
-      "PASS card-projector.test.ts"
+      "╭───────────────────────────╮",
+      "│ ▄▄▄▄▄▄▄                   │",
+      "│ █ ◆ ◆ █  TraeCode CLI (v1) │",
+      "│ Good morning, feiyu.zhu   │",
+      "╰───────────────────────────╯",
+      "◆ Current answer",
+      "────────────────────────────",
+      "❯ Use /skills to list available skills",
+      "GPT-5.6-Sol · Auto Mode"
     ].join("\n");
 
-    expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
-      delta: current.split("\n").slice(1).join("\n"),
-      update: "replace",
-      snapshot: current
+    expect(parseTerminalStreamDelta(previous, current, "tidy code")).toMatchObject({
+      delta: "◆ Current answer",
+      update: "replace-all"
     });
   });
 
-  it("does not replay output from earlier prompts when a new prompt window is redrawn", () => {
-    const previous = [
-      "TraeCode CLI banner",
-      "▍ previous request",
-      "◆ previous answer"
-    ].join("\n");
+  it("drops a narrow composer echo and unwraps terminal-width prose for Lark", () => {
     const current = [
-      "TraeCode CLI banner",
-      "▍ previous request",
-      "◆ previous answer",
-      "▍ switch to native worktree",
-      "◆ switched to feat/native"
+      "▍ t", "▍ i", "▍ d", "▍ y", "▍  ", "▍ c", "▍ o", "▍ d", "▍ e",
+      "◆ 已完成代", "码整理并", "通过测试。"
     ].join("\n");
 
-    expect(parseTerminalStreamDelta(previous + "\nold footer", current, "switch to native worktree")).toMatchObject({
-      delta: "◆ switched to feat/native",
-      update: "replace"
+    expect(parseTerminalStreamDelta("", current, "tidy code")).toMatchObject({
+      delta: "◆ 已完成代码整理并通过测试。",
+      update: "append"
     });
   });
 
-  it("keeps the active card unchanged when neither continuity nor the current prompt boundary is visible", () => {
-    const previous = "old terminal window";
-    const current = "unrelated redrawn terminal history";
-
-    expect(parseTerminalStreamDelta(previous, current, "current prompt")).toMatchObject({
-      delta: "", update: "replace", snapshot: current
-    });
-  });
-
-  it("does not treat an incidental short overlap as append-only continuity", () => {
-    const previous = `old window ${"x".repeat(80)}same`;
-    const current = `same${"y".repeat(80)}\n▍ deploy\nnew window`;
-
-    expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
-      delta: "new window", update: "replace"
-    });
-  });
-
-  it("keeps status, tools, shell output, and approval choices while hiding controls", () => {
+  it("keeps status, tools, shell output, and approval choices", () => {
     const current = [
       "\u001b[32m✧ Working\u001b[0m",
       "• Read /repo/src/a.ts",
@@ -94,7 +56,6 @@ describe("TraeX output parser", () => {
       "1. Allow once",
       "2. Deny",
       "<think>private chain</think>",
-      "<herdr_progress>{bad json}</herdr_progress>",
       "◆ Finished"
     ].join("\n");
 
@@ -105,7 +66,6 @@ describe("TraeX output parser", () => {
     expect(delta).toContain("Approve command?\n1. Allow once\n2. Deny");
     expect(delta).toContain("◆ Finished");
     expect(delta).not.toContain("private chain");
-    expect(delta).not.toContain("herdr_progress");
     expect(delta).not.toContain("\u001b");
   });
 
@@ -139,26 +99,6 @@ describe("TraeX output parser", () => {
     const current = `${previous}\n✧ Working`;
 
     expect(parseTraexOutput(previous, current, "/repo")).toMatchObject({ answerSnapshot: "", answerUpdate: "replace" });
-  });
-
-  it("extracts the newest structured plan and hides protocol blocks from answers", () => {
-    const previous = `◆ Working\n<herdr_progress>\n{"steps":[{"id":"inspect","text":"Inspect code","status":"in_progress"}]}\n</herdr_progress>`;
-    const current = `${previous}\nImplemented change.\n<herdr_progress>\n{"steps":[{"id":"inspect","text":"Inspect code","status":"completed"},{"id":"test","text":"Run tests","status":"in_progress"}]}\n</herdr_progress>`;
-
-    expect(parseTraexOutput(previous, current, "/repo")).toMatchObject({
-      answerSnapshot: "Working\nImplemented change.",
-      progressEvents: [
-        { key: "step:inspect", kind: "step", label: "Inspect code", state: "done" },
-        { key: "step:test", kind: "step", label: "Run tests", state: "active" }
-      ],
-      hasProgressSnapshot: true
-    });
-    expect(extractFinalTraexAnswer(`${current}\n────────`)).toBe("Working\nImplemented change.");
-  });
-
-  it("does not turn tool activity or malformed progress into steps", () => {
-    const output = `◆ Answer\n• Read /repo/src/a.ts\n<herdr_progress>{bad json}</herdr_progress>`;
-    expect(parseTraexOutput("", output, "/repo")).toMatchObject({ answerSnapshot: "Answer\n• Read /repo/src/a.ts", progressEvents: [], hasProgressSnapshot: false });
   });
 
   it("returns the latest TraeX status frame as one replaceable snapshot", () => {

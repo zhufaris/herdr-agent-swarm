@@ -74,6 +74,17 @@ describe("request run-card view", () => {
     expect(completed).toMatchObject({ answerSegments: ["Implemented and verified."], answerDraft: "", answer: "Implemented and verified." });
   });
 
+  it("replaces the full transient terminal transcript after a screen redraw", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const first = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "◆ Old screen", answerUpdate: "append", progressEvents: [] });
+    const redrawn = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "◆ Current screen", answerUpdate: "replace-all", progressEvents: [] });
+
+    expect(redrawn).toMatchObject({ answer: "◆ Current screen", answerSegments: [], answerDraft: "◆ Current screen" });
+    expect(redrawn.answer).not.toContain("Old screen");
+  });
+
   it("ignores an identical structured progress snapshot with a newer observation time", () => {
     const queued = createQueuedRunCard({
       promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"

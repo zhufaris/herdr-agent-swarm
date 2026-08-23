@@ -49,7 +49,7 @@ export type RunCardChange =
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
+  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string }
   | { type: "failed"; occurredAt: string; notice: string };
 
@@ -125,10 +125,11 @@ function answerParts(state: RunCardView): AnswerParts {
   return { answerSegments: state.answer.trim() ? [state.answer.trim()] : [], answerDraft: "", answerDraftTransient: false };
 }
 
-function reduceAnswerSnapshot(state: RunCardView, snapshot: string, update: "append" | "replace" | "replace-status"): AnswerParts {
+function reduceAnswerSnapshot(state: RunCardView, snapshot: string, update: "append" | "replace" | "replace-status" | "replace-all"): AnswerParts {
   const current = answerParts(state);
   const next = snapshot.trim();
   if (!next) return current;
+  if (update === "replace-all") return { answerSegments: [], answerDraft: next, answerDraftTransient: false };
   if (update === "replace-status") {
     const answerSegments = current.answerDraftTransient ? current.answerSegments : commitSegment(current.answerSegments, current.answerDraft);
     return { answerSegments, answerDraft: next, answerDraftTransient: true };

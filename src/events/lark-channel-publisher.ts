@@ -11,6 +11,7 @@ export class LarkChannelPublisher {
   private unsubscribe: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
+  private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
 
   constructor(
     private readonly bus: BridgeEventBus,
@@ -23,6 +24,11 @@ export class LarkChannelPublisher {
     void this.drain();
     this.unsubscribe = () => {};
     return () => this.unsubscribe?.();
+  }
+
+  onStreamCardCreated(listener: (promptId: string, viewVersion: number) => void): () => void {
+    this.streamCardCreatedListeners.add(listener);
+    return () => this.streamCardCreatedListeners.delete(listener);
   }
 
   stop(): Promise<void> {
@@ -123,6 +129,9 @@ export class LarkChannelPublisher {
             : { ...(await this.lark.replyCard(reply.rootMessageId, card)), cardId: undefined };
           this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sent.cardId);
           this.store.recordBridgeMessage(sent.messageId);
+          if (reply.promptId && reply.attemptCount > 0 && decoded.stream && decoded.stream.pageIndex > 0) {
+            for (const listener of this.streamCardCreatedListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
+          }
         } else if (reply.kind === "stream_content") {
           if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
           const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
@@ -159,7 +168,9 @@ export class LarkChannelPublisher {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function decodeStreamingCardPayload(payload: string): { card: object } {
-  const decoded = JSON.parse(payload) as object & { card?: object; stream?: object };
-  return decoded.card && decoded.stream ? { card: decoded.card } : { card: decoded };
+function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number } } {
+  const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown } };
+  return decoded.card && decoded.stream
+    ? { card: decoded.card, stream: { pageIndex: typeof decoded.stream.pageIndex === "number" ? decoded.stream.pageIndex : 0 } }
+    : { card: decoded };
 }

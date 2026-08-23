@@ -8,13 +8,14 @@ import type { BridgeEventBus } from "./bridge-event-bus.js";
 import type { LarkChannelPublisher } from "./lark-channel-publisher.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { ANSWER_STREAM_PAGE_LIMIT, splitAnswerStreamPage } from "../runtime/answer-stream.js";
+import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { answerElementId } from "../domain/run-card-view.js";
 
 export class CardProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
   private readonly bindingTails = new Map<string, Promise<void>>();
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeStreamCardCreated: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
   private readonly scheduler: CardUpdateScheduler;
@@ -31,21 +32,20 @@ export class CardProjector {
       if (view.answerCardId) {
         const fullContent = answerContent(view);
         while (view.answerCardId) {
-          const remaining = fullContent.slice(view.answerPageStart);
-          const { page, remainder } = splitAnswerStreamPage(remaining, ANSWER_STREAM_PAGE_LIMIT);
+          const { page, nextPageStart } = renderAnswerStreamPage(fullContent, view.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
           const sequence = Math.max(view.answerSequence + 1, view.viewVersion);
           this.store.saveRunCard({ ...view, answerSequence: sequence });
           await this.channelPublisher.enqueueStreamContent(view.bindingId, promptId, view.answerCardId, view.answerElementId, page, sequence);
-          if (!remainder) {
+          if (nextPageStart === null) {
             if (["completed", "failed"].includes(view.phase)) await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, view.phase === "completed" ? "Completed" : "Failed", sequence + 1);
             break;
           }
 
           await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, `Continued on part ${view.answerPageIndex + 2}`, sequence + 1);
-          const pageStart = fullContent.length - remainder.length;
+          const pageStart = nextPageStart;
           const pageIndex = view.answerPageIndex + 1;
           const nextElementId = answerElementId(promptId, pageIndex);
-          const nextPage = splitAnswerStreamPage(remainder, ANSWER_STREAM_PAGE_LIMIT).page;
+          const nextPage = renderAnswerStreamPage(fullContent, pageStart, ANSWER_STREAM_PAGE_LIMIT).page;
           const nextView = { ...view, answerElementId: nextElementId };
           const binding = this.store.getBinding(view.bindingId);
           if (!binding?.rootMessageId) return;
@@ -64,7 +64,11 @@ export class CardProjector {
 
   start(): () => void {
     this.unsubscribe = this.bus.onBridgeEvent((event) => this.enqueue(event));
-    return () => this.unsubscribe?.();
+    this.unsubscribeStreamCardCreated = this.channelPublisher.onStreamCardCreated((promptId, viewVersion) => {
+      const view = this.store.loadRunCard(promptId);
+      this.scheduler.schedule(promptId, Math.max(viewVersion, view?.viewVersion ?? 0), true);
+    });
+    return () => { this.unsubscribe?.(); this.unsubscribeStreamCardCreated?.(); };
   }
 
   stop(): Promise<void> {
@@ -72,6 +76,8 @@ export class CardProjector {
     this.stopping = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.unsubscribeStreamCardCreated?.();
+    this.unsubscribeStreamCardCreated = null;
     this.scheduler.stop();
     this.stopPromise = Promise.allSettled([...this.bindingTails.values()]).then(() => undefined);
     return this.stopPromise;

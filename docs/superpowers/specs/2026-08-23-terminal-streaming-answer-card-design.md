@@ -3,21 +3,23 @@
 ## Goal
 
 Preserve the useful visible TraeX terminal stream in Feishu without repeatedly
-re-rendering the Answer card. New prompts use one Answer card only: the user's
-Feishu message is already the durable request record, so a duplicate Request
-card is unnecessary. Text authored by a Feishu user must reach TraeX unchanged.
+re-rendering the Answer card. New prompts initially create one Answer card: the
+user's Feishu message is already the durable request record, so a duplicate
+Request card is unnecessary. Continuation Answer cards are created only when the
+active card reaches its safe content limit. Text authored by a Feishu user must
+reach TraeX unchanged.
 
-This design supersedes the Request-card progress and answer-rendering portions
-of `2026-08-22-request-step-progress-design.md`,
-`2026-08-22-transparent-prompt-native-progress-design.md`, and
-`2026-08-22-stable-answer-segments-design.md`. Their queueing, binding, and
-queueing and binding rules remain in force unless explicitly changed here.
+This design supersedes the earlier Request-card progress and answer-rendering
+designs. Their queueing and binding rules remain in force unless explicitly
+changed here.
 
-## Single-card ownership
+## Answer-card ownership
 
-Each new ordinary prompt owns one Answer message. Its original Feishu message
-already contains the request text and remains immediately above the reply in the
-topic. No Request card is created, patched, or required before execution.
+Each new ordinary prompt owns an ordered Answer-card chain. Its original Feishu
+message already contains the request text and remains immediately above the first
+reply in the topic. No Request card is created, patched, or required before
+execution. The chain normally contains one card and grows only through limit
+rollover.
 
 The Answer card contains one fixed Markdown element whose element ID is stable
 and unique to the request. It is created as a CardKit card entity with
@@ -30,13 +32,8 @@ notices, elapsed time, and visible terminal output all live in this one stream.
 ## Transparent prompt delivery
 
 The coordinator submits exactly the persisted user body to Herdr. It does not
-append `<herdr_control>`, `<herdr_progress>`, task instructions, or any other
-bridge-owned suffix. Steering text follows the same rule.
-
-The output sanitizer still recognizes and removes any historical or accidental
-`<herdr_control>` and `<herdr_progress>` blocks, including incomplete blocks.
-They are internal protocol debris and must never appear in Feishu. The bridge
-does not generate or depend on either block.
+append task instructions or any other bridge-owned suffix. Steering text follows
+the same rule.
 
 ## Terminal stream extraction
 
@@ -65,10 +62,33 @@ delivered text.
 
 Output is rendered as readable Markdown. Tool and shell material uses bounded
 code blocks where doing so does not break the stream. Individual observations
-and cumulative content both have explicit limits. A clipped observation ends
-with an omission marker. The first Answer card rolls over to a continuation
-Answer card before the CardKit Markdown-element limit is reached; streaming
-continues there instead of deleting already delivered history.
+have explicit limits, and a clipped observation ends with an omission marker.
+The cumulative Answer stream is not truncated. Before the active card reaches
+the CardKit Markdown-element limit, it rolls over to a continuation Answer card.
+The full prior card is frozen and all remaining plus newly arriving content is
+written to the continuation card. Previously delivered history is never deleted
+or moved between cards.
+
+## Unknown-state completion fallback
+
+Herdr may report `agent_status: unknown` for a TraeX pane even when a submitted
+turn has completed. The bridge must not require observing the short-lived
+`working` state before it can recognize completion. After prompt text is visibly
+confirmed and Enter is delivered, the bridge considers the turn submitted.
+
+Structured Herdr state remains authoritative when it is available. When state
+stays `unknown`, the bridge uses a conservative terminal fallback and completes
+only after all of these conditions hold:
+
+- terminal output changed after submission;
+- the TraeX idle composer is visible again;
+- consecutive polls show the same completed screen; and
+- process metadata shows no active turn helper beneath TraeX.
+
+The fallback requires multiple stable polls so a transient redraw cannot finish
+a live turn. A visible approval or blocked prompt keeps the turn open. If neither
+structured state nor the fallback proves completion, the existing turn timeout
+still fails the prompt explicitly.
 
 ## Redaction
 
@@ -93,10 +113,12 @@ hidden.
 ## Streaming state and delivery
 
 The run-card projection persists the sanitized cumulative Answer stream and the
-last normalized Herdr snapshot. It also persists the active Answer `card_id`,
-fixed `element_id`, monotonically increasing CardKit `sequence`, delivered
-character offset, and optional continuation index. This state makes retry and
-restart behavior deterministic.
+last normalized Herdr snapshot. Answer delivery is represented by ordered page
+records. Each page stores its page index, `card_id`, message ID, fixed
+`element_id`, monotonically increasing CardKit `sequence`, source start offset,
+delivered offset, and lifecycle state (`active`, `freezing`, or `frozen`). This
+state makes rollover, retry, and restart deterministic. Exactly one page may be
+active for a prompt.
 
 Although the bridge computes and stores only new deltas, Feishu's content API
 accepts the full current text for the element. Each update therefore sends the
@@ -112,10 +134,24 @@ newest cumulative snapshot, but an in-flight operation must finish before the
 next sequence is sent. Failures retain the newest desired snapshot for retry.
 Answer-stream delivery for one request cannot block unrelated bindings.
 
-On completion or failure, pending output is flushed first. The bridge then
-turns off `streaming_mode` through CardKit settings and updates only the minimal
-card lifecycle metadata needed for the terminal state. It does not replace the
-Markdown element or reconstruct its content.
+When the active page reaches its safe limit, the bridge splits at a Markdown-safe
+newline boundary, flushes and finishes that page, marks it frozen, creates the
+next continuation card, and streams the uncommitted remainder there. If a code
+fence crosses the boundary, the frozen page receives a synthetic closing fence
+and the continuation page receives the matching opening fence; source offsets
+still refer to the unsynthesized canonical Answer stream. A frozen page is never
+patched again.
+
+Page creation and rollover are durable. If continuation-card creation fails, the
+remainder stays pending in the outbox and no source offset advances. Retries reuse
+the same page index and idempotency key. They cannot create duplicate pages or
+overwrite a newer page. Independent prompts and bindings continue draining while
+one page is retrying.
+
+On completion or failure, pending output is flushed first. The bridge then turns
+off `streaming_mode` for the active page and updates only the minimal lifecycle
+metadata needed for the terminal state. It does not replace a Markdown element,
+reconstruct frozen content, or rebalance earlier pages.
 
 ## Creation and migration
 
@@ -149,8 +185,9 @@ later cleanup may remove those columns after all supported databases migrate.
   to repeatedly patching the full Answer card.
 - If output cannot be normalized without risking secret exposure, that fragment
   is replaced with `[OUTPUT REDACTED]`; prior content remains intact.
-- If the current card approaches the configured element limit, a continuation
-  CardKit card is created and subsequent deltas stream there.
+- If the current card approaches the configured element limit, it freezes and a
+  continuation CardKit card receives both the remainder and all subsequent
+  deltas. No cumulative Answer content is discarded.
 - A process restart resumes with the persisted sequence and delivered content;
   it never re-appends already acknowledged content. Existing restart policy for
   an interrupted running prompt remains unchanged.
@@ -161,7 +198,7 @@ Tests must prove:
 
 1. ordinary and steering prompts reach Herdr byte-for-byte unchanged;
 2. no bridge progress protocol is injected or rendered;
-3. a new prompt creates exactly one Answer card and no Request card;
+3. a new prompt initially creates exactly one Answer card and no Request card;
 4. queue and lifecycle notices append into the same Answer stream;
 5. Working, Read, Edit, Bash, tool summaries, shell output, approval text,
    commentary, and final answers enter the sanitized Answer stream;
@@ -175,6 +212,12 @@ Tests must prove:
    full-message patch API;
 11. sequences are monotonic across coalescing, retries, and restart;
 12. completion flushes content before disabling streaming;
-13. element-limit rollover preserves prior cards and continues in a new one;
-14. legacy active cards complete safely without mid-turn conversion; and
-15. focused tests, the full suite, typecheck, and build all pass.
+13. element-limit rollover freezes prior cards and places the unsent remainder
+    plus the latest output in a new card without truncation;
+14. rollover retries are idempotent and preserve monotonic page order;
+15. `unknown` panes complete after a submitted turn reaches a stable idle
+    composer even when polling never observes `working`;
+16. `unknown` panes do not complete during redraws, active helpers, or approval
+    prompts;
+17. legacy active cards complete safely without mid-turn conversion; and
+18. focused tests, the full suite, typecheck, and build all pass.
