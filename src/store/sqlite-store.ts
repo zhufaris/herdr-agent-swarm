@@ -579,6 +579,31 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
+  claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const bindingRow = this.database.prepare(`
+        SELECT * FROM bindings WHERE id = ? AND state = 'active' AND lifecycle = 'active'
+          AND attachment = 'attached' AND pane_id IS NOT NULL AND last_agent_state IN ('idle','done')
+      `).get(bindingId) as BindingRow | undefined;
+      if (!bindingRow) { this.database.exec("COMMIT"); return null; }
+      const row = this.database.prepare(`
+        SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+        WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
+          AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
+          AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
+        ORDER BY p.created_at, p.rowid LIMIT 1
+      `).get(bindingId) as PromptRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const claimed = this.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'queued'")
+        .run(now(), row.id);
+      if (Number(claimed.changes) !== 1) throw new Error(`Prompt ${row.id} was not atomically claimed`);
+      const promptRow = this.database.prepare("SELECT * FROM prompt_jobs WHERE id = ?").get(row.id) as PromptRow;
+      this.database.exec("COMMIT");
+      return { binding: mapBinding(bindingRow), prompt: mapPrompt(promptRow) };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {

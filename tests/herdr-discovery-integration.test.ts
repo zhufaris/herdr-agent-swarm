@@ -476,6 +476,8 @@ describe("Herdr discovery", () => {
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
+    const atomicClaim = vi.spyOn(store, "claimNextDispatchablePrompt");
+    vi.spyOn(store, "claimNextReadyPrompt").mockImplementation(() => { throw new Error("legacy claim path used"); });
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "status-1" });
     const bus = new BridgeEventBus();
@@ -488,6 +490,7 @@ describe("Herdr discovery", () => {
     await coordinator.handleMessage({ eventId: "event-retry", messageId: "message-retry", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")).toHaveLength(1));
     await vi.waitFor(() => expect(store.countPendingPrompts("b1")).toBe(0));
+    expect(atomicClaim).toHaveBeenCalledWith("b1");
     failCard = false;
     expect(replies).toEqual([]);
 

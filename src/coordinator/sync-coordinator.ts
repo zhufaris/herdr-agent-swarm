@@ -731,11 +731,9 @@ export class SyncCoordinator {
   }
 
   private async drain(bindingId: string): Promise<void> {
-    let binding = this.store.getBinding(bindingId);
-    if (!binding?.paneId || binding.state !== "active") return;
-    if (binding.lastAgentState === "working" || binding.lastAgentState === "blocked" || binding.lastAgentState === "unknown") return;
-    const paneId = binding.paneId;
-    for (let prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId); prompt; prompt = this.stopping ? null : this.store.claimNextReadyPrompt(bindingId)) {
+    for (let claimed = this.stopping ? null : this.store.claimNextDispatchablePrompt(bindingId); claimed; claimed = this.stopping ? null : this.store.claimNextDispatchablePrompt(bindingId)) {
+      let { binding, prompt } = claimed;
+      const paneId = binding.paneId!;
       const queueDepth = this.store.countPendingPrompts(bindingId);
       const startedAt = Date.now();
       const abortController = this.turns.attach(bindingId, prompt.id, paneId);
@@ -988,9 +986,10 @@ export class SyncCoordinator {
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string) {
-    const pane = this.herdr.observeBoundPane
-      ? await this.herdr.observeBoundPane(paneId)
+    const observation = this.herdr.observeRuntime
+      ? await this.herdr.observeRuntime(paneId)
       : (await this.herdr.listPanes(binding.workspaceId, { forceRefresh: true })).find((candidate) => candidate.paneId === paneId) ?? null;
+    const pane = observation && "pane" in observation ? observation.pane : observation;
     if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
     if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
     const project = this.config.projects.find((item) => item.id === binding.projectId);

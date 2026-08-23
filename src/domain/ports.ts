@@ -109,6 +109,7 @@ export interface BindingStorePort {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   claimNextPrompt(bindingId: string): PromptJob | null;
   claimNextReadyPrompt(bindingId: string): PromptJob | null;
+  claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   requeueSteeringAsTurn(promptId: string): void;
   requeueQueuedSteering(bindingId: string, parentPromptId: string): number;

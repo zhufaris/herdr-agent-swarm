@@ -366,6 +366,28 @@ describe("SQLite store", () => {
     expect(store.claimNextReadyPrompt("b1")?.id).toBe("p1");
   });
 
+  it("atomically claims a prompt only while its binding is dispatchable", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "unknown"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const answerCreate = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(answerCreate.id, "answer-card", "cardkit-1");
+
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1"]);
+
+    store.updateBinding("b1", { lastAgentState: "idle" });
+    expect(store.claimNextDispatchablePrompt("b1")).toMatchObject({
+      prompt: { id: "p1", state: "running", attemptCount: 1 },
+      binding: { id: "b1", paneId: "w1:p1", lastAgentState: "idle" }
+    });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+  });
+
   it("classifies, claims, falls back, and recovers steering jobs without replay", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
