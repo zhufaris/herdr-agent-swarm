@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports.js";
-import type { HerdrPane, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrPane, RuntimeObservation, WorkspaceCacheStatus } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
 
 interface Snapshot { panes: HerdrPane[]; capturedAt: number }
@@ -69,12 +69,29 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   async assertWorkspace(workspaceId: string): Promise<void> { await this.delegate.assertWorkspace(workspaceId); }
   async getPane(paneId: string): Promise<HerdrPane | null> { return this.delegate.getPane(paneId); }
   async observeBoundPane(paneId: string): Promise<HerdrPane | null> {
-    const pane = this.delegate.observeBoundPane ? await this.delegate.observeBoundPane(paneId) : await this.delegate.getPane(paneId);
+    return (await this.observeRuntime(paneId)).pane;
+  }
+  async observeRuntime(paneId: string): Promise<RuntimeObservation> {
+    const fallbackPane = this.delegate.observeRuntime
+      ? null
+      : this.delegate.observeBoundPane
+        ? await this.delegate.observeBoundPane(paneId)
+        : await this.delegate.getPane(paneId);
+    const observation = this.delegate.observeRuntime
+      ? await this.delegate.observeRuntime(paneId)
+      : {
+          pane: fallbackPane,
+          state: fallbackPane?.agentState ?? "unknown",
+          traexProcess: fallbackPane?.foregroundExecutables.includes("traex") ?? false,
+          composerReady: false,
+          evidenceSource: fallbackPane ? "structured" as const : "none" as const
+        };
+    const pane = observation.pane;
     if (pane) {
       const snapshot = this.snapshots.get(pane.workspaceId);
       if (snapshot) this.snapshots.set(pane.workspaceId, { ...snapshot, panes: snapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) });
     }
-    return pane;
+    return observation;
   }
   async createPane(workspaceId: string, cwd: string, options?: Parameters<HerdrPort["createPane"]>[2]): Promise<HerdrPane> {
     const pane = await this.delegate.createPane(workspaceId, cwd, options);

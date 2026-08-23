@@ -143,8 +143,15 @@ export class SessionReconciler {
         continue;
       }
       let existing = bindingByPaneId.get(pane.paneId) ?? this.options.store.findBindingByPane(pane.paneId);
-      if (existing && pane.agentState === "unknown" && this.options.herdr.observeBoundPane) {
-        try { pane = await this.options.herdr.observeBoundPane(pane.paneId) ?? pane; }
+      if (existing && pane.agentState === "unknown" && this.options.herdr.observeRuntime) {
+        try {
+          const observation = await this.options.herdr.observeRuntime(pane.paneId);
+          pane = observation.pane ?? pane;
+          this.options.logger.debug({
+            event: "binding-runtime-observed", bindingId: existing.id, paneId: pane.paneId,
+            agentState: observation.state, evidenceSource: observation.evidenceSource
+          }, "enriched bound pane from runtime evidence");
+        }
         catch (error) {
           this.options.logger.warn({ event: "binding-agent-probe-failed", err: safeLogError(error), bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" }, "failed to enrich unknown bound pane");
         }

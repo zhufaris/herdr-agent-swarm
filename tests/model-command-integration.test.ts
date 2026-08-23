@@ -28,17 +28,17 @@ describe("model command", () => {
     const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
     const snapshotPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, foregroundExecutables: [] };
     const observedPane = { ...snapshotPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const observeBoundPane = vi.fn(async () => observedPane);
+    const observeRuntime = vi.fn(async () => ({ pane: observedPane, state: "idle" as const, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
     let snapshotReads = 0;
     const fixture = await setup(cards, runPaneCommand, {
       pane: observedPane,
       listPanes: async () => ++snapshotReads === 1 ? [observedPane] : [snapshotPane],
-      observeBoundPane
+      observeRuntime
     });
 
     await fixture.coordinator.handleMessage(message("/model GPT-5.5"));
 
-    expect(observeBoundPane).toHaveBeenCalledWith("w1:p1");
+    expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model GPT-5.5", 1000);
     expect(JSON.stringify(cards.at(-1))).toContain("Current model: GPT-5.5");
     await fixture.close();
@@ -64,7 +64,7 @@ async function setup(
   options: {
     pane?: Awaited<ReturnType<HerdrPort["getPane"]>> & {};
     listPanes?: HerdrPort["listPanes"];
-    observeBoundPane?: HerdrPort["observeBoundPane"];
+    observeRuntime?: HerdrPort["observeRuntime"];
   } = {}
 ) {
   const lark: LarkPort = {
@@ -77,7 +77,7 @@ async function setup(
   const pane = options.pane ?? { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
     async assertWorkspace() {}, listPanes: options.listPanes ?? (async () => [pane]), async getPane() { return pane; },
-    ...(options.observeBoundPane ? { observeBoundPane: options.observeBoundPane } : {}),
+    ...(options.observeRuntime ? { observeRuntime: options.observeRuntime } : {}),
     async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; },
     runPaneCommand, async readOutput() { return ""; }, async renamePane() {}
   };

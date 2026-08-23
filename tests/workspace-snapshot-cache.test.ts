@@ -53,25 +53,28 @@ describe("workspace snapshot cache", () => {
     await expect(cache.listAllPanes()).rejects.toThrow(/does not support an all-workspace snapshot/);
   });
 
-  it("forwards bound-pane observation and updates the cached pane without refreshing the workspace", async () => {
+  it("forwards runtime observation and updates the cached pane without refreshing the workspace", async () => {
     const unknown = { ...pane("w1", 1), agentState: "unknown" as const, foregroundExecutables: [] };
     const observed = { ...unknown, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const listPanes = vi.fn(async () => [unknown]);
-    const observeBoundPane = vi.fn(async () => observed);
-    const cache = new WorkspaceSnapshotCache(adapter({ listPanes, observeBoundPane }));
+    const observation = { pane: observed, state: "idle" as const, traexProcess: true, composerReady: true, evidenceSource: "visible" as const };
+    const observeRuntime = vi.fn(async () => observation);
+    const cache = new WorkspaceSnapshotCache(adapter({ listPanes, observeRuntime }));
 
     expect((await cache.listPanes("w1"))[0]?.agentState).toBe("unknown");
-    expect(await cache.observeBoundPane("w1:p1")).toEqual(observed);
+    expect(await cache.observeRuntime("w1:p1")).toEqual(observation);
     expect((await cache.listPanes("w1"))[0]).toEqual(observed);
-    expect(observeBoundPane).toHaveBeenCalledWith("w1:p1");
+    expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(listPanes).toHaveBeenCalledOnce();
   });
 
-  it("falls back to getPane when bound-pane observation is unsupported", async () => {
+  it("preserves pane evidence when runtime observation is unsupported", async () => {
     const getPane = vi.fn(async () => pane("w1", 1));
     const cache = new WorkspaceSnapshotCache(adapter({ getPane }));
 
-    expect(await cache.observeBoundPane("w1:p1")).toEqual(pane("w1", 1));
+    expect(await cache.observeRuntime("w1:p1")).toEqual({
+      pane: pane("w1", 1), state: "idle", traexProcess: true, composerReady: false, evidenceSource: "structured"
+    });
     expect(getPane).toHaveBeenCalledWith("w1:p1");
   });
 

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { HerdrPort } from "../domain/ports.js";
-import type { AgentState, HerdrPane } from "../domain/types.js";
+import type { AgentState, HerdrPane, RuntimeObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import { stripTerminalControl } from "../runtime/output.js";
 import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-output-parser.js";
@@ -64,13 +64,25 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async observeBoundPane(paneId: string): Promise<HerdrPane | null> {
+    return (await this.observeRuntime(paneId)).pane;
+  }
+
+  async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const pane = await this.getPane(paneId);
-    if (!pane || pane.agentState !== "unknown") return pane;
+    if (!pane) return { pane: null, state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "none" };
     const foregroundExecutables = await this.foregroundExecutables(paneId);
+    const traexProcess = foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
-    if (!foregroundExecutables.includes("traex")) return observed;
-    try { return { ...observed, agentState: await this.inferTraexPaneState(paneId) }; }
-    catch { return observed; }
+    if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, state: "unknown", traexProcess, composerReady: false, evidenceSource: "process" };
+    if (pane.agentState !== "unknown") return { pane: observed, state: pane.agentState, traexProcess, composerReady: pane.agentState === "idle", evidenceSource: "structured" };
+    try {
+      const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
+      if (recentState !== "unknown") return this.runtimeObservation(observed, recentState, "recent");
+      const visibleState = inferTraexAgentState(await this.readOutputSource(paneId, 80, "visible"));
+      return this.runtimeObservation(observed, visibleState, visibleState === "unknown" ? "process" : "visible");
+    } catch {
+      return { pane: observed, state: "unknown", traexProcess, composerReady: false, evidenceSource: "process" };
+    }
   }
 
   async createPane(workspaceId: string, cwd: string, options?: { bindingId: string; generation: number; projectId: string; title?: string; placement?: "split" | "dedicated-tab" }): Promise<HerdrPane> {
@@ -243,6 +255,10 @@ export class HerdrCliAdapter implements HerdrPort {
     const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
     if (recentState !== "unknown") return recentState;
     return inferTraexAgentState(await this.readOutputSource(paneId, 80, "visible"));
+  }
+
+  private runtimeObservation(pane: HerdrPane, state: AgentState, evidenceSource: RuntimeObservation["evidenceSource"]): RuntimeObservation {
+    return { pane: { ...pane, agentState: state }, state, traexProcess: true, composerReady: state === "idle", evidenceSource };
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {

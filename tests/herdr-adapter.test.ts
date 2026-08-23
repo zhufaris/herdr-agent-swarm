@@ -17,8 +17,9 @@ describe("Herdr adapter", () => {
       }
     };
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeBoundPane("w1:p1")).resolves.toMatchObject({
-      paneId: "w1:p1", terminalId: "term-1", agentState: "idle", foregroundExecutables: ["traex"]
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeRuntime("w1:p1")).resolves.toMatchObject({
+      pane: { paneId: "w1:p1", terminalId: "term-1", agentState: "idle", foregroundExecutables: ["traex"] },
+      state: "idle", traexProcess: true, composerReady: true, evidenceSource: "recent"
     });
   });
 
@@ -33,8 +34,9 @@ describe("Herdr adapter", () => {
       }
     };
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeBoundPane("w1:p1")).resolves.toMatchObject({
-      agentState: "unknown", foregroundExecutables: ["bash"]
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeRuntime("w1:p1")).resolves.toMatchObject({
+      pane: { agentState: "unknown", foregroundExecutables: ["bash"] },
+      state: "unknown", traexProcess: false, composerReady: false, evidenceSource: "process"
     });
   });
 
