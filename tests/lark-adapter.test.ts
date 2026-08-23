@@ -1,17 +1,53 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const createMessage = vi.fn();
+const replyMessage = vi.fn();
 const getMessage = vi.fn();
 const forwardThread = vi.fn();
+const createCard = vi.fn();
+const streamContent = vi.fn();
+const updateSettings = vi.fn();
 vi.mock("@larksuiteoapi/node-sdk", () => ({
-  Client: class { im = { v1: { message: { create: createMessage, get: getMessage }, thread: { forward: forwardThread } } }; },
+  Client: class {
+    im = { v1: { message: { create: createMessage, reply: replyMessage, get: getMessage }, thread: { forward: forwardThread } } };
+    cardkit = { v1: { card: { create: createCard, settings: updateSettings }, cardElement: { content: streamContent } } };
+  },
   WSClient: class { async start() {} close() {} },
   EventDispatcher: class { register() { return this; } }
 }));
 
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
-beforeEach(() => { createMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); });
+beforeEach(() => {
+  createMessage.mockReset(); replyMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
+  createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset();
+});
+
+describe("Lark streaming Answer cards", () => {
+  it("creates a CardKit entity and replies with a card reference", async () => {
+    createCard.mockResolvedValue({ data: { card_id: "card-1" } });
+    replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.replyStreamingCard("root-1", { schema: "2.0" })).resolves.toEqual({ messageId: "answer-1", cardId: "card-1" });
+    expect(createCard).toHaveBeenCalledWith({ data: { type: "card_json", data: JSON.stringify({ schema: "2.0" }) } });
+    expect(replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "root-1" },
+      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: "card-1" } }), reply_in_thread: true }
+    });
+  });
+
+  it("streams cumulative content and finalizes with monotonic sequences", async () => {
+    streamContent.mockResolvedValue({}); updateSettings.mockResolvedValue({});
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await adapter.streamCardContent("card-1", "answer-content-p1", "one\ntwo", 4);
+    await adapter.finishStreamingCard("card-1", 5, "Completed");
+
+    expect(streamContent).toHaveBeenCalledWith({ path: { card_id: "card-1", element_id: "answer-content-p1" }, data: { content: "one\ntwo", sequence: 4, uuid: "stream-card-1-4" } });
+    expect(updateSettings).toHaveBeenCalledWith({ path: { card_id: "card-1" }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: "Completed" } } }), sequence: 5, uuid: "finish-card-1-5" } });
+  });
+});
 
 describe("Lark topic creation", () => {
   it("passes a stable idempotency key to message.create", async () => {

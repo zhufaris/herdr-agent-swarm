@@ -1,7 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { extractFinalTraexAnswer, parseTraexOutput } from "../src/runtime/traex-output-parser.js";
+import { extractFinalTraexAnswer, parseTerminalStreamDelta, parseTraexOutput } from "../src/runtime/traex-output-parser.js";
 
 describe("TraeX output parser", () => {
+  it("appends newly visible terminal output once and redacts secrets in place", () => {
+    const previous = "› deploy\n✧ Working\n• Read /repo/src/a.ts";
+    const current = `${previous}\n• Bash curl -H 'Authorization: Bearer secret-token' /health\nHTTP 200\n◆ Deployment healthy`;
+
+    const first = parseTerminalStreamDelta(previous, current, "deploy");
+    expect(first.delta).toBe("• Bash curl -H 'Authorization: Bearer [REDACTED]' /health\nHTTP 200\n◆ Deployment healthy");
+    expect(first.snapshot).toBe(current);
+    expect(parseTerminalStreamDelta(current, current, "deploy").delta).toBe("");
+  });
+
+  it("keeps status, tools, shell output, and approval choices while hiding controls", () => {
+    const current = [
+      "\u001b[32m✧ Working\u001b[0m",
+      "• Read /repo/src/a.ts",
+      "• Edit /repo/src/b.ts",
+      "• Bash npm test",
+      "PASS tests/a.test.ts",
+      "Approve command?",
+      "1. Allow once",
+      "2. Deny",
+      "<think>private chain</think>",
+      "<herdr_progress>{bad json}</herdr_progress>",
+      "◆ Finished"
+    ].join("\n");
+
+    const { delta } = parseTerminalStreamDelta("", current, "unrelated prompt");
+    expect(delta).toContain("✧ Working");
+    expect(delta).toContain("• Read /repo/src/a.ts");
+    expect(delta).toContain("PASS tests/a.test.ts");
+    expect(delta).toContain("Approve command?\n1. Allow once\n2. Deny");
+    expect(delta).toContain("◆ Finished");
+    expect(delta).not.toContain("private chain");
+    expect(delta).not.toContain("herdr_progress");
+    expect(delta).not.toContain("\u001b");
+  });
+
   it("extracts answer growth and normalized safe progress", () => {
     const previous = "✧ Working\n• Read /repo/src/a.ts\n◆ Fixed";
     const current = "✧ Working\n• Read /repo/src/a.ts\n• Edit /repo/src/b.ts\n• Bash npm test\n◆ Fixed login safely";

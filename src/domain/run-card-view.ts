@@ -15,6 +15,11 @@ export interface RunCardView {
   bindingId: string;
   larkMessageId: string | null;
   answerMessageId: string | null;
+  answerCardId: string | null;
+  answerElementId: string;
+  answerSequence: number;
+  answerPageIndex: number;
+  answerPageStart: number;
   phase: RunCardPhase;
   title: string;
   requestText: string;
@@ -51,11 +56,16 @@ export function createQueuedRunCard(input: {
   queuePosition: number; occurredAt: string;
 }): RunCardView {
   return {
-    promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, answerMessageId: null, phase: "queued",
+    promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
+}
+
+export function answerElementId(promptId: string, pageIndex: number): string {
+  const base = promptId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 54);
+  return `answer-content-${base}-${pageIndex}`;
 }
 
 export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCardView {
@@ -131,6 +141,7 @@ function completeAnswer(state: RunCardView, finalAnswer: string): Pick<RunCardVi
   const current = answerParts(state);
   const draft = current.answerDraft.trim();
   const finalValue = finalAnswer.trim();
+  if (finalValue === state.answer.trim()) return { answer: state.answer, ...current };
   let answerSegments = current.answerSegments;
   if (!current.answerDraftTransient && draft && !finalValue.startsWith(draft)) answerSegments = commitSegment(answerSegments, draft);
   answerSegments = commitSegment(answerSegments, finalValue || draft);

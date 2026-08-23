@@ -104,11 +104,11 @@ describe("Herdr discovery", () => {
     await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed" }));
 
     expect(events.filter((event) => event === "AgentStateChanged:working")).toHaveLength(1);
-    expect(events.filter((event) => event === "TurnOutputObserved")).toHaveLength(3);
+    expect(events.filter((event) => event === "TurnOutputObserved")).toHaveLength(4);
     expect(events.filter((event) => event === "AgentStateChanged:done")).toHaveLength(1);
-    expect(answerSnapshots).toEqual(["Ran first", "Ran second", "done"]);
-    expect(answerUpdates).toEqual(["replace", "append", "append"]);
-    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("Ran first\n\nRan second\n\ndone");
+    expect(answerSnapshots).toEqual(["✧ Working", "◆ Ran first", "◆ Ran second", "◆ done"]);
+    expect(answerUpdates).toEqual(["append", "append", "append", "append"]);
+    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("✧ Working\n\n◆ Ran first\n\n◆ Ran second\n\n◆ done");
     expect(submittedPrompts).toEqual(["run"]);
 
     await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
@@ -316,10 +316,8 @@ describe("Herdr discovery", () => {
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: "thread reply", larkMessageId: "request-card-1", answerMessageId: "request-card-1" }));
     await vi.waitFor(() => expect(updates.some((update) => update.messageId === "request-card-1" && JSON.stringify(update.card).includes("thread reply"))).toBe(true));
-    expect(cards).toHaveLength(2);
-    const requestUpdates = updates.filter((update) => JSON.stringify(update.card).includes("HERDR REQUEST"));
-    expect(requestUpdates.length).toBeGreaterThan(0);
-    expect(requestUpdates.every((update) => update.messageId === "request-card-1")).toBe(true);
+    expect(cards).toHaveLength(1);
+    expect(updates.some((update) => JSON.stringify(update.card).includes("HERDR REQUEST"))).toBe(false);
     expect(replies).toEqual([]);
     expect(inboundEvents).toEqual(["InboundMessageReceived"]);
 
@@ -386,7 +384,7 @@ describe("Herdr discovery", () => {
     releaseApproval();
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toBe("second");
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: "answer 2" }));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: "◆ answer 2" }));
     expect(replies).toEqual([]);
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();

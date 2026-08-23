@@ -164,14 +164,14 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary().outbound.dismissed).toBe(1);
   });
 
-  it("atomically accepts task and answer cards and only claims after both are delivered", () => {
+  it("atomically accepts one streaming answer card and claims after its card identity is delivered", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "first **request**", queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z" });
     const accepted = store.acceptPrompt({
       prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" },
-      view, rootMessageId: "m1", taskCard: { card: "task" }, answerCard: { card: "answer" }
+      view, rootMessageId: "m1", answerCard: { card: "answer" }
     });
     const duplicate = store.acceptPrompt({
       prompt: { id: "other", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" },
@@ -181,22 +181,15 @@ describe("SQLite store", () => {
     expect(accepted.inserted).toBe(true);
     expect(duplicate).toMatchObject({ inserted: false, prompt: { id: "p1" }, view: { promptId: "p1" } });
     expect(store.listPendingOutboundReplies()).toMatchObject([
-      { promptId: "p1", viewVersion: 1, kind: "card_reply", cardRole: "task", payload: JSON.stringify({ card: "task" }) },
-      { promptId: "p1", viewVersion: 1, kind: "card_reply", cardRole: "answer", payload: JSON.stringify({ card: "answer" }) }
+      { promptId: "p1", viewVersion: 1, kind: "stream_card_create", cardRole: "answer", payload: JSON.stringify({ card: "answer" }) }
     ]);
     expect(store.claimNextReadyPrompt("b1")).toBeNull();
     expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1"]);
 
-    const [taskCreate, answerCreate] = store.listPendingOutboundReplies();
-    store.markOutboundReplyDelivered(taskCreate!.id, "task-card-m1");
+    const [answerCreate] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1", "cardkit-1");
     expect(store.loadRunCard("p1")).toMatchObject({
-      larkMessageId: "task-card-m1", answerMessageId: null, requestText: "first **request**", deliveredVersion: 1, answerDeliveredVersion: 0
-    });
-    expect(store.claimNextReadyPrompt("b1")).toBeNull();
-
-    store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1");
-    expect(store.loadRunCard("p1")).toMatchObject({
-      larkMessageId: "task-card-m1", answerMessageId: "answer-card-m1", deliveredVersion: 1, answerDeliveredVersion: 1
+      larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
     });
     expect(store.claimNextReadyPrompt("b1")?.id).toBe("p1");
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false });
@@ -256,25 +249,21 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
   });
 
-  it("queues a missing answer card for a migrated request exactly once", () => {
+  it("does not duplicate the single answer-card create operation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "legacy", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root-1", taskCard: {}, answerCard: {} });
-    const creates = store.listPendingOutboundReplies();
-    store.markOutboundReplyDelivered(creates.find((reply) => reply.cardRole === "task")!.id, "legacy-task-card");
-    store.database.prepare("DELETE FROM outbound_replies WHERE card_role = 'answer'").run();
-
     store.ensureAnswerCard("p1", "root-1", { card: "answer" });
     store.ensureAnswerCard("p1", "root-1", { card: "duplicate" });
 
     expect(store.listPendingOutboundReplies()).toMatchObject([{
-      promptId: "p1", cardRole: "answer", kind: "card_reply", payload: JSON.stringify({ card: "answer" })
+      promptId: "p1", cardRole: "answer", kind: "stream_card_create", payload: JSON.stringify({})
     }]);
     expect(store.claimNextReadyPrompt("b1")).toBeNull();
     const answerCreate = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(answerCreate.id, "legacy-answer-card");
+    store.markOutboundReplyDelivered(answerCreate.id, "answer-card", "cardkit-1");
     expect(store.claimNextReadyPrompt("b1")?.id).toBe("p1");
   });
 
@@ -288,7 +277,7 @@ describe("SQLite store", () => {
         view: makeView(id), rootMessageId: "m1", taskCard: {}, answerCard: {}
       });
     }
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`);
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`, `cardkit-${reply.promptId}`);
 
     expect(store.claimNextReadyPrompt("b1")).toBeNull();
     expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
@@ -309,7 +298,7 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "s1", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `${reply.cardRole}-card-s1`);
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `${reply.cardRole}-card-s1`, "cardkit-s1");
     expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
 
     expect(store.recoverRunningPrompts()).toBe(1);

@@ -77,7 +77,7 @@ describe("active-turn steering", () => {
       { phase: "completed", answer: "", notice: "已加入当前执行" }
     ]);
     release();
-    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed", answer: "parent answer" }));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed", answer: "◆ parent answer" }));
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

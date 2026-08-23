@@ -234,6 +234,8 @@ Available commands:
 /herdr projects
 /herdr spaces
 /herdr attach <space> <pane>
+/model [name]
+/herdr model [name]
 /herdr status
 /herdr rename <title>
 /herdr close
@@ -257,6 +259,10 @@ button when the binding has a Feishu root message. Clicking it makes the bridge
 send Feishu's native forwarded-topic card into the current group; open that card
 to enter the project thread. This avoids unsupported `openMessageId` chat links.
 Bindings owned by another group remain rejected without exposing their topic.
+In an idle bound topic, `/model` lists the current and available TraeX models;
+`/model <name>` switches to a uniquely matching model. `/herdr model [name]` is
+an equivalent alias. Model commands do not create an agent turn or enter the
+prompt queue, and are rejected while work is running or queued.
 An `@Bot` root message creates a topic in the default project and uses the
 message body as its first prompt. A reply received while a bridge-owned turn is actively `working`
 steers that turn; replies received while idle, blocked, or in an unknown state

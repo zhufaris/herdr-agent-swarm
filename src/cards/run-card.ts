@@ -154,16 +154,12 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 
 export function renderRequestRunCard(input: RunCardView): object {
   const state = RUN_STATE_VIEW[input.phase];
-  const allSteps = input.progressEvents.filter((event) => event.kind === "step");
-  const visibleProgress = allSteps.slice(0, 20);
-  const completedSteps = allSteps.filter((event) => event.state === "done").length;
   const lifecycleLine = input.phase === "queued"
     ? `⏳ 已进入队列 · 当前第 ${input.queuePosition} 位`
-    : input.phase === "running" && visibleProgress.length === 0 ? "正在等待 TraeX 提供任务计划"
+    : input.phase === "running" ? "🧠 TraeX 正在处理"
       : input.phase === "blocked" ? "⚠️ 等待用户处理"
         : input.phase === "completed" ? "✅ 任务完成"
           : input.phase === "failed" ? "❌ 执行失败" : null;
-  const planContent = [lifecycleLine, ...visibleProgress.map(progressLine)].filter((line) => line !== null).join("\n");
   const elements: object[] = [
     { tag: "column_set", horizontal_spacing: "8px", columns: [
       metric("SPACE", input.spaceName), metric("PANE", input.paneId ?? "provisioning"),
@@ -175,9 +171,7 @@ export function renderRequestRunCard(input: RunCardView): object {
     { tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
       header: { title: { tag: "plain_text", content: "原始请求" } },
       elements: [{ tag: "markdown", content: `📩 **已接收请求**\n${truncateLarkMarkdown(input.requestText, 2_000)}` }] },
-    { tag: "collapsible_panel", expanded: true, border: { color: input.phase === "failed" ? "red" : "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: allSteps.length ? `执行计划 · ${completedSteps}/${allSteps.length}` : "执行计划" } },
-      elements: [{ tag: "markdown", content: planContent || "正在等待 TraeX 提供任务计划" }] }
+    { tag: "markdown", content: lifecycleLine ?? state.label }
   ];
   if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
@@ -190,26 +184,32 @@ export function renderRequestRunCard(input: RunCardView): object {
   };
 }
 
-export function renderRequestAnswerCard(input: RunCardView): object {
+export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string } = {}): object {
   const state = RUN_STATE_VIEW[input.phase];
   const structuredAnswer = Array.isArray(input.answerSegments) && typeof input.answerDraft === "string"
     ? [...input.answerSegments, input.answerDraft].filter((part) => part.trim()).join("\n\n")
     : "";
   const answer = structuredAnswer || input.answer;
   const prose = stripNativeTraexStatus(answer);
-  const content = prose
+  const baseContent = prose
     ? truncateLarkMarkdownTail(normalizeLarkPreview(prose), 12_000)
     : input.phase === "running" && input.progressEvents.some((event) => event.kind === "step")
       ? `TraeX 正在执行 · ${input.progressEvents.filter((event) => event.kind === "step" && event.state === "done").length}/${input.progressEvents.filter((event) => event.kind === "step").length}`
-    : input.phase === "running" ? "正在生成…"
-      : input.phase === "queued" ? "等待任务开始…"
+    : input.phase === "running" ? "⏳ 已接收请求"
+      : input.phase === "queued" ? "⏳ 已接收请求"
         : input.phase === "failed" ? "本次执行未产生回答。"
           : "暂无回答。";
+  const content = options.initialContent ?? (input.phase === "blocked" ? `${baseContent}\n\n⚠️ ${input.notice ?? "等待用户处理"}`
+    : input.phase === "failed" ? `${baseContent}\n\n❌ ${input.notice ?? "执行失败"}` : baseContent);
   return {
-    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
-    header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: `HERDR ANSWER · ${boundedTitle(input.title)}` }, template: state.color },
-    body: { elements: [{ tag: "markdown", content }] }
+    schema: "2.0", config: { update_multi: true, streaming_mode: true, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
+    header: { title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) }, subtitle: { tag: "plain_text", content: `HERDR ANSWER${options.pageNumber && options.pageNumber > 1 ? ` · 续 ${options.pageNumber}` : ""} · ${boundedTitle(input.title)}` }, template: state.color },
+    body: { elements: [{ tag: "markdown", element_id: input.answerElementId || answerElementId(input.promptId), content }] }
   };
+}
+
+export function answerElementId(promptId: string): string {
+  return `answer-content-${promptId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 64)}`;
 }
 
 export function renderHelpCard(): object {
@@ -227,6 +227,8 @@ export function renderHelpCard(): object {
         "`/herdr failures`  查看并处理发送失败",
         "`/herdr attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",
         "`/herdr status`  查看当前绑定",
+        "`/model [name]`  查看或切换当前 Pane 的 TraeX 模型",
+        "`/herdr model [name]`  `/model` 的等价别名",
         "`/herdr rename <标题>`  重命名当前 pane",
         "`/herdr close`  归档映射（不会强杀 TraeX）",
         "`/herdr reattach <pane>`  重新连接已验证的原 Pane",

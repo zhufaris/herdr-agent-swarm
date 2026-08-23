@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { renderModelResultCard } from "../src/cards/model-card.js";
 import { renderAttachStatusCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
@@ -18,6 +19,16 @@ describe("run card", () => {
     expect(help).toContain("/herdr attach <space> <pane>");
     expect(help).toContain("ID 或唯一名称");
     expect(help).toContain("/herdr spaces");
+  });
+
+  it("documents and renders the model command result", () => {
+    const help = JSON.stringify(renderHelpCard());
+    expect(help).toContain("/model [name]");
+    expect(help).toContain("/herdr model [name]");
+
+    const card = renderModelResultCard({ spaceName: "datasage", paneId: "w5:p3G", output: "Current model: GPT-5.5", switched: false });
+    expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage / w5:p3G" }, subtitle: { content: "HERDR MODEL" }, template: "blue" } });
+    expect(JSON.stringify(card)).toContain("Current model: GPT-5.5");
   });
 
   it("renders project buttons with opaque ids and no host routing details", () => {
@@ -130,7 +141,7 @@ describe("run card", () => {
     expect(requestCard).toMatchObject({ header: { template: "red" } });
   });
 
-  it("renders real steps on the task card and the answer only on its sibling card", () => {
+  it("renders lifecycle only on the task card and gives the answer a stable stream element", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerSnapshot: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "2026-08-22T10:00:02Z", answer: "Fixed." });
@@ -138,22 +149,24 @@ describe("run card", () => {
     const answerCard = renderRequestAnswerCard(completed);
     const task = JSON.stringify(taskCard);
     const answer = JSON.stringify(answerCard);
-    expect(taskCard).toMatchObject({ schema: "2.0", config: { streaming_mode: false }, header: { template: "green" } });
+    expect(taskCard).toMatchObject({ schema: "2.0", header: { template: "green" } });
     expect(task).toContain("📩 **已接收请求**");
     expect(task).toContain("## Request\\nFix **login**");
     expect(task).not.toContain("bad()");
-    expect(task).toContain("✓ 实现双卡更新");
+    expect(task).toContain("✅ 任务完成");
+    expect(task).not.toContain("实现双卡更新");
+    expect(task).not.toContain("执行计划");
     expect(task).not.toContain("Fixed.");
     expect(answer).toContain("Fixed.");
     expect(answer).not.toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
     expect(panels).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tag: "collapsible_panel", expanded: false, header: expect.objectContaining({ title: expect.objectContaining({ content: "原始请求" }) }) }),
-      expect.objectContaining({ tag: "collapsible_panel", expanded: true, header: expect.objectContaining({ title: expect.objectContaining({ content: "执行计划 · 1/1" }) }) })
+      expect.objectContaining({ tag: "collapsible_panel", expanded: false, header: expect.objectContaining({ title: expect.objectContaining({ content: "原始请求" }) }) })
     ]));
     expect(answerCard).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" }, subtitle: { content: "HERDR ANSWER · Fix login" } } });
     expect(answerCard).toMatchObject({ config: { summary: { content: "完成 · Fix login" } } });
+    expect(answerCard).toMatchObject({ body: { elements: [expect.objectContaining({ tag: "markdown", element_id: "answer-content-p1-0" })] } });
   });
 
   it("keeps native TraeX task status out of the answer card", () => {
@@ -209,7 +222,7 @@ describe("run card", () => {
     expect(renderRequestRunCard(view)).toMatchObject({ header: { title: { content: "TraeX · datasage_semantic_knowledge / w1:p2" } } });
   });
 
-  it("filters legacy tool activity and renders real steps", () => {
+  it("ignores all legacy progress activity on the lifecycle-only request card", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large", workspaceId: "w1", paneId: "p1", requestText: "Inspect files", queuePosition: 1, occurredAt: "now" });
     const card = renderRequestRunCard({ ...view, progressEvents: [
       { key: "legacy", kind: "read" as const, label: "已读取 secret.ts", state: "done" as const, occurredAt: "now" },
@@ -217,8 +230,9 @@ describe("run card", () => {
     ] });
     const serialized = JSON.stringify(card);
     expect(serialized).not.toContain("secret.ts");
-    expect(serialized).toContain("☐ 任务步骤 0");
-    expect(serialized).toContain("☐ 任务步骤 19");
+    expect(serialized).not.toContain("任务步骤 0");
+    expect(serialized).not.toContain("任务步骤 19");
+    expect(serialized).not.toContain("执行计划");
   });
 
   it("keeps the newest answer window in request cards", () => {
@@ -246,7 +260,7 @@ describe("run card", () => {
     expect(serialized).not.toContain("stale aggregate");
   });
 
-  it("shows request, queue state, and lifecycle fallback without inferred steps", () => {
+  it("shows request and lifecycle without an execution-plan panel", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
     const queued = JSON.stringify(renderRequestRunCard(view));
     expect(queued).toContain("📩 **已接收请求**");
@@ -254,6 +268,7 @@ describe("run card", () => {
 
     const card = renderRequestRunCard({ ...view, phase: "running" });
     const serialized = JSON.stringify(card);
-    expect(serialized).toContain("正在等待 TraeX 提供任务计划");
+    expect(serialized).toContain("🧠 TraeX 正在处理");
+    expect(serialized).not.toContain("执行计划");
   });
 });

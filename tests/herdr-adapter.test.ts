@@ -51,6 +51,28 @@ describe("Herdr adapter", () => {
     expect(calls.some((args) => args[0] === "agent" && args[1] === "prompt")).toBe(false);
   });
 
+  it("runs a pane slash command and returns only its stable native output", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "TraeX ready\n❯",
+      "TraeX ready\n❯ /model GPT-5.5",
+      "TraeX ready\n❯ /model GPT-5.5\n\u001b[32mCurrent model: GPT-5.5\u001b[0m\ntoken=secret-value",
+      "TraeX ready\n❯ /model GPT-5.5\n\u001b[32mCurrent model: GPT-5.5\u001b[0m\ntoken=secret-value"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPaneCommand("w1:p1", "/model GPT-5.5", 1000))
+      .resolves.toBe("Current model: GPT-5.5\ntoken=[REDACTED]");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.5"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+  });
+
   it("keeps the turn open while approval is blocked and completes after approval", async () => {
     const states = ["working", "blocked", "blocked", "working", "done"] as const;
     const outputs = ["before", "before\n❯ needs approval"];

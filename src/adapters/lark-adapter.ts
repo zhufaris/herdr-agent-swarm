@@ -91,6 +91,31 @@ export class LarkSdkAdapter implements LarkPort {
     return { messageId: requireMessageId(response.data?.message_id) };
   }
 
+  async replyStreamingCard(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }> {
+    const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(card) } });
+    const cardId = created.data?.card_id;
+    if (!cardId) throw new Error("Lark response did not contain card_id");
+    const response = await this.client.im.v1.message.reply({
+      path: { message_id: rootMessageId },
+      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), reply_in_thread: true }
+    });
+    return { messageId: requireMessageId(response.data?.message_id), cardId };
+  }
+
+  async streamCardContent(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
+    await this.client.cardkit.v1.cardElement.content({
+      path: { card_id: cardId, element_id: elementId },
+      data: { content, sequence, uuid: `stream-${cardId}-${sequence}` }
+    });
+  }
+
+  async finishStreamingCard(cardId: string, sequence: number, summary: string): Promise<void> {
+    await this.client.cardkit.v1.card.settings({
+      path: { card_id: cardId },
+      data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: summary } } }), sequence, uuid: `finish-${cardId}-${sequence}` }
+    });
+  }
+
   async shareThread(topicOrRootMessageId: string, chatId: string): Promise<{ messageId: string }> {
     const threadId = topicOrRootMessageId.startsWith("omt_")
       ? topicOrRootMessageId

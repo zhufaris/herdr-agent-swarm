@@ -61,6 +61,10 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: Parameters<HerdrPort["runPrompt"]>[3], signal?: AbortSignal): Promise<import("../domain/types.js").AgentState> {
     return this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal);
   }
+  async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
+    if (!this.delegate.runPaneCommand) throw new Error("Herdr adapter does not support Pane commands");
+    return this.delegate.runPaneCommand(paneId, command, timeoutMs);
+  }
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
     return this.delegate.steerPrompt ? this.delegate.steerPrompt(paneId, text) : "not_working";
   }

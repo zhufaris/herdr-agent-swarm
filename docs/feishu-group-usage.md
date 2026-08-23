@@ -95,6 +95,21 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 /herdr status
 ```
 
+### `/model [name]`
+
+在已绑定且空闲的项目话题中查看或切换当前 Pane 的 TraeX 模型。`/herdr model
+[name]` 是等价别名。
+
+```text
+/model
+/model GPT-5.5
+/herdr model GPT-5.5
+```
+
+不带名称时显示当前模型和可用模型；带名称时由 TraeX 匹配并切换。名称未知或
+不唯一时，Bridge 会原样展示 TraeX 的候选或错误信息。该命令不创建 Request/Answer
+卡片、不进入任务队列；当前有任务运行或排队时会拒绝，请等待队列完成后重试。
+
 ### `/herdr rename <标题>`
 
 修改当前任务和 Herdr pane 的显示名称。该命令不会重启 TraeX，也不会创建

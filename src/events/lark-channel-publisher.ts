@@ -56,6 +56,30 @@ export class LarkChannelPublisher {
     await this.drain();
   }
 
+  async enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
+    this.store.enqueueOutboundReply({
+      id: randomUUID(), idempotencyKey: `stream:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer",
+      rootMessageId: cardId, kind: "stream_content", payload: JSON.stringify({ elementId, content, sequence })
+    });
+    await this.drain();
+  }
+
+  async enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void> {
+    this.store.enqueueOutboundReply({
+      id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.pageIndex}`, bindingId: input.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
+      rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.pageIndex, pageStart: input.pageStart, elementId: input.elementId } })
+    });
+    await this.drain();
+  }
+
+  async enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void> {
+    this.store.enqueueOutboundReply({
+      id: randomUUID(), idempotencyKey: `stream-finish:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer",
+      rootMessageId: cardId, kind: "stream_finish", payload: JSON.stringify({ summary, sequence })
+    });
+    await this.drain();
+  }
+
   async drain(force = false): Promise<void> {
     if (this.draining) {
       await this.draining;
@@ -91,6 +115,24 @@ export class LarkChannelPublisher {
         if (reply.kind === "card_update") {
           await this.lark.updateCard(reply.rootMessageId, JSON.parse(reply.payload) as object);
           this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+        } else if (reply.kind === "stream_card_create") {
+          const decoded = decodeStreamingCardPayload(reply.payload);
+          const card = decoded.card;
+          const sent = this.lark.replyStreamingCard
+            ? await this.lark.replyStreamingCard(reply.rootMessageId, card)
+            : { ...(await this.lark.replyCard(reply.rootMessageId, card)), cardId: undefined };
+          this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sent.cardId);
+          this.store.recordBridgeMessage(sent.messageId);
+        } else if (reply.kind === "stream_content") {
+          if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
+          const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
+          await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
+          this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+        } else if (reply.kind === "stream_finish") {
+          if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
+          const payload = JSON.parse(reply.payload) as { summary: string; sequence: number };
+          await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
+          this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         } else {
           const sent = reply.kind === "text"
             ? await this.lark.replyText(reply.rootMessageId, reply.payload)
@@ -117,3 +159,7 @@ export class LarkChannelPublisher {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function decodeStreamingCardPayload(payload: string): { card: object } {
+  const decoded = JSON.parse(payload) as object & { card?: object; stream?: object };
+  return decoded.card && decoded.stream ? { card: decoded.card } : { card: decoded };
+}

@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
+import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort } from "../domain/ports.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
@@ -8,6 +8,8 @@ import type { BridgeEventBus } from "./bridge-event-bus.js";
 import type { LarkChannelPublisher } from "./lark-channel-publisher.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { ANSWER_STREAM_PAGE_LIMIT, splitAnswerStreamPage } from "../runtime/answer-stream.js";
+import { answerElementId } from "../domain/run-card-view.js";
 
 export class CardProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
@@ -24,12 +26,39 @@ export class CardProjector {
     private readonly logger: Logger
   ) {
     this.scheduler = new CardUpdateScheduler(async (promptId) => {
-      const view = this.store.loadRunCard(promptId);
-      if (!view?.larkMessageId || !view.answerMessageId) return;
-      await Promise.all([
-        this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.larkMessageId, view.viewVersion, "task", renderRequestRunCard(view)),
-        this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view))
-      ]);
+      let view = this.store.loadRunCard(promptId);
+      if (!view?.answerMessageId) return;
+      if (view.answerCardId) {
+        const fullContent = answerContent(view);
+        while (view.answerCardId) {
+          const remaining = fullContent.slice(view.answerPageStart);
+          const { page, remainder } = splitAnswerStreamPage(remaining, ANSWER_STREAM_PAGE_LIMIT);
+          const sequence = Math.max(view.answerSequence + 1, view.viewVersion);
+          this.store.saveRunCard({ ...view, answerSequence: sequence });
+          await this.channelPublisher.enqueueStreamContent(view.bindingId, promptId, view.answerCardId, view.answerElementId, page, sequence);
+          if (!remainder) {
+            if (["completed", "failed"].includes(view.phase)) await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, view.phase === "completed" ? "Completed" : "Failed", sequence + 1);
+            break;
+          }
+
+          await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, `Continued on part ${view.answerPageIndex + 2}`, sequence + 1);
+          const pageStart = fullContent.length - remainder.length;
+          const pageIndex = view.answerPageIndex + 1;
+          const nextElementId = answerElementId(promptId, pageIndex);
+          const nextPage = splitAnswerStreamPage(remainder, ANSWER_STREAM_PAGE_LIMIT).page;
+          const nextView = { ...view, answerElementId: nextElementId };
+          const binding = this.store.listBindings().find((candidate) => candidate.id === view!.bindingId);
+          if (!binding?.rootMessageId) return;
+          await this.channelPublisher.enqueueStreamCardCreate({
+            bindingId: view.bindingId, promptId, rootMessageId: binding.rootMessageId, pageIndex, pageStart, elementId: nextElementId, viewVersion: view.viewVersion,
+            card: renderRequestAnswerCard(nextView, { pageNumber: pageIndex + 1, initialContent: nextPage })
+          });
+          view = this.store.loadRunCard(promptId);
+          if (!view?.answerCardId || view.answerPageIndex !== pageIndex) return;
+        }
+        return;
+      }
+      if (view.larkMessageId) await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
     });
   }
 
@@ -92,6 +121,12 @@ export class CardProjector {
     });
     return work;
   }
+}
+
+function answerContent(view: NonNullable<ReturnType<BindingStorePort["loadRunCard"]>>): string {
+  const base = ["⏳ 已接收请求", view.answer].filter(Boolean).join("\n\n");
+  return view.phase === "blocked" ? `${base}\n\n⚠️ ${view.notice ?? "等待用户处理"}`
+    : view.phase === "failed" ? `${base}\n\n❌ ${view.notice ?? "执行失败"}` : base;
 }
 
 function promptIdOf(event: BridgeEvent): string | null {

@@ -13,6 +13,53 @@ export interface ParsedTraexOutput {
 
 const UNSAFE = /<\/?(?:think|reasoning)>|authorization\s*[:=]|bearer\s+[a-z0-9._-]+|private[ _-]?key|\$(?:token|secret|password)|"(?:command|arguments|tool_call)"\s*:/i;
 const PROGRESS_BLOCK = /\n?<herdr_progress>\s*([\s\S]*?)(?:<\/herdr_progress>|$)\n?/g;
+const CONTROL_BLOCK = /\n?<herdr_(?:control|progress)>[\s\S]*?(?:<\/herdr_(?:control|progress)>|$)\n?/gi;
+const REASONING_BLOCK = /\n?<(?:think|reasoning)>[\s\S]*?(?:<\/(?:think|reasoning)>|$)\n?/gi;
+const MAX_TERMINAL_DELTA_CHARS = 12_000;
+
+export interface ParsedTerminalStreamDelta { delta: string; snapshot: string }
+
+/** Convert two Herdr terminal snapshots into one safe, append-only display delta. */
+export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string, promptEcho: string): ParsedTerminalStreamDelta {
+  const previous = stripTerminalControl(previousRaw).replace(/\r/g, "");
+  const current = stripTerminalControl(currentRaw).replace(/\r/g, "");
+  if (current === previous) return { delta: "", snapshot: currentRaw };
+
+  const rawDelta = current.startsWith(previous)
+    ? current.slice(previous.length).replace(/^\n/, "")
+    : appendAfterOverlap(previous, current);
+  const visible = redactTerminalSecrets(
+    rawDelta
+      .replace(REASONING_BLOCK, "\n")
+      .replace(CONTROL_BLOCK, "\n")
+      .split("\n")
+      .filter((line) => line.trim() !== promptEcho.trim() && !/^\s*[─━-]{3,}\s*$/.test(line))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
+  const delta = visible.length <= MAX_TERMINAL_DELTA_CHARS
+    ? visible
+    : `${visible.slice(0, MAX_TERMINAL_DELTA_CHARS)}\n… [OUTPUT TRUNCATED]`;
+  return { delta, snapshot: currentRaw };
+}
+
+function appendAfterOverlap(previous: string, current: string): string {
+  const limit = Math.min(previous.length, current.length);
+  for (let size = limit; size > 0; size -= 1) {
+    if (previous.endsWith(current.slice(0, size))) return current.slice(size).replace(/^\n/, "");
+  }
+  return current ? `[terminal snapshot boundary]\n${current}` : "";
+}
+
+function redactTerminalSecrets(value: string): string {
+  return value
+    .replace(/((?:proxy-)?authorization\s*[:=]\s*(?:bearer\s+)?)([^\s'";,}]+)/gi, "$1[REDACTED]")
+    .replace(/(bearer\s+)([a-z0-9._~+\/-]+)/gi, "$1[REDACTED]")
+    .replace(/((?:access[_-]?token|api[_-]?key|token|secret|password)\s*[=:]\s*["']?)([^\s"'&,;}]+)/gi, "$1[REDACTED]")
+    .replace(/([?&](?:access_token|api_key|token|secret|password)=)[^&#\s]+/gi, "$1[REDACTED]")
+    .replace(/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/gi, "[REDACTED PRIVATE KEY]");
+}
 export function parseTraexOutput(previousRaw: string, currentRaw: string, _workspaceRoot: string): ParsedTraexOutput {
   const previous = stripTerminalControl(previousRaw).trim();
   const current = stripTerminalControl(currentRaw).trim();

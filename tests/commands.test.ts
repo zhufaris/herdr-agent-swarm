@@ -18,6 +18,10 @@ describe("commands", () => {
     expect(parseCommand("/herdr reattach w1:p9")).toEqual({ kind: "reattach", paneId: "w1:p9" });
     expect(parseCommand("/herdr replace")).toEqual({ kind: "replace" });
     expect(parseCommand("/herdr resume")).toEqual({ kind: "resume" });
+    expect(parseCommand("/model")).toEqual({ kind: "model", name: null });
+    expect(parseCommand("/model GPT-5.5")).toEqual({ kind: "model", name: "GPT-5.5" });
+    expect(parseCommand("/herdr model")).toEqual({ kind: "model", name: null });
+    expect(parseCommand("/herdr model GPT-5.5")).toEqual({ kind: "model", name: "GPT-5.5" });
     expect(parseCommand("hello")).toBeNull();
   });
 

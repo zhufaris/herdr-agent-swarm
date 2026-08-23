@@ -72,11 +72,11 @@ describe("event-driven card projection", () => {
     expect(JSON.stringify(latestPrimary.card)).toContain("TraeX 需要人工审批");
     expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
     expect(JSON.stringify(latestPrimary.card)).toContain("🛠️ 更新主卡片");
-    expect(updates.some((update) => update.messageId === "request-task-card" && JSON.stringify(update.card).includes("等待用户处理") && !JSON.stringify(update.card).includes("live answer"))).toBe(true);
+    expect(updates.some((update) => update.messageId === "request-task-card")).toBe(false);
     expect(updates.some((update) => {
       if (update.messageId !== "request-answer-card") return false;
-      const elements = (update.card as { body?: { elements?: Array<{ content?: string }> } }).body?.elements ?? [];
-      return elements[0]?.content === "live answer";
+      const serialized = JSON.stringify(update.card);
+      return serialized.includes("live answer") && serialized.includes("TraeX 需要人工审批");
     })).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
@@ -121,6 +121,45 @@ describe("event-driven card projection", () => {
     expect(new Set(answerUpdates.map((update) => update.messageId))).toEqual(new Set(["request-answer-card"]));
 
     stopProjector(); stopPublisher(); store.close(); vi.useRealTimers();
+  });
+
+  it("finalizes a full answer card and continues streaming on a persisted continuation card", async () => {
+    const created: object[] = [];
+    const streamed: Array<{ cardId: string; elementId: string; content: string; sequence: number }> = [];
+    const finished: Array<{ cardId: string; sequence: number; summary: string }> = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
+      async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
+      async replyStreamingCard(_rootMessageId, card) { created.push(card); const number = created.length; return { messageId: `answer-${number}`, cardId: `cardkit-${number}` }; },
+      async streamCardContent(cardId, elementId, content, sequence) { streamed.push({ cardId, elementId, content, sequence }); },
+      async finishStreamingCard(cardId, sequence, summary) { finished.push({ cardId, sequence, summary }); }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    await publisher.drain();
+
+    const answer = `${"a".repeat(20_000)}\n${"b".repeat(12_000)}`;
+    await bus.publish({ eventId: "done", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
+    await vi.waitFor(() => expect(finished).toHaveLength(2));
+
+    expect(created).toHaveLength(2);
+    expect(streamed.map(({ cardId, elementId, content }) => ({ cardId, elementId, content }))).toEqual([
+      { cardId: "cardkit-1", elementId: "answer-content-p1-0", content: `⏳ 已接收请求\n\n${"a".repeat(20_000)}` },
+      { cardId: "cardkit-2", elementId: "answer-content-p1-1", content: "b".repeat(12_000) }
+    ]);
+    expect(finished.map(({ cardId, summary }) => ({ cardId, summary }))).toEqual([
+      { cardId: "cardkit-1", summary: "Continued on part 2" }, { cardId: "cardkit-2", summary: "Completed" }
+    ]);
+    expect(JSON.stringify(created[1])).toContain("HERDR ANSWER · 续 2");
+    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: 20_010, answerElementId: "answer-content-p1-1" });
+
+    await projector.stop(); await publisher.stop(); store.close();
   });
 
   it("waits for an in-flight card update before stopping", async () => {

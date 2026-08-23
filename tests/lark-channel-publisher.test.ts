@@ -7,6 +7,25 @@ import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("Lark channel publisher", () => {
+  it("creates one CardKit answer and streams cumulative content without patching the message", async () => {
+    const create = vi.fn(async () => ({ messageId: "answer-1", cardId: "cardkit-1" }));
+    const stream = vi.fn(async () => {});
+    const updateCard = vi.fn(async () => {});
+    const lark = fakeLark({ replyStreamingCard: create, streamCardContent: stream, updateCard });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ schema: "2.0" }) });
+
+    await publisher.drain();
+    await publisher.enqueueStreamContent("b1", "p1", "cardkit-1", "answer-content-p1", "Working\nDone", 2);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(stream).toHaveBeenCalledWith("cardkit-1", "answer-content-p1", "Working\nDone", 2);
+    expect(updateCard).not.toHaveBeenCalled();
+    store.close();
+  });
+
   it("keeps a failed card pending and delivers it during a later drain", async () => {
     let fail = true;
     const cards: object[] = [];

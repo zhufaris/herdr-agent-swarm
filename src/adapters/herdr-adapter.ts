@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { HerdrPort } from "../domain/ports.js";
 import type { AgentState, HerdrPane } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
+import { stripTerminalControl } from "../runtime/output.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -81,6 +82,27 @@ export class HerdrCliAdapter implements HerdrPort {
     const before = await this.readOutput(paneId, 240);
     await this.submitPromptText(paneId, text, before);
     return "injected";
+  }
+
+  async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
+    const before = await this.readOutput(paneId, 240);
+    await this.submitPromptText(paneId, command, before);
+    const deadline = Date.now() + timeoutMs;
+    let previous = "";
+    let stablePolls = 0;
+    while (Date.now() < deadline) {
+      const after = await this.readOutput(paneId, 240);
+      const output = paneCommandOutput(before, after, command);
+      if (output && output === previous) {
+        stablePolls += 1;
+        if (stablePolls >= 1) return output;
+      } else {
+        previous = output;
+        stablePolls = 0;
+      }
+      await abortableDelay(50);
+    }
+    throw new Error(`Timed out waiting for Pane command output in ${paneId}`);
   }
 
   async readOutput(paneId: string, lines: number): Promise<string> {
@@ -245,6 +267,25 @@ function countOccurrences(haystack: string, needle: string): number {
 
 function normalizePromptEcho(value: string): string {
   return value.replace(/[▍\s]+/gu, "");
+}
+
+function paneCommandOutput(before: string, after: string, command: string): string {
+  const cleanBefore = stripTerminalControl(before).replace(/\r/g, "").trimEnd();
+  const cleanAfter = stripTerminalControl(after).replace(/\r/g, "").trimEnd();
+  const suffix = cleanAfter.startsWith(cleanBefore) ? cleanAfter.slice(cleanBefore.length) : cleanAfter;
+  return redactTerminalSecrets(suffix.split("\n")
+    .map((line) => line.replace(/^\s*[❯›>]\s*/, ""))
+    .filter((line) => normalizePromptEcho(line) !== normalizePromptEcho(command))
+    .join("\n").trim());
+}
+
+function redactTerminalSecrets(value: string): string {
+  return value
+    .replace(/((?:proxy-)?authorization\s*[:=]\s*(?:bearer\s+)?)([^\s'";,}]+)/gi, "$1[REDACTED]")
+    .replace(/(bearer\s+)([a-z0-9._~+\/-]+)/gi, "$1[REDACTED]")
+    .replace(/((?:access[_-]?token|api[_-]?key|token|secret|password)\s*[=:]\s*["']?)([^\s"'&,;}]+)/gi, "$1[REDACTED]")
+    .replace(/([?&](?:access_token|api_key|token|secret|password)=)[^&#\s]+/gi, "$1[REDACTED]")
+    .replace(/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/gi, "[REDACTED PRIVATE KEY]");
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

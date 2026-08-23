@@ -4,6 +4,8 @@ const MAX_TOPIC_TITLE_LENGTH = 80;
 
 export function parseCommand(text: string): BridgeCommand | null {
   const trimmed = text.trim();
+  const modelMatch = /^\/model(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  if (modelMatch) return { kind: "model", name: (modelMatch[1] ?? "").trim() || null };
   if (!trimmed.startsWith("/herdr")) return null;
 
   const match = /^\/herdr(?:\s+([a-z]+))?(?:\s+([\s\S]*))?$/i.exec(trimmed);
@@ -12,6 +14,8 @@ export function parseCommand(text: string): BridgeCommand | null {
   const action = (match[1] ?? "help").toLowerCase();
   const argument = (match[2] ?? "").trim();
   switch (action) {
+    case "model":
+      return { kind: "model", name: argument || null };
     case "new":
       return { kind: "new", title: argument || null };
     case "projects":

@@ -6,7 +6,7 @@ export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
-export type OutboundReplyKind = "text" | "card_reply" | "card_update";
+export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 
@@ -191,6 +191,7 @@ export interface IncomingLarkMessage {
 }
 
 export type BridgeCommand =
+  | { kind: "model"; name: string | null }
   | { kind: "new"; title: string | null }
   | { kind: "projects" }
   | { kind: "spaces" }

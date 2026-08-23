@@ -3,38 +3,29 @@
 ## Goal
 
 Preserve the useful visible TraeX terminal stream in Feishu without repeatedly
-re-rendering the Answer card. The Request card remains a compact lifecycle
-record and no longer presents an execution plan. Text authored by a Feishu user
-must reach TraeX unchanged.
+re-rendering the Answer card. New prompts use one Answer card only: the user's
+Feishu message is already the durable request record, so a duplicate Request
+card is unnecessary. Text authored by a Feishu user must reach TraeX unchanged.
 
 This design supersedes the Request-card progress and answer-rendering portions
 of `2026-08-22-request-step-progress-design.md`,
 `2026-08-22-transparent-prompt-native-progress-design.md`, and
 `2026-08-22-stable-answer-segments-design.md`. Their queueing, binding, and
-two-card ownership rules remain in force unless explicitly changed here.
+queueing and binding rules remain in force unless explicitly changed here.
 
-## Card responsibilities
+## Single-card ownership
 
-Each ordinary prompt continues to own two sibling messages.
-
-The Request card contains only:
-
-- the original request;
-- Space and Pane identity;
-- queue position or lifecycle state;
-- an approval or failure notice when relevant; and
-- elapsed duration.
-
-It has no execution-plan panel and stores or renders no progress steps. Agent
-state changes may update this card using the existing full-card patch path
-because they are infrequent lifecycle transitions.
+Each new ordinary prompt owns one Answer message. Its original Feishu message
+already contains the request text and remains immediately above the reply in the
+topic. No Request card is created, patched, or required before execution.
 
 The Answer card contains one fixed Markdown element whose element ID is stable
 and unique to the request. It is created as a CardKit card entity with
 `update_multi: true` and `streaming_mode: true`, then sent by `card_id`. During a
 turn, only that Markdown element is updated through
 `cardkit.v1.cardElement.content`; the complete Answer card is not patched for
-each observation.
+each observation. Space, Pane, queue/lifecycle state, approval notices, failure
+notices, elapsed time, and visible terminal output all live in this one stream.
 
 ## Transparent prompt delivery
 
@@ -119,8 +110,7 @@ The durable outbox gains a streaming-element operation distinct from full-card
 updates. Pending stream operations for the same card may be coalesced to the
 newest cumulative snapshot, but an in-flight operation must finish before the
 next sequence is sent. Failures retain the newest desired snapshot for retry.
-Request-card delivery and Answer-stream delivery cannot block unrelated
-bindings.
+Answer-stream delivery for one request cannot block unrelated bindings.
 
 On completion or failure, pending output is flushed first. The bridge then
 turns off `streaming_mode` through CardKit settings and updates only the minimal
@@ -136,17 +126,17 @@ New Answer cards use the recommended CardKit flow:
 3. record the returned message ID and card ID atomically with outbox delivery;
 4. stream the fixed Markdown element by card ID and sequence.
 
-Existing active Answer cards were sent as inline interactive JSON and may not
-have a stored card ID or stable element ID. They continue through the legacy
-full-card path until their prompt reaches a terminal state. New prompts always
-use CardKit entities. No attempt is made to convert and stream into an old card
-mid-turn, avoiding prefix and sequence ambiguity.
+Existing active prompts may have separate inline Request and Answer cards. They
+continue through the legacy full-card path until reaching a terminal state. New
+prompts create only a CardKit Answer entity. Old Request cards remain as inert
+history and are neither deleted nor updated. No attempt is made to convert an
+old Answer card mid-turn, avoiding prefix and sequence ambiguity.
 
 Database migration is additive and idempotent. Existing answer text is
-preserved. Progress-event columns may remain temporarily for schema
-compatibility, but new observations do not populate them and Request rendering
-ignores them. A later cleanup may remove those columns after all supported
-databases have migrated.
+preserved. Legacy task-card IDs, delivered versions, and progress-event columns
+may remain temporarily for schema compatibility, but new prompts do not create
+or update a task card and new observations do not populate progress events. A
+later cleanup may remove those columns after all supported databases migrate.
 
 ## Failure behavior
 
@@ -171,19 +161,20 @@ Tests must prove:
 
 1. ordinary and steering prompts reach Herdr byte-for-byte unchanged;
 2. no bridge progress protocol is injected or rendered;
-3. the Request card contains lifecycle information but no plan section;
-4. Working, Read, Edit, Bash, tool summaries, shell output, approval text,
+3. a new prompt creates exactly one Answer card and no Request card;
+4. queue and lifecycle notices append into the same Answer stream;
+5. Working, Read, Edit, Bash, tool summaries, shell output, approval text,
    commentary, and final answers enter the sanitized Answer stream;
-5. ANSI, terminal redraw duplication, prompt echo, reasoning, and internal
+6. ANSI, terminal redraw duplication, prompt echo, reasoning, and internal
    protocol markup do not enter the stream;
-6. secrets are replaced in place with `[REDACTED]` rather than dropping the
+7. secrets are replaced in place with `[REDACTED]` rather than dropping the
    surrounding message;
-7. repeated and overlapping pane snapshots append each visible character once;
-8. Answer creation stores a CardKit `card_id` and stable element ID;
-9. live observations call only the CardKit element-content API and never the
+8. repeated and overlapping pane snapshots append each visible character once;
+9. Answer creation stores a CardKit `card_id` and stable element ID;
+10. live observations call only the CardKit element-content API and never the
    full-message patch API;
-10. sequences are monotonic across coalescing, retries, and restart;
-11. completion flushes content before disabling streaming;
-12. element-limit rollover preserves prior cards and continues in a new one;
-13. legacy active cards complete safely without mid-turn conversion; and
-14. focused tests, the full suite, typecheck, and build all pass.
+11. sequences are monotonic across coalescing, retries, and restart;
+12. completion flushes content before disabling streaming;
+13. element-limit rollover preserves prior cards and continues in a new one;
+14. legacy active cards complete safely without mid-turn conversion; and
+15. focused tests, the full suite, typecheck, and build all pass.

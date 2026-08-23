@@ -11,6 +11,9 @@ export interface LarkPort {
   createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }>;
   replyText(rootMessageId: string, text: string): Promise<{ messageId: string }>;
   replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }>;
+  replyStreamingCard?(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }>;
+  streamCardContent?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
+  finishStreamingCard?(cardId: string, sequence: number, summary: string): Promise<void>;
   shareThread(topicOrRootMessageId: string, chatId: string): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
 }
@@ -28,6 +31,7 @@ export interface HerdrPort {
     onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<AgentState>;
+  runPaneCommand?(paneId: string, command: string, timeoutMs: number): Promise<string>;
   steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
   renamePane(paneId: string, title: string): Promise<void>;
@@ -79,7 +83,7 @@ export interface BindingStorePort {
   listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
   enqueuePrompt(input: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   claimNextPrompt(bindingId: string): PromptJob | null;
   claimNextReadyPrompt(bindingId: string): PromptJob | null;
@@ -91,7 +95,7 @@ export interface BindingStorePort {
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];
   listDueOutboundReplies(): OutboundReply[];
-  markOutboundReplyDelivered(id: string, messageId: string): void;
+  markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void;
   markOutboundReplyFailed(id: string, error: string): OutboundReply | null;
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;

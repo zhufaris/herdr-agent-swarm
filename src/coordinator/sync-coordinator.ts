@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderAttachStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard } from "../cards/run-card.js";
+import { renderAttachStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
 import { renderFailureCards, renderSessionCards } from "../cards/operations-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
+import { renderModelResultCard } from "../cards/model-card.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
@@ -14,7 +15,7 @@ import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage,
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
 import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
 import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
-import { extractFinalTraexAnswer, parseTraexOutput } from "../runtime/traex-output-parser.js";
+import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 export class SyncCoordinator {
@@ -57,8 +58,7 @@ export class SyncCoordinator {
         if (!view.answerMessageId && binding.rootMessageId) this.store.ensureAnswerCard(view.promptId, binding.rootMessageId, renderRequestAnswerCard(view));
         const changed = view.spaceName !== spaceName;
         const current = changed ? this.store.saveRunCard({ ...view, spaceName, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
-        if (changed || current.viewVersion > current.deliveredVersion) await this.channelPublisher.enqueueRunCardUpdate(current.bindingId, current.promptId, current.larkMessageId!, current.viewVersion, "task", renderRequestRunCard(current));
-        if (current.answerMessageId && (changed || current.viewVersion > current.answerDeliveredVersion)) await this.channelPublisher.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
+        if (!current.answerCardId && current.answerMessageId && (changed || current.viewVersion > current.answerDeliveredVersion)) await this.channelPublisher.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
       }
       const latestRun = runCards.at(-1);
       const currentTopic = this.store.loadTopicView(binding.id);
@@ -238,6 +238,8 @@ export class SyncCoordinator {
     try {
       if (command?.kind === "help") {
         await this.replyStandalone(message.rootMessageId ?? message.messageId, renderHelpCard());
+      } else if (command?.kind === "model") {
+        disposition = await this.runModelCommand(message, binding, command.name) ? "command_completed" : "rejected";
       } else if (command?.kind === "new" || command?.kind === "projects") {
         await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
       } else if (command?.kind === "spaces") {
@@ -355,14 +357,12 @@ export class SyncCoordinator {
         for (const view of this.store.listRunCards(binding.id).filter((item) => item.phase === "running" || item.phase === "blocked")) {
           const next = { ...view, phase: "failed" as const, notice: `Herdr pane ${binding.paneId} no longer exists`, finishedAt: occurredAt, queuePosition: 0, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
           this.store.saveRunCard(next);
-          if (next.larkMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.larkMessageId, next.viewVersion, "task", renderRequestRunCard(next));
-          if (next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
+          if (!next.answerCardId && next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
         }
         for (const view of this.store.listRunCards(binding.id).filter((item) => item.phase === "queued")) {
           const next = { ...view, phase: "blocked" as const, notice: `Herdr pane ${binding.paneId} no longer exists，请恢复绑定后重试。`, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
           this.store.saveRunCard(next);
-          if (next.larkMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.larkMessageId, next.viewVersion, "task", renderRequestRunCard(next));
-          if (next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
+          if (!next.answerCardId && next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
         }
         await this.publish(binding.id, "BindingOrphaned", "herdr", { reason: `Herdr pane ${binding.paneId} no longer exists` });
       }
@@ -681,7 +681,7 @@ export class SyncCoordinator {
     });
     const { prompt, inserted } = this.store.acceptPrompt({
       prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId },
-      view, rootMessageId: binding.rootMessageId, taskCard: renderRequestRunCard(view), answerCard: renderRequestAnswerCard(view)
+      view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view)
     });
     if (!inserted) {
       await this.channelPublisher.drain();
@@ -760,11 +760,10 @@ export class SyncCoordinator {
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
-          const projectCwd = this.config.projects.find((project) => project.id === binding?.projectId)?.cwd ?? this.config.herdr.workspaceCwd;
-          const parsed = parseTraexOutput(previousObservation, output, projectCwd);
+          const parsed = parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
-          if (parsed.answerSnapshot || parsed.hasProgressSnapshot) {
-            await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.answerSnapshot, previousAnswerSnapshot: parsed.previousAnswerSnapshot, answerUpdate: parsed.answerUpdate, progressEvents: parsed.progressEvents, hasProgressSnapshot: parsed.hasProgressSnapshot });
+          if (parsed.delta) {
+            await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: "append", progressEvents: [] });
           }
           const previousState = this.observedAgentStates.get(paneId) ?? binding?.lastAgentState ?? "unknown";
           const activeRun = this.activeRuns.get(bindingId);
@@ -787,14 +786,14 @@ export class SyncCoordinator {
           await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
         }
         const after = await this.herdr.readOutput(paneId, 240);
-        const terminalDelta = cleanTerminalOutput(extractNewOutput(before, after));
         const answer = extractFinalTraexAnswer(after);
         const fingerprint = outputFingerprint(answer);
         this.observedTerminalOutputs.set(paneId, cleanTerminalOutput(after));
         this.store.updateBinding(bindingId, { lastOutputFingerprint: fingerprint });
         this.store.updatePrompt(prompt.id, "delivered");
         binding = this.store.transitionBinding(bindingId, { type: "turn_completed" });
-        await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。", queueDepth: this.store.countPendingPrompts(bindingId) });
+        const streamed = this.store.loadRunCard(prompt.id)?.answer ?? "";
+        await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。", queueDepth: this.store.countPendingPrompts(bindingId) });
         this.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
         await this.refreshQueuePositions(bindingId);
       } catch (error) {
@@ -837,6 +836,36 @@ export class SyncCoordinator {
 
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> {
     await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason));
+  }
+
+  private async runModelCommand(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean> {
+    const target = name ?? "list";
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") {
+      await this.reject(message, "这个话题没有可切换模型的活动 TraeX Pane。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "inactive_binding" });
+      return false;
+    }
+    if (this.activeRuns.has(binding.id) || this.workers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
+      await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，请在当前任务或队列完成后重试。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "busy" });
+      return false;
+    }
+    if (!this.herdr.runPaneCommand) {
+      await this.reject(message, "当前 Herdr adapter 不支持模型切换。");
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "unsupported" });
+      return false;
+    }
+    try {
+      const pane = await this.requireMatchingPane(binding, binding.paneId);
+      const output = await this.herdr.runPaneCommand(pane.paneId, name ? `/model ${name}` : "/model", this.config.commandTimeoutMs);
+      await this.replyStandalone(message.rootMessageId ?? message.messageId, renderModelResultCard({ spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: name !== null }));
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: name ? "switch_completed" : "list_completed" });
+      return true;
+    } catch (error) {
+      await this.reject(message, `模型命令执行失败：${errorMessage(error)}`);
+      this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "failed" });
+      return false;
+    }
   }
 
   private async attachExistingPane(message: IncomingLarkMessage, spaceName: string, paneReference: string): Promise<boolean> {
