@@ -618,7 +618,7 @@ export class SyncCoordinator {
           const parsed = parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
           if (parsed.delta) {
-            await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: "append", progressEvents: [] });
+            await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [] });
           }
           const previousState = binding?.lastAgentState ?? "unknown";
           const activeRun = this.activeRuns.get(bindingId);

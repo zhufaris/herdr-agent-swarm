@@ -12,6 +12,34 @@ describe("TraeX output parser", () => {
     expect(parseTerminalStreamDelta(current, current, "deploy").delta).toBe("");
   });
 
+  it("replaces an ambiguous rolling terminal window instead of appending the whole snapshot", () => {
+    const previous = [
+      "old output that has scrolled away",
+      "◆ Running tests (1m 10s)",
+      "PASS parser.test.ts"
+    ].join("\n");
+    const current = [
+      "◆ Running tests (1m 12s)",
+      "PASS parser.test.ts",
+      "PASS card-projector.test.ts"
+    ].join("\n");
+
+    expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
+      delta: current,
+      update: "replace",
+      snapshot: current
+    });
+  });
+
+  it("does not treat an incidental short overlap as append-only continuity", () => {
+    const previous = `old window ${"x".repeat(80)}same`;
+    const current = `same${"y".repeat(80)} new window`;
+
+    expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
+      delta: current, update: "replace"
+    });
+  });
+
   it("keeps status, tools, shell output, and approval choices while hiding controls", () => {
     const current = [
       "\u001b[32m✧ Working\u001b[0m",

@@ -164,6 +164,63 @@ describe("event-driven card projection", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("keeps any number of history cards and replaces only the latest active card for a rolling window", async () => {
+    vi.useFakeTimers();
+    const created: Array<{ messageId: string; cardId: string }> = [];
+    const streamed: Array<{ cardId: string; content: string }> = [];
+    const primaryUpdates: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard() { return { messageId: "legacy" }; },
+      async updateCard(messageId) { primaryUpdates.push(messageId); },
+      async replyStreamingCard() {
+        const number = created.length + 1;
+        const result = { messageId: `answer-${number}`, cardId: `cardkit-${number}` };
+        created.push(result);
+        return result;
+      },
+      async streamCardContent(cardId, _elementId, content) { streamed.push({ cardId, content }); },
+      async finishStreamingCard() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "root-1" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    await publisher.drain();
+
+    for (let index = 0; index < 5; index += 1) {
+      await bus.publish({
+        eventId: `part-${index}`, bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: `part-${index}`,
+        payload: { promptId: "p1", answerSnapshot: String(index).repeat(20_000), answerUpdate: index === 0 ? "replace" : "append", progressEvents: [] }
+      });
+    }
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.waitFor(() => expect(created.length).toBeGreaterThan(3));
+    const activeCard = created.at(-1)!.cardId;
+    const historyCards = created.slice(0, -1).map(({ cardId }) => cardId);
+    const createsBeforeRolling = created.length;
+    const streamsBeforeRolling = streamed.length;
+
+    const latestWindow = "latest rolling terminal window";
+    await bus.publish({ eventId: "rolling", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "rolling", payload: { promptId: "p1", answerSnapshot: latestWindow, answerUpdate: "replace", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await publisher.drain();
+
+    expect(created).toHaveLength(createsBeforeRolling);
+    const rollingStreams = streamed.slice(streamsBeforeRolling);
+    expect(rollingStreams).toEqual([{ cardId: activeCard, content: latestWindow }]);
+    expect(rollingStreams.some(({ cardId }) => historyCards.includes(cardId))).toBe(false);
+    expect(primaryUpdates).toContain("root-1");
+
+    await projector.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
+  });
+
   it("waits for an in-flight card update before stopping", async () => {
     let releaseUpdate!: () => void;
     const updateBlocked = new Promise<void>((resolve) => { releaseUpdate = resolve; });

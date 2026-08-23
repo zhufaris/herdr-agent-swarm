@@ -16,18 +16,20 @@ const PROGRESS_BLOCK = /\n?<herdr_progress>\s*([\s\S]*?)(?:<\/herdr_progress>|$)
 const CONTROL_BLOCK = /\n?<herdr_(?:control|progress)>[\s\S]*?(?:<\/herdr_(?:control|progress)>|$)\n?/gi;
 const REASONING_BLOCK = /\n?<(?:think|reasoning)>[\s\S]*?(?:<\/(?:think|reasoning)>|$)\n?/gi;
 const MAX_TERMINAL_DELTA_CHARS = 12_000;
+const MIN_RELIABLE_TERMINAL_OVERLAP = 64;
 
-export interface ParsedTerminalStreamDelta { delta: string; snapshot: string }
+export interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace" }
 
-/** Convert two Herdr terminal snapshots into one safe, append-only display delta. */
+/** Convert two Herdr terminal snapshots into a safe append or active-window replacement. */
 export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string, promptEcho: string): ParsedTerminalStreamDelta {
   const previous = stripTerminalControl(previousRaw).replace(/\r/g, "");
   const current = stripTerminalControl(currentRaw).replace(/\r/g, "");
-  if (current === previous) return { delta: "", snapshot: currentRaw };
+  if (current === previous) return { delta: "", snapshot: currentRaw, update: "replace" };
 
+  const continuous = current.startsWith(previous) || hasSuffixPrefixOverlap(previous, current);
   const rawDelta = current.startsWith(previous)
     ? current.slice(previous.length).replace(/^\n/, "")
-    : appendAfterOverlap(previous, current);
+    : continuous ? appendAfterOverlap(previous, current) : current;
   const visible = redactTerminalSecrets(
     rawDelta
       .replace(REASONING_BLOCK, "\n")
@@ -41,15 +43,23 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
   const delta = visible.length <= MAX_TERMINAL_DELTA_CHARS
     ? visible
     : `${visible.slice(0, MAX_TERMINAL_DELTA_CHARS)}\n… [OUTPUT TRUNCATED]`;
-  return { delta, snapshot: currentRaw };
+  return { delta, snapshot: currentRaw, update: continuous || !previous ? "append" : "replace" };
+}
+
+function hasSuffixPrefixOverlap(previous: string, current: string): boolean {
+  const limit = Math.min(previous.length, current.length);
+  for (let size = limit; size >= Math.min(MIN_RELIABLE_TERMINAL_OVERLAP, limit); size -= 1) {
+    if (previous.endsWith(current.slice(0, size))) return true;
+  }
+  return false;
 }
 
 function appendAfterOverlap(previous: string, current: string): string {
   const limit = Math.min(previous.length, current.length);
-  for (let size = limit; size > 0; size -= 1) {
+  for (let size = limit; size >= Math.min(MIN_RELIABLE_TERMINAL_OVERLAP, limit); size -= 1) {
     if (previous.endsWith(current.slice(0, size))) return current.slice(size).replace(/^\n/, "");
   }
-  return current ? `[terminal snapshot boundary]\n${current}` : "";
+  return current;
 }
 
 function redactTerminalSecrets(value: string): string {
