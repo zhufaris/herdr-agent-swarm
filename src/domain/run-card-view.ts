@@ -1,3 +1,5 @@
+import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
+
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
 export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
 export type ProgressEventState = "pending" | "active" | "done" | "failed";
@@ -64,8 +66,7 @@ export function createQueuedRunCard(input: {
 }
 
 export function answerElementId(promptId: string, pageIndex: number): string {
-  const base = promptId.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 54);
-  return `answer_content_${base}_${pageIndex}`;
+  return normalizeLarkElementId(`answer-content-${promptId}-${pageIndex}`);
 }
 
 export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCardView {

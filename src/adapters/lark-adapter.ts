@@ -2,6 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
+import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 interface LarkAdapterOptions {
@@ -104,7 +105,7 @@ export class LarkSdkAdapter implements LarkPort {
 
   async streamCardContent(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
     await this.client.cardkit.v1.cardElement.content({
-      path: { card_id: cardId, element_id: normalizeCardElementId(elementId) },
+      path: { card_id: cardId, element_id: normalizeLarkElementId(elementId) },
       data: { content, sequence, uuid: `stream-${cardId}-${sequence}` }
     });
   }
@@ -205,11 +206,6 @@ function normalizeCardElementIds(value: unknown): unknown {
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
     key,
-    key === "element_id" && typeof item === "string" ? normalizeCardElementId(item) : normalizeCardElementIds(item)
+    key === "element_id" && typeof item === "string" ? normalizeLarkElementId(item) : normalizeCardElementIds(item)
   ]));
-}
-
-function normalizeCardElementId(value: string): string {
-  const normalized = value.replace(/[^a-zA-Z0-9_]/g, "_");
-  return /^[a-zA-Z]/.test(normalized) ? normalized : `element_${normalized}`;
 }

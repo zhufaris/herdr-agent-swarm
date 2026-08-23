@@ -169,6 +169,8 @@ describe("run card", () => {
     expect(answerCard).toMatchObject({ body: { elements: [expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" })] } });
     const elementId = (answerCard as { body: { elements: Array<{ element_id: string }> } }).body.elements[0]!.element_id;
     expect(elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+    expect(elementId.length).toBeLessThanOrEqual(20);
+    expect(createQueuedRunCard({ promptId: "3f0cea75-c8cd-41f0-8fca-87d402b2a2a1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" }).answerElementId).toBe("element_cbb6cb5f9c09");
   });
 
   it("keeps native TraeX task status out of the answer card", () => {

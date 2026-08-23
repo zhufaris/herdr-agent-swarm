@@ -2,6 +2,7 @@ import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
+import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 
 const RUN_STATE_VIEW = {
@@ -209,7 +210,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
 }
 
 export function answerElementId(promptId: string): string {
-  return `answer_content_${promptId.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 64)}`;
+  return normalizeLarkElementId(`answer-content-${promptId}`);
 }
 
 export function renderHelpCard(): object {
