@@ -179,7 +179,10 @@ export function normalizeCardActionEvent(data: lark.RawCardActionEvent): Incomin
   const chatId = data.context?.open_chat_id ?? data.open_chat_id;
   const operatorOpenId = data.operator?.open_id;
   if (!messageId || !chatId || !operatorOpenId || data.action?.value === undefined) return null;
-  return { messageId, chatId, operatorOpenId, value: data.action.value };
+  return {
+    messageId, chatId, operatorOpenId, value: data.action.value,
+    ...(typeof data.action.option === "string" ? { option: data.action.option } : {})
+  };
 }
 
 function requireMessageId(value: string | undefined): string {

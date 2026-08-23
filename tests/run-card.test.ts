@@ -26,9 +26,15 @@ describe("run card", () => {
     expect(help).toContain("/model [name]");
     expect(help).toContain("/herdr model [name]");
 
-    const card = renderModelResultCard({ spaceName: "datasage", paneId: "w5:p3G", output: "Current model: GPT-5.5", switched: false });
+    const card = renderModelResultCard({
+      bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G", switched: false,
+      output: "Select Model and Effort\n 1. Seed-Evolving          1000K context window\n 2. GPT-5.6-Sol (current)  support reasoning"
+    });
     expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage / w5:p3G" }, subtitle: { content: "HERDR MODEL" }, template: "blue" } });
-    expect(JSON.stringify(card)).toContain("Current model: GPT-5.5");
+    expect(card).toMatchObject({ body: { elements: expect.arrayContaining([expect.objectContaining({
+      tag: "select_static", name: "model", initial_option: "GPT-5.6-Sol",
+      behaviors: [{ type: "callback", value: { action: "select_model", bindingId: "binding-1" } }]
+    })]) } });
   });
 
   it("renders project buttons with opaque ids and no host routing details", () => {

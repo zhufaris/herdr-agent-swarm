@@ -15,10 +15,11 @@ alias so the command remains discoverable in the bridge help card.
 
 ## TraeX contract
 
-TraeX 0.201.5 exposes `Usage: /model <name>`. Sending `/model` reports the
-current model and available choices. Sending `/model <name>` selects a uniquely
-matching model. If the name is unknown or ambiguous, TraeX returns its native
-error or candidate list and leaves the active model unchanged.
+TraeX 0.201.5 opens an interactive selector when `/model` is submitted. Text
+following `/model` is not a supported direct argument and may become an ordinary
+agent prompt. The bridge therefore translates `/model <name>` and card selection
+into the native selector sequence: open `/model`, type the exact model filter,
+confirm it, and wait for the composer to return.
 
 The bridge delegates model resolution to TraeX. It does not maintain a second
 model catalog, rewrite names, guess providers, or mutate `traecli.toml`. This
@@ -59,16 +60,19 @@ Other bindings remain independent.
 The adapter:
 
 1. reads a small terminal snapshot;
-2. sends the exact normalized `/model` command with the existing reliable
-   `send-text` then `Enter` submission path;
+2. sends `/model` with the existing reliable `send-text` then `Enter` submission
+   path;
 3. polls for a stable post-command terminal snapshot until a short timeout; and
-4. returns only the new visible output attributable to the command.
+4. returns only the new visible output attributable to the command; and
+5. closes the selector with Escape after collecting its model catalog.
 
 The operation does not wait for an agent-state transition. Snapshot comparison
 removes the echoed command and repeated pre-command lines. ANSI controls and
 terminal redraw artifacts are normalized, and the existing output redaction
 policy is applied before the result is logged, persisted, or sent to Feishu.
-Output is bounded so a large model catalog cannot exceed card limits.
+Output is bounded so a large model catalog cannot exceed card limits. If terminal
+history rolls over, extraction starts at the newest exact `/model` echo and never
+falls back to replaying the full visible terminal.
 
 If no stable output is observed before the timeout, the operation fails rather
 than claiming that the model changed.
@@ -80,11 +84,11 @@ card. Its header follows the existing identity convention:
 
 `TraeX · <space> / <pane>`
 
-The subtitle is `HERDR MODEL`. The body contains the sanitized native TraeX
-result, preserving the current model, available models, successful selection,
-or native ambiguity/error details. A successful direct switch may use a green
-template; listing uses blue; rejected or failed execution uses orange. The card
-is not updated in place and is not appended to the main project activity feed.
+The subtitle is `HERDR MODEL`. A parsed native selector becomes a Feishu
+`select_static` list with the current model preselected. Selecting an option opens
+the native TraeX selector, chooses that exact model, and updates the same Feishu
+card with the refreshed catalog. Unparseable output falls back to sanitized native
+text. The model card remains outside the main project activity feed.
 
 ## Errors and audit
 

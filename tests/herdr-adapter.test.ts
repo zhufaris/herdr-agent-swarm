@@ -390,6 +390,58 @@ describe("Herdr adapter", () => {
     expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
   });
 
+  it("extracts only the current model selector after terminal history rolls over", async () => {
+    const calls: string[][] = [];
+    const selector = [
+      "old answer that must not be replayed",
+      "❯ /model",
+      "Select Model and Effort",
+      " 1. Seed-Evolving          1000K context window",
+      " 2. GPT-5.6-Sol (current)  support reasoning",
+      "Press enter to confirm or esc to go back"
+    ].join("\n");
+    const outputs = ["history before command", "different viewport\n❯ /model", selector, selector];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? selector, stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPaneCommand("w1:p1", "/model", 1000))
+      .resolves.toBe([
+        "Select Model and Effort",
+        " 1. Seed-Evolving          1000K context window",
+        " 2. GPT-5.6-Sol (current)  support reasoning",
+        "Press enter to confirm or esc to go back"
+      ].join("\n"));
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Esc"]);
+  });
+
+  it("selects a model through the native interactive selector instead of prompting the agent", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "answer\n❯", "answer\n❯ /model",
+      "answer\n❯ /model\nSelect Model and Effort\nType to search models\n1. GPT-5.6-Sol (current)\n2. GPT-5.6-Terra\nPress enter to confirm or esc to go back",
+      "answer\nModel switched to GPT-5.6-Terra\n❯ Use /skills to list available skills"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).selectPaneModel("w1:p1", "GPT-5.6-Terra", 1000))
+      .resolves.toBeUndefined();
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "/model"]);
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "GPT-5.6-Terra"]);
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(2);
+    expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.6-Terra"]);
+  });
+
   it("keeps the turn open while approval is blocked and completes after approval", async () => {
     const states = ["working", "blocked", "blocked", "working", "done"] as const;
     const outputs = ["before", "before\n❯ needs approval"];

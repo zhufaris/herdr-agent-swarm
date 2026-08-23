@@ -140,6 +140,11 @@ export class SyncCoordinator {
 
   async handleCardAction(action: IncomingLarkCardAction): Promise<void> {
     if (action.chatId !== this.config.lark.chatId) return;
+    const modelSelection = parseModelSelectionAction(action.value, action.option);
+    if (modelSelection) {
+      await this.runModelSelection(action, modelSelection.bindingId, modelSelection.model);
+      return;
+    }
     const openThread = parseOpenThreadAction(action.value);
     if (openThread) {
       const binding = this.store.getBinding(openThread.bindingId);
@@ -903,14 +908,37 @@ export class SyncCoordinator {
     }
     try {
       const pane = await this.requireMatchingPane(binding, binding.paneId);
-      const output = await this.herdr.runPaneCommand(pane.paneId, name ? `/model ${name}` : "/model", this.config.commandTimeoutMs);
-      await this.replyStandalone(message.rootMessageId ?? message.messageId, renderModelResultCard({ spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: name !== null }));
+      if (name) {
+        if (!this.herdr.selectPaneModel) throw new Error("当前 Herdr adapter 不支持交互式模型选择。");
+        await this.herdr.selectPaneModel(pane.paneId, name, this.config.commandTimeoutMs);
+      }
+      const output = await this.herdr.runPaneCommand(pane.paneId, "/model", this.config.commandTimeoutMs);
+      await this.replyStandalone(message.rootMessageId ?? message.messageId, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: name !== null }));
       this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: name ? "switch_completed" : "list_completed" });
       return true;
     } catch (error) {
       await this.reject(message, `模型命令执行失败：${errorMessage(error)}`);
       this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "failed" });
       return false;
+    }
+  }
+
+  private async runModelSelection(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void> {
+    const binding = this.store.getBinding(bindingId);
+    if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
+    if (this.turns.has(binding.id) || this.workers.has(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") return;
+    if (!this.herdr.selectPaneModel || !this.herdr.runPaneCommand) return;
+    try {
+      const pane = await this.requireMatchingPane(binding, binding.paneId);
+      await this.herdr.selectPaneModel(pane.paneId, model, this.config.commandTimeoutMs);
+      const output = await this.herdr.runPaneCommand(pane.paneId, "/model", this.config.commandTimeoutMs);
+      await this.channelPublisher.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}`, renderModelResultCard({
+        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: true
+      }));
+      this.store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "switch_completed" });
+    } catch (error) {
+      this.logger.warn({ event: "model-selection-failed", err: safeLogError(error), bindingId, paneId: binding.paneId, outcome: "failed" }, "failed to select TraeX model");
+      this.store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "failed" });
     }
   }
 
@@ -1135,6 +1163,13 @@ function parseOpenThreadAction(value: unknown): { bindingId: string } | null {
   const candidate = value as Record<string, unknown>;
   if (candidate.action !== "open_project_thread" || typeof candidate.bindingId !== "string") return null;
   return { bindingId: candidate.bindingId };
+}
+function parseModelSelectionAction(value: unknown, option?: string | null): { bindingId: string; model: string } | null {
+  if (!value || typeof value !== "object" || !option) return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.action !== "select_model" || typeof candidate.bindingId !== "string") return null;
+  if (!/^[a-z0-9][a-z0-9._:+/-]{0,127}$/i.test(option)) return null;
+  return { bindingId: candidate.bindingId, model: option };
 }
 function parseDeadLetterAction(value: unknown): { action: "retry_dead_letter" | "dismiss_dead_letter"; replyId: string } | null {
   if (!value || typeof value !== "object") return null;

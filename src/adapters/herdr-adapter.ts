@@ -156,7 +156,12 @@ export class HerdrCliAdapter implements HerdrPort {
       const output = paneCommandOutput(before, after, command);
       if (output && output === previous) {
         stablePolls += 1;
-        if (stablePolls >= 1) return output;
+        if (stablePolls >= 1) {
+          if (isInteractiveModelSelector(command, output)) {
+            await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Esc"], this.commandTimeoutMs);
+          }
+          return output;
+        }
       } else {
         previous = output;
         stablePolls = 0;
@@ -164,6 +169,26 @@ export class HerdrCliAdapter implements HerdrPort {
       await abortableDelay(50);
     }
     throw new Error(`Timed out waiting for Pane command output in ${paneId}`);
+  }
+
+  async selectPaneModel(paneId: string, model: string, timeoutMs: number): Promise<void> {
+    const before = await this.readOutput(paneId, 240);
+    await this.submitPromptText(paneId, "/model", before);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const output = await this.readOutput(paneId, 240);
+      if (/Select Model and Effort/i.test(output) && /esc to go back/i.test(output)) {
+        await this.runner.run(this.executable, ["pane", "send-text", paneId, model], this.commandTimeoutMs);
+        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+        while (Date.now() < deadline) {
+          if (isTraexComposerReady(await this.readOutput(paneId, 240))) return;
+          await abortableDelay(50);
+        }
+        throw new Error(`Timed out waiting for TraeX model selection in pane ${paneId}`);
+      }
+      await abortableDelay(50);
+    }
+    throw new Error(`Timed out waiting for TraeX model selector in pane ${paneId}`);
   }
 
   async readOutput(paneId: string, lines: number): Promise<string> {
@@ -382,11 +407,24 @@ function normalizePromptEcho(value: string): string {
 function paneCommandOutput(before: string, after: string, command: string): string {
   const cleanBefore = stripTerminalControl(before).replace(/\r/g, "").trimEnd();
   const cleanAfter = stripTerminalControl(after).replace(/\r/g, "").trimEnd();
-  const suffix = cleanAfter.startsWith(cleanBefore) ? cleanAfter.slice(cleanBefore.length) : cleanAfter;
+  const lines = cleanAfter.split("\n");
+  const commandKey = normalizePromptEcho(command);
+  let commandLine = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (normalizePromptEcho(lines[index]!.replace(/^\s*[❯›>]\s*/, "")) === commandKey) { commandLine = index; break; }
+  }
+  const suffix = commandLine >= 0
+    ? lines.slice(commandLine + 1).join("\n")
+    : cleanAfter.startsWith(cleanBefore) ? cleanAfter.slice(cleanBefore.length) : "";
   return redactTerminalSecrets(suffix.split("\n")
     .map((line) => line.replace(/^\s*[❯›>]\s*/, ""))
     .filter((line) => normalizePromptEcho(line) !== normalizePromptEcho(command))
     .join("\n").trim());
+}
+
+function isInteractiveModelSelector(command: string, output: string): boolean {
+  return normalizePromptEcho(command) === normalizePromptEcho("/model") &&
+    /Select Model and Effort/i.test(output) && /esc to go back/i.test(output);
 }
 
 function redactTerminalSecrets(value: string): string {

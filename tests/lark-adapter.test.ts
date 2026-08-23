@@ -143,4 +143,13 @@ describe("Lark card action normalization", () => {
     })).toMatchObject({ messageId: "om_2", chatId: "oc_2", operatorOpenId: "ou_2" });
     expect(normalizeCardActionEvent({ context: {}, operator: {}, action: {} })).toBeNull();
   });
+
+  it("preserves the selected static option", () => {
+    expect(normalizeCardActionEvent({
+      context: { open_message_id: "om_model", open_chat_id: "oc_1" }, operator: { open_id: "ou_1" },
+      action: { tag: "select_static", option: "GPT-5.6-Terra", value: { action: "select_model", bindingId: "binding-1" } }
+    })).toMatchObject({
+      messageId: "om_model", option: "GPT-5.6-Terra", value: { action: "select_model", bindingId: "binding-1" }
+    });
+  });
 });

@@ -65,6 +65,7 @@ export interface IncomingLarkCardAction {
   chatId: string;
   operatorOpenId: string;
   value: unknown;
+  option?: string | null;
 }
 
 export interface Binding {
