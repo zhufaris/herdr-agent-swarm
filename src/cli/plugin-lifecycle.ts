@@ -133,25 +133,34 @@ async function waitForHealth(paths: RuntimePaths, base: NodeJS.ProcessEnv): Prom
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
   const timeoutMs = positiveMilliseconds(base.BRIDGE_PLUGIN_START_TIMEOUT_MS, 15_000);
   const deadline = Date.now() + timeoutMs;
+  let consecutiveHealthyChecks = 0;
   do {
-    if (await probe(config.http.host, config.http.port, "/health", "ok")) {
+    const active = isUnitActive(paths.serviceName, base);
+    const healthy = active && await probe(config.http.host, config.http.port, "/health", "ok");
+    consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
+    if (consecutiveHealthyChecks >= 2) {
       process.stdout.write(`bridge service is healthy (${paths.serviceName})\n`);
       return 0;
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   } while (Date.now() < deadline);
-  throw new Error(`bridge service did not become healthy within ${timeoutMs}ms; inspect journalctl --user -u ${paths.serviceName}`);
+  throw new Error(`bridge service did not become active and healthy within ${timeoutMs}ms; inspect systemctl --user status ${paths.serviceName}`);
 }
 
 async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
-  const unit = spawnSync("systemctl", ["--user", "is-active", paths.serviceName], { env: base, encoding: "utf8", timeout: 5_000 });
+  const active = isUnitActive(paths.serviceName, base);
   let bridge: unknown = null;
   try {
     const config = loadConfig(loadRuntimeEnvironment(paths, base));
     bridge = await getJson(config.http.host, config.http.port, "/status");
   } catch (error) { bridge = { status: "unreachable", error: safeMessage(error) }; }
-  process.stdout.write(JSON.stringify({ service: paths.serviceName, active: unit.status === 0, unitFile: paths.unitFile, bridge }) + "\n");
-  return unit.status === 0 ? 0 : 1;
+  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitFile: paths.unitFile, bridge }) + "\n");
+  return active ? 0 : 1;
+}
+
+function isUnitActive(serviceName: string, environment: NodeJS.ProcessEnv): boolean {
+  const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: environment, encoding: "utf8", timeout: 5_000 });
+  return unit.status === 0 && unit.stdout.trim() === "active";
 }
 
 function delegate(command: string, args: string[], environment: NodeJS.ProcessEnv, tolerateFailure = false): number {

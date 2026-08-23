@@ -32,9 +32,16 @@ describe("plugin lifecycle", () => {
     const fixture = createFixture();
     await expect(runPluginLifecycle("start", fixture.environment)).rejects.toThrow(/service is not installed/);
   });
+
+  it("does not accept a healthy port unless the managed unit is active", async () => {
+    const fixture = createFixture({ active: false });
+    await runPluginLifecycle("install", fixture.environment);
+    await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
+      .rejects.toThrow(/did not become active and healthy/);
+  });
 });
 
-function createFixture() {
+function createFixture(options: { active?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bridge-plugin-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -49,7 +56,8 @@ function createFixture() {
     "BRIDGE_HTTP_PORT=39001", "BRIDGE_HTTP_HOST=127.0.0.1"
   ].join("\n") + "\n");
   writeFileSync(join(dist, "main.js"), "// fixture\n");
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n[ "$2" != "is-active" ]\n`);
+  const active = options.active ?? true;
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${active ? 'echo active; exit 0' : 'echo inactive; exit 3'}; fi\nexit 0\n`);
   writeFileSync(join(bin, "journalctl"), "#!/bin/sh\nexit 0\n");
   chmodSync(join(bin, "systemctl"), 0o755);
   chmodSync(join(bin, "journalctl"), 0o755);
