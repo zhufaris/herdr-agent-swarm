@@ -569,41 +569,6 @@ export class SqliteBindingStore implements BindingStorePort {
     });
   }
 
-  claimNextPrompt(bindingId: string): PromptJob | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare(
-        "SELECT * FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' ORDER BY created_at, id LIMIT 1"
-      ).get(bindingId) as PromptRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
-      this.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
-        .run(now(), row.id);
-      this.database.exec("COMMIT");
-      return this.getPrompt(row.id);
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  claimNextReadyPrompt(bindingId: string): PromptJob | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare(`
-        SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
-        WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
-          AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
-        ORDER BY p.created_at, p.rowid LIMIT 1
-      `).get(bindingId) as PromptRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
-      const ready = this.database.prepare("SELECT lark_message_id, answer_message_id, answer_card_id FROM run_cards WHERE prompt_id = ?").get(row.id) as { lark_message_id: string | null; answer_message_id: string | null; answer_card_id: string | null };
-      if (!ready.answer_message_id || (!ready.answer_card_id && !ready.lark_message_id)) { this.database.exec("COMMIT"); return null; }
-      this.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(now(), row.id);
-      this.database.exec("COMMIT");
-      return this.getPrompt(row.id);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
-  }
-
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {

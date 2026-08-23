@@ -154,7 +154,7 @@ describe("pane/thread lifecycle integration", () => {
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "user", body: "already sent" });
-    expect(store.claimNextPrompt("b1")).toMatchObject({ id: "p1" });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
     store.markPromptDispatched("p1");
     expect(store.recoverRunningPrompts()).toBe(1);
 

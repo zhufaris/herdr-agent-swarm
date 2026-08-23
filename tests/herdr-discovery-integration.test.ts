@@ -477,7 +477,6 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const atomicClaim = vi.spyOn(store, "claimNextDispatchablePrompt");
-    vi.spyOn(store, "claimNextReadyPrompt").mockImplementation(() => { throw new Error("legacy claim path used"); });
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "status-1" });
     const bus = new BridgeEventBus();

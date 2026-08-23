@@ -108,8 +108,6 @@ export interface BindingStorePort {
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
   acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
-  claimNextPrompt(bindingId: string): PromptJob | null;
-  claimNextReadyPrompt(bindingId: string): PromptJob | null;
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   requeueSteeringAsTurn(promptId: string): void;
