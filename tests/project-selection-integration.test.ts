@@ -110,7 +110,7 @@ describe("project selection flow", () => {
     expect(JSON.stringify(groupCards[0])).toContain("wD:p9");
     expect(store.findBindingByPane("wD:p9")).toMatchObject({
       projectId: "datasage", workspaceId: "wD", title: "datasage_semantic_knowledge / Fix login", state: "active",
-      topicId: "project-topic-1", rootMessageId: "project-root-1", statusMessageId: "project-root-1"
+      topicId: "project-topic-1", rootMessageId: "project-root-1", statusMessageId: "project-root-1", lastAgentState: "idle"
     });
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
     expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
@@ -122,6 +122,12 @@ describe("project selection flow", () => {
     expect(JSON.stringify(completedCard)).not.toContain("client/chat/open");
     expect(JSON.stringify(updates.at(-1))).not.toContain("当前话题");
     expect(JSON.stringify(updates.at(-1))).not.toContain("**Workspace**");
+
+    await coordinator.handleMessage({
+      eventId: "e-first-prompt", messageId: "first-prompt", chatId: "chat", topicId: "project-topic-1", rootMessageId: "project-root-1",
+      actorOpenId: "user-1", text: "start the task", mentionsBot: false, isRootMessage: false
+    });
+    await vi.waitFor(() => expect(prompts).toEqual(["start the task"]));
 
     const openButton = findActionButton(completedCard, "open_project_thread");
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value: openButton.value });
@@ -201,6 +207,42 @@ describe("project selection flow", () => {
     expect(JSON.stringify(updates.at(-1))).toContain("项目创建已暂停");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
+  it("keeps a pane at pane_created when TraeX composer readiness fails", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
+    const selectorCards: object[] = [];
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic() { throw new Error("must not create topic before runtime readiness"); },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card-1" }; },
+      async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane(workspaceId, cwd) { return { paneId: "w1:p7", workspaceId, cwd, label: null, agentState: "unknown", foregroundExecutables: [] }; },
+      async startTraex() { throw new Error("TraeX composer did not become ready in pane w1:p7"); },
+      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/herdr new Not ready", mentionsBot: true, isRootMessage: true });
+    const value = findProjectButton(selectorCards[0]!, "alpha").value;
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+
+    expect(store.listBindings()[0]).toMatchObject({
+      state: "pending", lifecycle: "provisioning", provisioningCheckpoint: "pane_created", paneId: "w1:p7", lastAgentState: "unknown"
+    });
+    expect(store.getProjectSelection((value as { selectionId: string }).selectionId)).toMatchObject({
+      state: "processing", error: "TraeX composer did not become ready in pane w1:p7"
+    });
+
+    await coordinator.stop(); await publisher.stop(); store.close();
   });
 });
 

@@ -51,7 +51,7 @@ describe("project provisioning recovery", () => {
     expect(harness.topics).toBe(expectedTopics);
     if (expectedTopics) expect(harness.topicKeys).toEqual(["binding-1"]);
     expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "completed" });
-    expect(harness.store.listBindings()[0]).toMatchObject({ state: expectedState, lifecycle: "active", provisioningCheckpoint: "activated" });
+    expect(harness.store.listBindings()[0]).toMatchObject({ state: expectedState, lifecycle: "active", provisioningCheckpoint: "activated", lastAgentState: "idle" });
     await harness.close();
   });
 

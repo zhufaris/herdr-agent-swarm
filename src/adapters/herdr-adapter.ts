@@ -100,9 +100,10 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async startTraex(paneId: string, executable: string): Promise<void> {
-    if (await this.isTraexReady(paneId)) return;
-    await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", "auto"], this.commandTimeoutMs);
-    await this.waitUntilTraex(paneId);
+    if (!await this.isTraexProcessRunning(paneId)) {
+      await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", "auto"], this.commandTimeoutMs);
+    }
+    await this.waitUntilTraexComposer(paneId);
   }
 
   async runPrompt(
@@ -215,20 +216,23 @@ export class HerdrCliAdapter implements HerdrPort {
     };
   }
 
-  private async waitUntilTraex(paneId: string): Promise<void> {
+  private async waitUntilTraexComposer(paneId: string): Promise<void> {
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
-      if (await this.isTraexReady(paneId)) return;
+      if (await this.isTraexComposerReady(paneId)) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`TraeX did not become ready in pane ${paneId}`);
+    throw new Error(`TraeX composer did not become ready in pane ${paneId}`);
   }
 
-  private async isTraexReady(paneId: string): Promise<boolean> {
-    const pane = await this.getPane(paneId);
-    if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
-    if (pane.foregroundExecutables.includes("traex")) return true;
+  private async isTraexProcessRunning(paneId: string): Promise<boolean> {
     return (await this.foregroundExecutables(paneId)).includes("traex");
+  }
+
+  private async isTraexComposerReady(paneId: string): Promise<boolean> {
+    if (!await this.isTraexProcessRunning(paneId)) return false;
+    try { return isTraexComposerReady(await this.readOutput(paneId, 80)); }
+    catch { return false; }
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {

@@ -532,6 +532,7 @@ export class SyncCoordinator {
       if (!pane) throw new Error(`Provisioning checkpoint ${binding.provisioningCheckpoint} has no Herdr pane`);
       if (binding.provisioningCheckpoint === "pane_created") {
         await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
+        binding = this.store.updateBinding(binding.id, { lastAgentState: "idle" });
         binding = this.store.transitionBinding(binding.id, { type: "runtime_started" });
       }
       const activatedEvent = this.event(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: "pending" });
@@ -616,6 +617,7 @@ export class SyncCoordinator {
       binding = this.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
       binding = this.store.transitionBinding(binding.id, { type: "pane_created" });
       await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
+      binding = this.store.updateBinding(binding.id, { lastAgentState: "idle" });
       binding = this.store.transitionBinding(binding.id, { type: "runtime_started" });
       binding = this.store.transitionBinding(binding.id, { type: "thread_created" });
       binding = this.store.transitionBinding(binding.id, { type: "activate" });
@@ -1011,7 +1013,7 @@ export class SyncCoordinator {
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
     const pane = await this.herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation + 1, projectId: project.id, title: binding.title, placement: "dedicated-tab" });
     await this.herdr.startTraex(pane.paneId, this.config.traex.executable);
-    const next = this.store.attachBindingPane(binding.id, pane, true);
+    const next = this.store.updateBinding(this.store.attachBindingPane(binding.id, pane, true).id, { lastAgentState: "idle" });
     await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });
     this.store.audit({ actorOpenId, action: "binding.replace", target: binding.id, outcome: "success" });
   }
