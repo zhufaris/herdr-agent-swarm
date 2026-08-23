@@ -15,3 +15,8 @@ export function stripTerminalControl(output: string): string { return output.rep
 export function outputFingerprint(output: string): string {
   return createHash("sha256").update(output).digest("hex");
 }
+
+export function extractNewOutput(before: string, after: string): string {
+  if (!before || !after.startsWith(before)) return after;
+  return after.slice(before.length).trimStart();
+}

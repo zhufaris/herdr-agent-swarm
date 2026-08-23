@@ -6,6 +6,7 @@ import { renderFailureCards, renderSessionCards } from "../cards/operations-card
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { renderModelResultCard } from "../cards/model-card.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
+import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
 import { initialTopicView, mirrorRunCardToTopic, reduceTopicView } from "../domain/topic-view.js";
@@ -17,18 +18,15 @@ import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
 import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
 import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { SessionReconciler } from "./session-reconciler.js";
 
 export class SyncCoordinator {
   private readonly workers = new Map<string, Promise<void>>();
   private readonly activeRuns = new Map<string, { promptId: string; paneId: string; state: Binding["lastAgentState"]; abortController: AbortController }>();
   private readonly steeringWorkers = new Map<string, Promise<void>>();
-  private readonly observedAgentStates = new Map<string, Binding["lastAgentState"]>();
-  private readonly observedTerminalOutputs = new Map<string, string>();
-  private skippedPaneReasons = new Map<string, string>();
-  private reconciliation: Promise<void> | null = null;
+  private readonly reconciler: SessionReconciler;
   private inboundDrain: Promise<void> | null = null;
   private stopping = false;
-  private reconcileTimer: NodeJS.Timeout | null = null;
   private stopInboundSubscription: (() => void) | null = null;
 
   constructor(
@@ -40,7 +38,14 @@ export class SyncCoordinator {
     private readonly channelPublisher: LarkChannelPublisher,
     private readonly logger: Logger,
     private readonly shutdownGraceMs = 30_000
-  ) {}
+  ) {
+    this.reconciler = new SessionReconciler({
+      projects: config.projects, store, herdr, bus, channelPublisher, logger,
+      discoverPane: (pane, project) => this.createFromHerdr(pane, project),
+      scheduleBinding: (bindingId) => this.scheduleWorker(bindingId),
+      isBindingBusy: (bindingId) => this.workers.has(bindingId)
+    });
+  }
 
   async start(): Promise<void> {
     const recovered = this.store.recoverRunningPrompts();
@@ -72,13 +77,9 @@ export class SyncCoordinator {
     if (recoveredInbound > 0) this.logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     const recoverableSelections = this.store.listProcessingProjectSelections();
     for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) await this.herdr.assertWorkspace(workspaceId);
-    await this.captureOutputBaselines();
-    await this.reconcile();
-    this.reconcileTimer = setInterval(() => {
-      if (this.stopping) return;
-      void this.reconcile().catch((error) => this.logger.error({ event: "reconciliation-failed", err: safeLogError(error), outcome: "failed" }, "reconciliation failed"));
-    }, this.config.reconcileIntervalMs);
-    this.reconcileTimer.unref();
+    await this.reconciler.captureBaselines();
+    await this.reconciler.reconcile();
+    this.reconciler.start(this.config.reconcileIntervalMs);
     this.stopInboundSubscription = this.bus.onInboundMessage((event) => this.acceptInboundMessage(event.payload));
     await this.lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
     for (const selection of recoverableSelections) await this.recoverProjectSelection(selection);
@@ -93,13 +94,12 @@ export class SyncCoordinator {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     await this.lark.stop();
     this.stopInboundSubscription?.();
     const pending = [
       ...this.workers.values(),
       ...this.steeringWorkers.values(),
-      ...(this.reconciliation ? [this.reconciliation] : []),
+      this.reconciler.stop(),
       ...(this.inboundDrain ? [this.inboundDrain] : [])
     ];
     if (!pending.length) return;
@@ -324,158 +324,7 @@ export class SyncCoordinator {
   }
 
   async reconcile(): Promise<void> {
-    if (this.stopping) return;
-    if (this.reconciliation) return this.reconciliation;
-    const work = this.reconcileOnce();
-    this.reconciliation = work;
-    try { await work; }
-    finally { if (this.reconciliation === work) this.reconciliation = null; }
-  }
-
-  private async reconcileOnce(): Promise<void> {
-    await this.channelPublisher.drain();
-    const panesByWorkspace = new Map<string, Awaited<ReturnType<HerdrPort["listPanes"]>>>();
-    for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) {
-      try {
-        panesByWorkspace.set(workspaceId, await this.herdr.listPanes(workspaceId));
-      } catch (error) {
-        this.logger.error({ event: "workspace-reconciliation-failed", err: safeLogError(error), workspaceId, outcome: "failed" }, "workspace reconciliation failed");
-      }
-    }
-    const activeBindings = this.store.listBindingsByState("active");
-    const bindingByPaneId = new Map(activeBindings.flatMap((binding) => binding.paneId ? [[binding.paneId, binding] as const] : []));
-    let pendingBindings: Binding[] | null = null;
-    for (const binding of activeBindings) {
-      const workspacePanes = panesByWorkspace.get(binding.workspaceId);
-      if (!workspacePanes) {
-        const next = this.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
-        this.logger.warn({ event: "binding-pane-probe-failed", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment, reason: "workspace_unavailable" }, "could not observe binding because its workspace was unavailable");
-        if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", "herdr", { reason: `Herdr workspace ${binding.workspaceId} remained unavailable` });
-        continue;
-      }
-      const paneIds = new Set(workspacePanes.map((pane) => pane.paneId));
-      if (binding.paneId && !paneIds.has(binding.paneId)) {
-        this.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
-        const occurredAt = new Date().toISOString();
-        const affectedRunCards = this.store.listRunCardsByPhases(binding.id, ["running", "blocked", "queued"]);
-        for (const view of affectedRunCards) {
-          const terminal = view.phase === "running" || view.phase === "blocked";
-          const next = terminal
-            ? { ...view, phase: "failed" as const, notice: `Herdr pane ${binding.paneId} no longer exists`, finishedAt: occurredAt, queuePosition: 0, viewVersion: view.viewVersion + 1, updatedAt: occurredAt }
-            : { ...view, phase: "blocked" as const, notice: `Herdr pane ${binding.paneId} no longer exists，请恢复绑定后重试。`, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
-          this.store.saveRunCard(next);
-          if (!next.answerCardId && next.answerMessageId) await this.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
-        }
-        await this.publish(binding.id, "BindingOrphaned", "herdr", { reason: `Herdr pane ${binding.paneId} no longer exists` });
-      }
-    }
-
-    const nextSkippedPaneReasons = new Map<string, string>();
-    for (const [requestedWorkspaceId, panes] of panesByWorkspace) for (const pane of panes) {
-      if (pane.workspaceId !== requestedWorkspaceId) {
-        this.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId, reportedWorkspaceId: pane.workspaceId, paneId: pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
-        continue;
-      }
-      if (!pane.foregroundExecutables.includes("traex")) continue;
-      const existing = bindingByPaneId.get(pane.paneId) ?? this.store.findBindingByPane(pane.paneId);
-      if (!existing) {
-        const projects = this.config.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
-        if (projects.length !== 1) {
-          const reason = projects.length === 0 ? "unregistered" : "ambiguous";
-          const signature = `${reason}:${projects.map((project) => project.id).sort().join(",")}`;
-          nextSkippedPaneReasons.set(pane.paneId, signature);
-          if (this.skippedPaneReasons.get(pane.paneId) !== signature) {
-            this.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, matchingProjects: projects.map((project) => project.id), reason }, "skipping unregistered or ambiguous Herdr pane");
-          }
-          continue;
-        }
-        pendingBindings ??= this.store.listBindingsByState("pending");
-        const interruptedProvisioning = pendingBindings.find((candidate) =>
-          candidate.lifecycle === "provisioning" && candidate.provisioningCheckpoint === "selected" && candidate.projectId === projects[0]!.id
-        );
-        if (interruptedProvisioning) {
-          const signature = `provisioning:${interruptedProvisioning.id}`;
-          nextSkippedPaneReasons.set(pane.paneId, signature);
-          if (this.skippedPaneReasons.get(pane.paneId) !== signature) {
-            this.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: projects[0]!.id, bindingId: interruptedProvisioning.id, reason: "ambiguous_interrupted_provisioning" }, "leaving pane unclaimed until interrupted provisioning is resolved explicitly");
-          }
-          continue;
-        }
-        if (this.skippedPaneReasons.has(pane.paneId)) {
-          this.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: projects[0]!.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
-        }
-        await this.createFromHerdr(pane, projects[0]!);
-        const created = this.store.findBindingByPane(pane.paneId);
-        if (created) bindingByPaneId.set(pane.paneId, created);
-        const output = cleanTerminalOutput(await this.herdr.readOutput(pane.paneId, 240));
-        this.observedTerminalOutputs.set(pane.paneId, output);
-        this.observedAgentStates.set(pane.paneId, pane.agentState);
-        continue;
-      }
-      if (!existing.projectId) {
-        const projects = this.config.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
-        if (projects.length === 1) this.store.updateBinding(existing.id, { projectId: projects[0]!.id });
-      }
-      // Provisioning recovery validates the persisted pane identity at its checkpoint.
-      // Normal reconciliation must not transition an incomplete saga first.
-      if (existing.lifecycle === "provisioning") continue;
-      const previous = this.observedAgentStates.get(pane.paneId) ?? existing.lastAgentState;
-      if (existing.traexSessionId && pane.terminalId && existing.traexSessionId !== pane.terminalId) {
-        this.store.transitionBinding(existing.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
-        await this.publish(existing.id, "BindingOrphaned", "herdr", { reason: `Herdr pane ${pane.paneId} terminal identity changed` });
-        continue;
-      }
-      if (existing.attachment !== "orphaned" && (existing.lifecycle === "active" || existing.lifecycle === "draining")) {
-        this.store.transitionBinding(existing.id, { type: "pane_observed", runtime: pane.agentState });
-      }
-      this.observedAgentStates.set(pane.paneId, pane.agentState);
-      if (existing.state !== "active" || this.workers.has(existing.id)) continue;
-      if (previous !== pane.agentState) {
-        this.store.updateBinding(existing.id, { lastAgentState: pane.agentState });
-        await this.publish(existing.id, "AgentStateChanged", "herdr", {
-          state: pane.agentState, queueDepth: this.store.countPendingPrompts(existing.id)
-        });
-      }
-      if (previous === "blocked" && pane.agentState !== "blocked" && this.store.countPendingPrompts(existing.id) > 0) {
-        this.scheduleWorker(existing.id);
-      }
-      if (previous === "working" && (pane.agentState === "done" || pane.agentState === "idle")) {
-        await this.publishChangedLocalOutput(existing, pane.paneId);
-      } else {
-        await this.publishChangedLocalOutput(existing, pane.paneId);
-      }
-    }
-    this.skippedPaneReasons = nextSkippedPaneReasons;
-    for (const binding of this.store.listBindingsByState("active")) this.scheduleWorker(binding.id);
-  }
-
-  private async captureOutputBaselines(): Promise<void> {
-    for (const binding of this.store.listBindings().filter((item) => item.state === "active" && item.paneId)) {
-      try {
-        const output = cleanTerminalOutput(await this.herdr.readOutput(binding.paneId!, 240));
-        this.observedTerminalOutputs.set(binding.paneId!, output);
-        if (output) this.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(output) });
-      } catch (error) {
-        const next = this.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: isPaneMissing(error), orphanThreshold: 2 });
-        if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", "herdr", { reason: `Unable to read Herdr pane ${binding.paneId}: ${errorMessage(error)}` });
-        this.logger.warn({ event: "binding-pane-probe-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment }, "failed to observe Herdr pane during startup");
-      }
-    }
-  }
-
-  private async publishChangedLocalOutput(binding: Binding, paneId: string): Promise<void> {
-    const output = cleanTerminalOutput(await this.herdr.readOutput(paneId, 240));
-    if (!output) return;
-    const previous = this.observedTerminalOutputs.get(paneId) ?? "";
-    this.observedTerminalOutputs.set(paneId, output);
-    const fingerprint = outputFingerprint(output);
-    if (fingerprint === binding.lastOutputFingerprint) return;
-    this.store.updateBinding(binding.id, { lastOutputFingerprint: fingerprint });
-    const answer = extractTraexAnswer(extractNewOutput(previous, output));
-    if (!answer) return;
-    await this.publish(binding.id, "TurnCompleted", "herdr", {
-      promptId: `local:${fingerprint.slice(0, 16)}`, answer, queueDepth: this.store.countPendingPrompts(binding.id)
-    });
+    await this.reconciler.reconcile();
   }
 
   private async createProjectSelector(message: IncomingLarkMessage, requestedTitle: string | null): Promise<void> {
@@ -651,7 +500,7 @@ export class SyncCoordinator {
     }
   }
 
-  private async createFromHerdr(pane: Awaited<ReturnType<HerdrPort["listPanes"]>>[number], project: ProjectConfig): Promise<void> {
+  private async createFromHerdr(pane: Awaited<ReturnType<HerdrPort["listPanes"]>>[number], project: ProjectConfig): Promise<Binding> {
     const id = randomUUID();
     const title = formatProjectPaneTitle(projectSpaceName(project), pane.cwd, pane.label, pane.paneId);
     let binding = this.store.createPendingBinding({ id, projectId: project.id, workspaceId: pane.workspaceId, chatId: this.config.lark.chatId, topicId: null, rootMessageId: null, title });
@@ -670,6 +519,7 @@ export class SyncCoordinator {
     binding = this.store.transitionBinding(binding.id, { type: "activate" });
     await this.bus.publish(createdEvent);
     await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: topic.topicId });
+    return binding;
   }
 
   private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<void> {
@@ -770,11 +620,10 @@ export class SyncCoordinator {
           if (parsed.delta) {
             await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: "append", progressEvents: [] });
           }
-          const previousState = this.observedAgentStates.get(paneId) ?? binding?.lastAgentState ?? "unknown";
+          const previousState = binding?.lastAgentState ?? "unknown";
           const activeRun = this.activeRuns.get(bindingId);
           if (activeRun?.promptId === prompt.id) activeRun.state = observedState;
           if (previousState !== observedState) {
-            this.observedAgentStates.set(paneId, observedState);
             binding = this.store.transitionBinding(bindingId, { type: "pane_observed", runtime: observedState });
             await this.publish(bindingId, "AgentStateChanged", "herdr", {
               state: observedState, queueDepth: this.store.countPendingPrompts(bindingId), promptId: prompt.id
@@ -785,7 +634,6 @@ export class SyncCoordinator {
         const stateBeforeReturn = binding.lastAgentState;
         const activeRun = this.activeRuns.get(bindingId);
         if (activeRun?.promptId === prompt.id) activeRun.state = state;
-        this.observedAgentStates.set(paneId, state);
         binding = this.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) {
           await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
@@ -793,7 +641,6 @@ export class SyncCoordinator {
         const after = await this.herdr.readOutput(paneId, 240);
         const answer = extractFinalTraexAnswer(after);
         const fingerprint = outputFingerprint(answer);
-        this.observedTerminalOutputs.set(paneId, cleanTerminalOutput(after));
         this.store.updateBinding(bindingId, { lastOutputFingerprint: fingerprint });
         this.store.updatePrompt(prompt.id, "delivered");
         binding = this.store.transitionBinding(bindingId, { type: "turn_completed" });
@@ -1000,13 +847,12 @@ export class SyncCoordinator {
     await this.channelPublisher.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card);
   }
 
-  private event<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: Extract<BridgeEvent, { type: T }>["payload"]): Extract<BridgeEvent, { type: T }> {
-    return { eventId: randomUUID(), bindingId, type, origin, occurredAt: new Date().toISOString(), payload } as Extract<BridgeEvent, { type: T }>;
+  private event<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): BridgeEventOf<T> {
+    return createBridgeEvent<T>(bindingId, type, origin, payload);
   }
 
-  private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: Extract<BridgeEvent, { type: T }>["payload"]): Promise<void> {
-    const event = { eventId: randomUUID(), bindingId, type, origin, occurredAt: new Date().toISOString(), payload } as BridgeEvent;
-    await this.bus.publish(event);
+  private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> {
+    await this.bus.publish(createBridgeEvent<T>(bindingId, type, origin, payload));
   }
 }
 
@@ -1078,7 +924,6 @@ function provisioningRecoveryMessage(error: unknown): string {
     ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/herdr attach <space> <pane>\`；若不存在，再发送 \`/herdr new\`。${detail}`
     : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`;
 }
-function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }
 function parseOpenThreadAction(value: unknown): { bindingId: string } | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Record<string, unknown>;
@@ -1106,16 +951,4 @@ function parseProjectAction(value: unknown): { selectionId: string; projectId: s
 function requestTitle(body: string): string {
   const normalized = body.replace(/\s+/g, " " ).trim();
   return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request";
-}
-
-function extractTraexAnswer(output: string): string | null {
-  const marker = /^\s*◆\s+/m.exec(output);
-  if (!marker || marker.index === undefined) return null;
-  const answer = output.slice(marker.index + marker[0].length).split(/\n\s*─{3,}/)[0]?.trim() ?? "";
-  return answer || null;
-}
-
-export function extractNewOutput(before: string, after: string): string {
-  if (!before || !after.startsWith(before)) return after;
-  return after.slice(before.length).trimStart();
 }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractNewOutput } from "../src/coordinator/sync-coordinator.js";
-import { cleanTerminalOutput, outputFingerprint } from "../src/runtime/output.js";
+import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../src/runtime/output.js";
 
 describe("terminal output", () => {
   it("extracts appended output and strips ANSI", () => {

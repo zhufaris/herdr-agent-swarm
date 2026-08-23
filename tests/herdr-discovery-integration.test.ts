@@ -88,7 +88,7 @@ describe("Herdr discovery", () => {
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const stopObserver = bus.onBridgeEvent((event) => {
-      if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
+      if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
       if (event.type === "TurnOutputObserved") {
         answerSnapshots.push(event.payload.answerSnapshot);
         answerUpdates.push(event.payload.answerUpdate ?? "replace");
@@ -110,6 +110,11 @@ describe("Herdr discovery", () => {
     expect(answerUpdates).toEqual(["append", "append", "append", "append"]);
     expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("✧ Working\n\n◆ Ran first\n\n◆ Ran second\n\n◆ done");
     expect(submittedPrompts).toEqual(["run"]);
+    const completedBeforeReconcile = events.filter((event) => event === "TurnCompleted").length;
+    const doneBeforeReconcile = events.filter((event) => event === "AgentStateChanged:done").length;
+    await coordinator.reconcile();
+    expect(events.filter((event) => event === "TurnCompleted")).toHaveLength(completedBeforeReconcile);
+    expect(events.filter((event) => event === "AgentStateChanged:done")).toHaveLength(doneBeforeReconcile);
 
     await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
   });
