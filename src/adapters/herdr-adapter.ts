@@ -154,13 +154,15 @@ export class HerdrCliAdapter implements HerdrPort {
     let stablePolls = 0;
     while (Date.now() < deadline) {
       const after = await this.readOutput(paneId, 240);
+      const selector = interactiveModelSelectorOutput(command, after);
+      if (selector) {
+        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Esc"], this.commandTimeoutMs);
+        return selector;
+      }
       const output = paneCommandOutput(before, after, command);
       if (output && output === previous) {
         stablePolls += 1;
         if (stablePolls >= 1) {
-          if (isInteractiveModelSelector(command, output)) {
-            await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Esc"], this.commandTimeoutMs);
-          }
           return output;
         }
       } else {
@@ -446,6 +448,15 @@ function paneCommandOutput(before: string, after: string, command: string): stri
 function isInteractiveModelSelector(command: string, output: string): boolean {
   return normalizePromptEcho(command) === normalizePromptEcho("/model") &&
     /Select Model and Effort/i.test(output) && /esc to go back/i.test(output);
+}
+
+function interactiveModelSelectorOutput(command: string, output: string): string | null {
+  if (normalizePromptEcho(command) !== normalizePromptEcho("/model")) return null;
+  const clean = stripTerminalControl(output).replace(/\r/g, "");
+  const start = clean.search(/Select Model and Effort/i);
+  if (start < 0) return null;
+  const selector = clean.slice(start).trim();
+  return /esc to go back/i.test(selector) ? redactTerminalSecrets(selector) : null;
 }
 
 function redactTerminalSecrets(value: string): string {

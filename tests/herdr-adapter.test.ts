@@ -309,6 +309,30 @@ describe("Herdr adapter", () => {
     expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Esc"]);
   });
 
+  it("returns a model selector that is visible for only one terminal snapshot", async () => {
+    const calls: string[][] = [];
+    const selector = [
+      "Select Model and Effort",
+      " 1. GPT-5.6-Sol (current)  support reasoning",
+      " 2. GPT-5.6-Terra           support reasoning",
+      "Press enter to confirm or esc to go back"
+    ].join("\n");
+    const outputs = [
+      "answer\n❯", "answer\n❯ /model", selector,
+      "answer\n❯ Use /skills to list available skills"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1_000).runPaneCommand("w1:p1", "/model", 1_000)).resolves.toBe(selector);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Esc"]);
+  });
+
   it("selects a model through the native interactive selector instead of prompting the agent", async () => {
     const calls: string[][] = [];
     const outputs = [
