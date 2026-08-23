@@ -1,4 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,6 +14,7 @@ describe("plugin lifecycle", () => {
     expect(unit).toContain(`WorkingDirectory=${fixture.root}`);
     expect(unit).toContain(`EnvironmentFile=${fixture.config}/.env`);
     expect(unit).toContain(`ExecStart=${process.execPath} ${fixture.root}/dist/main.js`);
+    expect(unit).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:test-build");
     expect(unit).toContain("Restart=on-failure");
     await expect(runPluginLifecycle("stop", fixture.environment)).resolves.toBe(0);
     expect(readFileSync(fixture.calls, "utf8").trim().split(/\n/)).toEqual([
@@ -28,6 +31,33 @@ describe("plugin lifecycle", () => {
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable --now test-bridge.service");
   });
 
+  it("refreshes the unit identity before restarting a rebuilt plugin", async () => {
+    const fixture = createFixture();
+    await runPluginLifecycle("install", fixture.environment);
+    writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
+    await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" })).rejects.toThrow();
+    expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart test-bridge.service");
+  });
+
+  it("refreshes the unit identity before starting a rebuilt stopped plugin", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
+      await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user start test-bridge.service");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("refuses service control before installation", async () => {
     const fixture = createFixture();
     await expect(runPluginLifecycle("start", fixture.environment)).rejects.toThrow(/service is not installed/);
@@ -37,11 +67,42 @@ describe("plugin lifecycle", () => {
     const fixture = createFixture({ active: false });
     await runPluginLifecycle("install", fixture.environment);
     await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
-      .rejects.toThrow(/did not become active and healthy/);
+      .rejects.toThrow(/did not become active with expected build/);
+  });
+
+  it("accepts only the expected build identity from the active unit", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("rejects a healthy response from a stale build", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.1.0", buildId: "sha256:stale-build" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
+        .rejects.toThrow(/expected build sha256:test-build.*observed sha256:stale-build/);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 });
 
-function createFixture(options: { active?: boolean } = {}) {
+function createFixture(options: { active?: boolean; port?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bridge-plugin-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -53,9 +114,10 @@ function createFixture(options: { active?: boolean } = {}) {
   writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: root }] }));
   writeFileSync(join(config, ".env"), [
     "LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot",
-    "BRIDGE_HTTP_PORT=39001", "BRIDGE_HTTP_HOST=127.0.0.1"
+    `BRIDGE_HTTP_PORT=${options.port ?? 39001}`, "BRIDGE_HTTP_HOST=127.0.0.1"
   ].join("\n") + "\n");
   writeFileSync(join(dist, "main.js"), "// fixture\n");
+  writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
   writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${active ? 'echo active; exit 0' : 'echo inactive; exit 3'}; fi\nexit 0\n`);
   writeFileSync(join(bin, "journalctl"), "#!/bin/sh\nexit 0\n");

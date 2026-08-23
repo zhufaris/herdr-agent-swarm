@@ -12,6 +12,7 @@ node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if
 npm --prefix "$ROOT" ci
 npm --prefix "$ROOT" run build
 test -r "$ROOT/dist/main.js"
+test -r "$ROOT/dist/build-info.json"
 test -r "$ROOT/dist/cli/validate-config.js"
 test -r "$ROOT/dist/cli/relay-herdr-event.js"
 echo "Herdr Lark Bridge plugin build complete. Run the setup action to configure the service."

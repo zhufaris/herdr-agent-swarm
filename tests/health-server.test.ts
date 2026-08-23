@@ -12,15 +12,20 @@ afterEach(async () => {
 });
 
 describe("health server", () => {
+  const buildIdentity = { serviceId: "herdr-lark-bridge" as const, version: "0.2.0", buildId: "sha256:test-build", gitCommit: null };
+
   it("reports every readiness component and exposes a safe operational status", async () => {
     store = new SqliteBindingStore(":memory:");
     const projects = [{ id: "missing", displayName: "Missing", description: "Missing", workspaceId: "w1", cwd: "/definitely/missing/project" }];
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects, lark: { isReady: () => false } as never,
       herdr: { async assertWorkspace() { throw new Error("workspace unavailable"); } } as never,
-      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) }
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
     });
     const port = (server.address() as AddressInfo).port;
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(await health.json()).toEqual({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build" });
 
     const ready = await fetch(`http://127.0.0.1:${port}/ready`);
     expect(ready.status).toBe(503);
@@ -33,7 +38,7 @@ describe("health server", () => {
     const status = await fetch(`http://127.0.0.1:${port}/status`);
     expect(status.status).toBe(200);
     const body = await status.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ status: "degraded", readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0 } });
+    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0 } });
     expect(body).toHaveProperty("uptimeSeconds");
     expect(body).toHaveProperty("timestamp");
     expect(body).toHaveProperty("lease.ownerSuffix", "owner123");
@@ -45,7 +50,8 @@ describe("health server", () => {
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
       lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
-      lease: { snapshot: () => ({ held: false, ownerSuffix: "owner123", fencingToken: 4, expiresAt: null, lastRenewedAt: null, error: "fence changed" }) }
+      lease: { snapshot: () => ({ held: false, ownerSuffix: "owner123", fencingToken: 4, expiresAt: null, lastRenewedAt: null, error: "fence changed" }) },
+      buildIdentity
     });
     const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/ready`);
     expect(response.status).toBe(503);

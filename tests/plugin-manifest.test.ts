@@ -13,6 +13,11 @@ describe("Herdr plugin manifest", () => {
     expect(manifest).not.toContain("[[startup]]");
   });
 
+  it("keeps the manifest version aligned with the package version", () => {
+    const packageVersion = JSON.parse(readFileSync("package.json", "utf8")).version as string;
+    expect(manifest).toContain(`version = "${packageVersion}"`);
+  });
+
   it("uses plugin-local lifecycle action ids", () => {
     const actionIds = [...manifest.matchAll(/\[\[actions\]\][\s\S]*?^id = \"([^\"]+)\"/gm)].map((match) => match[1]);
     for (const action of ["setup", "start", "status", "restart", "stop", "logs", "configure-projects", "uninstall-service"]) {

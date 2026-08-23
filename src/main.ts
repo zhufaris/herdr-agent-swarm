@@ -1,4 +1,5 @@
 import pino from "pino";
+import { fileURLToPath } from "node:url";
 import { HerdrCliAdapter } from "./adapters/herdr-adapter.js";
 import { LarkSdkAdapter } from "./adapters/lark-adapter.js";
 import { loadConfig, validateProjectDirectories } from "./config.js";
@@ -11,10 +12,12 @@ import { ExecFileCommandRunner } from "./infra/command-runner.js";
 import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
 import { InstanceLeaseController } from "./runtime/instance-lease.js";
 import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
+import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
+const buildIdentity = loadBuildIdentity(fileURLToPath(new URL("./build-info.json", import.meta.url)), process.env.BRIDGE_EXPECTED_BUILD_ID);
 const config = loadConfig();
 validateProjectDirectories(config.projects);
 const logger = pino({ level: config.logLevel, serializers: { err: safeLogError }, redact: [
@@ -42,7 +45,7 @@ try {
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr });
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   lease.start(() => shutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; }));

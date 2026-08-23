@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
 import type { InstanceLeaseStatus, ProjectConfig, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
+import type { BuildIdentity } from "../runtime/build-identity.js";
 
 interface ComponentState { ok: boolean; error?: string }
 interface Readiness {
@@ -17,10 +18,14 @@ export function startHealthServer(options: {
   host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
   lease: { snapshot(): InstanceLeaseStatus };
   workspaceCache?: { status(): WorkspaceCacheStatus };
+  buildIdentity: BuildIdentity;
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
-    if (request.url === "/health") { response.statusCode = 200; response.end(JSON.stringify({ status: "ok" })); return; }
+    if (request.url === "/health") {
+      const { serviceId, version, buildId } = options.buildIdentity;
+      response.statusCode = 200; response.end(JSON.stringify({ status: "ok", serviceId, version, buildId })); return;
+    }
     if (request.url === "/ready") {
       const readiness = await inspectReadiness(options);
       response.statusCode = readiness.status === "ready" ? 200 : 503;
@@ -34,7 +39,7 @@ export function startHealthServer(options: {
       catch (error) { operational = { error: boundedError(error) }; }
       response.statusCode = 200;
       response.end(JSON.stringify({
-        status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded",
+        status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {})
       }));

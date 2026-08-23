@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadConfig, validateProjectDirectories } from "../config.js";
 import { readEnvironmentFile } from "../runtime/environment-file.js";
+import { BRIDGE_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
 
@@ -14,6 +15,7 @@ interface RuntimePaths {
   stateDirectory: string;
   environmentFile: string;
   entrypoint: string;
+  buildInfo: string;
   unitFile: string;
   serviceName: string;
   nodeExecutable: string;
@@ -29,6 +31,12 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   if (action === "status") return printStatus(paths, environment);
 
   requireInstalled(paths);
+  if (action === "start" || action === "restart") {
+    loadRuntimeEnvironment(paths, environment);
+    atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo)), 0o600);
+    const reload = delegate("systemctl", ["--user", "daemon-reload"], environment);
+    if (reload !== 0) return reload;
+  }
   const result = delegate("systemctl", ["--user", action, paths.serviceName], environment);
   if (result !== 0 || action === "stop") return result;
   return waitForHealth(paths, environment);
@@ -44,7 +52,7 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   return {
     root, configDirectory, stateDirectory, serviceName,
     environmentFile: resolve(configDirectory, ".env"),
-    entrypoint: resolve(root, "dist/main.js"),
+    entrypoint: resolve(root, "dist/main.js"), buildInfo: resolve(root, "dist/build-info.json"),
     unitFile: resolve(unitDirectory, serviceName),
     nodeExecutable: resolve(environment.NODE_BIN || process.execPath)
   };
@@ -72,9 +80,10 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
 
 function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
   if (!existsSync(paths.entrypoint)) throw new Error(`compiled bridge entrypoint not found: ${paths.entrypoint}; run the plugin build first`);
+  const identity = loadBuildIdentity(paths.buildInfo);
   loadRuntimeEnvironment(paths, environment);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
-  atomicWrite(paths.unitFile, renderUnit(paths), 0o600);
+  atomicWrite(paths.unitFile, renderUnit(paths, identity), 0o600);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) result = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
   if (result === 0) process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}\n`);
@@ -89,7 +98,7 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
   return result;
 }
 
-function renderUnit(paths: RuntimePaths): string {
+function renderUnit(paths: RuntimePaths, identity: BuildIdentity): string {
   return [
     "[Unit]",
     "Description=Herdr Lark Bridge",
@@ -103,6 +112,7 @@ function renderUnit(paths: RuntimePaths): string {
     `Environment=HERDR_PLUGIN_ROOT=${systemdEscape(paths.root)}`,
     `Environment=HERDR_PLUGIN_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,
     `Environment=HERDR_PLUGIN_STATE_DIR=${systemdEscape(paths.stateDirectory)}`,
+    `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
     `ExecStart=${systemdEscape(paths.nodeExecutable)} ${systemdEscape(paths.entrypoint)}`,
     "Restart=on-failure",
     "RestartSec=5",
@@ -130,31 +140,39 @@ function requireInstalled(paths: RuntimePaths): void {
 }
 
 async function waitForHealth(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
+  const expected = loadBuildIdentity(paths.buildInfo);
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
   const timeoutMs = positiveMilliseconds(base.BRIDGE_PLUGIN_START_TIMEOUT_MS, 15_000);
   const deadline = Date.now() + timeoutMs;
   let consecutiveHealthyChecks = 0;
+  let observedBuildId = "unavailable";
   do {
     const active = isUnitActive(paths.serviceName, base);
-    const healthy = active && await probe(config.http.host, config.http.port, "/health", "ok");
+    const health = active ? await probeHealthIdentity(config.http.host, config.http.port) : null;
+    observedBuildId = health?.buildId ?? "unavailable";
+    const healthy = health?.status === "ok" && health.serviceId === BRIDGE_SERVICE_ID && health.buildId === expected.buildId;
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
-      process.stdout.write(`bridge service is healthy (${paths.serviceName})\n`);
+      const readiness = await probeStatus(config.http.host, config.http.port, "/ready");
+      process.stdout.write(`bridge service is healthy (${paths.serviceName}); readiness=${readiness.status}\n`);
+      if (readiness.status !== "ready") process.stdout.write(`bridge dependencies are degraded: ${readiness.detail}\n`);
       return 0;
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   } while (Date.now() < deadline);
-  throw new Error(`bridge service did not become active and healthy within ${timeoutMs}ms; inspect systemctl --user status ${paths.serviceName}`);
+  throw new Error(`bridge service did not become active with expected build ${expected.buildId} within ${timeoutMs}ms; observed ${observedBuildId}; inspect systemctl --user status ${paths.serviceName}`);
 }
 
 async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
+  const expected = loadBuildIdentity(paths.buildInfo);
   const active = isUnitActive(paths.serviceName, base);
   let bridge: unknown = null;
   try {
     const config = loadConfig(loadRuntimeEnvironment(paths, base));
     bridge = await getJson(config.http.host, config.http.port, "/status");
   } catch (error) { bridge = { status: "unreachable", error: safeMessage(error) }; }
-  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitFile: paths.unitFile, bridge }) + "\n");
+  const observed = bridge && typeof bridge === "object" && "identity" in bridge ? (bridge as { identity: unknown }).identity : null;
+  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitFile: paths.unitFile, expectedIdentity: expected, observedIdentity: observed, bridge }) + "\n");
   return active ? 0 : 1;
 }
 
@@ -169,6 +187,15 @@ function delegate(command: string, args: string[], environment: NodeJS.ProcessEn
   return result.status ?? 1;
 }
 
+async function probeHealthIdentity(host: string, port: number): Promise<{ status?: unknown; serviceId?: unknown; buildId?: string } | null> {
+  try {
+    const result = await getJson(host, port, "/health");
+    if (!result || typeof result !== "object") return null;
+    const record = result as Record<string, unknown>;
+    return { status: record.status, serviceId: record.serviceId, ...(typeof record.buildId === "string" ? { buildId: record.buildId } : {}) };
+  } catch { return null; }
+}
+
 function positiveMilliseconds(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -181,12 +208,23 @@ async function probe(host: string, port: number, path: string, expectedStatus: s
   } catch { return false; }
 }
 
-function getJson(host: string, port: number, path: string): Promise<unknown> {
+async function probeStatus(host: string, port: number, path: string): Promise<{ status: string; detail: string }> {
+  try {
+    const result = await getJson(host, port, path, true);
+    const status = typeof result === "object" && result !== null && typeof (result as { status?: unknown }).status === "string"
+      ? String((result as { status: string }).status) : "unknown";
+    return { status, detail: JSON.stringify(result).slice(0, 1_000) };
+  } catch (error) {
+    return { status: "unreachable", detail: safeMessage(error) };
+  }
+}
+
+function getJson(host: string, port: number, path: string, acceptErrorStatus = false): Promise<unknown> {
   return new Promise((resolvePromise, reject) => {
     const outgoing = request({ host, port, path, method: "GET", timeout: 1_500 }, (response) => {
       let body = ""; response.setEncoding("utf8"); response.on("data", (chunk: string) => { if (body.length < 1_000_000) body += chunk; });
       response.on("end", () => {
-        if (!response.statusCode || response.statusCode >= 400) { reject(new Error(`HTTP ${response.statusCode ?? "unknown"}`)); return; }
+        if (!response.statusCode || response.statusCode >= 400 && !acceptErrorStatus) { reject(new Error(`HTTP ${response.statusCode ?? "unknown"}`)); return; }
         try { resolvePromise(JSON.parse(body)); } catch { reject(new Error("invalid JSON response")); }
       });
     });
