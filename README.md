@@ -77,10 +77,18 @@ manifest build step; packaged `plugin install` runs it.
 
 ```bash
 cd /absolute/path/to/herdr-lark-bridge
-npm ci
-npm run build
-herdr plugin link /absolute/path/to/herdr-lark-bridge --enabled
-herdr plugin list --json
+./install.sh
+```
+
+The installer checks the required commands, installs locked dependencies,
+builds the plugin, links the absolute checkout path, enables it, and verifies
+the registered plugin state. It is safe to run again after source updates. It
+does not modify bridge configuration or service state by default.
+
+To continue directly into interactive configuration and systemd service setup:
+
+```bash
+./install.sh --setup
 ```
 
 The plugin requires Herdr 0.7.5 or newer on Linux and a working user systemd

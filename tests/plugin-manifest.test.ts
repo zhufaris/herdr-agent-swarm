@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 describe("Herdr plugin manifest", () => {
   const manifest = readFileSync("herdr-plugin.toml", "utf8");
   const setupScript = readFileSync("plugin/setup.sh", "utf8");
+  const installScript = readFileSync("install.sh", "utf8");
 
   it("declares a Linux build without using a startup hook as a service manager", () => {
     expect(manifest).toContain('id = "herdr-lark-bridge"');
@@ -38,5 +39,12 @@ describe("Herdr plugin manifest", () => {
     expect(setupScript).toContain('"$SCRIPT_DIR/service.sh" install');
     expect(setupScript).toContain('"$SCRIPT_DIR/service.sh" restart');
     expect(setupScript).not.toContain('"$SCRIPT_DIR/service.sh" start\n');
+  });
+
+  it("keeps installation non-interactive unless setup is requested explicitly", () => {
+    expect(installScript).toContain('bash "$ROOT/plugin/build.sh"');
+    expect(installScript).toContain('herdr plugin link "$ROOT" --enabled');
+    expect(installScript).toContain('if [ "$RUN_SETUP" -eq 1 ]');
+    expect(installScript).toContain('herdr plugin action invoke setup --plugin "$PLUGIN_ID"');
   });
 });
