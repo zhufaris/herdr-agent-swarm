@@ -1,11 +1,11 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { InboundRouter } from "../src/coordinator/inbound-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { CardProjector } from "../src/events/card-projector.js";
-import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("model command", () => {
@@ -113,9 +113,9 @@ async function setup(
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
-  const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-  const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+  const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+  const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;
   return { coordinator, store, bindingId, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };

@@ -136,6 +136,22 @@ export interface BindingStorePort {
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
 }
 
+export type InboundStore = Pick<BindingStorePort,
+  | "claimNextInboundMessage" | "findBindingByLarkScope" | "isBridgeMessage" | "markInboundMessageAccepted"
+  | "recordInboundMessage" | "recoverProcessingInboundMessages" | "releaseInboundMessage"
+>;
+
+export type LeaseStore = Pick<BindingStorePort,
+  | "acquireInstanceLease" | "renewInstanceLease" | "releaseInstanceLease"
+>;
+
+export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "listBindings">;
+
+export type PromptAcceptanceStore = Pick<BindingStorePort,
+  | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary"
+  | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "saveRunCard" | "saveTopicView"
+>;
+
 export type PromptRunStore = Pick<BindingStorePort,
   | "recoverRunningPrompts"
   | "listDetachedPrompts"

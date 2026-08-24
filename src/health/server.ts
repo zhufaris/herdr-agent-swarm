@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import type { BindingStorePort, HerdrPort, LarkPort } from "../domain/ports.js";
+import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
 import type { InstanceLeaseStatus, ProjectConfig, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
@@ -15,7 +15,7 @@ interface Readiness {
 }
 
 export function startHealthServer(options: {
-  host: string; port: number; store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
+  host: string; port: number; store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
   lease: { snapshot(): InstanceLeaseStatus };
   workspaceCache?: { status(): WorkspaceCacheStatus };
   buildIdentity: BuildIdentity;
@@ -34,7 +34,7 @@ export function startHealthServer(options: {
     }
     if (request.url === "/status") {
       const readiness = await inspectReadiness(options);
-      let operational: ReturnType<BindingStorePort["getOperationalSummary"]> | { error: string };
+      let operational: ReturnType<HealthStore["getOperationalSummary"]> | { error: string };
       try { operational = options.store.getOperationalSummary(); }
       catch (error) { operational = { error: boundedError(error) }; }
       response.statusCode = 200;
@@ -53,7 +53,7 @@ export function startHealthServer(options: {
   });
 }
 
-async function inspectReadiness(options: { store: BindingStorePort; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus } }): Promise<Readiness> {
+async function inspectReadiness(options: { store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus } }): Promise<Readiness> {
   const database = check(() => options.store.listBindings());
   const projects = check(() => validateProjectDirectories(options.projects));
   const lark = options.lark.isReady() ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };

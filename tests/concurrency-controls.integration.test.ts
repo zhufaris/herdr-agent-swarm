@@ -1,10 +1,10 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { InboundRouter } from "../src/coordinator/inbound-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
@@ -147,8 +147,8 @@ describe("coordinator concurrency controls", () => {
 function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
-  const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-  const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+  const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+  const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   return { coordinator, publisher, store };
 }
 

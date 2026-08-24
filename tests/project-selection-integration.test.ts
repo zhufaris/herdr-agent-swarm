@@ -1,12 +1,12 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { InboundRouter } from "../src/coordinator/inbound-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { IncomingLarkCardAction } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { CardProjector } from "../src/events/card-projector.js";
-import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project selection flow", () => {
@@ -28,8 +28,8 @@ describe("project selection flow", () => {
     store.createPendingBinding({ id: "archived-binding", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", title: "alpha / old task" });
     store.updateBinding("archived-binding", { paneId: "w1:p-old", state: "archived" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-archived", messageId: "m-archived", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", actorOpenId: "user-1", text: "继续", mentionsBot: false, isRootMessage: false });
@@ -79,9 +79,9 @@ describe("project selection flow", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     store.createPendingBinding({ id: "existing-binding", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", title: "bridge / Existing" });
     store.updateBinding("existing-binding", { paneId: "wH:p1", state: "active" });
@@ -158,9 +158,9 @@ describe("project selection flow", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/herdr new", mentionsBot: true, isRootMessage: true });
@@ -203,8 +203,8 @@ describe("project selection flow", () => {
     store.createPendingBinding({ id: "b2", projectId: "beta", workspaceId: "w2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", title: "beta / task" });
     store.updateBinding("b2", { paneId: "w2:p1", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(multiProjectConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(multiProjectConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
 
     await coordinator.start();
 
@@ -231,9 +231,9 @@ describe("project selection flow", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/herdr new Broken", mentionsBot: true, isRootMessage: true });
@@ -266,8 +266,8 @@ describe("project selection flow", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/herdr new Not ready", mentionsBot: true, isRootMessage: true });

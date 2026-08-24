@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { HerdrCliAdapter } from "./adapters/herdr-adapter.js";
 import { LarkSdkAdapter } from "./adapters/lark-adapter.js";
 import { loadConfig, validateProjectDirectories } from "./config.js";
-import { SyncCoordinator } from "./coordinator/sync-coordinator.js";
+import { InboundRouter } from "./coordinator/inbound-router.js";
 import { BridgeEventBus } from "./events/bridge-event-bus.js";
 import { InProcessPromptWorkScheduler } from "./events/prompt-work-scheduler.js";
 import { InProcessInboundWorkNotifier } from "./events/inbound-work-notifier.js";
@@ -38,7 +38,7 @@ const scheduler = new InProcessPromptWorkScheduler(logger);
 const inboundWork = new InProcessInboundWorkNotifier();
 const channelPublisher = new LarkOutboxDispatcher(bus, store, lark, logger);
 const projector = new ConversationViewProjector(bus, store, channelPublisher, logger);
-const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, channelPublisher, logger, 30_000, scheduler, inboundWork);
+const coordinator = new InboundRouter(config, store, herdr, lark, bus, channelPublisher, logger, 30_000, scheduler, inboundWork);
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)

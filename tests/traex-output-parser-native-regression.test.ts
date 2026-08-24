@@ -25,11 +25,11 @@ describe("TraeX native parser regressions", () => {
       "▍ deploy",
       "◆ Running tests (1m 12s)",
       "PASS parser.test.ts",
-      "PASS card-projector.test.ts"
+      "PASS conversation-view-projector.test.ts"
     ].join("\n");
 
     expect(parseTerminalStreamDelta(previous, current, "deploy")).toMatchObject({
-      delta: "◆ Running tests (1m 12s)PASS parser.test.ts PASS card-projector.test.ts",
+      delta: "◆ Running tests (1m 12s)PASS parser.test.ts PASS conversation-view-projector.test.ts",
       update: "replace-all",
       snapshot: current
     });

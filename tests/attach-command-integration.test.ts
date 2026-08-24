@@ -1,11 +1,11 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { InboundRouter } from "../src/coordinator/inbound-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { CardProjector } from "../src/events/card-projector.js";
-import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("attach existing pane command", () => {
@@ -26,9 +26,9 @@ describe("attach existing pane command", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     exposePane = true;
 
@@ -67,9 +67,9 @@ describe("attach existing pane command", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     exposePane = true;
 
@@ -121,9 +121,9 @@ describe("attach existing pane command", () => {
     missingExplicitSpace.projects[0]!.cwd = "/repo/datasage_semantic_knowledge";
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(missingExplicitSpace, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(missingExplicitSpace, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage(command(1));
@@ -141,8 +141,8 @@ describe("attach existing pane command", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
     const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
 
     await coordinator.handleMessage({ ...command(1), text: "/herdr attach datasage_semantic_knowledge tidy" });
 
@@ -161,8 +161,8 @@ describe("attach existing pane command", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
     const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
 
     await coordinator.handleMessage(command(1, "w5:p3G"));
 
@@ -182,8 +182,8 @@ describe("attach existing pane command", () => {
     store.createPendingBinding({ id: "other-binding", projectId: "analytics", workspaceId: "w5", chatId: "other-chat", topicId: "secret-topic", rootMessageId: "secret-root", title: "secret" });
     store.updateBinding("other-binding", { paneId: "w5:p3G", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePane = true;
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePane = true;
 
     await coordinator.handleMessage(command(1, "tidy"));
 
@@ -210,9 +210,9 @@ describe("attach existing pane command", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage(command(1));
@@ -245,9 +245,9 @@ describe("attach existing pane command", () => {
     testConfig.projects = projects;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(testConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(testConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     exposePanes = true;
 

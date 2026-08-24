@@ -1,10 +1,10 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { InboundRouter } from "../src/coordinator/inbound-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("operational commands", () => {
@@ -30,8 +30,8 @@ describe("operational commands", () => {
     store.enqueueOutboundReply({ id: "o1", idempotencyKey: "failed-output", bindingId: "b1", promptId: "p1", rootMessageId: "root", kind: "card_reply", payload: "{}" });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new SyncCoordinator(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage(message(1, "/herdr sessions"));

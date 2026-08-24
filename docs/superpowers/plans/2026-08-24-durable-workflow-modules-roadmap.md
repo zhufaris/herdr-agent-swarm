@@ -22,7 +22,7 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
   > After this: plugin and periodic observations converge through `HerdrRuntimeReconciler`, which can only persist runtime transitions, publish lifecycle outcomes, and wake durable prompt work.
 - [x] **S07: Isolate projection and outbox delivery ports** `risk:medium` `depends:[S02,S03]`
   > After this: projection callers can only record outbound intent and the Lark dispatcher alone controls lane claims, retries, checkpoints, and dead letters.
-- [ ] **S08: Replace SyncCoordinator with InboundRouter** `risk:high` `depends:[S04,S05,S06,S07]`
+- [x] **S08: Replace SyncCoordinator with InboundRouter** `risk:high` `depends:[S04,S05,S06,S07]`
   > After this: normalized Lark ingress delegates commands through `InboundRouter`; no monolithic coordinator or broad `BindingStorePort` consumer remains.
 - [ ] **S09: Integrated recovery and operator verification** `risk:medium` `depends:[S08]`
   > After this: full tests, build, migration tests, shutdown/restart scenarios, and a non-mutating real-user smoke prove the assembled architecture.

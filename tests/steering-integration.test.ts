@@ -2,11 +2,11 @@ import pino from "pino";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { SyncCoordinator } from "../src/coordinator/sync-coordinator.js";
+import { InboundRouter } from "../src/coordinator/inbound-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { CardProjector } from "../src/events/card-projector.js";
-import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
@@ -56,11 +56,11 @@ describe("active-turn steering", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
     publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
     projector.start();
-    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, logger);
+    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, logger);
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
     const message = (n: number, text: string) => ({ eventId: `e${n}`, messageId: `m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
@@ -124,9 +124,9 @@ describe("active-turn steering", () => {
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
+    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
     const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `blocked-e${n}`, messageId: `blocked-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 
     await send(1, "parent");

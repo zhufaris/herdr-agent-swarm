@@ -76,21 +76,21 @@ process-manager state directly.
 
 ### Current implementation map
 
-The `ext` branch has completed the prompt-execution extraction but not the full
-target decomposition. Current names describe code that exists now; target names
-describe the stable seams that later slices will establish.
+The `ext` branch implements the target workflow decomposition. The remaining
+work is integration hardening and operational verification rather than another
+coordinator split.
 
 | Current implementation | Current responsibility | Target boundary |
 | --- | --- | --- |
-| `SyncCoordinator` | Inbound routing, prompt acceptance, binding provisioning, operations, and recovery wiring | `InboundRouter` plus separate application workflows |
+| `InboundRouter` | Durable ingress, command routing, prompt acceptance, and application lifecycle wiring | Implemented target boundary |
 | `PromptRunWorkflow` | FIFO turn draining, steering, detached observation, `TurnSupervisor`, and prompt-specific shutdown | Implemented target boundary |
 | `InProcessPromptWorkScheduler` | Coalesced process-local binding and detached-prompt wake-ups behind `PromptWorkScheduler` | Implemented target boundary |
-| `SessionReconciler` | Herdr snapshot convergence and queue scheduling callbacks | `HerdrRuntimeReconciler` publishing scoped work hints |
-| `BridgeEventBus` | Lifecycle projection events behind `LifecycleEventPublisher`; inbound work now uses a separate notifier | Replace concrete dependencies with the lifecycle interface |
-| `CardProjector` | Run-card and topic-view reduction plus outbound intent creation | `ConversationViewProjector` |
-| `LarkChannelPublisher` | Durable Lark outbox draining, retry, dead letters, and Answer-card-ready callbacks | `LarkOutboxDispatcher` publishing delivery checkpoints to the scheduler |
+| `HerdrRuntimeReconciler` | Herdr snapshot convergence and scoped prompt scheduling hints | Implemented target boundary |
+| `BridgeEventBus` | Lifecycle projection events behind `LifecycleEventPublisher`; inbound work uses a separate notifier | Implemented target boundary |
+| `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | Implemented target boundary |
+| `LarkOutboxDispatcher` | Durable Lark outbox draining, retry, dead letters, and Answer-card-ready callbacks | Implemented target boundary |
 | `PromptRunStore` | Capability port used by prompt execution, still backed by the shared SQLite store | Implemented target boundary |
-| `BindingStorePort` / `SqliteBindingStore` | Remaining broad persistence surface and atomic transitions | Capability-focused ports implemented by one transactional SQLite store |
+| `SqliteBindingStore` | One transactional implementation of the capability-focused store ports | Implemented infrastructure boundary |
 
 ### Ubiquitous language and target module names
 
@@ -339,18 +339,13 @@ and credentials.
 
 ## Current evolution priorities
 
-1. Make every user-visible lifecycle projection transactional or reconstructible
-   from durable aggregate state; do not rely on `BridgeEventBus` as a replay log.
-2. Split binding provisioning and operations from `SyncCoordinator`, leaving it
-   as inbound routing and application composition; prompt execution is already
-   isolated in `PromptRunWorkflow`.
-3. Retain startup and periodic durable scans as the correctness mechanism behind
-   the implemented `PromptWorkScheduler` interface.
-4. Continue narrowing the broad store dependency into capability-focused ports;
-   prompt execution already uses `PromptRunStore`.
-5. Persist explicit outbox lane identity and add lane-level backlog diagnostics;
-   cross-lane concurrency with strict in-lane ordering is already implemented.
-6. Model Answer pages explicitly only when page-level recovery, audit, or
+1. Keep startup and periodic durable scans as the correctness mechanism behind
+   the best-effort `PromptWorkScheduler`; wake-ups remain latency hints only.
+2. Keep user-visible terminal transitions atomic and transient output projections
+   reconstructible; `BridgeEventBus` is not a replay log.
+3. Extend capability ports instead of reintroducing broad store dependencies.
+4. Monitor persisted outbox lane health and preserve strict in-lane ordering.
+5. Model Answer pages explicitly only when page-level recovery, audit, or
    operations need more than the active page and outbox history.
 
 ## Related documents

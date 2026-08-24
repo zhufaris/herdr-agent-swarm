@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { BindingStorePort } from "../domain/ports.js";
+import type { LeaseStore } from "../domain/ports.js";
 import type { InstanceLeaseStatus } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
 
@@ -11,7 +11,7 @@ export class InstanceLeaseController {
   private onLost: (() => void | Promise<void>) | null = null;
 
   constructor(
-    private readonly store: Pick<BindingStorePort, "acquireInstanceLease" | "renewInstanceLease" | "releaseInstanceLease">,
+    private readonly store: LeaseStore,
     private readonly options: { ttlMs: number; heartbeatMs: number },
     private readonly logger: Pick<Logger, "info" | "warn" | "error">,
     private readonly clock: () => number = Date.now,
