@@ -6,7 +6,8 @@ import type { BindingStorePort } from "../domain/ports.js";
 import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, RequestCardRole, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
-import { answerElementId } from "../domain/run-card-view.js";
+import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
+import { mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { BridgeEvent } from "../domain/events.js";
 import { transitionSession, type AttachmentState, type ProvisioningCheckpoint, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
@@ -678,6 +679,48 @@ export class SqliteBindingStore implements BindingStorePort {
     const observationState: PromptObservationState = state === "queued" ? "not_started" : state === "running" ? "attached" : "completed";
     this.database.prepare("UPDATE prompt_jobs SET state = ?, observation_state = ?, error = ?, updated_at = ? WHERE id = ?")
       .run(state, observationState, error, now(), id);
+  }
+
+  completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', error = NULL, updated_at = ? WHERE id = ? AND binding_id = ?")
+        .run(input.occurredAt, input.promptId, input.bindingId);
+      this.updateBinding(input.bindingId, { lastOutputFingerprint: input.outputFingerprint });
+      const binding = this.transitionBinding(input.bindingId, { type: "turn_completed" });
+      this.persistTerminalRunCard(input.promptId, { type: "completed", occurredAt: input.occurredAt, answer: input.answer });
+      this.database.exec("COMMIT");
+      return binding;
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  failPrompt(input: { promptId: string; error: string; occurredAt: string }): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?")
+        .run(input.error, input.occurredAt, input.promptId);
+      this.persistTerminalRunCard(input.promptId, { type: "failed", occurredAt: input.occurredAt, notice: input.error });
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', error = NULL, updated_at = ? WHERE id = ?")
+        .run(input.occurredAt, input.promptId);
+      this.persistTerminalRunCard(input.promptId, { type: "steering-delivered", occurredAt: input.occurredAt, notice: input.notice });
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private persistTerminalRunCard(promptId: string, change: Parameters<typeof reduceRunCard>[1]): void {
+    const current = this.loadRunCard(promptId);
+    if (!current) throw new Error(`Run card missing for prompt: ` + promptId);
+    const next = reduceRunCard(current, change);
+    if (next !== current) this.saveRunCard(next);
+    const topic = this.loadTopicView(current.bindingId);
+    if (topic) this.saveTopicView(mirrorRunCardToTopic(topic, next));
   }
 
   cancelQueuedPrompts(bindingId: string, reason: string): number {

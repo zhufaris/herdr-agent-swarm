@@ -116,7 +116,7 @@ export class PromptRunWorkflow {
         if (result === "not_working") {
           if (prompt.body === "/stop") {
             const message = "TraeX 已不再处于 working 状态，`/stop` 未加入后续任务队列。";
-            this.options.store.updatePrompt(prompt.id, "failed", message);
+            this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
             await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
             this.options.logger.warn({ event: "stop-steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "not_working" }, "stop steering target was no longer working");
             continue;
@@ -128,12 +128,12 @@ export class PromptRunWorkflow {
           continue;
         }
         await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
-        this.options.store.updatePrompt(prompt.id, "delivered");
+        this.options.store.completeSteering({ promptId: prompt.id, notice: "已加入当前执行", occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "SteeringDelivered", "herdr", { promptId: prompt.id, parentPromptId });
         this.options.logger.info({ event: "steering-delivered", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "delivered" }, "steering delivered to active turn");
       } catch (error) {
         const message = `Steering 注入结果无法确认，请检查 Herdr pane 后按需重试：${errorMessage(error)}`;
-        this.options.store.updatePrompt(prompt.id, "failed", message);
+        this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
         this.options.logger.error({ event: "steering-failed", err: safeLogError(error), bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "uncertain" }, "steering delivery failed");
       }
@@ -182,11 +182,10 @@ export class PromptRunWorkflow {
         binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
         const answer = extractFinalTraexAnswer(await this.options.herdr.readOutput(paneId, 240));
-        this.options.store.updateBinding(bindingId, { lastOutputFingerprint: outputFingerprint(answer) });
-        this.options.store.updatePrompt(prompt.id, "delivered");
-        binding = this.options.store.transitionBinding(bindingId, { type: "turn_completed" });
         const streamed = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
-        await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。", queueDepth: this.options.store.countPendingPrompts(bindingId) });
+        const finalAnswer = streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。";
+        binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(answer), occurredAt: new Date().toISOString() });
+        await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
         await this.refreshQueuePositions(bindingId);
       } catch (error) {
@@ -199,7 +198,7 @@ export class PromptRunWorkflow {
           return;
         }
         if (abortController.signal.aborted && this.stopping) { observerDetached = true; return; }
-        this.options.store.updatePrompt(prompt.id, "failed", errorMessage(error));
+        this.options.store.failPrompt({ promptId: prompt.id, error: errorMessage(error), occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
         await this.refreshQueuePositions(bindingId);
@@ -242,11 +241,10 @@ export class PromptRunWorkflow {
         const unknownOutput = state === "unknown" ? await this.options.herdr.readOutput(paneId, 240) : null;
         if (observation.traexProcess && (state === "done" || state === "idle" && (observedActive || observation.composerReady))) {
           const answer = extractFinalTraexAnswer(unknownOutput ?? await this.options.herdr.readOutput(paneId, 240));
-          this.options.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(answer) });
-          this.options.store.updatePrompt(prompt.id, "delivered");
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
-          this.options.store.transitionBinding(binding.id, { type: "turn_completed" });
-          await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: answer || "TraeX 已完成；Bridge 重连后未能恢复更多文本，请查看 Herdr pane。", queueDepth: this.options.store.countPendingPrompts(binding.id) });
+          const finalAnswer = answer || "TraeX 已完成；Bridge 重连后未能恢复更多文本，请查看 Herdr pane。";
+          this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(answer), occurredAt: new Date().toISOString() });
+          await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;
         }

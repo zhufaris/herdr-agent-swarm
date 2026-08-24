@@ -94,6 +94,10 @@ export class CardProjector {
         if (next !== runCard) {
           this.store.saveRunCard(next);
           this.scheduler.schedule(promptId, next.viewVersion, ["blocked", "completed", "failed"].includes(next.phase));
+        } else if (["blocked", "completed", "failed"].includes(runCard.phase) && runCard.viewVersion > runCard.answerDeliveredVersion) {
+          // The durable workflow transition may have projected the terminal view
+          // before this process-local lifecycle notification arrived.
+          this.scheduler.schedule(promptId, runCard.viewVersion, true);
         }
       }
     }

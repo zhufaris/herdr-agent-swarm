@@ -113,6 +113,9 @@ export interface BindingStorePort {
   requeueQueuedSteering(bindingId: string, parentPromptId: string): number;
   cancelQueuedPrompts(bindingId: string, reason: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
+  completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
+  failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
+  completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[]): OutboundReply[];
@@ -146,6 +149,9 @@ export type PromptRunStore = Pick<BindingStorePort,
   | "requeueSteeringAsTurn"
   | "requeueQueuedSteering"
   | "updatePrompt"
+  | "completeTurn"
+  | "failPrompt"
+  | "completeSteering"
   | "updateBinding"
   | "transitionBinding"
   | "countPendingPrompts"

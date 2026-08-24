@@ -81,6 +81,7 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "running", startedAt: state.startedAt ?? change.occurredAt, notice: null };
       break;
     case "steering-delivered":
+      if (state.phase === "completed" && state.notice === change.notice) return state;
       patch = { phase: "completed", answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
     case "blocked":
@@ -107,9 +108,11 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       break;
     }
     case "completed":
+      if (state.phase === "completed" && state.answer.trim() === change.answer.trim()) return state;
       patch = { phase: "completed", ...completeAnswer(state, change.answer), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
       break;
     case "failed":
+      if (state.phase === "failed" && state.notice === change.notice) return state;
       patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }

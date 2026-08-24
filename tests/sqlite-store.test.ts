@@ -224,6 +224,49 @@ describe("SQLite store", () => {
     expect(serialized).not.toContain("private card payload");
   });
 
+  it("commits prompt completion and terminal projections atomically before lifecycle delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "running", activePromptId: "p1" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-24T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const answerCreate = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(answerCreate.id, "answer-1", "card-1");
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+    store.transitionBinding("b1", { type: "pane_observed", runtime: "working" });
+
+    store.completeTurn({ promptId: "p1", bindingId: "b1", answer: "done", outputFingerprint: "fingerprint", occurredAt: "2026-08-24T00:01:00Z" });
+
+    expect(store.getPrompt("p1")).toMatchObject({ state: "delivered", observationState: "completed" });
+    expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "done", lastOutputFingerprint: "fingerprint", hasCompletedTurn: true });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "completed", answer: "done", answerMessageId: "answer-1" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "done", activePromptId: null });
+  });
+
+  it("reopens a completed turn without lifecycle replay or prompt duplication", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-terminal-projection-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "running", activePromptId: "p1" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-24T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+    store.transitionBinding("b1", { type: "pane_observed", runtime: "working" });
+    store.completeTurn({ promptId: "p1", bindingId: "b1", answer: "durable answer", outputFingerprint: "fp", occurredAt: "2026-08-24T00:01:00Z" });
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.getPrompt("p1")).toMatchObject({ state: "delivered", attemptCount: 1 });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "completed", answer: "durable answer" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "durable answer" });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+  });
+
   it("scopes sessions and dead-letter actions to a chat without replaying prompts", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Visible" });
