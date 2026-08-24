@@ -26,7 +26,7 @@ describe("Herdr plugin manifest", () => {
   });
 
   it("relays state-changing Herdr events without subscribing to focus noise", () => {
-    for (const event of ["workspace.closed", "pane.created", "pane.closed", "pane.exited", "pane.agent_detected", "pane.agent_status_changed"]) {
+    for (const event of ["workspace.closed", "pane.created", "pane.closed", "pane.exited", "pane.output_changed", "pane.agent_detected", "pane.agent_status_changed"]) {
       expect(manifest).toContain(`on = \"${event}\"`);
     }
     expect(manifest).not.toContain('on = "workspace.updated"');

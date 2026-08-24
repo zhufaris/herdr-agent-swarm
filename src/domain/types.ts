@@ -186,6 +186,7 @@ export interface HerdrPane {
   tabId?: string | null;
   terminalId?: string | null;
   agentKind?: string | null;
+  outputRevision?: number | null;
   stateChangeSeq?: number | null;
   workspaceId: string;
   cwd: string | null;
@@ -199,6 +200,12 @@ export interface RuntimeObservation {
   traexProcess: boolean;
   composerReady: boolean;
   evidenceSource: "structured" | "recent" | "visible" | "process" | "none";
+}
+
+export interface RuntimeTurnObservation {
+  state: AgentState;
+  stateSource: "structured" | "terminal" | "unknown";
+  output: string;
 }
 
 export interface HerdrPaneCreationOptions {

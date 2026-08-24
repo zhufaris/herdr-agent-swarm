@@ -38,7 +38,7 @@ const environmentSchema = z.object({
   BRIDGE_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   HERDR_BIN: z.string().min(1).default("herdr"),
   TRAEX_BIN: z.string().min(1).default("traex"),
-  TRAEX_PERMISSION_MODE: z.string().min(1).default("suggest"),
+  TRAEX_PERMISSION_MODE: z.enum(["default", "bypass_permissions", "auto"]).default("auto"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),

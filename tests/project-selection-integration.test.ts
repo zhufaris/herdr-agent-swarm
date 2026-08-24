@@ -136,6 +136,45 @@ describe("project selection flow", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("uses a short random pane name when /herdr new has no title", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
+    const created: Array<{ title?: string }> = [];
+    const groupCards: object[] = [];
+    const selectorCards: object[] = [];
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic(card) { groupCards.push(card); return { topicId: "topic-random", rootMessageId: "root-random" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card-1" }; },
+      async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane(_workspaceId, _cwd, options) {
+        created.push({ title: options?.title });
+        return { paneId: "w1:p7", workspaceId: "w1", cwd: "/work/alpha", label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] };
+      },
+      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new CardProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = new SyncCoordinator(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/herdr new", mentionsBot: true, isRootMessage: true });
+    const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
+    await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+
+    const paneName = created[0]?.title;
+    expect(paneName).toMatch(/^task-[a-z0-9]{4}$/);
+    expect(store.findBindingByPane("w1:p7")).toMatchObject({ title: `alpha / ${paneName}` });
+    expect(JSON.stringify(groupCards[0])).toContain(`alpha / ${paneName}`);
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("reconciles each workspace independently and skips an unavailable workspace", async () => {
     const listed: string[] = [];
     const lark: LarkPort = {

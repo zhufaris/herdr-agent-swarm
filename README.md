@@ -41,10 +41,10 @@ as an authorization boundary: use a dedicated, tightly-scoped group, a least-
 privilege service account, and a non-critical host or container.
 
 TraeX is launched with `--permission-mode $TRAEX_PERMISSION_MODE` (default
-`suggest`). Set it to `auto` only when every chat member is trusted to act as
-the host user; in the default `suggest` mode each command waits for local
-approval in the Herdr pane and the Lark card turns orange until someone approves
-or rejects it there. The bridge intentionally has no remote approve/stop action.
+`auto`). This keeps approval handling in TraeX while allowing auto-review for
+eligible requests. Use `bypass_permissions` only when every chat member is
+trusted to act as the host user. The bridge intentionally has no remote
+approve/stop action.
 
 Inbound messages are accepted only from the configured chat ID and from user
 (not bot) senders; card-action callbacks must also originate from that chat.
@@ -154,7 +154,7 @@ BRIDGE_HTTP_PORT=8787
 HERDR_BRIDGE_EVENT_PORT=18787
 HERDR_BIN=herdr
 TRAEX_BIN=traex
-TRAEX_PERMISSION_MODE=suggest
+TRAEX_PERMISSION_MODE=auto
 LOG_LEVEL=info
 COMMAND_TIMEOUT_MS=30000
 TURN_TIMEOUT_MS=3600000
@@ -318,6 +318,8 @@ Available commands:
 
 The `new` and `projects` commands open a project selector. Only the command
 initiator can use it, and each resulting topic remains bound to that project.
+If `/herdr new` has no title, the bridge uses a short random pane name such as
+`task-7kq2`; cards display it as `space / pane_name`.
 The read-only `spaces` command lists every configured Space and its current
 panes, including empty Spaces and unregistered panes, without creating a
 binding or starting TraeX.

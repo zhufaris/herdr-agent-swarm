@@ -32,10 +32,10 @@ describe("active-turn steering", () => {
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
-        await onObservation?.({ state: "working", output });
+        await onObservation?.({ state: "working", stateSource: "structured", output });
         await hold;
         output += "\n◆ parent answer\n────────";
-        await onObservation?.({ state: "done", output });
+        await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
       async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },
@@ -99,9 +99,9 @@ describe("active-turn steering", () => {
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
-        if (turns.length === 1) { await onObservation?.({ state: "blocked", output }); await hold; }
+        if (turns.length === 1) { await onObservation?.({ state: "blocked", stateSource: "structured", output }); await hold; }
         output += `\n◆ answer ${turns.length}\n────────`;
-        await onObservation?.({ state: "done", output });
+        await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
       async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },

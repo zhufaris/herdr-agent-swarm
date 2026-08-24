@@ -53,7 +53,7 @@ describe("Herdr adapter", () => {
       } });
     } };
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1")).resolves.toEqual([{
-      paneId: "w1:p1", tabId: null, terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
+      paneId: "w1:p1", tabId: null, terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", outputRevision: null, stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
     }]);
     expect(calls).toEqual([["api", "snapshot"]]);
   });
@@ -175,7 +175,7 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "/usr/local/bin/traex"))
       .resolves.toBeUndefined();
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "run")).toEqual([
-      ["pane", "run", "w1:p1", "/usr/local/bin/traex", "--permission-mode", "suggest"]
+      ["pane", "run", "w1:p1", "/usr/local/bin/traex", "--permission-mode", "auto"]
     ]);
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "process-info")).toHaveLength(2);
   });
@@ -569,6 +569,28 @@ describe("Herdr adapter", () => {
     };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "finish", 2000)).resolves.toBe("done");
+  });
+
+  it("trusts structured done state even when terminal history still contains working markers", async () => {
+    const observations: Array<{ state: string; stateSource: string; output: string }> = [];
+    const outputs = [
+      "◆ Previous turn\n❯",
+      "◆ Previous turn\n❯ finish",
+      "✧ Working on stale terminal history\n◆ Final answer\n────────"
+    ];
+    const states = ["working", "done"] as const;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: states.shift() ?? "done" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "finish", 2000, (observation) => { observations.push(observation); }))
+      .resolves.toBe("done");
+    expect(observations.map(({ state, stateSource }) => `${state}:${stateSource}`)).toEqual(["working:structured", "done:structured"]);
   });
 
   it("does not complete an unknown-state turn while an active helper remains", async () => {

@@ -25,6 +25,10 @@ on = "pane.exited"
 command = ["bash", "plugin/relay-event.sh"]
 
 [[events]]
+on = "pane.output_changed"
+command = ["bash", "plugin/relay-event.sh"]
+
+[[events]]
 on = "pane.agent_detected"
 command = ["bash", "plugin/relay-event.sh"]
 

@@ -54,7 +54,8 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 ```
 
 如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
-不带标题的 `/herdr new` 会在选择后使用项目显示名作为标题。
+不带标题的 `/herdr new` 会在选择后使用短随机 Pane 名，例如 `task-7kq2`；
+卡片标题展示为 `space / pane_name`。
 
 ### `/herdr projects`
 

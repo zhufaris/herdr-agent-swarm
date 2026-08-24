@@ -30,7 +30,7 @@ export class SessionReconciler {
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly observedTerminalOutputs = new Map<string, string>();
-  private readonly observedStateSequences = new Map<string, number>();
+  private readonly observedOutputRevisions = new Map<string, number>();
   private skippedPaneReasons = new Map<string, string>();
 
   constructor(private readonly options: SessionReconcilerOptions) {}
@@ -183,7 +183,7 @@ export class SessionReconciler {
         bindingByPaneId.set(pane.paneId, existing);
         const output = cleanTerminalOutput(await this.options.herdr.readOutput(pane.paneId, 240));
         this.observedTerminalOutputs.set(pane.paneId, output);
-        if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) this.observedStateSequences.set(pane.paneId, pane.stateChangeSeq);
+        if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
         continue;
       }
       if (!existing.projectId) {
@@ -204,8 +204,8 @@ export class SessionReconciler {
         await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth: this.options.store.countPendingPrompts(existing.id) });
       }
       if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduleBinding(existing.id);
-      if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined && this.observedStateSequences.get(pane.paneId) === pane.stateChangeSeq) continue;
-      if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) this.observedStateSequences.set(pane.paneId, pane.stateChangeSeq);
+      if (pane.outputRevision !== null && pane.outputRevision !== undefined && this.observedOutputRevisions.get(pane.paneId) === pane.outputRevision) continue;
+      if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
       await this.publishChangedLocalOutput(existing, pane.paneId);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;

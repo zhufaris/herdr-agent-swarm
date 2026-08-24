@@ -67,13 +67,13 @@ describe("Herdr discovery", () => {
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         submittedPrompts.push(text);
         output += "\n✧ Working";
-        await onObservation?.({ state: "working", output });
+        await onObservation?.({ state: "working", stateSource: "structured", output });
         output += "\n◆ Ran first";
-        await onObservation?.({ state: "working", output });
+        await onObservation?.({ state: "working", stateSource: "structured", output });
         output += "\n◆ Ran second";
-        await onObservation?.({ state: "working", output });
+        await onObservation?.({ state: "working", stateSource: "structured", output });
         output += "\n◆ done\n────────";
-        await onObservation?.({ state: "done", output });
+        await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
       async readOutput() { return output; }, async renamePane() {}
@@ -119,6 +119,57 @@ describe("Herdr discovery", () => {
     await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
   });
 
+  it("ignores unknown runtime state observations while preserving terminal output", async () => {
+    let output = "initial terminal";
+    const events: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "request-card-1" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation) {
+        output += "\n◆ partial answer";
+        await onObservation?.({ state: "unknown", stateSource: "unknown", output });
+        output += "\n◆ final answer\n────────";
+        await onObservation?.({ state: "done", stateSource: "structured", output });
+        return "done";
+      },
+      async readOutput() { return output; }, async renamePane() {}
+    };
+    const config = {
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
+      projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
+      databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
+      commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const stopObserver = bus.onBridgeEvent((event) => {
+      if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
+    });
+    const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
+    const stopPublisher = publisher.start();
+    const stopProjector = new CardProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "event-unknown", messageId: "message-unknown", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
+    const bindingId = store.findBindingByPane("w1:p1")!.id;
+    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed" }));
+
+    expect(events).toContain("TurnOutputObserved");
+    expect(events).not.toContain("AgentStateChanged:unknown");
+    expect(events).toContain("AgentStateChanged:done");
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "done" });
+
+    await coordinator.stop(); stopObserver(); stopProjector(); stopPublisher(); store.close();
+  });
+
   it("uses the root card as the status card instead of posting a second card", async () => {
     let created = 0; let replied = 0; let updated = 0; let rootCard: object | null = null;
     const lark: LarkPort = {
@@ -152,7 +203,7 @@ describe("Herdr discovery", () => {
     await publisher.drain();
     expect({ created, replied, updated }).toEqual({ created: 1, replied: 0, updated: 2 });
     expect(store.findBindingByPane("w1:p1")).toMatchObject({ title: "configured-space / task", statusMessageId: "root-1", state: "active" });
-    expect(JSON.stringify(rootCard)).toContain("TraeX · configured-space / w1:p1");
+    expect(JSON.stringify(rootCard)).toContain("TraeX · configured-space / task");
 
     await coordinator.stop(); stopProjector(); stopChannelPublisher(); store.close();
   });
@@ -351,14 +402,14 @@ describe("Herdr discovery", () => {
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         prompts.push(text);
-        await onObservation?.({ state: "working", output });
+        await onObservation?.({ state: "working", stateSource: "structured", output });
         if (prompts.length === 1) {
-          await onObservation?.({ state: "blocked", output });
+          await onObservation?.({ state: "blocked", stateSource: "structured", output });
           await approval;
-          await onObservation?.({ state: "working", output });
+          await onObservation?.({ state: "working", stateSource: "structured", output });
         }
         output = `${output}\n◆ answer ${prompts.length}\n────────`;
-        await onObservation?.({ state: "done", output });
+        await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
       async readOutput() { return output; }, async renamePane() {}
@@ -415,7 +466,7 @@ describe("Herdr discovery", () => {
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         prompts.push(text);
         if (prompts.length === 1) {
-          await onObservation?.({ state: "blocked", output: "terminal" });
+          await onObservation?.({ state: "blocked", stateSource: "structured", output: "terminal" });
           await blockedTurn;
         }
         return "done";

@@ -52,6 +52,13 @@ describe("project registry configuration", () => {
     expect(loadConfig({ ...requiredEnvironment }).instanceLease).toEqual({ ttlMs: 15_000, heartbeatMs: 5_000 });
   });
 
+  it("uses only TraeX-supported permission modes", () => {
+    expect(loadConfig({ ...requiredEnvironment }).traex.permissionMode).toBe("auto");
+    expect(loadConfig({ ...requiredEnvironment, TRAEX_PERMISSION_MODE: "auto" }).traex.permissionMode).toBe("auto");
+    expect(loadConfig({ ...requiredEnvironment, TRAEX_PERMISSION_MODE: "bypass_permissions" }).traex.permissionMode).toBe("bypass_permissions");
+    expect(() => loadConfig({ ...requiredEnvironment, TRAEX_PERMISSION_MODE: "suggest" })).toThrow();
+  });
+
   it("uses plugin-native paths unless explicit paths override them", () => {
     expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
       PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"

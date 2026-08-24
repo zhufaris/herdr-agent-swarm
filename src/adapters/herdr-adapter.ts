@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { HerdrPort } from "../domain/ports.js";
-import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation } from "../domain/types.js";
+import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import { stripTerminalControl } from "../runtime/output.js";
 import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-output-parser.js";
@@ -28,7 +28,7 @@ export class HerdrCliAdapter implements HerdrPort {
     private readonly runner: CommandRunner,
     private readonly executable: string,
     private readonly commandTimeoutMs: number,
-    private readonly traexPermissionMode = "suggest"
+    private readonly traexPermissionMode = "auto"
   ) {}
 
   async assertWorkspace(workspaceId: string): Promise<void> {
@@ -124,7 +124,7 @@ export class HerdrCliAdapter implements HerdrPort {
     paneId: string,
     text: string,
     timeoutMs: number,
-    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
+    onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
     signal?: AbortSignal,
     onDispatched?: () => void | Promise<void>
   ): Promise<AgentState> {
@@ -261,7 +261,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const kind = agent?.agent ?? raw.agent ?? null;
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
-      agentKind: kind, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
+      agentKind: kind, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables: kind ? [kind] : []
     };
   }
@@ -300,7 +300,7 @@ export class HerdrCliAdapter implements HerdrPort {
     paneId: string,
     before: string,
     timeoutMs: number,
-    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
+    onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<AgentState> {
     const deadline = Date.now() + timeoutMs;
@@ -327,7 +327,7 @@ export class HerdrCliAdapter implements HerdrPort {
       if (output !== before) outputChangedAfterSubmission = true;
       if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
         if (agentState !== "unknown") lastAgentState = agentState;
-        await onObservation?.({ state: agentState, output });
+        await onObservation?.({ state: agentState, stateSource: agentState === "unknown" ? "unknown" : "structured", output });
       }
       if (observedWorking && (agentState === "done" || agentState === "idle")) return "done";
       const safelyIdle = agentState === "unknown" && outputChangedAfterSubmission && isTraexIdle(output) && !hasActiveTurnHelper(foregroundExecutables);
@@ -336,6 +336,10 @@ export class HerdrCliAdapter implements HerdrPort {
         if (stableIdlePolls >= 2) return "done";
       } else if (agentState === "unknown" && isTraexWorking(output)) {
         observedWorking = true;
+        if (lastAgentState !== "working") {
+          lastAgentState = "working";
+          await onObservation?.({ state: "working", stateSource: "terminal", output });
+        }
         stableIdlePolls = 0;
       } else if (agentState === "unknown" && observedWorking) {
         stableIdlePolls = output === lastOutput ? stableIdlePolls + 1 : 0;

@@ -121,18 +121,39 @@ describe("SessionReconciler", () => {
     store.close();
   });
 
-  it("skips terminal reads when the Herdr state sequence is unchanged", async () => {
+  it("skips terminal reads when the Herdr output revision is unchanged", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
     const readOutput = vi.fn(async () => "unchanged");
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", stateChangeSeq: 7, foregroundExecutables: ["traex"] };
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
     const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
 
     await reconciler.reconcile();
     await reconciler.reconcile();
 
     expect(readOutput).toHaveBeenCalledTimes(1);
+    store.close();
+  });
+
+  it("reads terminal output when the output revision changes even if agent state does not", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    let outputRevision = 7;
+    const readOutput = vi.fn(async () => "◆ local answer\n────────");
+    const pane = () => ({
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+      agentKind: "traex", outputRevision, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    });
+    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, readOutput } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+    outputRevision = 8;
+    await reconciler.reconcile();
+
+    expect(readOutput).toHaveBeenCalledTimes(2);
     store.close();
   });
 

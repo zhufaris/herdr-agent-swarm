@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -30,7 +30,7 @@ export interface HerdrPort {
     paneId: string,
     text: string,
     timeoutMs: number,
-    onObservation?: (observation: { state: AgentState; output: string }) => void | Promise<void>,
+    onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
     signal?: AbortSignal,
     onDispatched?: () => void | Promise<void>
   ): Promise<AgentState>;

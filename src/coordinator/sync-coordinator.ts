@@ -362,7 +362,7 @@ export class SyncCoordinator {
       await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。");
       return false;
     }
-    const paneTitle = requestedTitle ?? "新会话";
+    const paneTitle = requestedTitle ?? randomPaneName();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     const handoff = this.store.resetTopicBinding({ oldBindingId: binding.id, newBindingId: randomUUID(), title, actorOpenId: message.actorOpenId });
     this.turns.abort(binding.id);
@@ -564,7 +564,7 @@ export class SyncCoordinator {
     allowPaneCreation: boolean
   ): Promise<Binding> {
     const bindingId = selection.bindingId ?? randomUUID();
-    const paneTitle = selection.requestedTitle ?? project.displayName;
+    const paneTitle = selection.requestedTitle ?? randomPaneName();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = selection.bindingId ? this.store.getBinding(selection.bindingId) : null;
     if (!binding) {
@@ -664,7 +664,7 @@ export class SyncCoordinator {
   private async createFromLark(message: IncomingLarkMessage, title: string, initialPrompt: string | null): Promise<void> {
     const bindingId = randomUUID();
     const defaultProject = this.config.projects.find((project) => project.id === this.config.defaultProjectId) ?? this.config.projects[0]!;
-    const paneTitle = title;
+    const paneTitle = title || randomPaneName();
     title = formatProjectPaneTitle(projectSpaceName(defaultProject), defaultProject.cwd, paneTitle, "TraeX pane");
     let binding = this.store.createPendingBinding({
       id: bindingId, projectId: defaultProject.id, workspaceId: defaultProject.workspaceId, chatId: message.chatId,
@@ -806,7 +806,7 @@ export class SyncCoordinator {
         this.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
         const before = await this.herdr.readOutput(paneId, 240);
         let previousObservation = before;
-        const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, output }) => {
+        const state = await this.herdr.runPrompt(paneId, prompt.body, this.config.turnTimeoutMs, async ({ state: observedState, stateSource, output }) => {
           if (!this.isBindingActive(bindingId)) return;
           const parsed = parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
@@ -814,8 +814,8 @@ export class SyncCoordinator {
             await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [] });
           }
           const previousState = binding?.lastAgentState ?? "unknown";
-          this.turns.updateState(bindingId, prompt.id, observedState);
-          if (previousState !== observedState) {
+          if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
+          if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
             binding = this.store.transitionBinding(bindingId, { type: "pane_observed", runtime: observedState });
             await this.publish(bindingId, "AgentStateChanged", "herdr", {
               state: observedState, queueDepth: this.store.countPendingPrompts(bindingId), promptId: prompt.id
@@ -1189,6 +1189,10 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function paneCloseCodeHash(code: string): string { return createHash("sha256").update(code.trim().toUpperCase()).digest("hex"); }
+function randomPaneName(): string {
+  const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4);
+  return `task-${suffix}`;
+}
 function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(new Error("observer detached"));
   return new Promise((resolve, reject) => {
