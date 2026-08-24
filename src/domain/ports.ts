@@ -174,6 +174,14 @@ export type RuntimeReconciliationStore = Pick<BindingStorePort,
   | "updateBinding"
 >;
 
+export type BindingProvisioningStore = Pick<BindingStorePort,
+  | "attachBindingPane" | "audit" | "claimProjectSelection" | "completeProjectSelection"
+  | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
+  | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindings"
+  | "listProcessingProjectSelections" | "loadTopicView" | "pauseProjectSelection" | "recordBridgeMessage"
+  | "resetTopicBinding" | "saveTopicView" | "transitionBinding" | "updateBinding"
+>;
+
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
 
 export type OutboxStore = Pick<BindingStorePort,

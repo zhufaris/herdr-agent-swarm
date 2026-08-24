@@ -22,12 +22,14 @@ import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../event
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import { PromptRunWorkflow } from "./prompt-run-workflow.js";
 import { HerdrRuntimeReconciler } from "./herdr-runtime-reconciler.js";
+import { BindingProvisioningWorkflow } from "./binding-provisioning-workflow.js";
 
 export class SyncCoordinator {
   private readonly scheduler: PromptWorkScheduler;
   private readonly inboundWork: InboundWorkNotifier;
   private readonly promptRun: PromptRunWorkflow;
   private readonly reconciler: HerdrRuntimeReconciler;
+  private readonly provisioning: BindingProvisioningWorkflow;
   private inboundDrain: Promise<void> | null = null;
   private stopping = false;
   private stopInboundSubscription: (() => void) | null = null;
@@ -48,9 +50,10 @@ export class SyncCoordinator {
     this.inboundWork = inboundWork ?? new InProcessInboundWorkNotifier();
     channelPublisher.connectPromptScheduler(this.scheduler);
     this.promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler: this.scheduler, channelPublisher, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
+    this.provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: channelPublisher, scheduler: this.scheduler, logger });
     this.reconciler = new HerdrRuntimeReconciler({
       projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher, logger,
-      discoverPane: (pane, project) => this.createFromHerdr(pane, project),
+      discoverPane: (pane, project) => this.provisioning.discover(pane, project),
       scheduler: this.scheduler,
       isBindingBusy: (bindingId) => this.promptRun.isBindingBusy(bindingId)
     });
@@ -85,7 +88,6 @@ export class SyncCoordinator {
     }
     const recoveredInbound = this.store.recoverProcessingInboundMessages();
     if (recoveredInbound > 0) this.logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
-    const recoverableSelections = this.store.listProcessingProjectSelections();
     for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) await this.herdr.assertWorkspace(workspaceId);
     await this.reconciler.captureBaselines();
     await this.recoverPaneCloseOperations();
@@ -94,11 +96,7 @@ export class SyncCoordinator {
     this.reconciler.start(this.config.reconcileIntervalMs);
     this.stopInboundSubscription = this.inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
     await this.lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
-    for (const selection of recoverableSelections) await this.recoverProjectSelection(selection);
-    const selectionBindingIds = new Set(recoverableSelections.flatMap((selection) => selection.bindingId ? [selection.bindingId] : []));
-    for (const binding of this.store.listBindings().filter((candidate) =>
-      candidate.lifecycle === "provisioning" && candidate.provisioningCheckpoint === "runtime_started" && !selectionBindingIds.has(candidate.id)
-    )) await this.recoverDiscoveredBinding(binding);
+    await this.provisioning.recover();
     await this.channelPublisher.drain();
     await this.drainInboundMessages();
   }
@@ -175,49 +173,13 @@ export class SyncCoordinator {
       const project = this.config.projects.find((candidate) => candidate.id === paneClaim.projectId && candidate.workspaceId === paneClaim.workspaceId);
       if (!project) return;
       const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/herdr attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
-      const outcome = await this.attachExistingPane(synthetic, projectSpaceName(project), paneClaim.paneId);
+      const outcome = await this.provisioning.attach(synthetic, projectSpaceName(project), paneClaim.paneId);
       this.logger.info({ event: "space-pane-claim-decided", projectId: project.id, workspaceId: project.workspaceId, paneId: paneClaim.paneId, outcome: outcome ? "attached" : "rejected" }, "processed Space pane claim");
       return;
     }
     const value = parseProjectAction(action.value);
     if (!value) return;
-    const claim = this.store.claimProjectSelection({
-      selectionId: value.selectionId, projectId: value.projectId, messageId: action.messageId, chatId: action.chatId, actorOpenId: action.operatorOpenId,
-      allowedProjectIds: this.config.projects.map((project) => project.id)
-    });
-    this.logger.info({ event: "project-selection-decided", selectionId: value.selectionId, projectId: value.projectId, messageId: action.messageId, outcome: claim.outcome }, "processed project selection action");
-    this.store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${value.selectionId}:${value.projectId}`, outcome: claim.outcome });
-    if (claim.outcome === "missing" || !claim.selection) return;
-    const selection = claim.selection;
-    if (claim.outcome === "invalid") return;
-    if (claim.outcome === "unauthorized") return;
-    if (claim.outcome === "expired") {
-      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:expired`, renderProjectSelectionStatusCard({ status: "expired", message: "请重新发送 /herdr new。" }));
-      return;
-    }
-    if (claim.outcome === "processing") return;
-    if (claim.outcome === "completed") {
-      const binding = selection.bindingId ? this.store.getBinding(selection.bindingId) : null;
-      const project = this.config.projects.find((item) => item.id === selection.selectedProjectId);
-      if (binding && project) await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
-      return;
-    }
-    const project = this.config.projects.find((item) => item.id === value.projectId);
-    if (!project) return;
-    await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:processing`, renderProjectSelectionStatusCard({ status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) }));
-    try {
-      const binding = await this.createSelectedProject(selection, project, true);
-      this.store.completeProjectSelection(selection.id, binding.id);
-      await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
-      this.store.audit({ actorOpenId: action.operatorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
-    } catch (error) {
-      this.store.pauseProjectSelection(selection.id, errorMessage(error));
-      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `selection:${value.selectionId}:recoverable`, renderProjectSelectionStatusCard({
-        status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project),
-        message: provisioningRecoveryMessage(error)
-      }));
-      this.logger.error({ event: "project-selection-paused", err: safeLogError(error), selectionId: value.selectionId, projectId: project.id, outcome: "retry_on_restart" }, "project selection paused at a recoverable checkpoint");
-    }
+    await this.provisioning.completeSelection(action, value.selectionId, value.projectId);
   }
 
   private async drainInboundMessages(): Promise<void> {
@@ -261,9 +223,9 @@ export class SyncCoordinator {
       } else if (command?.kind === "model") {
         disposition = await this.runModelCommand(message, binding, command.name) ? "command_completed" : "rejected";
       } else if (command?.kind === "reset") {
-        disposition = await this.resetTopicSession(message, binding, command.title) ? "command_completed" : "rejected";
+        disposition = await this.provisioning.reset(message, binding, command.title) ? "command_completed" : "rejected";
       } else if (command?.kind === "new" || command?.kind === "projects") {
-        await this.createProjectSelector(message, command.kind === "new" ? command.title : null);
+        await this.provisioning.selectProject(message, command.kind === "new" ? command.title : null);
       } else if (command?.kind === "spaces") {
         await this.publishSpaceDirectory(message);
       } else if (command?.kind === "sessions") {
@@ -271,7 +233,7 @@ export class SyncCoordinator {
       } else if (command?.kind === "failures") {
         await this.publishOperationCards(message, "failures", renderFailureCards(this.store.listFailures(message.chatId)));
       } else if (command?.kind === "attach") {
-        disposition = await this.attachExistingPane(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
+        disposition = await this.provisioning.attach(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
       } else if (command?.kind === "status") {
         if (!binding) {
           await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard("这个话题尚未连接 Herdr。请发送 `/herdr new` 创建项目。"));
@@ -302,11 +264,11 @@ export class SyncCoordinator {
       } else if (command?.kind === "reattach") {
         if (!binding || binding.attachment !== "orphaned") {
           await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected";
-        } else await this.reattachBinding(binding, command.paneId, false, message.actorOpenId);
+        } else await this.provisioning.reattach(binding, command.paneId, message.actorOpenId);
       } else if (command?.kind === "replace") {
         if (!binding || binding.attachment !== "orphaned") {
           await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected";
-        } else await this.replaceBinding(binding, message.actorOpenId);
+        } else await this.provisioning.replace(binding, message.actorOpenId);
       } else if (command?.kind === "resume") {
         if (!binding || binding.lifecycle !== "archived" || !binding.paneId) {
           await this.reject(message, "只有已归档且仍保留 Pane 的会话可以恢复。"); disposition = "rejected";
@@ -321,7 +283,8 @@ export class SyncCoordinator {
         await this.enqueue(binding, message);
         disposition = "prompt_queued";
       } else if (message.isRootMessage && message.mentionsBot) {
-        await this.createFromLark(message, deriveTopicTitle(message.text), message.text);
+        const created = await this.provisioning.createRoot(message, deriveTopicTitle(message.text));
+        await this.enqueue(created, message, message.text);
       } else {
         await this.channelPublisher.enqueueCard(
           message.rootMessageId ?? message.messageId,
