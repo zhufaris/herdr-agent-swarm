@@ -57,4 +57,23 @@ describe("health server", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ status: "not_ready", components: { lease: { ok: false, held: false, error: "fence changed" } } });
   });
+
+  it("reports lifecycle subscriber failures without changing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      lifecycleEvents: { snapshot: () => ({ subscriberFailures: 3, lastFailureAt: "2026-08-24T00:00:00.000Z", lastFailedSubscriber: "conversation-view-projector" }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    const ready = await fetch(`http://127.0.0.1:${port}/ready`);
+    expect(ready.status).toBe(200);
+    const status = await fetch(`http://127.0.0.1:${port}/status`);
+    expect(await status.json()).toMatchObject({ status: "ok", lifecycleEvents: {
+      subscriberFailures: 3, lastFailureAt: "2026-08-24T00:00:00.000Z", lastFailedSubscriber: "conversation-view-projector"
+    } });
+  });
 });

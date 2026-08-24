@@ -88,7 +88,7 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const stopObserver = bus.onBridgeEvent((event) => {
+    const stopObserver = bus.onBridgeEvent("test-observer", (event) => {
       if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
       if (event.type === "TurnOutputObserved") {
         answerSnapshots.push(event.payload.answerSnapshot);
@@ -150,7 +150,7 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const stopObserver = bus.onBridgeEvent((event) => {
+    const stopObserver = bus.onBridgeEvent("test-observer", (event) => {
       if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
     });
     const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));

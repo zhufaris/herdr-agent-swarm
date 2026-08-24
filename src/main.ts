@@ -38,7 +38,7 @@ const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
 const rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode);
 const herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
 const lark = new LarkSdkAdapter(config.lark, logger);
-const bus = new BridgeEventBus();
+const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);
 const inboundWork = new InProcessInboundWorkNotifier();
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger);
@@ -64,7 +64,7 @@ try {
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, buildIdentity });
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, lifecycleEvents: bus, buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   lease.start(() => shutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; }));

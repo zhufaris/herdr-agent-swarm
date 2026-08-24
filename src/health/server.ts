@@ -3,6 +3,7 @@ import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
 import type { InstanceLeaseStatus, ProjectConfig, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
+import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
 
 interface ComponentState { ok: boolean; error?: string }
 interface Readiness {
@@ -18,6 +19,7 @@ export function startHealthServer(options: {
   host: string; port: number; store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
   lease: { snapshot(): InstanceLeaseStatus };
   workspaceCache?: { status(): WorkspaceCacheStatus };
+  lifecycleEvents?: LifecycleEventDiagnostics;
   buildIdentity: BuildIdentity;
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
@@ -41,7 +43,8 @@ export function startHealthServer(options: {
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
-        ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {})
+        ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
+        ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));
       return;
     }

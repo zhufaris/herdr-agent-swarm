@@ -180,6 +180,14 @@ contract is persisted workflow state plus deterministic convergence, not replay
 of every process-local notification. This is separate from workflow wake-ups:
 wake-ups remain best effort because workers always reload durable state.
 
+Lifecycle subscribers are isolated from workflow publishers. The event bus waits
+for every subscriber present at publication time, but records and logs an
+individual subscriber failure instead of rejecting the workflow publication.
+This prevents a projection failure from reclassifying a workflow result that is
+already durable. `/status` exposes the process-local failure count and latest
+failed subscriber; these diagnostics reset on restart and do not affect
+readiness.
+
 ### Runtime shape
 
 ```text

@@ -142,6 +142,35 @@ describe("coordinator concurrency controls", () => {
       await coordinator.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
     }
   });
+
+  it("keeps a committed terminal result completed when a lifecycle subscriber fails", async () => {
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", title: "Task", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; },
+      async createPane() { throw new Error("not used"); },
+      async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, _onObservation, _signal, onDispatched) { await onDispatched?.(); return "done"; },
+      async readOutput() { return "◆ final answer\n────────"; },
+      async renamePane() {}
+    };
+    const { coordinator, publisher, store, bus } = fixture(herdr);
+    bus.onBridgeEvent("failing-projector", (event) => {
+      if (event.type === "TurnCompleted") throw new Error("projection failed");
+    });
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "final answer" }));
+
+    const promptId = store.listRunCards("b1")[0]!.promptId;
+    expect(store.getPrompt(promptId)).toMatchObject({ state: "delivered", observationState: "completed", error: null });
+    expect(bus.snapshot()).toMatchObject({ subscriberFailures: 1, lastFailedSubscriber: "failing-projector" });
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
 });
 
 function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
@@ -149,7 +178,7 @@ function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
   const bus = new BridgeEventBus();
   const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
-  return { coordinator, publisher, store };
+  return { coordinator, publisher, store, bus };
 }
 
 function emptyHerdr(): HerdrPort {

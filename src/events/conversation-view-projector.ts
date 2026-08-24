@@ -62,7 +62,7 @@ export class ConversationViewProjector {
   }
 
   start(): () => void {
-    this.unsubscribe = this.bus.onBridgeEvent((event) => this.enqueue(event));
+    this.unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
     this.unsubscribeStreamCardCreated = this.channelPublisher.onStreamCardCreated((promptId, viewVersion) => {
       const view = this.store.loadRunCard(promptId);
       this.scheduler.schedule(promptId, Math.max(viewVersion, view?.viewVersion ?? 0), true);

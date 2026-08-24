@@ -347,8 +347,9 @@ describe("event-driven card projection", () => {
     const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
 
-    await expect(bus.publish({ eventId: "failed", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Failed" } })).rejects.toThrow("projection failed");
+    await expect(bus.publish({ eventId: "failed", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Failed" } })).resolves.toBeUndefined();
     expect(store.loadTopicView("b1")).toBeNull();
+    expect(bus.snapshot()).toMatchObject({ subscriberFailures: 1, lastFailedSubscriber: "conversation-view-projector" });
     await expect(bus.publish({ eventId: "recovered", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:01Z", payload: { title: "Recovered" } })).resolves.toBeUndefined();
     expect(store.loadTopicView("b1")?.title).toBe("Recovered");
     await projector.stop(); await publisher.stop(); store.close();
