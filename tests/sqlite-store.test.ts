@@ -551,18 +551,35 @@ describe("SQLite store", () => {
   });
 
   it("selects bounded durable lane heads without letting later rows bypass backoff", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
     store = new SqliteBindingStore(":memory:");
     for (let index = 0; index < 8; index += 1) {
       store.enqueueOutboundReply({ id: `head-${index}`, idempotencyKey: `head-${index}`, rootMessageId: `card-${index}`, kind: "card_update", payload: "{}" });
     }
     store.enqueueOutboundReply({ id: "same-lane-later", idempotencyKey: "same-lane-later", rootMessageId: "card-0", kind: "card_update", payload: "{}" });
-    store.markOutboundReplyFailed("head-0", "temporary");
+    store.markOutboundReplyFailed("head-0", "temporary", 60_000);
 
     expect(store.listOutboundLaneHeads(4, new Date().toISOString()).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
     expect(store.listOutboundLaneHeads(4, null).map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
     expect(store.listOutboundLaneHeads(4, null, ["message:card-0"]).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
-    expect(store.getOperationalSummary().outboxLanes).toMatchObject({ pending: 8, blocked: 1 });
+    vi.setSystemTime(new Date("2026-08-24T00:00:10.500Z"));
+    expect(store.getOperationalSummary().outboxLanes).toEqual({
+      pending: 8, eligible: 7, blocked: 1,
+      nextAttemptAt: "2026-08-24T00:01:00.000Z",
+      oldestHeadAt: "2026-08-24T00:00:00.000Z", oldestHeadAgeSeconds: 10
+    });
     expect(store.getNextOutboundLaneHeadAttemptAt()).toBe(store.listPendingOutboundReplies()[1]!.nextAttemptAt);
+    vi.useRealTimers();
+  });
+
+  it("reports an empty durable outbox lane summary without identifiers", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    expect(store.getOperationalSummary().outboxLanes).toEqual({
+      pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null,
+      oldestHeadAt: null, oldestHeadAgeSeconds: null
+    });
   });
 
   it("preserves Answer lane insertion order across reopen and VACUUM", () => {

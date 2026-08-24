@@ -20,6 +20,7 @@ describe("health server", () => {
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects, lark: { isReady: () => false } as never,
       herdr: { async assertWorkspace() { throw new Error("workspace unavailable"); } } as never,
+      outboxDispatcher: { snapshot: () => ({ state: "idle", activeDeliveries: 0, scanPending: false, lastScanAt: null, lastScanOutcome: null, lastDeliveryAt: null, lastDeliveryFailureAt: null }) },
       lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
       buildIdentity
     });
@@ -38,7 +39,7 @@ describe("health server", () => {
     const status = await fetch(`http://127.0.0.1:${port}/status`);
     expect(status.status).toBe(200);
     const body = await status.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, outboxLanes: { pending: 0, blocked: 0, oldestHeadAt: null } } });
+    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, outboxLanes: { pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null, oldestHeadAt: null, oldestHeadAgeSeconds: null } }, outboxDispatcher: { state: "idle", activeDeliveries: 0 } });
     expect(body).toHaveProperty("uptimeSeconds");
     expect(body).toHaveProperty("timestamp");
     expect(body).toHaveProperty("lease.ownerSuffix", "owner123");
@@ -75,5 +76,23 @@ describe("health server", () => {
     expect(await status.json()).toMatchObject({ status: "ok", lifecycleEvents: {
       subscriberFailures: 3, lastFailureAt: "2026-08-24T00:00:00.000Z", lastFailedSubscriber: "conversation-view-projector"
     } });
+  });
+
+  it("isolates dispatcher diagnostic failure from readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      outboxDispatcher: { snapshot() { throw new Error("diagnostic failed"); } }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    const status = await fetch(`http://127.0.0.1:${port}/status`);
+    expect(await status.json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" },
+      outboxDispatcher: { error: "diagnostic failed" }
+    });
   });
 });

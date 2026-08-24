@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { LarkPort, OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports.js";
-import type { OutboundReply } from "../domain/types.js";
+import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
@@ -10,7 +10,7 @@ import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessa
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
   private static readonly MAX_CONCURRENT_DELIVERIES = 4;
   private draining: Promise<void> | null = null;
-  private readonly activeHandlers = new Set<Promise<void>>();
+  private readonly activeHandlers = new Set<Promise<unknown>>();
   private unsubscribe: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
@@ -20,6 +20,10 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private forceRequested = false;
   private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
   private scheduler: PromptWorkScheduler | null = null;
+  private lastScanAt: string | null = null;
+  private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
+  private lastDeliveryAt: string | null = null;
+  private lastDeliveryFailureAt: string | null = null;
 
   constructor(
     private readonly store: OutboxStore,
@@ -46,6 +50,15 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   }
 
   connectPromptScheduler(scheduler: PromptWorkScheduler): void { this.scheduler = scheduler; }
+
+  snapshot(): OutboxDispatcherDiagnostics {
+    return {
+      state: this.stopping ? "stopping" : this.draining ? "running" : "idle",
+      activeDeliveries: this.activeHandlers.size, scanPending: this.scanRequested,
+      lastScanAt: this.lastScanAt, lastScanOutcome: this.lastScanOutcome,
+      lastDeliveryAt: this.lastDeliveryAt, lastDeliveryFailureAt: this.lastDeliveryFailureAt
+    };
+  }
 
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
@@ -79,11 +92,18 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       const force = this.forceRequested;
       this.scanRequested = false;
       this.forceRequested = false;
-      await this.drainPending(force);
+      try {
+        this.lastScanOutcome = await this.drainPending(force);
+      } catch (error) {
+        this.lastScanOutcome = "failed";
+        throw error;
+      } finally {
+        this.lastScanAt = new Date().toISOString();
+      }
     }
   }
 
-  private trackHandler(work: Promise<void>): Promise<void> {
+  private trackHandler<T>(work: Promise<T>): Promise<T> {
     this.activeHandlers.add(work);
     void work.then(
       () => this.activeHandlers.delete(work),
@@ -97,17 +117,20 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     if (this.draining) await this.draining;
   }
 
-  private async drainPending(force: boolean): Promise<void> {
+  private async drainPending(force: boolean): Promise<"idle" | "delivered" | "failed"> {
     const blockedTargets = new Set<string>();
+    let outcome: "idle" | "delivered" | "failed" = "idle";
     while (true) {
-      if (this.stopping) return;
+      if (this.stopping) return outcome;
       const batch = this.store.listOutboundLaneHeads(
         LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES,
         force ? null : new Date().toISOString(),
         [...blockedTargets]
       );
-      if (batch.length === 0) return;
-      await Promise.all(batch.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
+      if (batch.length === 0) return outcome;
+      const results = await Promise.all(batch.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
+      if (results.includes("failed")) outcome = "failed";
+      else if (outcome === "idle" && results.includes("delivered")) outcome = "delivered";
     }
   }
 
@@ -125,7 +148,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     this.retryTimer.unref?.();
   }
 
-  private async deliverReply(reply: OutboundReply, blockedTargets: Set<string>): Promise<void> {
+  private async deliverReply(reply: OutboundReply, blockedTargets: Set<string>): Promise<"delivered" | "failed"> {
     try {
       if (reply.kind === "card_update") {
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
@@ -172,6 +195,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         this.store.recordBridgeMessage(sent.messageId);
         if (reply.kind === "card_reply" && reply.bindingId && !reply.promptId) this.store.updateBinding(reply.bindingId, { statusMessageId: sent.messageId });
       }
+      this.lastDeliveryAt = new Date().toISOString();
+      return "delivered";
     } catch (error) {
       const permanent = error instanceof PermanentDeliveryError;
       const retryDelayMs = permanent ? undefined : retryAfterDelayMs(error);
@@ -187,6 +212,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       if (failed?.state === "dead_letter") this.logger.error(context, permanent ? "Lark outbox reply rejected by durable target validation" : "Lark outbox reply exhausted retries");
       else this.logger.warn(context, "Lark outbox reply delivery failed; retry scheduled");
       blockedTargets.add(deliveryTargetKey(reply));
+      this.lastDeliveryFailureAt = new Date().toISOString();
+      return "failed";
     }
   }
 }

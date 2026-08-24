@@ -861,6 +861,7 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   getOperationalSummary(): OperationalSummary {
+    const observedAt = now();
     const groupedCounts = <T extends string>(table: string, column: string, values: readonly T[]): Record<T, number> => {
       const result = Object.fromEntries(values.map((value) => [value, 0])) as Record<T, number>;
       const rows = this.database.prepare(`SELECT ${column} AS value, COUNT(*) AS count FROM ${table} GROUP BY ${column}`).all() as Array<{ value: T; count: number }>;
@@ -876,10 +877,12 @@ export class SqliteBindingStore implements BindingStorePort {
         FROM outbound_replies WHERE state = 'pending'
       )
       SELECT COUNT(*) AS pending,
+        SUM(CASE WHEN next_attempt_at <= ? THEN 1 ELSE 0 END) AS eligible,
         SUM(CASE WHEN error IS NOT NULL OR next_attempt_at > ? THEN 1 ELSE 0 END) AS blocked,
+        MIN(CASE WHEN next_attempt_at > ? THEN next_attempt_at END) AS next_attempt_at,
         MIN(created_at) AS oldest_head_at
       FROM heads WHERE position = 1
-    `).get(now()) as { pending: number; blocked: number | null; oldest_head_at: string | null };
+    `).get(observedAt, observedAt, observedAt) as { pending: number; eligible: number | null; blocked: number | null; next_attempt_at: string | null; oldest_head_at: string | null };
     const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
     const oldestInactive = this.database.prepare("SELECT MIN(last_activity_at) AS value FROM bindings WHERE lifecycle != 'active' OR attachment != 'attached'").get() as { value: string | null };
     const recoverableProvisioning = this.database.prepare("SELECT COUNT(*) AS count FROM project_selections WHERE state = 'processing' AND binding_id IS NOT NULL").get() as { count: number };
@@ -890,7 +893,11 @@ export class SqliteBindingStore implements BindingStorePort {
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
       promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
       outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, oldestPendingAt: oldestPending.value,
-      outboxLanes: { pending: Number(laneHealth.pending), blocked: Number(laneHealth.blocked ?? 0), oldestHeadAt: laneHealth.oldest_head_at },
+      outboxLanes: {
+        pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),
+        nextAttemptAt: laneHealth.next_attempt_at, oldestHeadAt: laneHealth.oldest_head_at,
+        oldestHeadAgeSeconds: laneHealth.oldest_head_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_head_at)) / 1_000))
+      },
       lifecycle: groupedCounts<SessionLifecycle>("bindings", "lifecycle", ["provisioning", "active", "draining", "archived", "closed", "failed"]),
       attachment: groupedCounts<AttachmentState>("bindings", "attachment", ["unattached", "attached", "degraded", "orphaned"]),
       recoverableProvisioning: Number(recoverableProvisioning.count), archivedPanesPresent: Number(archivedPanesPresent.count),

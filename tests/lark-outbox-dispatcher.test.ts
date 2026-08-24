@@ -246,14 +246,46 @@ describe("Lark channel publisher", () => {
     publisher.start();
     const publishing = connectedWriter(store, publisher).enqueueCard("root-1", "standalone:stop", { schema: "2.0" });
     await deliveryStarted;
+    expect(publisher.snapshot()).toMatchObject({ state: "running", activeDeliveries: 1, scanPending: false });
     let stopped = false;
     const stopping = publisher.stop().then(() => { stopped = true; });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(stopped).toBe(false);
+    expect(publisher.snapshot()).toMatchObject({ state: "stopping", activeDeliveries: 1 });
     release();
     await Promise.all([publishing, stopping]);
     expect(delivered).toBe(true);
+    expect(publisher.snapshot()).toMatchObject({
+      state: "stopping", activeDeliveries: 0, lastScanOutcome: "delivered"
+    });
+    expect(publisher.snapshot().lastDeliveryAt).not.toBeNull();
     store.close();
+  });
+
+  it("reports sanitized idle and failed scan diagnostics", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async replyCard() { throw new Error("secret delivery detail"); }
+    }), pino({ enabled: false }));
+
+    expect(publisher.snapshot()).toEqual({
+      state: "idle", activeDeliveries: 0, scanPending: false, lastScanAt: null,
+      lastScanOutcome: null, lastDeliveryAt: null, lastDeliveryFailureAt: null
+    });
+    store.enqueueOutboundReply({ id: "private-reply-id", idempotencyKey: "private-key", rootMessageId: "private-root", kind: "card_reply", payload: "private payload" });
+    await publisher.requestScan();
+
+    expect(publisher.snapshot()).toEqual({
+      state: "idle", activeDeliveries: 0, scanPending: false,
+      lastScanAt: "2026-08-24T00:00:00.000Z", lastScanOutcome: "failed",
+      lastDeliveryAt: null, lastDeliveryFailureAt: "2026-08-24T00:00:00.000Z"
+    });
+    expect(JSON.stringify(publisher.snapshot())).not.toMatch(/private|secret/);
+    await publisher.stop();
+    store.close();
+    vi.useRealTimers();
   });
 
   it("delivers successive versions to the same request card", async () => {

@@ -150,7 +150,10 @@ export interface OperationalSummary {
   pendingOutbox: number;
   deadLetters: number;
   oldestPendingAt: string | null;
-  outboxLanes: { pending: number; blocked: number; oldestHeadAt: string | null };
+  outboxLanes: {
+    pending: number; eligible: number; blocked: number; nextAttemptAt: string | null;
+    oldestHeadAt: string | null; oldestHeadAgeSeconds: number | null;
+  };
   recentFailedPrompt: { promptId: string; bindingId: string; updatedAt: string; error: string } | null;
   recentDeadLetter: { replyId: string; bindingId: string | null; promptId: string | null; attemptCount: number; updatedAt: string; error: string } | null;
   lifecycle: Record<import("./pane-thread-lifecycle.js").SessionLifecycle, number>;
@@ -159,6 +162,16 @@ export interface OperationalSummary {
   archivedPanesPresent: number;
   cleanupCandidates: number;
   oldestInactiveAt: string | null;
+}
+
+export interface OutboxDispatcherDiagnostics {
+  state: "idle" | "running" | "stopping";
+  activeDeliveries: number;
+  scanPending: boolean;
+  lastScanAt: string | null;
+  lastScanOutcome: "idle" | "delivered" | "failed" | null;
+  lastDeliveryAt: string | null;
+  lastDeliveryFailureAt: string | null;
 }
 
 export interface ProjectSelection {

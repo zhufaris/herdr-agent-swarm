@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { InstanceLeaseStatus, ProjectConfig, WorkspaceCacheStatus } from "../domain/types.js";
+import type { InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
@@ -20,6 +20,7 @@ export function startHealthServer(options: {
   lease: { snapshot(): InstanceLeaseStatus };
   workspaceCache?: { status(): WorkspaceCacheStatus };
   lifecycleEvents?: LifecycleEventDiagnostics;
+  outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   buildIdentity: BuildIdentity;
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
@@ -39,10 +40,14 @@ export function startHealthServer(options: {
       let operational: ReturnType<HealthStore["getOperationalSummary"]> | { error: string };
       try { operational = options.store.getOperationalSummary(); }
       catch (error) { operational = { error: boundedError(error) }; }
+      let outboxDispatcher: OutboxDispatcherDiagnostics | { error: string } | undefined;
+      try { outboxDispatcher = options.outboxDispatcher?.snapshot(); }
+      catch (error) { outboxDispatcher = { error: boundedError(error) }; }
       response.statusCode = 200;
       response.end(JSON.stringify({
-        status: readiness.status === "ready" && !("error" in operational) ? "ok" : "degraded", identity: options.buildIdentity,
+        status: readiness.status === "ready" && !("error" in operational) && !(outboxDispatcher && "error" in outboxDispatcher) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
+        ...(outboxDispatcher ? { outboxDispatcher } : {}),
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
         ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));

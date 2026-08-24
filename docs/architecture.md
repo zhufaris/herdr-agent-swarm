@@ -312,6 +312,14 @@ failures become dead letters that an operator can retry or dismiss.
 It performs an initial scan and a periodic safety scan, so lost or duplicate
 wake-ups cannot change the converged result.
 
+The sanitized `/status` view combines two deliberately different signals.
+SQLite reports durable lane-head counts, currently eligible heads, the earliest
+future retry, and oldest-head age. The dispatcher reports only bounded
+process-local scan and delivery timestamps, outcome, active delivery count, and
+whether a scan is pending. These diagnostics contain no lane or message
+identifiers and reset when the process restarts; they never become workflow
+authority.
+
 Order is important inside one CardKit element because sequences must increase.
 The dispatcher assigns every outbox row a durable delivery order and drains only
 the head of each target lane. Work is serial within a lane, including retries,
@@ -357,7 +365,8 @@ and credentials.
 2. Keep user-visible terminal transitions atomic and transient output projections
    reconstructible; `BridgeEventBus` is not a replay log.
 3. Extend capability ports instead of reintroducing broad store dependencies.
-4. Monitor persisted outbox lane health and preserve strict in-lane ordering.
+4. Preserve the implemented persisted outbox lane and dispatcher diagnostics
+   while maintaining strict in-lane ordering.
 5. Model Answer pages explicitly only when page-level recovery, audit, or
    operations need more than the active page and outbox history.
 
