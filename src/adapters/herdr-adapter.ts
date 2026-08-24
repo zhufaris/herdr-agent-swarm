@@ -27,7 +27,8 @@ export class HerdrCliAdapter implements HerdrPort {
   constructor(
     private readonly runner: CommandRunner,
     private readonly executable: string,
-    private readonly commandTimeoutMs: number
+    private readonly commandTimeoutMs: number,
+    private readonly traexPermissionMode = "suggest"
   ) {}
 
   async assertWorkspace(workspaceId: string): Promise<void> {
@@ -114,7 +115,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const initial = await this.observeRuntime(paneId);
     if (initial.composerReady) return;
     if (!initial.traexProcess) {
-      await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", "auto"], this.commandTimeoutMs);
+      await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode], this.commandTimeoutMs);
     }
     await this.waitUntilTraexComposer(paneId);
   }
