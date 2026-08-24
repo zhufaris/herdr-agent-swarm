@@ -454,9 +454,9 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
-    expect(store.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1 });
+    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "message:root" });
     store.enqueueOutboundReply({ id: "o2", idempotencyKey: "key-2", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
-    expect(store.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2 });
+    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "message:root-2" });
   });
 
   it("adds streaming run-card columns before rebuilding a legacy outbox", () => {
@@ -518,6 +518,7 @@ describe("SQLite store", () => {
     expect(store.listOutboundLaneHeads(4, new Date().toISOString()).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
     expect(store.listOutboundLaneHeads(4, null).map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
     expect(store.listOutboundLaneHeads(4, null, ["message:card-0"]).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
+    expect(store.getOperationalSummary().outboxLanes).toMatchObject({ pending: 8, blocked: 1 });
     expect(store.getNextOutboundLaneHeadAttemptAt()).toBe(store.listPendingOutboundReplies()[1]!.nextAttemptAt);
   });
 

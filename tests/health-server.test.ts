@@ -38,7 +38,7 @@ describe("health server", () => {
     const status = await fetch(`http://127.0.0.1:${port}/status`);
     expect(status.status).toBe(200);
     const body = await status.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0 } });
+    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, outboxLanes: { pending: 0, blocked: 0, oldestHeadAt: null } } });
     expect(body).toHaveProperty("uptimeSeconds");
     expect(body).toHaveProperty("timestamp");
     expect(body).toHaveProperty("lease.ownerSuffix", "owner123");

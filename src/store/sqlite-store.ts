@@ -32,6 +32,7 @@ type OutboundReplyRow = Record<string, SqlValue> & {
   attempt_count: number; error: string | null; delivered_message_id: string | null; next_attempt_at: string; created_at: string; updated_at: string;
   card_id_checkpoint: string | null;
   delivery_order: number;
+  lane_key: string;
 };
 type ProjectSelectionRow = Record<string, SqlValue> & {
   id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
@@ -226,8 +227,8 @@ export class SqliteBindingStore implements BindingStorePort {
       const timestamp = now();
       this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
         .run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.expiresAt, timestamp, timestamp);
-      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, 'pending', 0, ?, ?, ?)`)
-        .run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), timestamp, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, ?, 'pending', 0, ?, ?, ?)`)
+        .run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), `message:${input.rootMessageId}`, timestamp, timestamp, timestamp);
       this.database.exec("COMMIT");
       return this.getProjectSelection(input.id)!;
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
@@ -388,8 +389,8 @@ export class SqliteBindingStore implements BindingStorePort {
         .run(input.event.eventId, input.id, input.event.type, JSON.stringify(input.event.payload), input.event.occurredAt);
       this.database.prepare(`INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`)
         .run(input.id, JSON.stringify(input.view), timestamp);
-      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_update', ?, 'pending', 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(randomUUID(), `card-update:${input.messageId}:${input.event.eventId}`, input.id, input.messageId, JSON.stringify(input.card), timestamp, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_update', ?, ?, 'pending', 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+        .run(randomUUID(), `card-update:${input.messageId}:${input.event.eventId}`, input.id, input.messageId, JSON.stringify(input.card), `message:${input.messageId}`, timestamp, timestamp, timestamp);
       this.database.exec("COMMIT");
       return binding;
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
@@ -597,10 +598,10 @@ export class SqliteBindingStore implements BindingStorePort {
         .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, input.prompt.dispatchKind ?? "turn", input.prompt.parentPromptId ?? null, timestamp, timestamp);
       this.insertRunCard(input.view);
       const createCard = this.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
       `);
-      createCard.run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, input.view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), timestamp, timestamp, timestamp);
+      createCard.run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, input.view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
       this.database.exec("COMMIT");
       return { prompt: this.requirePrompt(input.prompt.id), view: this.loadRunCard(input.prompt.id)!, inserted: true };
     } catch (error) {
@@ -697,13 +698,13 @@ export class SqliteBindingStore implements BindingStorePort {
         .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
     }
     this.database.prepare(`
-      INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, next_attempt_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+      INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
       ON CONFLICT(idempotency_key) DO UPDATE SET
         payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
         view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
         updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-    `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.rootMessageId, input.kind, input.payload, timestamp, timestamp, timestamp);
+    `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.rootMessageId, input.kind, input.payload, outboundLaneKey(input), timestamp, timestamp, timestamp);
     const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
     if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
     return mapOutboundReply(row);
@@ -722,8 +723,7 @@ export class SqliteBindingStore implements BindingStorePort {
     parameters.push(limit);
     return (this.database.prepare(`
       WITH ranked AS (
-        SELECT *, ${outboundLaneKeySql()} AS lane_key,
-          ROW_NUMBER() OVER (PARTITION BY ${outboundLaneKeySql()} ORDER BY delivery_order) AS lane_position
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY lane_key ORDER BY delivery_order) AS lane_position
         FROM outbound_replies WHERE state = 'pending'
       )
       SELECT * FROM ranked WHERE lane_position = 1 ${exclusions} ${due}
@@ -734,7 +734,7 @@ export class SqliteBindingStore implements BindingStorePort {
   getNextOutboundLaneHeadAttemptAt(): string | null {
     const row = this.database.prepare(`
       WITH ranked AS (
-        SELECT next_attempt_at, ROW_NUMBER() OVER (PARTITION BY ${outboundLaneKeySql()} ORDER BY delivery_order) AS lane_position
+        SELECT next_attempt_at, ROW_NUMBER() OVER (PARTITION BY lane_key ORDER BY delivery_order) AS lane_position
         FROM outbound_replies WHERE state = 'pending'
       )
       SELECT MIN(next_attempt_at) AS next_attempt_at FROM ranked WHERE lane_position = 1
@@ -827,6 +827,16 @@ export class SqliteBindingStore implements BindingStorePort {
     const recentFailedPrompt = this.database.prepare("SELECT id, binding_id, updated_at, error FROM prompt_jobs WHERE state = 'failed' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string; updated_at: string; error: string | null } | undefined;
     const recentDeadLetter = this.database.prepare("SELECT id, binding_id, prompt_id, attempt_count, updated_at, error FROM outbound_replies WHERE state = 'dead_letter' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
     const oldestPending = this.database.prepare("SELECT MIN(created_at) AS value FROM outbound_replies WHERE state = 'pending'").get() as { value: string | null };
+    const laneHealth = this.database.prepare(`
+      WITH heads AS (
+        SELECT lane_key, next_attempt_at, created_at, error, ROW_NUMBER() OVER (PARTITION BY lane_key ORDER BY delivery_order) AS position
+        FROM outbound_replies WHERE state = 'pending'
+      )
+      SELECT COUNT(*) AS pending,
+        SUM(CASE WHEN error IS NOT NULL OR next_attempt_at > ? THEN 1 ELSE 0 END) AS blocked,
+        MIN(created_at) AS oldest_head_at
+      FROM heads WHERE position = 1
+    `).get(now()) as { pending: number; blocked: number | null; oldest_head_at: string | null };
     const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
     const oldestInactive = this.database.prepare("SELECT MIN(last_activity_at) AS value FROM bindings WHERE lifecycle != 'active' OR attachment != 'attached'").get() as { value: string | null };
     const recoverableProvisioning = this.database.prepare("SELECT COUNT(*) AS count FROM project_selections WHERE state = 'processing' AND binding_id IS NOT NULL").get() as { count: number };
@@ -837,6 +847,7 @@ export class SqliteBindingStore implements BindingStorePort {
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
       promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
       outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, oldestPendingAt: oldestPending.value,
+      outboxLanes: { pending: Number(laneHealth.pending), blocked: Number(laneHealth.blocked ?? 0), oldestHeadAt: laneHealth.oldest_head_at },
       lifecycle: groupedCounts<SessionLifecycle>("bindings", "lifecycle", ["provisioning", "active", "draining", "archived", "closed", "failed"]),
       attachment: groupedCounts<AttachmentState>("bindings", "attachment", ["unattached", "attached", "degraded", "orphaned"]),
       recoverableProvisioning: Number(recoverableProvisioning.count), archivedPanesPresent: Number(archivedPanesPresent.count),
@@ -952,7 +963,7 @@ export class SqliteBindingStore implements BindingStorePort {
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
-        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
       CREATE TABLE IF NOT EXISTS project_selections(
@@ -1002,6 +1013,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundDeliveryOrder();
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
+    this.ensureOutboundLaneKey();
     this.ensurePaneCloseOperationState();
     this.ensureRunCardsView();
     this.ensureQueryIndexes();
@@ -1056,10 +1068,10 @@ export class SqliteBindingStore implements BindingStorePort {
       PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
       CREATE TABLE outbound_replies_next(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, next_attempt_at, created_at, updated_at)
-      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
+      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql()}, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
       CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
     `);
@@ -1197,6 +1209,15 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
   }
 
+  private ensureOutboundLaneKey(): void {
+    const columns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "lane_key")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN lane_key TEXT");
+    this.database.exec(`
+      UPDATE outbound_replies SET lane_key = ${outboundLaneKeySql()} WHERE lane_key IS NULL OR lane_key = '';
+      CREATE INDEX IF NOT EXISTS outbound_replies_lane_order ON outbound_replies(state, lane_key, delivery_order);
+    `);
+  }
+
   private ensureDualRequestCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
@@ -1273,6 +1294,11 @@ export class SqliteBindingStore implements BindingStorePort {
 function now(): string { return new Date().toISOString(); }
 function outboundLaneKeySql(): string {
   return "CASE WHEN card_role = 'answer' AND prompt_id IS NOT NULL THEN 'answer:' || prompt_id WHEN kind IN ('stream_content','stream_finish') THEN 'stream:' || root_message_id ELSE 'message:' || root_message_id END";
+}
+function outboundLaneKey(input: { cardRole?: RequestCardRole | null; promptId?: string | null; kind: OutboundReplyKind; rootMessageId: string }): string {
+  if (input.cardRole === "answer" && input.promptId) return `answer:${input.promptId}`;
+  if (input.kind === "stream_content" || input.kind === "stream_finish") return `stream:${input.rootMessageId}`;
+  return `message:${input.rootMessageId}`;
 }
 function mapInstanceLease(row: { owner_id: string; fencing_token: number; expires_at: string; updated_at: string }): InstanceLease {
   return { ownerId: row.owner_id, fencingToken: Number(row.fencing_token), expiresAt: row.expires_at, updatedAt: row.updated_at };

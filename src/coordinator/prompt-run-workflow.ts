@@ -2,12 +2,12 @@ import type { Logger } from "pino";
 import { renderProjectEntryCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, PromptExecutionStore } from "../domain/ports.js";
+import type { HerdrPort, PromptRunStore } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
 import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
-import type { WorkflowWakeup, WorkflowWakeupBus } from "../events/workflow-wakeup-bus.js";
+import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
@@ -19,18 +19,18 @@ export interface ActiveTurnSnapshot {
   state: Binding["lastAgentState"];
 }
 
-interface PromptExecutionWorkflowOptions {
-  store: PromptExecutionStore;
+interface PromptRunWorkflowOptions {
+  store: PromptRunStore;
   herdr: HerdrPort;
   bus: BridgeEventBus;
-  wakeups: WorkflowWakeupBus;
+  scheduler: PromptWorkScheduler;
   channelPublisher: LarkChannelPublisher;
   logger: Logger;
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
 }
 
-export class PromptExecutionWorkflow {
+export class PromptRunWorkflow {
   private readonly workers = new Map<string, Promise<void>>();
   private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly turns = new TurnSupervisor();
@@ -38,7 +38,7 @@ export class PromptExecutionWorkflow {
   private unsubscribe: (() => void) | null = null;
   private stopping = false;
 
-  constructor(private readonly options: PromptExecutionWorkflowOptions) {
+  constructor(private readonly options: PromptRunWorkflowOptions) {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
   }
 
@@ -50,16 +50,16 @@ export class PromptExecutionWorkflow {
   start(): void {
     if (this.unsubscribe) return;
     this.stopping = false;
-    this.unsubscribe = this.options.wakeups.subscribe((event) => this.wake(event));
+    this.unsubscribe = this.options.scheduler.subscribe((event) => this.wake(event));
     for (const prompt of this.options.store.listDetachedPrompts()) {
-      this.options.wakeups.publish({ kind: "detached-observer-ready", bindingId: prompt.bindingId, promptId: prompt.id });
+      this.options.scheduler.wake({ kind: "detached-observer-ready", bindingId: prompt.bindingId, promptId: prompt.id });
     }
     for (const binding of this.options.store.listBindingsByState("active")) {
-      this.options.wakeups.publish({ kind: "prompt-ready", bindingId: binding.id });
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
     }
   }
 
-  wake(event: WorkflowWakeup): void {
+  wake(event: PromptWorkHint): void {
     if (this.stopping) return;
     if (event.kind === "steering-ready") {
       this.scheduleSteering(event.bindingId, event.parentPromptId);
@@ -124,7 +124,7 @@ export class PromptExecutionWorkflow {
           this.options.store.requeueSteeringAsTurn(prompt.id);
           this.options.logger.warn({ event: "steering-fell-back-to-turn", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "requeued", reason: "not_working" }, "steering target was no longer working");
           await this.refreshQueuePositions(bindingId);
-          this.options.wakeups.publish({ kind: "prompt-ready", bindingId });
+          this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
           continue;
         }
         await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
@@ -219,7 +219,7 @@ export class PromptExecutionWorkflow {
     if (this.workers.has(prompt.bindingId)) return;
     const worker = this.observeDetachedTurn(prompt).finally(() => {
       if (this.workers.get(prompt.bindingId) === worker) this.workers.delete(prompt.bindingId);
-      if (!this.stopping) this.options.wakeups.publish({ kind: "prompt-ready", bindingId: prompt.bindingId });
+      if (!this.stopping) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: prompt.bindingId });
     });
     this.workers.set(prompt.bindingId, worker);
   }

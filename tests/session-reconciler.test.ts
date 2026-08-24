@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionReconciler } from "../src/coordinator/session-reconciler.js";
 import type { HerdrPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { WorkflowWakeupBus } from "../src/events/workflow-wakeup-bus.js";
+import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("SessionReconciler", () => {
@@ -21,7 +21,7 @@ describe("SessionReconciler", () => {
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
       logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); },
-      wakeups: new WorkflowWakeupBus(),
+      scheduler: new InProcessPromptWorkScheduler(),
       isBindingBusy: () => false
     });
 
@@ -87,7 +87,7 @@ describe("SessionReconciler", () => {
       ],
       store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, wakeups: new WorkflowWakeupBus(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
     });
 
     await reconciler.requestReconciliation(["w2"]);
@@ -109,7 +109,7 @@ describe("SessionReconciler", () => {
       ],
       store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, wakeups: new WorkflowWakeupBus(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
     });
 
     const first = reconciler.requestReconciliation(["w1"]);
@@ -196,13 +196,13 @@ describe("SessionReconciler", () => {
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
     const wake = vi.fn();
-    const wakeups = new WorkflowWakeupBus();
-    wakeups.subscribe(wake);
+    const scheduler = new InProcessPromptWorkScheduler();
+    scheduler.subscribe(wake);
     const reconciler = new SessionReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
       store, herdr: { async listAllPanes() { return [unknownPane]; }, observeRuntime, async readOutput() { return "❯ Use /skills to list available skills"; } } as unknown as HerdrPort,
       bus: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, wakeups, isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false
     });
 
     await reconciler.reconcile();
@@ -224,6 +224,6 @@ function fixture(
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     store, herdr, bus: new BridgeEventBus(),
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
-    logger: pino({ enabled: false }), discoverPane, wakeups: new WorkflowWakeupBus(), isBindingBusy: () => false
+    logger: pino({ enabled: false }), discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
   });
 }

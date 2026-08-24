@@ -18,13 +18,15 @@ import type { BridgeEventBus } from "../events/bridge-event-bus.js";
 import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
 import { cleanTerminalOutput } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { WorkflowWakeupBus } from "../events/workflow-wakeup-bus.js";
-import { PromptExecutionWorkflow } from "./prompt-execution-workflow.js";
+import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../events/inbound-work-notifier.js";
+import { PromptRunWorkflow } from "./prompt-run-workflow.js";
 import { SessionReconciler } from "./session-reconciler.js";
 
 export class SyncCoordinator {
-  private readonly wakeups: WorkflowWakeupBus;
-  private readonly promptExecution: PromptExecutionWorkflow;
+  private readonly scheduler: PromptWorkScheduler;
+  private readonly inboundWork: InboundWorkNotifier;
+  private readonly promptRun: PromptRunWorkflow;
   private readonly reconciler: SessionReconciler;
   private inboundDrain: Promise<void> | null = null;
   private stopping = false;
@@ -39,21 +41,23 @@ export class SyncCoordinator {
     private readonly channelPublisher: LarkChannelPublisher,
     private readonly logger: Logger,
     private readonly shutdownGraceMs = 30_000,
-    wakeups?: WorkflowWakeupBus
+    scheduler?: PromptWorkScheduler,
+    inboundWork?: InboundWorkNotifier
   ) {
-    this.wakeups = wakeups ?? new WorkflowWakeupBus(logger);
-    channelPublisher.connectWakeups(this.wakeups);
-    this.promptExecution = new PromptExecutionWorkflow({ store, herdr, bus, wakeups: this.wakeups, channelPublisher, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
+    this.scheduler = scheduler ?? new InProcessPromptWorkScheduler(logger);
+    this.inboundWork = inboundWork ?? new InProcessInboundWorkNotifier();
+    channelPublisher.connectPromptScheduler(this.scheduler);
+    this.promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler: this.scheduler, channelPublisher, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
     this.reconciler = new SessionReconciler({
       projects: config.projects, store, herdr, bus, channelPublisher, logger,
       discoverPane: (pane, project) => this.createFromHerdr(pane, project),
-      wakeups: this.wakeups,
-      isBindingBusy: (bindingId) => this.promptExecution.isBindingBusy(bindingId)
+      scheduler: this.scheduler,
+      isBindingBusy: (bindingId) => this.promptRun.isBindingBusy(bindingId)
     });
   }
 
   async start(): Promise<void> {
-    this.promptExecution.prepareRecovery();
+    this.promptRun.prepareRecovery();
     const recoveredLegacyCards = this.store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) this.logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
     for (const binding of this.store.listBindings()) {
@@ -86,9 +90,9 @@ export class SyncCoordinator {
     await this.reconciler.captureBaselines();
     await this.recoverPaneCloseOperations();
     await this.reconciler.reconcile();
-    this.promptExecution.start();
+    this.promptRun.start();
     this.reconciler.start(this.config.reconcileIntervalMs);
-    this.stopInboundSubscription = this.bus.onInboundMessage((event) => this.acceptInboundMessage(event.payload));
+    this.stopInboundSubscription = this.inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
     await this.lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
     for (const selection of recoverableSelections) await this.recoverProjectSelection(selection);
     const selectionBindingIds = new Set(recoverableSelections.flatMap((selection) => selection.bindingId ? [selection.bindingId] : []));
@@ -105,7 +109,7 @@ export class SyncCoordinator {
     this.stopInboundSubscription?.();
     const pending = [
       this.reconciler.stop(),
-      this.promptExecution.stop(),
+      this.promptRun.stop(),
       ...(this.inboundDrain ? [this.inboundDrain] : [])
     ];
     await Promise.allSettled(pending);
@@ -227,7 +231,7 @@ export class SyncCoordinator {
   private async drainInboundMessagesOnce(): Promise<void> {
     for (let message = this.store.claimNextInboundMessage(); message; message = this.store.claimNextInboundMessage()) {
       try {
-        await this.bus.publishInbound({
+        await this.inboundWork.notify({
           eventId: message.eventId, type: "InboundMessageReceived", origin: "lark", occurredAt: new Date().toISOString(), payload: message
         });
         this.store.markInboundMessageAccepted(message.eventId);
@@ -311,7 +315,7 @@ export class SyncCoordinator {
           const resumed = this.store.transitionBinding(binding.id, { type: "activate" });
           await this.publish(resumed.id, "BindingActivated", "lark", { paneId: pane.paneId, topicId: resumed.topicId! });
           this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.resume", target: binding.id, outcome: "success" });
-          this.wakeups.publish({ kind: "prompt-ready", bindingId: binding.id });
+          this.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
         }
       } else if (binding?.state === "active" && binding.lifecycle === "active") {
         await this.enqueue(binding, message);
@@ -334,7 +338,7 @@ export class SyncCoordinator {
   }
 
   private async archiveBinding(binding: Binding, actorOpenId: string): Promise<void> {
-    const hasActiveTurn = this.promptExecution.activeTurn(binding.id) !== null;
+    const hasActiveTurn = this.promptRun.activeTurn(binding.id) !== null;
     const reason = hasActiveTurn ? "停止接收新消息；当前任务完成后归档。" : "已从飞书归档；Herdr pane 与 TraeX 保持运行。";
     for (const view of this.store.listRunCards(binding.id).filter((item) => item.phase === "queued")) {
       await this.publish(binding.id, "PromptCancelled", "bridge", { promptId: view.promptId, reason: "话题已归档，排队任务已取消。" });
@@ -358,7 +362,7 @@ export class SyncCoordinator {
     const paneTitle = requestedTitle ?? randomPaneName();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     const handoff = this.store.resetTopicBinding({ oldBindingId: binding.id, newBindingId: randomUUID(), title, actorOpenId: message.actorOpenId });
-    this.wakeups.publish({ kind: "binding-runtime-changed", bindingId: binding.id });
+    this.scheduler.wake({ kind: "binding-runtime-changed", bindingId: binding.id });
     try {
       let replacement = this.store.updateBinding(handoff.replacement.id, { statusMessageId: handoff.replacement.rootMessageId });
       const pane = await this.herdr.createPane(project.workspaceId, project.cwd, {
@@ -475,7 +479,7 @@ export class SyncCoordinator {
       this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" });
       return null;
     }
-    if (this.promptExecution.isBindingBusy(binding.id) || this.store.countPendingPrompts(binding.id) > 0) {
+    if (this.promptRun.isBindingBusy(binding.id) || this.store.countPendingPrompts(binding.id) > 0) {
       await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，不能关闭。");
       this.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "busy" });
       return null;
@@ -712,7 +716,7 @@ export class SyncCoordinator {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const promptId = randomUUID();
     const occurredAt = new Date().toISOString();
-    const activeRun = this.promptExecution.activeTurn(binding.id);
+    const activeRun = this.promptRun.activeTurn(binding.id);
     const parentPromptId = forcedParentPromptId ?? (activeRun?.state === "working" ? activeRun.promptId : null);
     const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({
@@ -725,8 +729,8 @@ export class SyncCoordinator {
     });
     if (!inserted) {
       await this.channelPublisher.drain();
-      if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.wakeups.publish({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId });
-      else this.wakeups.publish({ kind: "prompt-ready", bindingId: binding.id });
+      if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId });
+      else this.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
       return;
     }
     const depth = this.store.countPendingPrompts(binding.id);
@@ -738,8 +742,8 @@ export class SyncCoordinator {
     }
     this.store.audit({ actorOpenId: message.actorOpenId, action: dispatchKind === "steering" ? "prompt.steer" : "prompt.queue", target: binding.id, outcome: "success" });
     await this.channelPublisher.drain();
-    if (dispatchKind === "steering" && parentPromptId) this.wakeups.publish({ kind: "steering-ready", bindingId: binding.id, parentPromptId });
-    else this.wakeups.publish({ kind: "prompt-ready", bindingId: binding.id });
+    if (dispatchKind === "steering" && parentPromptId) this.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId });
+    else this.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
   }
 
   private async stopActiveTurn(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
@@ -747,7 +751,7 @@ export class SyncCoordinator {
       await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。");
       return false;
     }
-    const activeRun = this.promptExecution.activeTurn(binding.id);
+    const activeRun = this.promptRun.activeTurn(binding.id);
     if (!activeRun || activeRun.state !== "working") {
       await this.reject(message, "当前没有确认处于 working 的 TraeX 任务。`/stop` 未进入任务队列。");
       return false;
@@ -786,7 +790,7 @@ export class SyncCoordinator {
       this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "inactive_binding" });
       return false;
     }
-    if (this.promptExecution.isBindingBusy(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
+    if (this.promptRun.isBindingBusy(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
       await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，请在当前任务或队列完成后重试。");
       this.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "busy" });
       return false;
@@ -816,7 +820,7 @@ export class SyncCoordinator {
   private async runModelSelection(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void> {
     const binding = this.store.getBinding(bindingId);
     if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
-    if (this.promptExecution.isBindingBusy(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") return;
+    if (this.promptRun.isBindingBusy(binding.id) || this.store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") return;
     if (!this.herdr.selectPaneModel || !this.herdr.runPaneCommand) return;
     try {
       const pane = await this.requireMatchingPane(binding, binding.paneId);

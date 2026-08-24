@@ -5,7 +5,8 @@ import { LarkSdkAdapter } from "./adapters/lark-adapter.js";
 import { loadConfig, validateProjectDirectories } from "./config.js";
 import { SyncCoordinator } from "./coordinator/sync-coordinator.js";
 import { BridgeEventBus } from "./events/bridge-event-bus.js";
-import { WorkflowWakeupBus } from "./events/workflow-wakeup-bus.js";
+import { InProcessPromptWorkScheduler } from "./events/prompt-work-scheduler.js";
+import { InProcessInboundWorkNotifier } from "./events/inbound-work-notifier.js";
 import { CardProjector } from "./events/card-projector.js";
 import { LarkChannelPublisher } from "./events/lark-channel-publisher.js";
 import { startHealthServer } from "./health/server.js";
@@ -33,10 +34,11 @@ const rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.com
 const herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus();
-const wakeups = new WorkflowWakeupBus(logger);
+const scheduler = new InProcessPromptWorkScheduler(logger);
+const inboundWork = new InProcessInboundWorkNotifier();
 const channelPublisher = new LarkChannelPublisher(bus, store, lark, logger);
 const projector = new CardProjector(bus, store, channelPublisher, logger);
-const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, channelPublisher, logger, 30_000, wakeups);
+const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, channelPublisher, logger, 30_000, scheduler, inboundWork);
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)

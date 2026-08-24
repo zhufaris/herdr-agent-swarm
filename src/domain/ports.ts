@@ -133,7 +133,7 @@ export interface BindingStorePort {
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
 }
 
-export type PromptExecutionStore = Pick<BindingStorePort,
+export type PromptRunStore = Pick<BindingStorePort,
   | "recoverRunningPrompts"
   | "listDetachedPrompts"
   | "listBindingsByState"

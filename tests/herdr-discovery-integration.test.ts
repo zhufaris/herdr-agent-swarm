@@ -6,6 +6,7 @@ import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { CardProjector } from "../src/events/card-projector.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
+import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("Herdr discovery", () => {
@@ -363,12 +364,13 @@ describe("Herdr discovery", () => {
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const inboundEvents: string[] = [];
-    const stopInboundObserver = bus.onInboundMessage((event) => { inboundEvents.push(event.type); });
+    const inboundWork = new InProcessInboundWorkNotifier();
+    const stopInboundObserver = inboundWork.subscribe((event) => { inboundEvents.push(event.type); });
     const publisher = new LarkChannelPublisher(bus, store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
     const projector = new CardProjector(bus, store, publisher, pino({ enabled: false }));
     const stopProjector = projector.start();
-    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = new SyncCoordinator(config, store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });

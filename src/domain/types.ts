@@ -150,6 +150,7 @@ export interface OperationalSummary {
   pendingOutbox: number;
   deadLetters: number;
   oldestPendingAt: string | null;
+  outboxLanes: { pending: number; blocked: number; oldestHeadAt: string | null };
   recentFailedPrompt: { promptId: string; bindingId: string; updatedAt: string; error: string } | null;
   recentDeadLetter: { replyId: string; bindingId: string | null; promptId: string | null; attemptCount: number; updatedAt: string; error: string } | null;
   lifecycle: Record<import("./pane-thread-lifecycle.js").SessionLifecycle, number>;
