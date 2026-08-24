@@ -45,6 +45,20 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 `/new` 与 `/herdr new` 不同：后者会选择项目并创建一个新的飞书话题。
 
+### `/stop`
+
+当当前 TraeX turn 明确处于 `working` 时，将字面量 `/stop` 作为高优先级
+steering 立即注入当前 turn。它会绕过已经排队的普通消息，但不会取消、重排或
+执行这些消息；当前 turn 结束后，普通消息仍按原 FIFO 顺序继续。
+
+只有不带参数的 `/stop`（大小写不敏感）具有这个含义。`/stop now` 等带参数形式
+不会作为 steering。若没有 active binding，或当前状态是 `idle`、`done`、`blocked`、
+`unknown`，Bridge 会拒绝 `/stop` 且不会把它加入普通队列。如果状态在检查后、注入前
+发生变化，Bridge 同样会将本次 `/stop` 标记失败，不会降级为后续普通 turn。
+
+`/stop` 是发给 TraeX 的 steering，不是 Bridge 对进程或 Herdr pane 的远程强杀，
+也不能批准、拒绝或绕过高风险操作。重复投递同一个飞书事件只会注入一次。
+
 ### `/herdr new <标题>`
 
 打开项目选择卡片；选择后创建新的 Herdr pane、启动 TraeX，并建立飞书话题绑定。
@@ -187,6 +201,8 @@ Pane。请先检查对应 Space；已有 Pane 时发送
 
 每条消息都有独立状态卡。Steering 卡显示“已加入当前执行”，当前 turn 的最终
 回答仍只显示在主任务卡中。重复的飞书事件不会导致同一条消息重复注入。
+`/stop` 是这一规则的显式优先级例外：仅在 `working` 时越过普通 FIFO 注入，
+但队列内容保持不变。
 
 ## 权限与审批
 
@@ -198,7 +214,7 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 - 批准或绕过 TraeX 权限；
 - 向审批界面发送 steering；
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
-- 强制终止正在工作的 TraeX。
+- 通过 `/stop` 强制终止 TraeX 进程或 Herdr pane。
 
 ## 从飞书关闭 Pane
 

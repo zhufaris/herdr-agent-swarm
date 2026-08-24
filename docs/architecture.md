@@ -71,7 +71,11 @@ directly.
 3. A command is handled as a binding or operational workflow. Ordinary text in
    an active bound topic becomes a prompt job. A message received during an
    active turn may become steering when the runtime confirms that steering is
-   safe.
+   safe. Exact, case-insensitive `/stop` is a priority steering command only
+   while the supervised turn is explicitly `working`: it bypasses queued
+   ordinary prompts without cancelling or reordering them. In every other
+   state, including a race where the turn stops before injection, it is rejected
+   and never falls back to the ordinary FIFO.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
    Herdr unchanged; the bridge adds no hidden prompt suffix.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
@@ -139,11 +143,12 @@ delivered; transient failures are retried with backoff; repeated failures become
 dead letters that an operator can retry or dismiss.
 
 Order is important inside one CardKit element because sequences must increase.
-The existing publisher drains the durable queue serially and blocks later work
-for the same delivery target after a failure. This preserves ordering but is a
-known scalability limit: a hung Lark call can delay unrelated targets. Future
-work should preserve per-target serial lanes while adding bounded concurrency
-across targets and request timeouts.
+The publisher assigns every outbox row a durable delivery order and drains only
+the head of each target lane. Work is serial within a lane, including retries,
+while up to four independent lanes may make progress concurrently. A failed or
+future-due head blocks only its own lane. Lark requests use a dedicated bounded
+timeout; HTTP 429 responses honor a bounded `Retry-After`, and other transient
+failures use jittered exponential backoff.
 
 ## Process lifecycle and diagnostics
 
@@ -167,6 +172,8 @@ and credentials.
 ## Safety rules
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
+- `/stop` is TraeX steering, not a remote process or pane kill. It cannot bypass
+  approval, and it is never queued when no `working` turn can accept it.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and
   terminal identity before changing a binding.
