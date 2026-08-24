@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const createMessage = vi.fn();
 const replyMessage = vi.fn();
+const patchMessage = vi.fn();
 const getMessage = vi.fn();
 const forwardThread = vi.fn();
 const createCard = vi.fn();
@@ -9,7 +10,7 @@ const streamContent = vi.fn();
 const updateSettings = vi.fn();
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
-    im = { v1: { message: { create: createMessage, reply: replyMessage, get: getMessage }, thread: { forward: forwardThread } } };
+    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage }, thread: { forward: forwardThread } } };
     cardkit = { v1: { card: { create: createCard, settings: updateSettings }, cardElement: { content: streamContent } } };
   },
   WSClient: class { async start() {} close() {} },
@@ -19,7 +20,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
 beforeEach(() => {
-  createMessage.mockReset(); replyMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
+  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
   createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset();
 });
 
@@ -60,6 +61,20 @@ describe("Lark streaming Answer cards", () => {
 
     expect(streamContent).toHaveBeenCalledWith({ path: { card_id: "card-1", element_id: "answer_content_p1" }, data: { content: "one\ntwo", sequence: 4, uuid: "stream-card-1-4" } });
     expect(updateSettings).toHaveBeenCalledWith({ path: { card_id: "card-1" }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: "Completed" } } }), sequence: 5, uuid: "finish-card-1-5" } });
+  });
+
+  it("normalizes element ids when replying with or updating a non-CardKit card", async () => {
+    replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
+    patchMessage.mockResolvedValue({});
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    const card = { schema: "2.0", body: { elements: [{ element_id: "answer_content_legacy_identifier_that_is_too_long_0" }] } };
+
+    await adapter.replyCard("root-1", card);
+    await adapter.updateCard("answer-1", card);
+
+    const normalized = { schema: "2.0", body: { elements: [{ element_id: "element_e8aa1ef57445" }] } };
+    expect(replyMessage).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ content: JSON.stringify(normalized) }) }));
+    expect(patchMessage).toHaveBeenCalledWith({ path: { message_id: "answer-1" }, data: { content: JSON.stringify(normalized) } });
   });
 
   it("retries an unsupported fenced language as a plain code fence", async () => {

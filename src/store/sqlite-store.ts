@@ -8,6 +8,7 @@ import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { BridgeEvent } from "../domain/events.js";
 import { transitionSession, type AttachmentState, type ProvisioningCheckpoint, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
+import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 
 type SqlValue = string | number | bigint | null;
 type BindingRow = Record<string, SqlValue> & {
@@ -548,18 +549,22 @@ export class SqliteBindingStore implements BindingStorePort {
 
   recoverLegacyElementIdDeadLetters(): number {
     const timestamp = now();
-    const result = this.database.prepare(`
-      UPDATE outbound_replies
-      SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, updated_at = ?
-      WHERE state = 'dead_letter' AND kind = 'stream_card_create' AND card_role = 'answer'
-        AND error LIKE '%elementID format error%'
-        AND prompt_id IN (
-          SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
-          WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL
-            AND c.answer_element_id LIKE 'answer_content_%' AND length(c.answer_element_id) > 20
-        )
-    `).run(timestamp, timestamp);
-    return Number(result.changes);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.canonicalizeLegacyAnswerTargets(timestamp);
+      const result = this.database.prepare(`
+        UPDATE outbound_replies
+        SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, updated_at = ?
+        WHERE state = 'dead_letter' AND kind = 'stream_card_create' AND card_role = 'answer'
+          AND error LIKE '%elementID format error%'
+          AND prompt_id IN (
+            SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+            WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL
+          )
+      `).run(timestamp, timestamp);
+      this.database.exec("COMMIT");
+      return Number(result.changes);
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean } {
@@ -718,8 +723,9 @@ export class SqliteBindingStore implements BindingStorePort {
         if (row.card_role === "answer") {
           if (row.kind === "card_reply" || row.kind === "stream_card_create") {
             const stream = row.kind === "stream_card_create" ? streamCardState(row.payload) : null;
-            this.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?")
-              .run(messageId, cardId ?? null, stream?.elementId ?? null, stream ? 1 : null, stream?.pageIndex ?? null, stream?.pageStart ?? null, cardId ?? null, messageId, row.view_version ?? 0, now(), row.prompt_id);
+            const expectedPageIndex = stream && stream.pageIndex > 0 ? stream.pageIndex - 1 : null;
+            this.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ? AND (? IS NULL OR answer_page_index = ?)")
+              .run(messageId, cardId ?? null, stream?.elementId ?? null, stream ? 1 : null, stream?.pageIndex ?? null, stream?.pageStart ?? null, cardId ?? null, messageId, row.view_version ?? 0, now(), row.prompt_id, expectedPageIndex, expectedPageIndex);
           }
           else this.database.prepare("UPDATE run_cards SET answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
         } else if (row.kind === "card_reply") this.database.prepare("UPDATE run_cards SET lark_message_id = ?, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(messageId, row.view_version ?? 0, now(), row.prompt_id);
@@ -741,6 +747,12 @@ export class SqliteBindingStore implements BindingStorePort {
     }
     this.database.prepare("UPDATE outbound_replies SET error = ?, attempt_count = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?")
       .run(error, attempts, retryAt(attempts), timestamp, id);
+    return this.getOutboundReply(id);
+  }
+
+  markOutboundReplyDeadLetter(id: string, error: string): OutboundReply | null {
+    this.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
+      .run(error, now(), id);
     return this.getOutboundReply(id);
   }
 
@@ -950,6 +962,25 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundDismissedState();
     this.ensurePaneCloseOperationState();
     this.ensureQueryIndexes();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.canonicalizeLegacyAnswerTargets(now());
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private canonicalizeLegacyAnswerTargets(timestamp: string): void {
+    const legacyCards = this.database.prepare("SELECT prompt_id, answer_element_id FROM run_cards WHERE answer_element_id != ''").all() as Array<{ prompt_id: string; answer_element_id: string }>;
+    for (const card of legacyCards) {
+      const canonical = normalizeLarkElementId(card.answer_element_id);
+      if (canonical === card.answer_element_id) continue;
+      this.database.prepare("UPDATE run_cards SET answer_element_id = ?, updated_at = ? WHERE prompt_id = ?").run(canonical, timestamp, card.prompt_id);
+      const replies = this.database.prepare("SELECT id, kind, payload FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter')").all(card.prompt_id) as Array<{ id: string; kind: string; payload: string }>;
+      for (const reply of replies) {
+        const payload = canonicalizeAnswerPayload(reply.kind, reply.payload);
+        if (payload !== reply.payload) this.database.prepare("UPDATE outbound_replies SET payload = ?, updated_at = ? WHERE id = ?").run(payload, timestamp, reply.id);
+      }
+    }
   }
 
   private ensureBindingResetColumns(): void {
@@ -1174,6 +1205,19 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
       ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
   } catch { return null; }
 }
+function canonicalizeAnswerPayload(kind: string, payload: string): string {
+  try {
+    const decoded = JSON.parse(payload) as unknown;
+    const normalized = normalizeLarkCardElementIds(decoded);
+    if (!isRecord(normalized)) return payload;
+    if ((kind === "stream_card_create" || kind === "stream_content") && isRecord(normalized.stream) && typeof normalized.stream.elementId === "string") {
+      normalized.stream.elementId = normalizeLarkElementId(normalized.stream.elementId);
+    }
+    if (kind === "stream_content" && typeof normalized.elementId === "string") normalized.elementId = normalizeLarkElementId(normalized.elementId);
+    return JSON.stringify(normalized);
+  } catch { return payload; }
+}
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 
 function mapBinding(row: BindingRow): Binding {
   return {

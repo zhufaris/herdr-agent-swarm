@@ -115,6 +115,7 @@ export interface BindingStorePort {
   listDueOutboundReplies(): OutboundReply[];
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void;
   markOutboundReplyFailed(id: string, error: string): OutboundReply | null;
+  markOutboundReplyDeadLetter(id: string, error: string): OutboundReply | null;
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   getOperationalSummary(): OperationalSummary;

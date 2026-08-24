@@ -92,6 +92,25 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("dead-letters a stale continuation create without calling Lark or retrying", async () => {
+    const create = vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }));
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    store.enqueueOutboundReply({ id: "stale-page", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: {}, stream: { pageIndex: 2, pageStart: 20_000, elementId: answerElementId("p1", 2) } }) });
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+
+    await publisher.drain();
+
+    expect(create).not.toHaveBeenCalled();
+    expect(store.getOperationalSummary().deadLetters).toBe(1);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-1", answerPageIndex: 0 });
+    store.close();
+  });
+
   it("logs retry and dead-letter decisions without card payloads", async () => {
     const warn = vi.fn();
     const error = vi.fn();
@@ -163,6 +182,58 @@ describe("Lark channel publisher", () => {
     await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 2, "task", { version: 2 });
     await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 3, "task", { version: 3 });
     expect(versions).toEqual([JSON.stringify({ version: 2 }), JSON.stringify({ version: 3 })]);
+    store.close();
+  });
+
+  it("delivers independent targets concurrently", async () => {
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    const delivered: string[] = [];
+    const lark = fakeLark({
+      async updateCard(messageId) {
+        if (messageId === "slow-card") await slowGate;
+        delivered.push(messageId);
+      }
+    });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    store.enqueueOutboundReply({ id: "slow", idempotencyKey: "card-update:slow", rootMessageId: "slow-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "fast", idempotencyKey: "card-update:fast", rootMessageId: "fast-card", kind: "card_update", payload: "{}" });
+
+    const draining = publisher.drain();
+    await vi.waitFor(() => expect(delivered).toEqual(["fast-card"]));
+    releaseSlow();
+    await draining;
+
+    expect(delivered).toEqual(["fast-card", "slow-card"]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.close();
+  });
+
+  it("keeps updates for the same target ordered while other targets progress", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const delivered: string[] = [];
+    const lark = fakeLark({
+      async updateCard(messageId, card) {
+        const marker = `${messageId}:${(card as { version: number }).version}`;
+        if (marker === "same-card:1") await firstGate;
+        delivered.push(marker);
+      }
+    });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    store.enqueueOutboundReply({ id: "same-1", idempotencyKey: "card-update:same:1", rootMessageId: "same-card", kind: "card_update", payload: JSON.stringify({ version: 1 }) });
+    store.enqueueOutboundReply({ id: "same-2", idempotencyKey: "card-update:same:2", rootMessageId: "same-card", kind: "card_update", payload: JSON.stringify({ version: 2 }) });
+    store.enqueueOutboundReply({ id: "other", idempotencyKey: "card-update:other", rootMessageId: "other-card", kind: "card_update", payload: JSON.stringify({ version: 1 }) });
+
+    const draining = publisher.drain();
+    await vi.waitFor(() => expect(delivered).toEqual(["other-card:1"]));
+    releaseFirst();
+    await draining;
+
+    expect(delivered).toEqual(["other-card:1", "same-card:1", "same-card:2"]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
     store.close();
   });
 

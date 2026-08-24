@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { initialTopicView } from "../src/domain/topic-view.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 let store: SqliteBindingStore | undefined;
@@ -303,11 +303,66 @@ describe("SQLite store", () => {
 
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
     expect(store.recoverLegacyElementIdDeadLetters()).toBe(1);
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null })]);
+    const [recovered] = store.listPendingOutboundReplies();
+    expect(recovered).toMatchObject({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null });
+    expect(store.loadRunCard("legacy-id")?.answerElementId).toBe("element_e8aa1ef57445");
+    expect(JSON.parse(recovered!.payload)).toMatchObject({ body: { elements: [{ element_id: "element_e8aa1ef57445" }] } });
     expect(store.getOperationalSummary().deadLetters).toBe(1);
 
     store.markOutboundReplyDelivered(legacyReply!.id, "answer-1", "cardkit-1");
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("legacy-id");
+  });
+
+  it("canonicalizes pending continuation metadata with its card payload", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
+    const legacyId = "answer_content_legacy_identifier_that_is_too_long_1";
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answerElementId: legacyId, answerPageIndex: 1 });
+    store.enqueueOutboundReply({ id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "m1", kind: "stream_card_create", payload: JSON.stringify({ card: { body: { elements: [{ element_id: legacyId }] } }, stream: { pageIndex: 1, pageStart: 20_000, elementId: legacyId } }) });
+
+    expect(store.recoverLegacyElementIdDeadLetters()).toBe(0);
+
+    const repaired = store.listPendingOutboundReplies().find((reply) => reply.id === "page-2")!;
+    const payload = JSON.parse(repaired.payload);
+    expect(store.loadRunCard("p1")?.answerElementId).toMatch(/^element_[a-f0-9]{12}$/);
+    expect(payload.stream.elementId).toBe(store.loadRunCard("p1")?.answerElementId);
+    expect(payload.card.body.elements[0].element_id).toBe(payload.stream.elementId);
+  });
+
+  it("canonicalizes persisted answer targets before startup outbox draining", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-element-id-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
+    store.database.prepare("UPDATE run_cards SET answer_element_id = ? WHERE prompt_id = 'p1'").run(legacyId);
+    store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE prompt_id = 'p1'").run(JSON.stringify({ body: { elements: [{ element_id: legacyId }] } }));
+    store.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.loadRunCard("p1")?.answerElementId).toBe("element_e8aa1ef57445");
+    expect(JSON.parse(store.listPendingOutboundReplies()[0]!.payload)).toMatchObject({ body: { elements: [{ element_id: "element_e8aa1ef57445" }] } });
+  });
+
+  it("does not let a late continuation delivery roll the active page backward", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
+    store.enqueueOutboundReply({ id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "m1", kind: "stream_card_create", payload: JSON.stringify({ card: {}, stream: { pageIndex: 1, pageStart: 20_000, elementId: answerElementId("p1", 1) } }) });
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answerMessageId: "answer-3", answerCardId: "card-3", answerElementId: answerElementId("p1", 2), answerPageIndex: 2, answerPageStart: 40_000 });
+
+    store.markOutboundReplyDelivered("page-2", "late-answer-2", "late-card-2");
+
+    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "answer-3", answerCardId: "card-3", answerElementId: answerElementId("p1", 2), answerPageIndex: 2, answerPageStart: 40_000 });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
   it("backfills original request text when migrating an existing run-card database", () => {

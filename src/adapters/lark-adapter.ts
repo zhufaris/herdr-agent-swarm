@@ -2,7 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
-import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
+import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 interface LarkAdapterOptions {
@@ -87,13 +87,13 @@ export class LarkSdkAdapter implements LarkPort {
   async replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "interactive", content: JSON.stringify(card), reply_in_thread: true }
+      data: { msg_type: "interactive", content: JSON.stringify(normalizeLarkCardElementIds(card)), reply_in_thread: true }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
 
   async replyStreamingCard(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }> {
-    const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(normalizeCardElementIds(card)) } });
+    const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(normalizeLarkCardElementIds(card)) } });
     const cardId = created.data?.card_id;
     if (!cardId) throw new Error(`Lark CardKit create returned no card_id (${safeResponseMetadata(created)})`);
     const response = await this.client.im.v1.message.reply({
@@ -141,7 +141,7 @@ export class LarkSdkAdapter implements LarkPort {
   async updateCard(messageId: string, card: object): Promise<void> {
     await this.client.im.v1.message.patch({
       path: { message_id: messageId },
-      data: { content: JSON.stringify(card) }
+      data: { content: JSON.stringify(normalizeLarkCardElementIds(card)) }
     });
   }
 
@@ -227,13 +227,4 @@ function safeResponseMetadata(response: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function normalizeCardElementIds(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeCardElementIds);
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-    key,
-    key === "element_id" && typeof item === "string" ? normalizeLarkElementId(item) : normalizeCardElementIds(item)
-  ]));
 }
