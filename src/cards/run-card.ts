@@ -121,7 +121,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable
     ? input.notice
-    : latestParagraph(visibleAnswer) ?? (recentProgress.at(-1) ? projectProgressLine(recentProgress.at(-1)!) : null);
+    : latestLines(visibleAnswer, 20) ?? (recentProgress.at(-1) ? projectProgressLine(recentProgress.at(-1)!) : null);
   const elements: object[] = [
     {
       tag: "column_set",
@@ -132,13 +132,12 @@ export function renderProjectEntryCard(input: TopicViewState): object {
         metric("QUEUE", String(input.queueDepth))
       ]
     },
-    { tag: "hr" },
-    { tag: "markdown", content: `**项目任务**  ${escapeMarkdown(input.title)}` }
+    { tag: "hr" }
   ];
   if (recentProgress.length) {
     elements.push({ tag: "markdown", content: `**最近动态**\n${recentProgress.map(projectProgressLine).join("\n")}` });
   }
-  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(normalizeLarkPreview(preview), 2_500)}` });
+  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(preview, 2_500)}` });
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
     schema: "2.0",
@@ -306,9 +305,11 @@ function formatRunDuration(input: RunCardView): string | null {
 function stripNativeTraexStatus(source: string): string {
   return stripNativeTaskFrame(source);
 }
-function latestParagraph(source: string): string | null {
-  const paragraphs = source.split(/\n\s*\n/).map((value) => value.trim()).filter(Boolean);
-  return paragraphs.at(-1) ?? null;
+function latestLines(source: string, limit: number): string | null {
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  while (lines.length && !lines.at(-1)?.trim()) lines.pop();
+  const tail = lines.slice(-limit).join("\n").trim();
+  return tail || null;
 }
 function projectProgressLine(event: RunCardView["progressEvents"][number]): string {
   return event.kind === "step" ? progressLine(event) : `🛠️ ${event.label}`;

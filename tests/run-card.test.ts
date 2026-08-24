@@ -50,6 +50,8 @@ describe("run card", () => {
       projects: [{ id: "bridge", displayName: "Herdr Lark Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/secret/work/bridge" }]
     });
     const serialized = JSON.stringify(card);
+    const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**最新消息**"))?.content ?? "";
 
     expect(serialized).toContain("Herdr Lark Bridge");
     expect(serialized).toContain("Bridge service");
@@ -94,10 +96,11 @@ describe("run card", () => {
     expect(serialized).toContain("最近动态");
   });
 
-  it("shows the three newest tool activities and the latest answer paragraph on the project card", () => {
+  it("shows the three newest tool activities and up to twenty latest answer lines on the project card", () => {
+    const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
-      answer: "已检查项目配置。\n\n正在运行聚焦测试。",
+      answer: lines.join("\n"),
       recentProgress: [
         { key: "read:old", kind: "read", label: "读取旧配置", state: "done", occurredAt: "1" },
         { key: "edit:new", kind: "edit", label: "修改卡片渲染", state: "done", occurredAt: "2" },
@@ -106,13 +109,15 @@ describe("run card", () => {
       ]
     });
     const serialized = JSON.stringify(card);
+    const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**最新消息**"))?.content ?? "";
 
     expect(serialized).toContain("🛠️ 修改卡片渲染");
     expect(serialized).toContain("🛠️ 运行聚焦测试");
     expect(serialized).toContain("🛠️ 检查调用位置");
     expect(serialized).not.toContain("读取旧配置");
-    expect(serialized).toContain("正在运行聚焦测试。");
-    expect(serialized).not.toContain("已检查项目配置。");
+    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-20));
+    expect(serialized).not.toContain("**项目任务**");
   });
 
   it("falls back to the newest formatted activity when the project has no answer prose", () => {
