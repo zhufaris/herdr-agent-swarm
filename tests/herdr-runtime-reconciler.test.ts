@@ -192,6 +192,7 @@ describe("HerdrRuntimeReconciler", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "unknown" });
+    store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "message-1", actorOpenId: "user", body: "queued work" });
     const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, stateChangeSeq: 9, foregroundExecutables: [] };
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
@@ -210,6 +211,7 @@ describe("HerdrRuntimeReconciler", () => {
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "idle", attachment: "attached" });
     await Promise.resolve();
+    expect(wake).toHaveBeenCalledWith({ kind: "binding-runtime-changed", bindingId: "b1" });
     expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
     store.close();
   });

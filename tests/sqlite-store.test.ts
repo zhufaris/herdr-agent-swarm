@@ -637,7 +637,7 @@ describe("SQLite store", () => {
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
-  it("cancels queued prompts whose bindings can no longer dispatch", () => {
+  it("atomically cancels terminal backlog and returns identity-only durable work hints", () => {
     store = new SqliteBindingStore(":memory:");
     for (const [bindingId, state, lifecycle, attachment] of [
       ["archived", "archived", "archived", "attached"],
@@ -649,12 +649,49 @@ describe("SQLite store", () => {
       store.enqueuePrompt({ id: `prompt-${bindingId}`, bindingId, larkMessageId: `message-${bindingId}`, actorOpenId: "u1", body: "must not run" });
     }
 
-    expect(store.convergePromptBacklog()).toEqual({ cancelled: 2 });
-    expect(store.getOperationalSummary().prompts).toMatchObject({ queued: 1, cancelled: 2 });
+    store.createPendingBinding({ id: "active", workspaceId: "w1", chatId: "c1", topicId: "active", rootMessageId: "active", title: "active" });
+    store.updateBinding("active", { paneId: "w1:active", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.enqueuePrompt({ id: "private-turn", bindingId: "active", larkMessageId: "private-message", actorOpenId: "u1", body: "private prompt body" });
+
+    expect(store.scanDurablePromptWork()).toEqual({
+      cancelled: 2,
+      hints: [{ kind: "prompt-ready", bindingId: "active" }]
+    });
+    expect(store.getOperationalSummary().prompts).toMatchObject({ queued: 2, cancelled: 2 });
+    expect(store.claimNextDispatchablePrompt("active")).toBeNull();
     expect(store.listFailures("c1").filter((failure) => failure.kind === "prompt").map((failure) => failure.error)).toEqual([
       "Session can no longer dispatch queued work",
       "Session can no longer dispatch queued work"
     ]);
+    expect(JSON.stringify(store.scanDurablePromptWork())).not.toMatch(/private-turn|private-message|private prompt body/);
+  });
+
+  it("discovers steering and detached observer work without claiming or replaying it", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
+    for (const [id, kind, parent] of [["parent", "turn", null], ["steer", "steering", "parent"]] as const) {
+      store.enqueuePrompt({ id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: `body-${id}`, dispatchKind: kind, parentPromptId: parent });
+    }
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'parent'").run();
+
+    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, hints: [
+      { kind: "detached-observer-ready", bindingId: "b1", promptId: "parent" },
+      { kind: "steering-ready", bindingId: "b1", parentPromptId: "parent" }
+    ] });
+    expect(store.getPrompt("parent")).toMatchObject({ state: "running", observationState: "detached", attemptCount: 0 });
+    expect(store.getPrompt("steer")).toMatchObject({ state: "queued", attemptCount: 0 });
+  });
+
+  it("does not report an ordinary queued turn while its binding already has a running prompt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
+    store.enqueuePrompt({ id: "running", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "running" });
+    store.enqueuePrompt({ id: "later", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "later" });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'running'").run();
+
+    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, hints: [] });
   });
 
   it("classifies, claims, falls back, and recovers steering jobs without replay", () => {

@@ -107,10 +107,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
-    const converged = this.options.store.convergePromptBacklog();
-    if (converged.cancelled > 0) this.options.logger.info({
-      event: "prompt-backlog-converged", cancelled: converged.cancelled, outcome: "cancelled"
-    }, "cancelled queued prompts whose bindings can no longer dispatch");
     const panesByWorkspace = new Map<string, HerdrPane[]>();
     const configuredWorkspaceIds = new Set(this.options.projects.map((project) => project.workspaceId));
     const workspaceIds = requestedWorkspaceIds
@@ -217,8 +213,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       await this.publishChangedLocalOutput(existing, pane.paneId);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
-    for (const binding of activeBindings) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
-    for (const prompt of this.options.store.listDetachedPrompts()) this.options.scheduler.wake({ kind: "detached-observer-ready", bindingId: prompt.bindingId, promptId: prompt.id });
   }
 
   private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {

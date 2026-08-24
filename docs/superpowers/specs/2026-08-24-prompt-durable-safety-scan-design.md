@@ -58,14 +58,19 @@ The SQLite implementation performs one transaction that:
 
 1. cancels queued prompts whose binding can no longer dispatch and updates their
    run-card projections, preserving the current `convergePromptBacklog` behavior;
-2. selects active bindings that have queued ordinary turns;
+2. selects active bindings that have queued ordinary turns and no running
+   prompt;
 3. selects queued steering prompts whose parent is still the active running
    turn; and
 4. selects running ordinary prompts with detached observation.
 
 It returns only scheduler identities: kind, binding ID, and where required parent
 or prompt ID. It does not return prompt bodies, card state, errors, pane output,
-or Lark identifiers. Duplicate hints are removed before returning.
+or Lark identifiers. Duplicate hints are removed before returning. Hints are
+ordered by recovery priority: detached observers first, then steering for their
+active parent, then ordinary queued turns. This prevents an ordinary no-op
+worker from occupying the per-binding worker slot before uncertain work is
+reattached.
 
 The operation does not claim a prompt. Existing claim methods remain the only
 dispatch authority, including the initial Answer Card delivery checkpoint and
@@ -118,7 +123,7 @@ reads used for lifecycle projection remain.
 
 ```ts
 interface PromptWorkerDiagnostics {
-  state: "running" | "stopping";
+  state: "idle" | "running" | "stopping";
   activeTurnWorkers: number;
   activeSteeringWorkers: number;
   lastScanAt: string | null;
@@ -132,6 +137,8 @@ Counts describe only the most recently completed scan and reset on restart. No
 identifiers or failure text are included. Structured logs contain the bounded
 error for a failed scan. `/status` isolates snapshot failure in the same way as
 other diagnostics; `/ready` remains unchanged.
+`idle` means the workflow has been constructed but has not started; after
+`start()` it reports `running` until shutdown begins.
 
 ## Safety invariants
 

@@ -11,6 +11,16 @@ export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
+export type PromptWorkHint =
+  | { kind: "prompt-ready"; bindingId: string }
+  | { kind: "steering-ready"; bindingId: string; parentPromptId: string }
+  | { kind: "detached-observer-ready"; bindingId: string; promptId: string }
+  | { kind: "binding-runtime-changed"; bindingId: string };
+
+export interface DurablePromptWorkScan {
+  cancelled: number;
+  hints: PromptWorkHint[];
+}
 
 export interface InstanceLease {
   ownerId: string;
@@ -172,6 +182,16 @@ export interface OutboxDispatcherDiagnostics {
   lastScanOutcome: "idle" | "delivered" | "failed" | null;
   lastDeliveryAt: string | null;
   lastDeliveryFailureAt: string | null;
+}
+
+export interface PromptWorkerDiagnostics {
+  state: "idle" | "running" | "stopping";
+  activeTurnWorkers: number;
+  activeSteeringWorkers: number;
+  lastScanAt: string | null;
+  lastScanOutcome: "idle" | "work_found" | "failed" | null;
+  lastDiscovered: { turns: number; steering: number; detached: number; cancelled: number };
+  lastScanFailureAt: string | null;
 }
 
 export interface ProjectSelection {

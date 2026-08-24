@@ -80,12 +80,12 @@ The implementation uses the following workflow decomposition.
 | Implementation | Responsibility | Boundary |
 | --- | --- | --- |
 | `InboundRouter` | Durable ingress, command routing, prompt acceptance, and application lifecycle wiring | Inbound application boundary |
-| `PromptRunWorkflow` | FIFO turn draining, steering, detached observation, `TurnSupervisor`, and prompt-specific shutdown | Prompt execution boundary |
+| `PromptRunWorkflow` | FIFO turn draining, steering, detached observation, durable safety scans, `TurnSupervisor`, and prompt-specific shutdown | Prompt execution boundary |
 | `BindingProvisioningWorkflow` | Project selection, pane creation/discovery, attach, reset, replace, and interrupted provisioning recovery | Provisioning boundary |
 | `OperationsWorkflow` | Close, archive/resume, rename/model, operator views, and dead-letter actions | Operator-command boundary |
 | `StartupViewConverger` | Deterministic startup repair of topic/run-card projections and missing Answer-card intent | Startup recovery boundary |
 | `InProcessPromptWorkScheduler` | Coalesced process-local binding and detached-prompt wake-ups behind `PromptWorkScheduler` | Best-effort scheduling adapter |
-| `HerdrRuntimeReconciler` | Herdr snapshot convergence and scoped prompt scheduling hints | Runtime authority boundary |
+| `HerdrRuntimeReconciler` | Herdr snapshot convergence and runtime-change-triggered prompt scheduling hints | Runtime authority boundary |
 | `BridgeEventBus` | Lifecycle projection events behind `LifecycleEventPublisher`; inbound work uses a separate notifier | Process-local lifecycle adapter |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | Projection boundary |
 | `OutboundIntentWriter` | Target validation, durable outbox writes, and best-effort outbound wake-up | Delivery-intent boundary |
@@ -103,7 +103,7 @@ responsibility is a business or application concern.
 | --- | --- | --- |
 | `Binding` | `TopicPaneBinding` in explanatory and external-facing contexts | The controlled association between a Lark topic or root message and a Herdr pane. `Binding` remains an acceptable short internal domain term. |
 | `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to application commands; it does not own execution, reconciliation, or delivery. |
-| prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, steering, detached observation, `TurnSupervisor`, and prompt-specific shutdown behavior. |
+| prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, steering, detached observation, SQLite-backed safety scans, `TurnSupervisor`, and prompt-specific shutdown behavior. |
 | `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
 | workflow wake-up adapter | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
 | concrete `BridgeEventBus` dependency | `LifecycleEventPublisher` | Application workflows publish lifecycle outcomes through this port. Inbound messages use `InboundWorkNotifier`, a separate contract. |
@@ -262,7 +262,8 @@ periodic recovery:
 3. Detect missing panes, terminal identity changes, unknown agent states, and
    eligible unbound TraeX panes.
 4. Read bounded terminal output only where it is needed.
-5. Update binding state, publish lifecycle events, and wake eligible queues.
+5. Update binding state, publish lifecycle events, and emit targeted wakes when
+   an observed runtime change can unblock prompt work.
 
 Periodic reconciliation remains required. A missed UDP datagram may delay an
 update, but must not change the final converged state.
@@ -270,10 +271,13 @@ update, but must not change the final converged state.
 The same rule applies to `PromptWorkScheduler` hints. Prompt acceptance,
 Answer-card delivery checkpoints, and reconciliation persist their state before
 publishing a scoped wake-up. Wake-ups are coalesced and may be duplicated,
-reordered, or lost. Workers atomically claim current SQLite work, and startup
-plus periodic reconciliation scan durable queues and detached observers to
-recover lost hints. `BridgeEventBus` remains separate: it carries lifecycle
-events to deterministic card projections, not commands to execute work.
+reordered, or lost. Workers atomically claim current SQLite work.
+`PromptRunWorkflow` performs startup and periodic SQLite-only safety scans for
+queued turns, eligible steering, and detached observers, so prompt convergence
+does not depend on a successful Herdr snapshot. Scan hints prioritize detached
+observation before steering and ordinary FIFO work for the same binding.
+`BridgeEventBus` remains separate: it carries lifecycle events to deterministic
+card projections, not commands to execute work.
 
 ## Answer streaming and pagination
 
@@ -340,7 +344,8 @@ Health endpoints have separate meanings:
 - `/ready` additionally requires the lease, configured project paths, Herdr,
   and Lark to be usable.
 - `/status` returns a sanitized operational snapshot even when dependencies are
-  degraded.
+  degraded. It includes process-local prompt-worker scan outcome, discovered
+  work counts, failure time, and active worker counts without identifiers.
 
 Shutdown stops ingress, waits for known work, and detaches observers if the
 grace period expires. It does not replay work or delete user state. Logs and
@@ -360,8 +365,9 @@ and credentials.
 
 ## Current evolution priorities
 
-1. Keep startup and periodic durable scans as the correctness mechanism behind
-   the best-effort `PromptWorkScheduler`; wake-ups remain latency hints only.
+1. Preserve the implemented startup and periodic SQLite safety scans as the
+   correctness mechanism behind the best-effort `PromptWorkScheduler`; wake-ups
+   remain latency hints only.
 2. Keep user-visible terminal transitions atomic and transient output projections
    reconstructible; `BridgeEventBus` is not a replay log.
 3. Extend capability ports instead of reintroducing broad store dependencies.
@@ -383,7 +389,7 @@ for the full suite.
 | At most one ordinary turn per binding | `PromptRunWorkflow` uses one worker per binding; the store atomically claims the oldest eligible FIFO prompt only when no prompt is running. | Concurrency-control and steering integration tests |
 | Uncertain dispatch is never replayed | Dispatch checkpoints distinguish not-started from possibly dispatched work. Shutdown and restart detach the observer; detached recovery observes the existing Herdr turn. | SQLite recovery, prompt workflow, and shutdown tests |
 | Terminal state survives missed lifecycle notification | Turn completion, turn failure, and steering completion update prompt state and durable run-card/topic projections in one SQLite transaction. Startup convergence repairs delivery intent from those views. | Terminal-projection SQLite tests and event/card integration tests |
-| Wake-up loss affects latency only | `PromptWorkScheduler` carries identity-only hints; startup recovery and periodic Herdr reconciliation scan durable queued and detached work. | Prompt scheduler, SQLite recovery, and runtime reconciler tests |
+| Wake-up loss affects latency only | `PromptWorkScheduler` carries identity-only hints; `PromptRunWorkflow` independently scans durable queued, steering, and detached work without requiring Herdr reconciliation. | Prompt safety-scan, scheduler, SQLite recovery, and runtime reconciler tests |
 | Herdr identity remains authoritative | Provisioning, live operations, and reconciliation check workspace, project directory, pane identity, and terminal identity before state-changing effects. | Attach, provisioning recovery, pane-close, model, and reconciler tests |
 | Lark retries cannot repeat TraeX work | All Lark work is persisted in the outbox. `LarkOutboxDispatcher` alone claims delivery work, and dead-letter retry changes only outbox state. | Outbox dispatcher and SQLite dead-letter tests |
 | Delivery order is isolated by lane | Every outbox row stores a deterministic `lane_key`; only each lane head is claimable, while independent lanes can drain concurrently. | SQLite migration and outbox dispatcher tests |

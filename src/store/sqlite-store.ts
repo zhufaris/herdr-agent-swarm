@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, RequestCardRole, SessionSummary } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -509,7 +509,7 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  convergePromptBacklog(): { cancelled: number } {
+  scanDurablePromptWork(): DurablePromptWorkScan {
     const timestamp = now();
     const reason = "Session can no longer dispatch queued work";
     this.database.exec("BEGIN IMMEDIATE");
@@ -529,8 +529,34 @@ export class SqliteBindingStore implements BindingStorePort {
           view_version = view_version + 1, updated_at = ?
         WHERE phase = 'queued' AND binding_id IN (${terminalBindings})
       `).run(reason, timestamp, timestamp);
+      const hints: PromptWorkHint[] = [];
+      const detached = this.database.prepare(`
+        SELECT p.id, p.binding_id FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id
+        WHERE p.state = 'running' AND p.dispatch_kind = 'turn' AND p.observation_state = 'detached'
+          AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached' AND b.pane_id IS NOT NULL
+        ORDER BY p.created_at, p.id
+      `).all() as Array<{ id: string; binding_id: string }>;
+      for (const row of detached) hints.push({ kind: "detached-observer-ready", bindingId: row.binding_id, promptId: row.id });
+      const steering = this.database.prepare(`
+        SELECT DISTINCT p.binding_id, p.parent_prompt_id FROM prompt_jobs p
+        JOIN bindings b ON b.id = p.binding_id
+        JOIN prompt_jobs parent ON parent.id = p.parent_prompt_id AND parent.binding_id = p.binding_id
+        WHERE p.state = 'queued' AND p.dispatch_kind = 'steering' AND p.parent_prompt_id IS NOT NULL
+          AND parent.state = 'running' AND parent.dispatch_kind = 'turn'
+          AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached' AND b.pane_id IS NOT NULL
+        ORDER BY p.binding_id, p.parent_prompt_id
+      `).all() as Array<{ binding_id: string; parent_prompt_id: string }>;
+      for (const row of steering) hints.push({ kind: "steering-ready", bindingId: row.binding_id, parentPromptId: row.parent_prompt_id });
+      const turns = this.database.prepare(`
+        SELECT DISTINCT p.binding_id FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id
+        WHERE p.state = 'queued' AND p.dispatch_kind = 'turn'
+          AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached' AND b.pane_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
+        ORDER BY p.binding_id
+      `).all() as Array<{ binding_id: string }>;
+      for (const row of turns) hints.push({ kind: "prompt-ready", bindingId: row.binding_id });
       this.database.exec("COMMIT");
-      return { cancelled: Number(result.changes) };
+      return { cancelled: Number(result.changes), hints };
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 

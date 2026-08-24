@@ -4,7 +4,7 @@ import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-e
 import type { BridgeEvent } from "../domain/events.js";
 import type { HerdrPort, PromptRunStore } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
-import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
+import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -22,6 +22,8 @@ export interface ActiveTurnSnapshot {
 export interface PromptRunWorkflowPort {
   prepareRecovery(): void;
   start(): void;
+  requestSafetyScan(): void;
+  snapshot(): PromptWorkerDiagnostics;
   activeTurn(bindingId: string): ActiveTurnSnapshot | null;
   isBindingBusy(bindingId: string): boolean;
   stop(): Promise<void>;
@@ -36,6 +38,7 @@ interface PromptRunWorkflowOptions {
   logger: Logger;
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
+  safetyScanIntervalMs?: number;
 }
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
@@ -43,11 +46,19 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly turns = new TurnSupervisor();
   private readonly shutdownGraceMs: number;
+  private readonly safetyScanIntervalMs: number;
   private unsubscribe: (() => void) | null = null;
+  private safetyTimer: ReturnType<typeof setInterval> | null = null;
+  private started = false;
   private stopping = false;
+  private lastScanAt: string | null = null;
+  private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
+  private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, cancelled: 0 };
+  private lastScanFailureAt: string | null = null;
 
   constructor(private readonly options: PromptRunWorkflowOptions) {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
+    this.safetyScanIntervalMs = options.safetyScanIntervalMs ?? 5_000;
   }
 
   prepareRecovery(): void {
@@ -58,13 +69,46 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   start(): void {
     if (this.unsubscribe) return;
     this.stopping = false;
+    this.started = true;
     this.unsubscribe = this.options.scheduler.subscribe((event) => this.wake(event));
-    for (const prompt of this.options.store.listDetachedPrompts()) {
-      this.options.scheduler.wake({ kind: "detached-observer-ready", bindingId: prompt.bindingId, promptId: prompt.id });
+    this.requestSafetyScan();
+    this.safetyTimer = setInterval(() => this.requestSafetyScan(), this.safetyScanIntervalMs);
+    this.safetyTimer.unref?.();
+  }
+
+  requestSafetyScan(): void {
+    if (this.stopping) return;
+    try {
+      const result = this.options.store.scanDurablePromptWork();
+      const discovered = { turns: 0, steering: 0, detached: 0, cancelled: result.cancelled };
+      for (const hint of result.hints) {
+        if (hint.kind === "prompt-ready") discovered.turns += 1;
+        else if (hint.kind === "steering-ready") discovered.steering += 1;
+        else if (hint.kind === "detached-observer-ready") discovered.detached += 1;
+        this.options.scheduler.wake(hint);
+      }
+      this.lastDiscovered = discovered;
+      this.lastScanOutcome = result.hints.length > 0 || result.cancelled > 0 ? "work_found" : "idle";
+      if (result.cancelled > 0) this.options.logger.info({
+        event: "prompt-backlog-converged", cancelled: result.cancelled, outcome: "cancelled"
+      }, "cancelled queued prompts whose bindings can no longer dispatch");
+    } catch (error) {
+      this.lastDiscovered = { turns: 0, steering: 0, detached: 0, cancelled: 0 };
+      this.lastScanOutcome = "failed";
+      this.lastScanFailureAt = new Date().toISOString();
+      this.options.logger.error({ event: "prompt-safety-scan-failed", err: safeLogError(error), outcome: "deferred_to_next_scan" }, "durable prompt safety scan failed");
+    } finally {
+      this.lastScanAt = new Date().toISOString();
     }
-    for (const binding of this.options.store.listBindingsByState("active")) {
-      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
-    }
+  }
+
+  snapshot(): PromptWorkerDiagnostics {
+    return {
+      state: this.stopping ? "stopping" : this.started ? "running" : "idle",
+      activeTurnWorkers: this.workers.size, activeSteeringWorkers: this.steeringWorkers.size,
+      lastScanAt: this.lastScanAt, lastScanOutcome: this.lastScanOutcome,
+      lastDiscovered: { ...this.lastDiscovered }, lastScanFailureAt: this.lastScanFailureAt
+    };
   }
 
   wake(event: PromptWorkHint): void {
@@ -93,6 +137,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    if (this.safetyTimer) clearInterval(this.safetyTimer);
+    this.safetyTimer = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     const pending = [...this.workers.values(), ...this.steeringWorkers.values()];

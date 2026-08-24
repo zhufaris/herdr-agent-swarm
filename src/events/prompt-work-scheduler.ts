@@ -1,11 +1,8 @@
 import type { Logger } from "pino";
+import type { PromptWorkHint } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-export type PromptWorkHint =
-  | { kind: "prompt-ready"; bindingId: string }
-  | { kind: "steering-ready"; bindingId: string; parentPromptId: string }
-  | { kind: "detached-observer-ready"; bindingId: string; promptId: string }
-  | { kind: "binding-runtime-changed"; bindingId: string };
+export type { PromptWorkHint } from "../domain/types.js";
 
 type PromptWorkListener = (event: PromptWorkHint) => void | Promise<void>;
 

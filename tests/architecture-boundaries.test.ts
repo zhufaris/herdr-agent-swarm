@@ -2,6 +2,13 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
+  it("keeps durable prompt safety scans out of Herdr reconciliation", () => {
+    const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
+    expect(reconciler).not.toContain("scanDurablePromptWork");
+    expect(reconciler).not.toContain("listDetachedPrompts");
+    expect(reconciler).not.toContain('scheduler.wake({ kind: "prompt-ready", bindingId: binding.id })');
+  });
+
   it("keeps concrete workflow and adapter construction in the composition root", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");

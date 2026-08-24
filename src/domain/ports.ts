@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -99,7 +99,7 @@ export interface BindingStorePort {
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
   recoverRunningPrompts(): number;
-  convergePromptBacklog(): { cancelled: number };
+  scanDurablePromptWork(): DurablePromptWorkScan;
   listDetachedPrompts(): PromptJob[];
   markPromptObservationDetached(id: string, notice: string): void;
   markPromptDispatched(id: string): void;
@@ -154,8 +154,7 @@ export type PromptAcceptanceStore = Pick<BindingStorePort,
 
 export type PromptRunStore = Pick<BindingStorePort,
   | "recoverRunningPrompts"
-  | "listDetachedPrompts"
-  | "listBindingsByState"
+  | "scanDurablePromptWork"
   | "getBinding"
   | "getPrompt"
   | "claimNextDispatchablePrompt"
@@ -179,11 +178,9 @@ export type PromptRunStore = Pick<BindingStorePort,
 >;
 
 export type RuntimeReconciliationStore = Pick<BindingStorePort,
-  | "convergePromptBacklog"
   | "countPendingPrompts"
   | "findBindingByPane"
   | "listBindingsByState"
-  | "listDetachedPrompts"
   | "listRunCardsByPhases"
   | "saveRunCard"
   | "transitionBinding"
