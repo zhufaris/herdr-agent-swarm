@@ -1,4 +1,5 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
@@ -73,7 +74,7 @@ export class LarkSdkAdapter implements LarkPort {
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: this.options.chatId, msg_type: "interactive", content: JSON.stringify(card),
-        ...(idempotencyKey ? { uuid: idempotencyKey } : {})
+        ...(idempotencyKey ? { uuid: larkMessageUuid(idempotencyKey) } : {})
       }
     });
     const messageId = requireMessageId(response.data?.message_id);
@@ -83,7 +84,7 @@ export class LarkSdkAdapter implements LarkPort {
   async replyText(rootMessageId: string, text: string, idempotencyKey?: string): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "text", content: JSON.stringify({ text }), reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) }
+      data: { msg_type: "text", content: JSON.stringify({ text }), reply_in_thread: true, ...(idempotencyKey ? { uuid: larkMessageUuid(idempotencyKey) } : {}) }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
@@ -91,7 +92,7 @@ export class LarkSdkAdapter implements LarkPort {
   async replyCard(rootMessageId: string, card: object, idempotencyKey?: string): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "interactive", content: JSON.stringify(normalizeLarkCardElementIds(card)), reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) }
+      data: { msg_type: "interactive", content: JSON.stringify(normalizeLarkCardElementIds(card)), reply_in_thread: true, ...(idempotencyKey ? { uuid: larkMessageUuid(idempotencyKey) } : {}) }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
@@ -112,7 +113,7 @@ export class LarkSdkAdapter implements LarkPort {
   async replyStreamingCardReference(rootMessageId: string, cardId: string, idempotencyKey: string): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) }
+      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), reply_in_thread: true, ...(idempotencyKey ? { uuid: larkMessageUuid(idempotencyKey) } : {}) }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
@@ -241,6 +242,11 @@ export function normalizeCardActionEvent(data: lark.RawCardActionEvent): Incomin
 function requireMessageId(value: string | undefined): string {
   if (!value) throw new Error("Lark response did not contain message_id");
   return value;
+}
+
+function larkMessageUuid(idempotencyKey: string): string {
+  if (idempotencyKey.length <= 50) return idempotencyKey;
+  return `bridge_${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 40)}`;
 }
 
 function safeResponseMetadata(response: unknown): string {

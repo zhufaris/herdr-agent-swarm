@@ -57,6 +57,22 @@ describe("Lark streaming Answer cards", () => {
     expect(sdk.defaultHttpInstance.get).toHaveBeenCalledWith("/probe", { headers: { test: "yes" }, timeout: 12_345 });
   });
 
+  it("maps long durable keys to stable Lark UUIDs within the API limit", async () => {
+    replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    const durableKey = "project-selection:create:211c0d79-ca14-47a8-b2fc-e2fe995f5480";
+
+    await adapter.replyCard("root-1", { schema: "2.0" }, durableKey);
+    await adapter.replyCard("root-1", { schema: "2.0" }, durableKey);
+
+    const firstUuid = replyMessage.mock.calls[0]?.[0].data.uuid as string;
+    const secondUuid = replyMessage.mock.calls[1]?.[0].data.uuid as string;
+    expect(firstUuid).toBe(secondUuid);
+    expect(firstUuid).toMatch(/^bridge_[a-f0-9]{40}$/);
+    expect(firstUuid.length).toBeLessThanOrEqual(50);
+    expect(firstUuid).not.toBe(durableKey);
+  });
+
   it("reports safe CardKit response metadata when creation returns no card id", async () => {
     createCard.mockResolvedValue({
       code: 99991672,
