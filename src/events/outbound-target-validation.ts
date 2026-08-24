@@ -1,0 +1,46 @@
+import type { OutboxStore } from "../domain/ports.js";
+import { answerElementId } from "../domain/run-card-view.js";
+
+export class PermanentDeliveryError extends Error {}
+
+export function assertAnswerCardCreateTarget(
+  store: Pick<OutboxStore, "getBinding" | "loadRunCard">, bindingId: string | null, promptId: string | null, rootMessageId: string,
+  card: object, stream?: { pageIndex: number; pageStart: number; elementId: string }
+): void {
+  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card create target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  const binding = store.getBinding(bindingId);
+  if (!view || view.bindingId !== bindingId || binding?.rootMessageId !== rootMessageId) throw new PermanentDeliveryError(`Answer card create target mismatch for prompt ${promptId}`);
+  if (!stream) {
+    if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0) throw new PermanentDeliveryError(`Initial answer card create is stale for prompt ${promptId}`);
+    return;
+  }
+  if (!view.answerCardId || stream.pageIndex !== view.answerPageIndex + 1 || stream.pageStart <= view.answerPageStart || !stream.elementId) throw new PermanentDeliveryError(`Answer continuation target mismatch for prompt ${promptId}`);
+  const expectedElementId = answerElementId(promptId, stream.pageIndex);
+  const cardElementIds = collectElementIds(card);
+  if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) throw new PermanentDeliveryError(`Answer continuation element mismatch for prompt ${promptId}`);
+}
+
+export function assertAnswerCardTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, cardId: string): void {
+  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer stream target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  if (!view || view.bindingId !== bindingId || view.answerCardId !== cardId) throw new PermanentDeliveryError(`Answer stream card target mismatch for prompt ${promptId}`);
+}
+
+export function assertAnswerStreamTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, cardId: string, elementId: string): void {
+  assertAnswerCardTarget(store, bindingId, promptId, cardId);
+  const view = store.loadRunCard(promptId!);
+  if (!view || view.answerElementId !== elementId) throw new PermanentDeliveryError(`Answer stream element target mismatch for prompt ${promptId}`);
+}
+
+export function assertAnswerMessageTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, messageId: string): void {
+  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  if (!view || view.bindingId !== bindingId || view.answerMessageId !== messageId) throw new PermanentDeliveryError(`Answer card message target mismatch for prompt ${promptId}`);
+}
+
+function collectElementIds(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(collectElementIds);
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, item]) => key === "element_id" && typeof item === "string" ? [item] : collectElementIds(item));
+}

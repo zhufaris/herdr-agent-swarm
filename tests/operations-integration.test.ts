@@ -4,7 +4,7 @@ import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("operational commands", () => {
@@ -30,7 +30,7 @@ describe("operational commands", () => {
     store.enqueueOutboundReply({ id: "o1", idempotencyKey: "failed-output", bindingId: "b1", promptId: "p1", rootMessageId: "root", kind: "card_reply", payload: "{}" });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 

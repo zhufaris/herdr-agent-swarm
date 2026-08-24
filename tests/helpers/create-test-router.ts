@@ -10,6 +10,8 @@ import type { HerdrPort, LarkPort } from "../../src/domain/ports.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
 import type { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
+import { OutboundIntentWriter } from "../../src/events/outbound-intent-writer.js";
+import { InProcessOutboundWorkNotifier } from "../../src/events/outbound-work-notifier.js";
 import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../../src/events/prompt-work-scheduler.js";
 import type { SqliteBindingStore } from "../../src/store/sqlite-store.js";
 
@@ -25,17 +27,20 @@ export function createTestRouter(
   scheduler: PromptWorkScheduler = new InProcessPromptWorkScheduler(logger),
   inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier()
 ): InboundRouter {
+  const outboundWork = new InProcessOutboundWorkNotifier(logger);
+  outboundWork.subscribe(() => outbound.requestScan());
+  const writer = new OutboundIntentWriter(store, outboundWork);
   outbound.connectPromptScheduler(scheduler);
-  const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, channelPublisher: outbound, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
-  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, scheduler, logger });
-  const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
+  const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
+  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, logger });
+  const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
   const reconciler = new HerdrRuntimeReconciler({
-    projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
+    projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
     isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId)
   });
   return new InboundRouter({
-    config, store, herdr, lark, lifecycleEvents: bus, outbound, logger, scheduler, inboundWork,
-    promptRun, provisioning, operations, reconciler, startupViews: new StartupViewConverger(config, store, outbound)
+    config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
+    promptRun, provisioning, operations, reconciler, startupViews: new StartupViewConverger(config, store, writer, outboundWork)
   });
 }

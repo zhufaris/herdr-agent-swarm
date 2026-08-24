@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
+import type { OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
@@ -23,6 +23,7 @@ export class ConversationViewProjector {
     private readonly bus: LifecycleEventSubscriber,
     private readonly store: ProjectionStore,
     private readonly channelPublisher: OutboundIntentPort,
+    private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger
   ) {
     this.scheduler = new CardUpdateScheduler(async (promptId) => {
@@ -63,7 +64,7 @@ export class ConversationViewProjector {
 
   start(): () => void {
     this.unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
-    this.unsubscribeStreamCardCreated = this.channelPublisher.onStreamCardCreated((promptId, viewVersion) => {
+    this.unsubscribeStreamCardCreated = this.checkpoints.onStreamCardCreated((promptId, viewVersion) => {
       const view = this.store.loadRunCard(promptId);
       this.scheduler.schedule(promptId, Math.max(viewVersion, view?.viewVersion ?? 0), true);
     });

@@ -212,6 +212,7 @@ export type OutboxStore = Pick<BindingStorePort,
   | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDeadLetter" | "markOutboundReplyDelivered"
   | "markOutboundReplyFailed" | "recordBridgeMessage" | "updateBinding"
 >;
+export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getBinding" | "loadRunCard">;
 
 export interface OutboundIntentPort {
   enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId?: string | null): Promise<void>;
@@ -220,16 +221,14 @@ export interface OutboundIntentPort {
   enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void>;
   enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void>;
-  onStreamCardCreated(listener: (promptId: string, viewVersion: number) => void): () => void;
 }
 
-export interface PromptRunOutboundPort extends OutboundIntentPort {
-  drain(): Promise<void>;
+export interface OutboundCheckpointSubscriber {
+  onStreamCardCreated(listener: (promptId: string, viewVersion: number) => void): () => void;
 }
 
 export interface OutboxDispatcherControl {
   start(): () => void;
   stop(): Promise<void>;
-  drain(force?: boolean): Promise<void>;
-  retryPending(): Promise<void>;
+  requestScan(force?: boolean): Promise<void>;
 }

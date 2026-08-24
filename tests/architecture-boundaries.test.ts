@@ -23,4 +23,17 @@ describe("application composition boundaries", () => {
     expect(projector).not.toContain("BridgeEventBus");
     expect(dispatcher).not.toContain("BridgeEventBus");
   });
+
+  it("keeps outbound intent persistence separate from Lark delivery", () => {
+    const writer = readFileSync(new URL("../src/events/outbound-intent-writer.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const coordinators = ["inbound-router.ts", "binding-provisioning-workflow.ts", "operations-workflow.ts", "prompt-run-workflow.ts", "herdr-runtime-reconciler.ts"]
+      .map((file) => readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8"))
+      .join("\n");
+    expect(writer).toContain("implements OutboundIntentPort");
+    expect(writer).not.toContain("LarkPort");
+    expect(dispatcher).toContain("implements OutboxDispatcherControl, OutboundCheckpointSubscriber");
+    expect(dispatcher).not.toContain("implements OutboundIntentPort");
+    expect(coordinators).not.toMatch(/(?:outbound|channelPublisher)\.drain\(|retryPending/);
+  });
 });

@@ -6,7 +6,7 @@ import type { HerdrPort, PromptRunStore } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
-import type { PromptRunOutboundPort } from "../domain/ports.js";
+import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -32,7 +32,7 @@ interface PromptRunWorkflowOptions {
   herdr: HerdrPort;
   bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler;
-  channelPublisher: PromptRunOutboundPort;
+  outboundWork: OutboundWorkNotifier;
   logger: Logger;
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
@@ -291,8 +291,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       return;
     }
     this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) });
+    this.options.outboundWork.wake();
     await this.options.bus.publish(event);
-    await this.options.channelPublisher.drain();
   }
 
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> {

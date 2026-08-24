@@ -10,6 +10,7 @@ import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
+import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
@@ -26,15 +27,14 @@ export interface InboundRouterPort {
 }
 
 type InboundRouterStore = InboundStore & PromptAcceptanceStore;
-type InboundRouterOutboundPort = OutboundIntentPort & { drain(): Promise<void> };
-
 export interface InboundRouterOptions {
   config: BridgeConfig;
   store: InboundRouterStore;
   herdr: Pick<HerdrPort, "assertWorkspace">;
   lark: Pick<LarkPort, "start" | "stop">;
   lifecycleEvents: LifecycleEventPublisher;
-  outbound: InboundRouterOutboundPort;
+  outbound: OutboundIntentPort;
+  outboundWork: OutboundWorkNotifier;
   logger: Logger;
   scheduler: PromptWorkScheduler;
   inboundWork: InboundWorkNotifier;
@@ -52,7 +52,7 @@ export class InboundRouter implements InboundRouterPort {
   constructor(private readonly options: InboundRouterOptions) {}
 
   async start(): Promise<void> {
-    const { config, store, herdr, lark, logger, promptRun, reconciler, operations, provisioning, outbound, inboundWork, startupViews } = this.options;
+    const { config, store, herdr, lark, logger, promptRun, reconciler, operations, provisioning, inboundWork, startupViews } = this.options;
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
@@ -68,7 +68,6 @@ export class InboundRouter implements InboundRouterPort {
     this.stopInboundSubscription = inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
     await lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
     await provisioning.recover();
-    await outbound.drain();
     await this.drainInboundMessages();
   }
 
@@ -158,12 +157,12 @@ export class InboundRouter implements InboundRouterPort {
     const promptId = randomUUID(); const occurredAt = new Date().toISOString(); const activeRun = this.options.promptRun.activeTurn(binding.id); const parentPromptId = forcedParentPromptId ?? (activeRun?.state === "working" ? activeRun.promptId : null); const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({ promptId, bindingId: binding.id, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: dispatchKind === "steering" ? 0 : this.options.store.countPendingPrompts(binding.id) + 1, occurredAt });
     const { prompt, inserted } = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view) });
-    if (!inserted) { await this.options.outbound.drain(); if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return; }
+    this.options.outboundWork.wake();
+    if (!inserted) { if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return; }
     const depth = this.options.store.countPendingPrompts(binding.id);
     this.options.logger.info({ event: "prompt-dispatch-decided", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: prompt.id, parentPromptId, workspaceId: binding.workspaceId, paneId: binding.paneId, dispatchKind, queueDepth: depth, outcome: "accepted" }, "accepted Lark prompt dispatch decision");
     await this.publish(binding.id, dispatchKind === "steering" ? "SteeringQueued" : "PromptQueued", "lark", dispatchKind === "steering" ? { promptId: prompt.id, parentPromptId: parentPromptId!, actorOpenId: message.actorOpenId } : { promptId: prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
     this.options.store.audit({ actorOpenId: message.actorOpenId, action: dispatchKind === "steering" ? "prompt.steer" : "prompt.queue", target: binding.id, outcome: "success" });
-    await this.options.outbound.drain();
     if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
   }
 

@@ -9,6 +9,7 @@ import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig, ProjectSelection } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 export interface BindingProvisioningWorkflowPort {
@@ -29,7 +30,8 @@ interface Options {
   herdr: HerdrPort;
   lark: LarkPort;
   lifecycleEvents: LifecycleEventPublisher;
-  outbound: OutboundIntentPort & { drain(): Promise<void> };
+  outbound: OutboundIntentPort;
+  outboundWork: OutboundWorkNotifier;
   scheduler: PromptWorkScheduler;
   logger: Logger;
 }
@@ -73,7 +75,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle,
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: renderProjectSelectorCard({ selectionId, projects: this.options.config.projects })
     });
-    await this.options.outbound.drain();
+    this.options.outboundWork.wake();
   }
 
   async completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<void> {

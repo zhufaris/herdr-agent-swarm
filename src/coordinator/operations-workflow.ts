@@ -13,10 +13,10 @@ import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface OutboundOperationsPort extends OutboundIntentPort { drain(): Promise<void>; retryPending(): Promise<void>; }
-interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; lark: LarkPort; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundOperationsPort; scheduler: PromptWorkScheduler; isBindingBusy(bindingId: string): boolean; logger: Logger; }
+interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; lark: LarkPort; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; isBindingBusy(bindingId: string): boolean; logger: Logger; }
 
 export interface OperationsWorkflowPort {
   recover(): Promise<void>;
@@ -65,7 +65,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     const { store, outbound, logger } = this.options;
     const outcome = decision === "retry_dead_letter" ? store.retryDeadLetter(replyId, action.chatId, action.operatorOpenId) : store.dismissDeadLetter(replyId, action.chatId, action.operatorOpenId);
     logger.info({ event: "dead-letter-action-decided", replyId, action: decision, outcome }, "processed dead-letter action");
-    if (outcome === "retried") await outbound.retryPending();
+    if (outcome === "retried") this.options.outboundWork.wake();
     const notice = outcome === "retried" ? "已重新提交该消息发送；不会重放 TraeX 任务。" : outcome === "dismissed" ? "已忽略该发送失败并保留历史记录。" : "该操作已失效或无权执行。";
     await outbound.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${replyId}:${outcome}`, renderFailureCards(store.listFailures(action.chatId), notice)[0]!);
   }
@@ -154,7 +154,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string): Promise<HerdrPane> { const pane = (await this.options.herdr.observeRuntime(paneId)).pane; if (!pane) throw new Error(`Herdr pane ${paneId} not found`); if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`); const project = this.options.config.projects.find((item) => item.id === binding.projectId); if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`); if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${paneId}`); if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`); return pane; }
-  private async transitionAndPublish(binding: Binding, transition: import("../domain/pane-thread-lifecycle.js").SessionTransition, type: "BindingDraining" | "BindingArchived", reason: string): Promise<Binding> { const event = createBridgeEvent(binding.id, type, "lark", { reason }); const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id); const view = reduceTopicView(current, event); if (!binding.statusMessageId) { const next = this.options.store.transitionBinding(binding.id, transition); await this.options.lifecycleEvents.publish(event); return next; } const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) }); await this.options.lifecycleEvents.publish(event); await this.options.outbound.drain(); return next; }
+  private async transitionAndPublish(binding: Binding, transition: import("../domain/pane-thread-lifecycle.js").SessionTransition, type: "BindingDraining" | "BindingArchived", reason: string): Promise<Binding> { const event = createBridgeEvent(binding.id, type, "lark", { reason }); const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id); const view = reduceTopicView(current, event); if (!binding.statusMessageId) { const next = this.options.store.transitionBinding(binding.id, transition); await this.options.lifecycleEvents.publish(event); return next; } const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) }); this.options.outboundWork.wake(); await this.options.lifecycleEvents.publish(event); return next; }
   private async publishCards(message: IncomingLarkMessage, kind: string, cards: object[]): Promise<void> { for (const [index, card] of cards.entries()) await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `${kind}:${message.messageId}:${index}`, card); this.options.logger.info({ event: `operation-${kind}-listed`, chatId: message.chatId, pageCount: cards.length, outcome: "listed" }, `listed Herdr ${kind}`); }
   private spaceNameFor(binding: Binding): string { const matches = binding.projectId ? this.options.config.projects.filter((project) => project.id === binding.projectId) : this.options.config.projects.filter((project) => project.workspaceId === binding.workspaceId); return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved"; }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }

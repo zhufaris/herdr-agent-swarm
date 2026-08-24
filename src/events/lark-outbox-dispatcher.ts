@@ -1,13 +1,13 @@
-import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { LarkPort, OutboundIntentPort, OutboxDispatcherControl, OutboxStore } from "../domain/ports.js";
+import type { LarkPort, OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports.js";
 import type { OutboundReply } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { answerElementId } from "../domain/run-card-view.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
+import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
+import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, PermanentDeliveryError } from "./outbound-target-validation.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
-export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatcherControl {
+export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
   private static readonly MAX_CONCURRENT_DELIVERIES = 4;
   private draining: Promise<void> | null = null;
   private readonly activeHandlers = new Set<Promise<void>>();
@@ -15,19 +15,29 @@ export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatche
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private safetyTimer: ReturnType<typeof setInterval> | null = null;
+  private scanRequested = false;
+  private forceRequested = false;
   private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
   private scheduler: PromptWorkScheduler | null = null;
 
   constructor(
     private readonly store: OutboxStore,
     private readonly lark: LarkPort,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly work: OutboundWorkNotifier = new InProcessOutboundWorkNotifier(logger),
+    private readonly safetyScanIntervalMs = 30_000
   ) {}
 
   start(): () => void {
-    void this.drain();
-    this.unsubscribe = () => {};
-    return () => this.unsubscribe?.();
+    if (this.unsubscribe) return this.unsubscribe;
+    this.stopping = false;
+    const unsubscribeWork = this.work.subscribe(() => this.requestScan());
+    this.unsubscribe = () => { unsubscribeWork(); this.unsubscribe = null; };
+    this.safetyTimer = setInterval(() => void this.requestScan(), this.safetyScanIntervalMs);
+    this.safetyTimer.unref?.();
+    void this.requestScan();
+    return this.unsubscribe;
   }
 
   onStreamCardCreated(listener: (promptId: string, viewVersion: number) => void): () => void {
@@ -44,71 +54,34 @@ export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatche
     this.unsubscribe = null;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    if (this.safetyTimer) clearInterval(this.safetyTimer);
+    this.safetyTimer = null;
     this.stopPromise = this.waitForActiveWork();
     return this.stopPromise;
   }
 
-  async enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId: string | null = null): Promise<void> {
-    this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey, bindingId, rootMessageId, kind: "card_reply", payload: JSON.stringify(card)
-    });
-    await this.drain();
-  }
-
-  async enqueueCardUpdate(bindingId: string | null, messageId: string, eventId: string, card: object): Promise<void> {
-    this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: `card-update:${messageId}:${eventId}`, bindingId, rootMessageId: messageId, kind: "card_update", payload: JSON.stringify(card)
-    });
-    await this.drain();
-  }
-
-  async enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object): Promise<void> {
-    this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: "run-card:update:" + promptId + ":" + cardRole + ":" + viewVersion, bindingId, promptId, viewVersion, cardRole,
-      rootMessageId: messageId, kind: "card_update", payload: JSON.stringify(card)
-    });
-    await this.drain();
-  }
-
-  async enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
-    assertAnswerStreamTarget(this.store, bindingId, promptId, cardId, elementId);
-    this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: `stream:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer",
-      rootMessageId: cardId, kind: "stream_content", payload: JSON.stringify({ elementId, content, sequence })
-    });
-    await this.drain();
-  }
-
-  async enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void> {
-    this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.pageIndex}`, bindingId: input.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
-      rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.pageIndex, pageStart: input.pageStart, elementId: input.elementId } })
-    });
-    await this.drain();
-  }
-
-  async enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void> {
-    assertAnswerCardTarget(this.store, bindingId, promptId, cardId);
-    this.store.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: `stream-finish:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer",
-      rootMessageId: cardId, kind: "stream_finish", payload: JSON.stringify({ summary, sequence })
-    });
-    await this.drain();
-  }
-
-  async drain(force = false): Promise<void> {
-    if (this.draining) {
-      await this.draining;
-      return this.drain(force);
-    }
-    this.draining = this.drainPending(force).finally(() => {
+  /** Explicit control for tests and recovery tooling; workflows publish notifier hints instead. */
+  async requestScan(force = false): Promise<void> {
+    if (this.stopping) return;
+    this.scanRequested = true;
+    this.forceRequested ||= force;
+    if (this.draining) return this.draining;
+    this.draining = this.runRequestedScans().finally(() => {
       this.draining = null;
       this.scheduleRetry();
+      if (this.scanRequested && !this.stopping) void this.requestScan();
     });
     return this.draining;
   }
 
-  async retryPending(): Promise<void> { await this.drain(true); }
+  private async runRequestedScans(): Promise<void> {
+    while (this.scanRequested && !this.stopping) {
+      const force = this.forceRequested;
+      this.scanRequested = false;
+      this.forceRequested = false;
+      await this.drainPending(force);
+    }
+  }
 
   private trackHandler(work: Promise<void>): Promise<void> {
     this.activeHandlers.add(work);
@@ -127,6 +100,7 @@ export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatche
   private async drainPending(force: boolean): Promise<void> {
     const blockedTargets = new Set<string>();
     while (true) {
+      if (this.stopping) return;
       const batch = this.store.listOutboundLaneHeads(
         LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES,
         force ? null : new Date().toISOString(),
@@ -146,7 +120,7 @@ export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatche
     const dueAt = Date.parse(nextAttemptAt);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.drain();
+      void this.requestScan();
     }, Math.max(0, dueAt - Date.now()));
     this.retryTimer.unref?.();
   }
@@ -175,7 +149,7 @@ export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatche
           if (prompt?.dispatchKind === "steering" && prompt.parentPromptId) this.scheduler?.wake({ kind: "steering-ready", bindingId: reply.bindingId, parentPromptId: prompt.parentPromptId });
           else this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
-        if (reply.promptId && reply.attemptCount > 0 && decoded.stream && decoded.stream.pageIndex > 0) {
+        if (reply.promptId && decoded.stream && decoded.stream.pageIndex > 0) {
           for (const listener of this.streamCardCreatedListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
         }
       } else if (reply.kind === "stream_content") {
@@ -249,63 +223,4 @@ function decodeStreamingCardPayload(payload: string): { card: object; stream?: {
       elementId: typeof decoded.stream.elementId === "string" ? decoded.stream.elementId : ""
     } }
     : { card: decoded };
-}
-
-class PermanentDeliveryError extends Error {}
-
-function assertAnswerCardCreateTarget(
-  store: OutboxStore, bindingId: string | null, promptId: string | null, rootMessageId: string,
-  card: object,
-  stream?: { pageIndex: number; pageStart: number; elementId: string }
-): void {
-  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card create target is missing binding or prompt identity");
-  const view = store.loadRunCard(promptId);
-  const binding = store.getBinding(bindingId);
-  if (!view || view.bindingId !== bindingId || binding?.rootMessageId !== rootMessageId) {
-    throw new PermanentDeliveryError(`Answer card create target mismatch for prompt ${promptId}`);
-  }
-  if (!stream) {
-    if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0) throw new PermanentDeliveryError(`Initial answer card create is stale for prompt ${promptId}`);
-    return;
-  }
-  if (!view.answerCardId || stream.pageIndex !== view.answerPageIndex + 1 || stream.pageStart <= view.answerPageStart || !stream.elementId) {
-    throw new PermanentDeliveryError(`Answer continuation target mismatch for prompt ${promptId}`);
-  }
-  const expectedElementId = answerElementId(promptId, stream.pageIndex);
-  const cardElementIds = collectElementIds(card);
-  if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) {
-    throw new PermanentDeliveryError(`Answer continuation element mismatch for prompt ${promptId}`);
-  }
-}
-
-function collectElementIds(value: unknown): string[] {
-  if (Array.isArray(value)) return value.flatMap(collectElementIds);
-  if (typeof value !== "object" || value === null) return [];
-  return Object.entries(value).flatMap(([key, item]) =>
-    key === "element_id" && typeof item === "string" ? [item] : collectElementIds(item)
-  );
-}
-
-function assertAnswerCardTarget(store: OutboxStore, bindingId: string | null, promptId: string | null, cardId: string): void {
-  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer stream target is missing binding or prompt identity");
-  const view = store.loadRunCard(promptId);
-  if (!view || view.bindingId !== bindingId || view.answerCardId !== cardId) {
-    throw new PermanentDeliveryError(`Answer stream card target mismatch for prompt ${promptId}`);
-  }
-}
-
-function assertAnswerStreamTarget(store: OutboxStore, bindingId: string | null, promptId: string | null, cardId: string, elementId: string): void {
-  assertAnswerCardTarget(store, bindingId, promptId, cardId);
-  const view = store.loadRunCard(promptId!);
-  if (!view || view.answerElementId !== elementId) {
-    throw new PermanentDeliveryError(`Answer stream element target mismatch for prompt ${promptId}`);
-  }
-}
-
-function assertAnswerMessageTarget(store: OutboxStore, bindingId: string | null, promptId: string | null, messageId: string): void {
-  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card target is missing binding or prompt identity");
-  const view = store.loadRunCard(promptId);
-  if (!view || view.bindingId !== bindingId || view.answerMessageId !== messageId) {
-    throw new PermanentDeliveryError(`Answer card message target mismatch for prompt ${promptId}`);
-  }
 }

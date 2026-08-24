@@ -88,7 +88,8 @@ The implementation uses the following workflow decomposition.
 | `HerdrRuntimeReconciler` | Herdr snapshot convergence and scoped prompt scheduling hints | Runtime authority boundary |
 | `BridgeEventBus` | Lifecycle projection events behind `LifecycleEventPublisher`; inbound work uses a separate notifier | Process-local lifecycle adapter |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | Projection boundary |
-| `LarkOutboxDispatcher` | Durable Lark outbox draining, retry, dead letters, and Answer-card-ready callbacks | Delivery boundary |
+| `OutboundIntentWriter` | Target validation, durable outbox writes, and best-effort outbound wake-up | Delivery-intent boundary |
+| `LarkOutboxDispatcher` | Background Lark delivery, retry, dead letters, safety scans, and Answer-card-ready callbacks | Delivery boundary |
 | Capability store ports | Consumer-specific atomic persistence capabilities | Application persistence boundary |
 | `SqliteBindingStore` | One transactional implementation of the capability-focused store ports | Durable infrastructure boundary |
 
@@ -107,7 +108,7 @@ responsibility is a business or application concern.
 | workflow wake-up adapter | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
 | concrete `BridgeEventBus` dependency | `LifecycleEventPublisher` | Application workflows publish lifecycle outcomes through this port. Inbound messages use `InboundWorkNotifier`, a separate contract. |
 | `CardProjector` | `ConversationViewProjector` | Reduces lifecycle outcomes into topic and run-card read models, then records delivery intent. |
-| `LarkChannelPublisher` | `LarkOutboxDispatcher` | Drains durable outbox work to Lark with ordering, retries, and dead-letter handling. |
+| `LarkChannelPublisher` | `OutboundIntentWriter` and `LarkOutboxDispatcher` | The writer records durable intent without network I/O; the dispatcher delivers it with ordering, retries, and dead-letter handling. |
 | prompt-run persistence | `PromptRunStore` | The prompt-run workflow's capability-focused persistence interface. |
 | `BindingStorePort` as a consumer dependency | capability-focused stores | Consumers use `InboundStore`, `PromptAcceptanceStore`, `PromptRunStore`, `RuntimeReconciliationStore`, `ProjectionStore`, `OutboxStore`, `BindingProvisioningStore`, `OperationsStore`, `LeaseStore`, or `HealthStore`. The aggregate interface remains only as the SQLite implementation contract and source for the capability types. |
 
@@ -302,10 +303,14 @@ yet have a separate `answer_pages` table.
 ## Lark delivery
 
 All user-visible replies are first represented as SQLite outbox rows with stable
-idempotency keys. `LarkOutboxDispatcher` delivers card replies, card updates,
+idempotency keys. `OutboundIntentWriter` persists each intent before publishing
+a payload-free, best-effort wake-up and does not wait for Lark.
+`LarkOutboxDispatcher` delivers card replies, card updates,
 streaming card creation, stream content, and stream finalization. It marks
 successful rows delivered; transient failures are retried with backoff; repeated
 failures become dead letters that an operator can retry or dismiss.
+It performs an initial scan and a periodic safety scan, so lost or duplicate
+wake-ups cannot change the converged result.
 
 Order is important inside one CardKit element because sequences must increase.
 The dispatcher assigns every outbox row a durable delivery order and drains only

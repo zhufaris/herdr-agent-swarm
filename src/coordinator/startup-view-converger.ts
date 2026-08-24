@@ -3,6 +3,7 @@ import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
 import { mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { Binding } from "../domain/types.js";
+import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 
@@ -10,7 +11,8 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   constructor(
     private readonly config: Pick<BridgeConfig, "projects">,
     private readonly store: PromptAcceptanceStore,
-    private readonly outbound: OutboundIntentPort
+    private readonly outbound: OutboundIntentPort,
+    private readonly outboundWork: OutboundWorkNotifier
   ) {}
 
   async converge(): Promise<void> {
@@ -24,7 +26,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       }
       const runCards = this.store.listRunCards(binding.id);
       for (const view of runCards.filter((item) => item.larkMessageId)) {
-        if (!view.answerMessageId && binding.rootMessageId) this.store.ensureAnswerCard(view.promptId, binding.rootMessageId, renderRequestAnswerCard(view));
+        if (!view.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(view.promptId, binding.rootMessageId, renderRequestAnswerCard(view)); this.outboundWork.wake(); }
         const current = view.spaceName !== spaceName ? this.store.saveRunCard({ ...view, spaceName, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
         if (!current.answerCardId && current.answerMessageId && (view.spaceName !== spaceName || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
       }

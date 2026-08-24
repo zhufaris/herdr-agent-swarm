@@ -4,7 +4,7 @@ import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
@@ -73,7 +73,7 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("uses one inbound consumer so concurrent messages remain ordered", async () => {
+  it("accepts concurrent inbound messages without waiting for Lark delivery", async () => {
     let releaseFirst!: () => void;
     const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const replies: string[] = [];
@@ -86,13 +86,14 @@ describe("coordinator concurrency controls", () => {
     const { coordinator, publisher, store } = fixture(emptyHerdr(), lark);
     await coordinator.start();
     const first = coordinator.handleMessage(message(1));
-    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: "processing" }));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: "accepted" }));
     const second = coordinator.handleMessage(message(2));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e2'").get()).toMatchObject({ state: "received" });
+    expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e2'").get()).toMatchObject({ state: "accepted" });
 
     releaseFirst();
     await Promise.all([first, second]);
+    await vi.waitFor(() => expect(replies).toEqual(["m1", "m2"]));
     expect(replies).toEqual(["m1", "m2"]);
     expect(store.database.prepare("SELECT state FROM inbound_messages ORDER BY created_at, event_id").all()).toEqual([{ state: "accepted" }, { state: "accepted" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
@@ -176,7 +177,7 @@ describe("coordinator concurrency controls", () => {
 function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
-  const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+  const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   return { coordinator, publisher, store, bus };
 }

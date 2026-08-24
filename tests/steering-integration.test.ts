@@ -6,7 +6,7 @@ import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
@@ -56,9 +56,9 @@ describe("active-turn steering", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
     projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
     await coordinator.start();
@@ -124,8 +124,8 @@ describe("active-turn steering", () => {
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
     const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `blocked-e${n}`, messageId: `blocked-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 

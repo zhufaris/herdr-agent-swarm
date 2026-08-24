@@ -5,7 +5,7 @@ import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { HerdrPane } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project provisioning recovery", () => {
@@ -107,7 +107,7 @@ function createHarness(options: { terminalId?: string } = {}) {
     async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
   };
   const bus = new BridgeEventBus();
-  const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+  const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   return { store, coordinator, get created() { return created; }, get started() { return started; }, get topics() { return topics; }, get topicKeys() { return topicKeys; }, async close() { await coordinator.stop(); await publisher.stop(); store.close(); } };
 }

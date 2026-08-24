@@ -5,7 +5,7 @@ import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("model command", () => {
@@ -113,8 +113,8 @@ async function setup(
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
-  const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-  const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+  const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;

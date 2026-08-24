@@ -14,6 +14,8 @@ import { InProcessPromptWorkScheduler } from "./events/prompt-work-scheduler.js"
 import { InProcessInboundWorkNotifier } from "./events/inbound-work-notifier.js";
 import { ConversationViewProjector } from "./events/conversation-view-projector.js";
 import { LarkOutboxDispatcher } from "./events/lark-outbox-dispatcher.js";
+import { OutboundIntentWriter } from "./events/outbound-intent-writer.js";
+import { InProcessOutboundWorkNotifier } from "./events/outbound-work-notifier.js";
 import { startHealthServer } from "./health/server.js";
 import { ExecFileCommandRunner } from "./infra/command-runner.js";
 import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
@@ -41,19 +43,21 @@ const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);
 const inboundWork = new InProcessInboundWorkNotifier();
-const channelPublisher = new LarkOutboxDispatcher(store, lark, logger);
-const projector = new ConversationViewProjector(bus, store, channelPublisher, logger);
+const outboundWork = new InProcessOutboundWorkNotifier(logger);
+const outbound = new OutboundIntentWriter(store, outboundWork);
+const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
+const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger);
 channelPublisher.connectPromptScheduler(scheduler);
-const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, channelPublisher, logger, turnTimeoutMs: config.turnTimeoutMs });
-const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: channelPublisher, scheduler, logger });
-const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: channelPublisher, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
+const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
+const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, logger });
+const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
 const reconciler = new HerdrRuntimeReconciler({
-  projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher, logger,
+  projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
   isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId)
 });
-const startupViews = new StartupViewConverger(config, store, channelPublisher);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound: channelPublisher, logger, scheduler, inboundWork, promptRun, provisioning, operations, reconciler, startupViews });
+const startupViews = new StartupViewConverger(config, store, outbound, outboundWork);
+const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, operations, reconciler, startupViews });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)

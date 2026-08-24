@@ -84,13 +84,15 @@ interface OutboundWorkNotifier {
 interface OutboxDispatcherControl {
   start(): () => void;
   stop(): Promise<void>;
-  retryPending(): void;
+  requestScan(force?: boolean): Promise<void>;
 }
 ```
 
-Normal workflows do not receive this control interface. Explicit dead-letter
-retry updates SQLite and invokes an outbound wake through an operations-specific
-capability; it does not synchronously drain delivery work.
+Normal workflows do not receive this control interface. `requestScan` is for
+runtime startup and explicit recovery or test control; ordinary work uses the
+notifier. Explicit dead-letter retry updates SQLite and invokes an outbound wake
+through an operations-specific capability; it does not synchronously drain
+delivery work.
 
 ## Durable-before-wake flow
 

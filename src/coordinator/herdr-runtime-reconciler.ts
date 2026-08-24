@@ -16,7 +16,6 @@ interface HerdrRuntimeReconcilerOptions {
   herdr: HerdrPort;
   lifecycleEvents: LifecycleEventPublisher;
   channelPublisher: {
-    drain(): Promise<void>;
     enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "answer", card: object): Promise<void>;
   };
   logger: Logger;
@@ -108,7 +107,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
-    await this.options.channelPublisher.drain();
     const converged = this.options.store.convergePromptBacklog();
     if (converged.cancelled > 0) this.options.logger.info({
       event: "prompt-backlog-converged", cancelled: converged.cancelled, outcome: "cancelled"

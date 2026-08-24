@@ -5,7 +5,7 @@ import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("attach existing pane command", () => {
@@ -26,8 +26,8 @@ describe("attach existing pane command", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     exposePane = true;
@@ -67,8 +67,8 @@ describe("attach existing pane command", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     exposePane = true;
@@ -121,8 +121,8 @@ describe("attach existing pane command", () => {
     missingExplicitSpace.projects[0]!.cwd = "/repo/datasage_semantic_knowledge";
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(missingExplicitSpace, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -141,7 +141,7 @@ describe("attach existing pane command", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
     const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
 
     await coordinator.handleMessage({ ...command(1), text: "/herdr attach datasage_semantic_knowledge tidy" });
@@ -161,7 +161,7 @@ describe("attach existing pane command", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
     const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
 
     await coordinator.handleMessage(command(1, "w5:p3G"));
@@ -182,7 +182,7 @@ describe("attach existing pane command", () => {
     store.createPendingBinding({ id: "other-binding", projectId: "analytics", workspaceId: "w5", chatId: "other-chat", topicId: "secret-topic", rootMessageId: "secret-root", title: "secret" });
     store.updateBinding("other-binding", { paneId: "w5:p3G", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePane = true;
 
     await coordinator.handleMessage(command(1, "tidy"));
@@ -210,8 +210,8 @@ describe("attach existing pane command", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -245,8 +245,8 @@ describe("attach existing pane command", () => {
     testConfig.projects = projects;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(testConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     exposePanes = true;

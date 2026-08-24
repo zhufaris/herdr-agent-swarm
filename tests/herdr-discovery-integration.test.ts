@@ -5,7 +5,7 @@ import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
@@ -35,7 +35,7 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
 
     await coordinator.start();
@@ -95,9 +95,9 @@ describe("Herdr discovery", () => {
         answerUpdates.push(event.payload.answerUpdate ?? "replace");
       }
     });
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -153,9 +153,9 @@ describe("Herdr discovery", () => {
     const stopObserver = bus.onBridgeEvent("test-observer", (event) => {
       if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
     });
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -195,9 +195,9 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -235,9 +235,9 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -282,9 +282,9 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     output = "initial terminal\n❯ next prompt";
@@ -326,8 +326,8 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const stopChannelPublisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })).start();
-    const coordinator = createTestRouter(config, store, herdr, lark, bus, new LarkOutboxDispatcher(store, lark, pino({ enabled: false })), pino({ enabled: false }));
+    const stopChannelPublisher = createTestPublisher(store, lark, pino({ enabled: false })).start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, createTestPublisher(store, lark, pino({ enabled: false })), pino({ enabled: false }));
     await coordinator.start();
 
     output = `${output}\n◆ actual answer`;
@@ -367,9 +367,9 @@ describe("Herdr discovery", () => {
     const inboundEvents: string[] = [];
     const inboundWork = new InProcessInboundWorkNotifier();
     const stopInboundObserver = inboundWork.subscribe((event) => { inboundEvents.push(event.type); });
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
     const stopProjector = projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
     await coordinator.start();
@@ -426,9 +426,9 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
@@ -485,9 +485,9 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
@@ -534,9 +534,9 @@ describe("Herdr discovery", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "status-1" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 

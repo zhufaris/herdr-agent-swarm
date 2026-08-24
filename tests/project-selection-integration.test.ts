@@ -6,7 +6,7 @@ import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { IncomingLarkCardAction } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project selection flow", () => {
@@ -28,7 +28,7 @@ describe("project selection flow", () => {
     store.createPendingBinding({ id: "archived-binding", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", title: "alpha / old task" });
     store.updateBinding("archived-binding", { paneId: "w1:p-old", state: "archived" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -79,8 +79,8 @@ describe("project selection flow", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     store.createPendingBinding({ id: "existing-binding", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", title: "bridge / Existing" });
@@ -158,8 +158,8 @@ describe("project selection flow", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -203,7 +203,7 @@ describe("project selection flow", () => {
     store.createPendingBinding({ id: "b2", projectId: "beta", workspaceId: "w2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", title: "beta / task" });
     store.updateBinding("b2", { paneId: "w2:p1", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(multiProjectConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
 
     await coordinator.start();
@@ -231,8 +231,8 @@ describe("project selection flow", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -266,7 +266,7 @@ describe("project selection flow", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
