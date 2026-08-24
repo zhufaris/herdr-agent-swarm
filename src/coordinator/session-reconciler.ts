@@ -5,6 +5,7 @@ import type { BridgeEvent } from "../domain/events.js";
 import type { ProjectConfig, Binding, HerdrPane } from "../domain/types.js";
 import type { BindingStorePort, HerdrPort } from "../domain/ports.js";
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
+import type { WorkflowWakeupBus } from "../events/workflow-wakeup-bus.js";
 import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { extractFinalTraexAnswer } from "../runtime/traex-output-parser.js";
@@ -20,7 +21,7 @@ interface SessionReconcilerOptions {
   };
   logger: Logger;
   discoverPane(pane: HerdrPane, project: ProjectConfig): Promise<Binding>;
-  scheduleBinding(bindingId: string): void;
+  wakeups: WorkflowWakeupBus;
   isBindingBusy(bindingId: string): boolean;
 }
 
@@ -203,13 +204,15 @@ export class SessionReconciler {
         this.options.store.updateBinding(existing.id, { lastAgentState: pane.agentState });
         await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth: this.options.store.countPendingPrompts(existing.id) });
       }
-      if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduleBinding(existing.id);
+      if (previous !== pane.agentState) this.options.wakeups.publish({ kind: "binding-runtime-changed", bindingId: existing.id });
+      if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && this.options.store.countPendingPrompts(existing.id) > 0) this.options.wakeups.publish({ kind: "prompt-ready", bindingId: existing.id });
       if (pane.outputRevision !== null && pane.outputRevision !== undefined && this.observedOutputRevisions.get(pane.paneId) === pane.outputRevision) continue;
       if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
       await this.publishChangedLocalOutput(existing, pane.paneId);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
-    for (const binding of activeBindings) this.options.scheduleBinding(binding.id);
+    for (const binding of activeBindings) this.options.wakeups.publish({ kind: "prompt-ready", bindingId: binding.id });
+    for (const prompt of this.options.store.listDetachedPrompts()) this.options.wakeups.publish({ kind: "detached-observer-ready", bindingId: prompt.bindingId, promptId: prompt.id });
   }
 
   private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {

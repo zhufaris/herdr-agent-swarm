@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionReconciler } from "../src/coordinator/session-reconciler.js";
 import type { HerdrPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
+import { WorkflowWakeupBus } from "../src/events/workflow-wakeup-bus.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("SessionReconciler", () => {
@@ -20,7 +21,7 @@ describe("SessionReconciler", () => {
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
       logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); },
-      scheduleBinding() {},
+      wakeups: new WorkflowWakeupBus(),
       isBindingBusy: () => false
     });
 
@@ -86,7 +87,7 @@ describe("SessionReconciler", () => {
       ],
       store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduleBinding() {}, isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, wakeups: new WorkflowWakeupBus(), isBindingBusy: () => false
     });
 
     await reconciler.requestReconciliation(["w2"]);
@@ -108,7 +109,7 @@ describe("SessionReconciler", () => {
       ],
       store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduleBinding() {}, isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, wakeups: new WorkflowWakeupBus(), isBindingBusy: () => false
     });
 
     const first = reconciler.requestReconciliation(["w1"]);
@@ -194,19 +195,22 @@ describe("SessionReconciler", () => {
     const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, stateChangeSeq: 9, foregroundExecutables: [] };
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
-    const scheduleBinding = vi.fn();
+    const wake = vi.fn();
+    const wakeups = new WorkflowWakeupBus();
+    wakeups.subscribe(wake);
     const reconciler = new SessionReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
       store, herdr: { async listAllPanes() { return [unknownPane]; }, observeRuntime, async readOutput() { return "❯ Use /skills to list available skills"; } } as unknown as HerdrPort,
       bus: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduleBinding, isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, wakeups, isBindingBusy: () => false
     });
 
     await reconciler.reconcile();
 
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "idle", attachment: "attached" });
-    expect(scheduleBinding).toHaveBeenCalledWith("b1");
+    await Promise.resolve();
+    expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
     store.close();
   });
 });
@@ -220,6 +224,6 @@ function fixture(
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     store, herdr, bus: new BridgeEventBus(),
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
-    logger: pino({ enabled: false }), discoverPane, scheduleBinding() {}, isBindingBusy: () => false
+    logger: pino({ enabled: false }), discoverPane, wakeups: new WorkflowWakeupBus(), isBindingBusy: () => false
   });
 }

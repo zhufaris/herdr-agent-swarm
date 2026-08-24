@@ -1,0 +1,314 @@
+import type { Logger } from "pino";
+import { renderProjectEntryCard } from "../cards/run-card.js";
+import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
+import type { BridgeEvent } from "../domain/events.js";
+import type { HerdrPort, PromptExecutionStore } from "../domain/ports.js";
+import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
+import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
+import type { BridgeEventBus } from "../events/bridge-event-bus.js";
+import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
+import type { WorkflowWakeup, WorkflowWakeupBus } from "../events/workflow-wakeup-bus.js";
+import { outputFingerprint } from "../runtime/output.js";
+import { safeLogError } from "../runtime/safe-error.js";
+import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
+import { TurnSupervisor } from "./turn-supervisor.js";
+
+export interface ActiveTurnSnapshot {
+  promptId: string;
+  paneId: string;
+  state: Binding["lastAgentState"];
+}
+
+interface PromptExecutionWorkflowOptions {
+  store: PromptExecutionStore;
+  herdr: HerdrPort;
+  bus: BridgeEventBus;
+  wakeups: WorkflowWakeupBus;
+  channelPublisher: LarkChannelPublisher;
+  logger: Logger;
+  turnTimeoutMs: number;
+  shutdownGraceMs?: number;
+}
+
+export class PromptExecutionWorkflow {
+  private readonly workers = new Map<string, Promise<void>>();
+  private readonly steeringWorkers = new Map<string, Promise<void>>();
+  private readonly turns = new TurnSupervisor();
+  private readonly shutdownGraceMs: number;
+  private unsubscribe: (() => void) | null = null;
+  private stopping = false;
+
+  constructor(private readonly options: PromptExecutionWorkflowOptions) {
+    this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
+  }
+
+  prepareRecovery(): void {
+    const recovered = this.options.store.recoverRunningPrompts();
+    if (recovered > 0) this.options.logger.warn({ event: "startup-prompts-recovered", recovered, outcome: "detached_without_replay" }, "detached from interrupted prompt observers without replay");
+  }
+
+  start(): void {
+    if (this.unsubscribe) return;
+    this.stopping = false;
+    this.unsubscribe = this.options.wakeups.subscribe((event) => this.wake(event));
+    for (const prompt of this.options.store.listDetachedPrompts()) {
+      this.options.wakeups.publish({ kind: "detached-observer-ready", bindingId: prompt.bindingId, promptId: prompt.id });
+    }
+    for (const binding of this.options.store.listBindingsByState("active")) {
+      this.options.wakeups.publish({ kind: "prompt-ready", bindingId: binding.id });
+    }
+  }
+
+  wake(event: WorkflowWakeup): void {
+    if (this.stopping) return;
+    if (event.kind === "steering-ready") {
+      this.scheduleSteering(event.bindingId, event.parentPromptId);
+      return;
+    }
+    if (event.kind === "detached-observer-ready") {
+      const prompt = this.options.store.getPrompt(event.promptId);
+      if (prompt?.bindingId === event.bindingId && prompt.state === "running" && prompt.observationState === "detached") this.scheduleDetachedObserver(prompt);
+      return;
+    }
+    if (event.kind === "binding-runtime-changed" && !this.isBindingActive(event.bindingId)) this.turns.abort(event.bindingId);
+    this.scheduleWorker(event.bindingId);
+  }
+
+  activeTurn(bindingId: string): ActiveTurnSnapshot | null {
+    const turn = this.turns.get(bindingId);
+    return turn ? { promptId: turn.promptId, paneId: turn.paneId, state: turn.state } : null;
+  }
+
+  isBindingBusy(bindingId: string): boolean {
+    return this.turns.has(bindingId) || this.workers.has(bindingId) || this.steeringWorkers.has(bindingId);
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    const pending = [...this.workers.values(), ...this.steeringWorkers.values()];
+    if (!pending.length) return;
+    const settled = Promise.allSettled(pending);
+    if (!await settlesWithin(settled, this.shutdownGraceMs)) {
+      this.options.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.turns.size(), graceMs: this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
+      this.turns.abortAll((run) => {
+        this.options.store.markPromptObservationDetached(run.promptId, "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。");
+      });
+      await settled;
+    }
+  }
+
+  private scheduleSteering(bindingId: string, parentPromptId: string): void {
+    const previous = this.steeringWorkers.get(bindingId) ?? Promise.resolve();
+    const worker = previous.catch(() => undefined).then(() => this.drainSteering(bindingId, parentPromptId)).finally(() => {
+      if (this.steeringWorkers.get(bindingId) === worker) this.steeringWorkers.delete(bindingId);
+    });
+    this.steeringWorkers.set(bindingId, worker);
+  }
+
+  private async drainSteering(bindingId: string, parentPromptId: string): Promise<void> {
+    const activeRun = this.turns.get(bindingId);
+    if (!activeRun || activeRun.promptId !== parentPromptId) return;
+    for (let prompt = this.options.store.claimNextReadySteering(bindingId, parentPromptId); prompt; prompt = this.options.store.claimNextReadySteering(bindingId, parentPromptId)) {
+      try {
+        const result = this.options.herdr.steerPrompt ? await this.options.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
+        if (result === "not_working") {
+          if (prompt.body === "/stop") {
+            const message = "TraeX 已不再处于 working 状态，`/stop` 未加入后续任务队列。";
+            this.options.store.updatePrompt(prompt.id, "failed", message);
+            await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+            this.options.logger.warn({ event: "stop-steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "not_working" }, "stop steering target was no longer working");
+            continue;
+          }
+          this.options.store.requeueSteeringAsTurn(prompt.id);
+          this.options.logger.warn({ event: "steering-fell-back-to-turn", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "requeued", reason: "not_working" }, "steering target was no longer working");
+          await this.refreshQueuePositions(bindingId);
+          this.options.wakeups.publish({ kind: "prompt-ready", bindingId });
+          continue;
+        }
+        await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
+        this.options.store.updatePrompt(prompt.id, "delivered");
+        await this.publish(bindingId, "SteeringDelivered", "herdr", { promptId: prompt.id, parentPromptId });
+        this.options.logger.info({ event: "steering-delivered", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "delivered" }, "steering delivered to active turn");
+      } catch (error) {
+        const message = `Steering 注入结果无法确认，请检查 Herdr pane 后按需重试：${errorMessage(error)}`;
+        this.options.store.updatePrompt(prompt.id, "failed", message);
+        await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+        this.options.logger.error({ event: "steering-failed", err: safeLogError(error), bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "uncertain" }, "steering delivery failed");
+      }
+    }
+  }
+
+  private scheduleWorker(bindingId: string): void {
+    if (this.workers.has(bindingId)) return;
+    const worker = this.drain(bindingId).finally(() => {
+      if (this.workers.get(bindingId) === worker) this.workers.delete(bindingId);
+    });
+    this.workers.set(bindingId, worker);
+  }
+
+  private async drain(bindingId: string): Promise<void> {
+    for (let claimed = this.stopping ? null : this.options.store.claimNextDispatchablePrompt(bindingId); claimed; claimed = this.stopping ? null : this.options.store.claimNextDispatchablePrompt(bindingId)) {
+      let { binding, prompt } = claimed;
+      const paneId = binding.paneId!;
+      const queueDepth = this.options.store.countPendingPrompts(bindingId);
+      const startedAt = Date.now();
+      const abortController = this.turns.attach(bindingId, prompt.id, paneId);
+      let observerDetached = false;
+      let dispatched = false;
+      try {
+        await this.refreshQueuePositions(bindingId);
+        await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
+        this.options.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
+        const before = await this.options.herdr.readOutput(paneId, 240);
+        let previousObservation = before;
+        const state = await this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource, output }) => {
+          if (!this.isBindingActive(bindingId)) return;
+          const parsed = parseTerminalStreamDelta(previousObservation, output, prompt.body);
+          previousObservation = output;
+          if (parsed.delta) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [] });
+          const previousState = binding.lastAgentState;
+          if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
+          if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
+            binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: observedState });
+            await this.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: this.options.store.countPendingPrompts(bindingId), promptId: prompt.id });
+            if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: this.options.store.countPendingPrompts(bindingId), outcome: "waiting_for_user" }, "TraeX turn requires user action");
+          }
+        }, abortController.signal, () => { dispatched = true; this.options.store.markPromptDispatched(prompt.id); });
+        if (!this.isBindingActive(bindingId)) return;
+        const stateBeforeReturn = binding.lastAgentState;
+        this.turns.updateState(bindingId, prompt.id, state);
+        binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
+        if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
+        const answer = extractFinalTraexAnswer(await this.options.herdr.readOutput(paneId, 240));
+        this.options.store.updateBinding(bindingId, { lastOutputFingerprint: outputFingerprint(answer) });
+        this.options.store.updatePrompt(prompt.id, "delivered");
+        binding = this.options.store.transitionBinding(bindingId, { type: "turn_completed" });
+        const streamed = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
+        await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。", queueDepth: this.options.store.countPendingPrompts(bindingId) });
+        this.options.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
+        await this.refreshQueuePositions(bindingId);
+      } catch (error) {
+        if (!this.isBindingActive(bindingId)) { observerDetached = true; return; }
+        if (dispatched) {
+          const notice = this.stopping ? "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。" : `TraeX 请求已尝试投递，但 Bridge 无法确认最终结果：${errorMessage(error)}；不会自动重发。`;
+          observerDetached = true;
+          this.options.store.markPromptObservationDetached(prompt.id, notice);
+          this.options.logger.warn({ event: "turn-observer-detached", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "detached_without_replay" }, "detached Bridge waiter from possibly in-flight TraeX turn");
+          return;
+        }
+        if (abortController.signal.aborted && this.stopping) { observerDetached = true; return; }
+        this.options.store.updatePrompt(prompt.id, "failed", errorMessage(error));
+        await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.options.store.countPendingPrompts(bindingId) });
+        this.options.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
+        await this.refreshQueuePositions(bindingId);
+        if (binding.lastAgentState === "blocked") return;
+      } finally {
+        const steeringWorker = this.steeringWorkers.get(bindingId);
+        if (steeringWorker) await steeringWorker;
+        if (this.options.store.requeueQueuedSteering(bindingId, prompt.id) > 0) await this.refreshQueuePositions(bindingId);
+        this.turns.detach(bindingId, prompt.id);
+        const latestBinding = this.options.store.getBinding(bindingId);
+        if (!observerDetached && latestBinding?.lifecycle === "draining") await this.archiveDrainedBinding(latestBinding);
+      }
+    }
+  }
+
+  private scheduleDetachedObserver(prompt: PromptJob): void {
+    if (this.workers.has(prompt.bindingId)) return;
+    const worker = this.observeDetachedTurn(prompt).finally(() => {
+      if (this.workers.get(prompt.bindingId) === worker) this.workers.delete(prompt.bindingId);
+      if (!this.stopping) this.options.wakeups.publish({ kind: "prompt-ready", bindingId: prompt.bindingId });
+    });
+    this.workers.set(prompt.bindingId, worker);
+  }
+
+  private async observeDetachedTurn(prompt: PromptJob): Promise<void> {
+    const binding = this.options.store.getBinding(prompt.bindingId);
+    if (!binding?.paneId || binding.state !== "active") return;
+    const paneId = binding.paneId;
+    const abortController = this.turns.attach(binding.id, prompt.id, paneId, binding.lastAgentState);
+    let observedActive = binding.lastAgentState === "working" || binding.lastAgentState === "blocked";
+    try {
+      while (!this.stopping) {
+        if (!this.isBindingActive(binding.id)) return;
+        const observation = await this.options.herdr.observeRuntime(paneId);
+        const pane = observation.pane;
+        if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
+        const state = pane.agentState;
+        this.turns.updateState(binding.id, prompt.id, state);
+        if (state === "working" || state === "blocked") observedActive = true;
+        const unknownOutput = state === "unknown" ? await this.options.herdr.readOutput(paneId, 240) : null;
+        if (observation.traexProcess && (state === "done" || state === "idle" && (observedActive || observation.composerReady))) {
+          const answer = extractFinalTraexAnswer(unknownOutput ?? await this.options.herdr.readOutput(paneId, 240));
+          this.options.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(answer) });
+          this.options.store.updatePrompt(prompt.id, "delivered");
+          this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
+          this.options.store.transitionBinding(binding.id, { type: "turn_completed" });
+          await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: answer || "TraeX 已完成；Bridge 重连后未能恢复更多文本，请查看 Herdr pane。", queueDepth: this.options.store.countPendingPrompts(binding.id) });
+          this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
+          return;
+        }
+        await abortableWait(500, abortController.signal);
+      }
+    } catch (error) {
+      if (abortController.signal.aborted || this.stopping) return;
+      this.options.store.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
+      this.options.logger.warn({ event: "detached-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId, outcome: "uncertain" }, "could not observe existing TraeX turn");
+    } finally {
+      this.turns.detach(binding.id, prompt.id);
+    }
+  }
+
+  private isBindingActive(bindingId: string): boolean {
+    const binding = this.options.store.getBinding(bindingId);
+    return binding?.state === "active" && binding.lifecycle === "active";
+  }
+
+  private async refreshQueuePositions(bindingId: string): Promise<void> {
+    const queuedTurnIds = new Set(this.options.store.listQueuedTurnPromptIds(bindingId));
+    const queued = this.options.store.listRunCards(bindingId).filter((view) => view.phase === "queued" && queuedTurnIds.has(view.promptId));
+    for (const [index, view] of queued.entries()) {
+      const queuePosition = index + 1;
+      if (view.queuePosition !== queuePosition) await this.publish(bindingId, "RunQueuePositionChanged", "bridge", { promptId: view.promptId, queuePosition });
+    }
+  }
+
+  private async archiveDrainedBinding(binding: Binding): Promise<void> {
+    const event = createBridgeEvent(binding.id, "BindingArchived", "bridge", { reason: "当前任务已结束，话题归档完成；Herdr pane 与 TraeX 保持运行。" });
+    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
+    const view = reduceTopicView(current, event);
+    if (!binding.statusMessageId) {
+      this.options.store.transitionBinding(binding.id, { type: "drain_completed" });
+      await this.options.bus.publish(event);
+      return;
+    }
+    this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) });
+    await this.options.bus.publish(event);
+    await this.options.channelPublisher.drain();
+  }
+
+  private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> {
+    await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
+  }
+}
+
+function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref();
+    void promise.then(() => { clearTimeout(timer); resolve(true); });
+  });
+}
+
+function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new Error("observer detached"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
+    const onAbort = () => { clearTimeout(timer); reject(new Error("observer detached")); };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

@@ -132,3 +132,26 @@ export interface BindingStorePort {
   listRunCards(bindingId: string): RunCardView[];
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
 }
+
+export type PromptExecutionStore = Pick<BindingStorePort,
+  | "recoverRunningPrompts"
+  | "listDetachedPrompts"
+  | "listBindingsByState"
+  | "getBinding"
+  | "getPrompt"
+  | "claimNextDispatchablePrompt"
+  | "claimNextReadySteering"
+  | "markPromptDispatched"
+  | "markPromptObservationDetached"
+  | "requeueSteeringAsTurn"
+  | "requeueQueuedSteering"
+  | "updatePrompt"
+  | "updateBinding"
+  | "transitionBinding"
+  | "countPendingPrompts"
+  | "listQueuedTurnPromptIds"
+  | "listRunCards"
+  | "loadRunCard"
+  | "loadTopicView"
+  | "transitionBindingWithOutbox"
+>;

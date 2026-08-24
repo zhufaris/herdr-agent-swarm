@@ -5,6 +5,7 @@ import type { OutboundReply } from "../domain/types.js";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { answerElementId } from "../domain/run-card-view.js";
+import type { WorkflowWakeupBus } from "./workflow-wakeup-bus.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkChannelPublisher {
@@ -16,7 +17,7 @@ export class LarkChannelPublisher {
   private stopPromise: Promise<void> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
-  private readonly answerCardReadyListeners = new Set<(bindingId: string, promptId: string) => void>();
+  private wakeups: WorkflowWakeupBus | null = null;
 
   constructor(
     private readonly bus: BridgeEventBus,
@@ -36,10 +37,7 @@ export class LarkChannelPublisher {
     return () => this.streamCardCreatedListeners.delete(listener);
   }
 
-  onAnswerCardReady(listener: (bindingId: string, promptId: string) => void): () => void {
-    this.answerCardReadyListeners.add(listener);
-    return () => this.answerCardReadyListeners.delete(listener);
-  }
+  connectWakeups(wakeups: WorkflowWakeupBus): void { this.wakeups = wakeups; }
 
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
@@ -175,7 +173,9 @@ export class LarkChannelPublisher {
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sent.cardId);
         this.store.recordBridgeMessage(sent.messageId);
         if (reply.bindingId && reply.promptId) {
-          for (const listener of this.answerCardReadyListeners) listener(reply.bindingId, reply.promptId);
+          const prompt = this.store.getPrompt(reply.promptId);
+          if (prompt?.dispatchKind === "steering" && prompt.parentPromptId) this.wakeups?.publish({ kind: "steering-ready", bindingId: reply.bindingId, parentPromptId: prompt.parentPromptId });
+          else this.wakeups?.publish({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
         if (reply.promptId && reply.attemptCount > 0 && decoded.stream && decoded.stream.pageIndex > 0) {
           for (const listener of this.streamCardCreatedListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
