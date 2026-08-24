@@ -5,7 +5,7 @@ import type { LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("Lark channel publisher", () => {
   it("creates one CardKit answer and streams cumulative content without patching the message", async () => {
@@ -15,15 +15,33 @@ describe("Lark channel publisher", () => {
     const lark = fakeLark({ replyStreamingCard: create, streamCardContent: stream, updateCard });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
-    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ schema: "2.0" }) });
-
     await publisher.drain();
-    await publisher.enqueueStreamContent("b1", "p1", "cardkit-1", "answer-content-p1", "Working\nDone", 2);
+    await publisher.enqueueStreamContent("b1", "p1", "cardkit-1", answerElementId("p1", 0), "Working\nDone", 2);
 
     expect(create).toHaveBeenCalledTimes(1);
-    expect(stream).toHaveBeenCalledWith("cardkit-1", "answer-content-p1", "Working\nDone", 2);
+    expect(stream).toHaveBeenCalledWith("cardkit-1", answerElementId("p1", 0), "Working\nDone", 2);
     expect(updateCard).not.toHaveBeenCalled();
+    store.close();
+  });
+
+  it("rejects a stream target belonging to another prompt", async () => {
+    const stream = vi.fn(async () => {});
+    const lark = fakeLark({ streamCardContent: stream });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const first = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "first", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "first" }, view: first, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    const second = createQueuedRunCard({ promptId: "p2", bindingId: "b1", title: "Second", workspaceId: "w1", paneId: "w1:p1", requestText: "second", queuePosition: 1, occurredAt: "later" });
+    store.acceptPrompt({ prompt: { id: "p2", bindingId: "b1", larkMessageId: "user-2", actorOpenId: "u1", body: "second" }, view: second, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) { if (reply.promptId === "p2") store.markOutboundReplyDelivered(reply.id, "answer-2", "cardkit-2"); }
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+
+    await expect(publisher.enqueueStreamContent("b1", "p2", "cardkit-1", "answer-content-p1-0", "wrong target", 2)).rejects.toThrow(/target mismatch/);
+    expect(stream).not.toHaveBeenCalled();
     store.close();
   });
 

@@ -63,6 +63,7 @@ export class LarkChannelPublisher {
   }
 
   async enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
+    assertAnswerStreamTarget(this.store, bindingId, promptId, cardId, elementId);
     this.store.enqueueOutboundReply({
       id: randomUUID(), idempotencyKey: `stream:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer",
       rootMessageId: cardId, kind: "stream_content", payload: JSON.stringify({ elementId, content, sequence })
@@ -79,6 +80,7 @@ export class LarkChannelPublisher {
   }
 
   async enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void> {
+    assertAnswerCardTarget(this.store, bindingId, promptId, cardId);
     this.store.enqueueOutboundReply({
       id: randomUUID(), idempotencyKey: `stream-finish:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer",
       rootMessageId: cardId, kind: "stream_finish", payload: JSON.stringify({ summary, sequence })
@@ -119,6 +121,7 @@ export class LarkChannelPublisher {
       for (const reply of replies) {
         try {
         if (reply.kind === "card_update") {
+          if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
           await this.lark.updateCard(reply.rootMessageId, JSON.parse(reply.payload) as object);
           this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         } else if (reply.kind === "stream_card_create") {
@@ -135,11 +138,13 @@ export class LarkChannelPublisher {
         } else if (reply.kind === "stream_content") {
           if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
           const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
+          assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
           await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
           this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         } else if (reply.kind === "stream_finish") {
           if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
           const payload = JSON.parse(reply.payload) as { summary: string; sequence: number };
+          assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
           await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
           this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         } else {
@@ -173,4 +178,28 @@ function decodeStreamingCardPayload(payload: string): { card: object; stream?: {
   return decoded.card && decoded.stream
     ? { card: decoded.card, stream: { pageIndex: typeof decoded.stream.pageIndex === "number" ? decoded.stream.pageIndex : 0 } }
     : { card: decoded };
+}
+
+function assertAnswerCardTarget(store: BindingStorePort, bindingId: string | null, promptId: string | null, cardId: string): void {
+  if (!bindingId || !promptId) throw new Error("Answer stream target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  if (!view || view.bindingId !== bindingId || view.answerCardId !== cardId) {
+    throw new Error(`Answer stream card target mismatch for prompt ${promptId}`);
+  }
+}
+
+function assertAnswerStreamTarget(store: BindingStorePort, bindingId: string | null, promptId: string | null, cardId: string, elementId: string): void {
+  assertAnswerCardTarget(store, bindingId, promptId, cardId);
+  const view = store.loadRunCard(promptId!);
+  if (!view || view.answerElementId !== elementId) {
+    throw new Error(`Answer stream element target mismatch for prompt ${promptId}`);
+  }
+}
+
+function assertAnswerMessageTarget(store: BindingStorePort, bindingId: string | null, promptId: string | null, messageId: string): void {
+  if (!bindingId || !promptId) throw new Error("Answer card target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  if (!view || view.bindingId !== bindingId || view.answerMessageId !== messageId) {
+    throw new Error(`Answer card message target mismatch for prompt ${promptId}`);
+  }
 }
