@@ -230,6 +230,7 @@ export interface IncomingLarkMessage {
 }
 
 export type BridgeCommand =
+  | { kind: "stop" }
   | { kind: "model"; name: string | null }
   | { kind: "reset"; title: string | null }
   | { kind: "new"; title: string | null }

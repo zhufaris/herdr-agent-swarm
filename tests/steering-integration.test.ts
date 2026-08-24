@@ -8,6 +8,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { CardProjector } from "../src/events/card-projector.js";
 import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("active-turn steering", () => {
   it("injects ordered steering into one active waiter and keeps final output on the parent card", async () => {
@@ -16,6 +17,7 @@ describe("active-turn steering", () => {
     const hold = new Promise<void>((resolve) => { release = resolve; });
     const turns: string[] = [];
     const steering: string[] = [];
+    let rejectStop = false;
     const info = vi.fn();
     const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
     let cardNumber = 0;
@@ -38,7 +40,11 @@ describe("active-turn steering", () => {
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
-      async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },
+      async steerPrompt(_paneId, text) {
+        if (rejectStop && text === "/stop") return "not_working";
+        steering.push(text);
+        return "injected";
+      },
       async readOutput() { return output; }, async renamePane() {}
     };
     const config = {
@@ -61,23 +67,32 @@ describe("active-turn steering", () => {
 
     await coordinator.handleMessage(message(1, "parent"));
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
+    const queued = createQueuedRunCard({ promptId: "queued-turn", bindingId, title: "queued turn", workspaceId: "w1", paneId: "w1:p1", requestText: "queued turn", queuePosition: 1, occurredAt: new Date().toISOString() });
+    store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
+    await publisher.drain();
+    await coordinator.handleMessage(message(4, "/stop"));
+    await coordinator.handleMessage(message(4, "/stop"));
     await Promise.all([coordinator.handleMessage(message(2, "steer one")), coordinator.handleMessage(message(3, "steer two"))]);
-    await vi.waitFor(() => expect(steering).toEqual(["steer one", "steer two"]));
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).slice(1).every((view) => view.phase === "completed")).toBe(true));
+    await vi.waitFor(() => expect(steering).toEqual(["/stop", "steer one", "steer two"]));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId).filter((view) => ["/stop", "steer one", "steer two"].includes(view.requestText)).every((view) => view.phase === "completed")).toBe(true));
     await coordinator.handleMessage(message(2, "steer one"));
-    expect(steering).toEqual(["steer one", "steer two"]);
+    expect(steering).toEqual(["/stop", "steer one", "steer two"]);
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "prompt-dispatch-decided", dispatchKind: "steering", outcome: "accepted" }), expect.any(String));
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "steering-delivered", outcome: "delivered" }), expect.any(String));
     expect(JSON.stringify(info.mock.calls)).not.toContain("steer one");
 
     expect(turns).toHaveLength(1);
     expect(turns[0]).toBe("parent");
-    expect(store.listRunCards(bindingId).slice(1)).toMatchObject([
-      { phase: "completed", answer: "", notice: "已加入当前执行" },
-      { phase: "completed", answer: "", notice: "已加入当前执行" }
-    ]);
+    expect(store.listRunCards(bindingId).filter((view) => view.requestText === "/stop")).toMatchObject([{ phase: "completed", answer: "", notice: "已加入当前执行" }]);
+    rejectStop = true;
+    await coordinator.handleMessage(message(5, "/stop"));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId).filter((view) => view.requestText === "/stop")).toHaveLength(2));
+    expect(store.listRunCards(bindingId).filter((view) => view.requestText === "/stop").at(-1)).toMatchObject({ phase: "failed", notice: expect.stringContaining("未加入后续任务队列") });
+    expect(store.listQueuedTurnPromptIds(bindingId)).toEqual(["queued-turn"]);
+    expect(steering).toEqual(["/stop", "steer one", "steer two"]);
     release();
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed", answer: "◆ parent answer" }));
+    await vi.waitFor(() => expect(turns).toEqual(["parent", "queued turn"]));
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -117,7 +132,11 @@ describe("active-turn steering", () => {
     await send(1, "parent");
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
     await send(2, "later turn");
+    const pendingBeforeStop = store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id);
+    await send(3, "/stop");
     expect(steering).toEqual([]); expect(turns).toEqual(["parent"]);
+    expect(store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id)).toBe(pendingBeforeStop);
+    expect(store.listRunCards(store.findBindingByPane("w1:p1")!.id).some((view) => view.requestText === "/stop")).toBe(false);
     release();
     await vi.waitFor(() => expect(turns).toHaveLength(2));
     expect(turns[1]).toBe("later turn");

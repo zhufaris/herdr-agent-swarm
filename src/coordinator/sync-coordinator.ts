@@ -261,6 +261,8 @@ export class SyncCoordinator {
     try {
       if (command?.kind === "help") {
         await this.replyStandalone(message.rootMessageId ?? message.messageId, renderHelpCard());
+      } else if (command?.kind === "stop") {
+        disposition = await this.stopActiveTurn(message, binding) ? "prompt_queued" : "rejected";
       } else if (command?.kind === "model") {
         disposition = await this.runModelCommand(message, binding, command.name) ? "command_completed" : "rejected";
       } else if (command?.kind === "reset") {
@@ -714,13 +716,13 @@ export class SyncCoordinator {
     return binding;
   }
 
-  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<void> {
-    if (this.store.countPendingPrompts(binding.id) >= this.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
+  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text, forcedParentPromptId?: string): Promise<void> {
+    if (!forcedParentPromptId && this.store.countPendingPrompts(binding.id) >= this.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const promptId = randomUUID();
     const occurredAt = new Date().toISOString();
     const activeRun = this.turns.get(binding.id);
-    const parentPromptId = activeRun?.state === "working" ? activeRun.promptId : null;
+    const parentPromptId = forcedParentPromptId ?? (activeRun?.state === "working" ? activeRun.promptId : null);
     const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({
       promptId, bindingId: binding.id, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId,
@@ -750,6 +752,20 @@ export class SyncCoordinator {
     else this.scheduleWorker(binding.id);
   }
 
+  private async stopActiveTurn(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
+    if (!binding || binding.state !== "active" || binding.lifecycle !== "active") {
+      await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。");
+      return false;
+    }
+    const activeRun = this.turns.get(binding.id);
+    if (!activeRun || activeRun.state !== "working") {
+      await this.reject(message, "当前没有确认处于 working 的 TraeX 任务。`/stop` 未进入任务队列。");
+      return false;
+    }
+    await this.enqueue(binding, message, "/stop", activeRun.promptId);
+    return true;
+  }
+
   private scheduleSteering(bindingId: string, parentPromptId: string): void {
     const previous = this.steeringWorkers.get(bindingId) ?? Promise.resolve();
     const worker = previous.catch(() => undefined).then(() => this.drainSteering(bindingId, parentPromptId)).finally(() => {
@@ -765,6 +781,13 @@ export class SyncCoordinator {
       try {
         const result = this.herdr.steerPrompt ? await this.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
         if (result === "not_working") {
+          if (prompt.body === "/stop") {
+            const message = "TraeX 已不再处于 working 状态，`/stop` 未加入后续任务队列。";
+            this.store.updatePrompt(prompt.id, "failed", message);
+            await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+            this.logger.warn({ event: "stop-steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "not_working" }, "stop steering target was no longer working");
+            continue;
+          }
           this.store.requeueSteeringAsTurn(prompt.id);
           this.logger.warn({ event: "steering-fell-back-to-turn", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "requeued", reason: "not_working" }, "steering target was no longer working");
           await this.refreshQueuePositions(bindingId);

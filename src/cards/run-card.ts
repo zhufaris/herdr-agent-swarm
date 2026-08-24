@@ -212,6 +212,7 @@ export function renderHelpCard(): object {
         "**从飞书控制 Herdr 中的 TraeX pane**", "",
         "`/herdr new [标题]`  选择项目并创建 TraeX pane",
         "`/new [标题]`  在当前话题开启新的 TraeX 会话（旧 pane 保持运行）",
+        "`/stop`  仅在 working 时优先 steering；不会取消已排队消息",
         "`/herdr projects`  打开项目选择卡片",
         "`/herdr spaces`  按 Space 查看全部 Pane",
         "`/herdr sessions`  查看当前群的会话",

@@ -37,6 +37,13 @@ describe("run card", () => {
     })]) } });
   });
 
+  it("documents priority stop steering and its safety boundary", () => {
+    const help = JSON.stringify(renderHelpCard());
+    expect(help).toContain("/stop");
+    expect(help).toContain("仅在 working 时");
+    expect(help).toContain("不会取消已排队消息");
+  });
+
   it("renders project buttons with opaque ids and no host routing details", () => {
     const card = renderProjectSelectorCard({
       selectionId: "selection-1",
