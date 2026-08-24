@@ -228,6 +228,7 @@ describe("Lark channel publisher", () => {
       err: { name: "Error", message: "Request failed with status code 400", code: "ERR_BAD_REQUEST", status: 400, larkCode: 230099 }
     }), expect.any(String));
     expect(JSON.stringify(warn.mock.calls)).not.toMatch(/top-secret|private card payload|response body|Authorization|config|request|response/);
+    await publisher.stop();
     store.close();
   });
 

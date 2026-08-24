@@ -91,6 +91,7 @@ export interface BindingStorePort {
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   findBindingByPane(paneId: string): Binding | null;
   getBinding(id: string): Binding | null;
+  getPrompt(id: string): PromptJob | null;
   listBindings(): Binding[];
   listBindingsByState(state: Binding["state"]): Binding[];
   listSessions(chatId: string): SessionSummary[];

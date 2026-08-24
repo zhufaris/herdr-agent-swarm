@@ -97,6 +97,51 @@ describe("coordinator concurrency controls", () => {
     expect(store.database.prepare("SELECT state FROM inbound_messages ORDER BY created_at, event_id").all()).toEqual([{ state: "accepted" }, { state: "accepted" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
   });
+
+  it("starts a queued prompt after its initial answer card succeeds on retry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    let failReply = true;
+    let runCount = 0;
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", title: "Task", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; },
+      async createPane() { throw new Error("not used"); },
+      async startTraex() {},
+      async runPrompt() { runCount += 1; return "done"; },
+      async readOutput() { return ""; },
+      async renamePane() {}
+    };
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text" }; },
+      async replyCard() { return { messageId: "legacy" }; },
+      async updateCard() {},
+      async createStreamingCard() { return { cardId: "cardkit-1" }; },
+      async replyStreamingCardReference() {
+        if (failReply) { failReply = false; throw new Error("temporary"); }
+        return { messageId: "answer-1" };
+      },
+      async streamCardContent() {},
+      async finishStreamingCard() {}
+    };
+    const { coordinator, publisher, store } = fixture(herdr, lark);
+    try {
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+      await coordinator.start();
+
+      await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+
+      expect(runCount).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_300);
+      await vi.waitFor(() => expect(runCount).toBe(1));
+    } finally {
+      await coordinator.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
+    }
+  });
 });
 
 function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {

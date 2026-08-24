@@ -30,6 +30,7 @@ export class SyncCoordinator {
   private inboundDrain: Promise<void> | null = null;
   private stopping = false;
   private stopInboundSubscription: (() => void) | null = null;
+  private stopAnswerCardReadySubscription: (() => void) | null = null;
 
   constructor(
     private readonly config: BridgeConfig,
@@ -96,12 +97,20 @@ export class SyncCoordinator {
     await this.channelPublisher.drain();
     await this.drainInboundMessages();
     for (const binding of this.store.listBindings().filter((item) => item.state === "active")) this.scheduleWorker(binding.id);
+    this.stopAnswerCardReadySubscription = this.channelPublisher.onAnswerCardReady((bindingId, promptId) => {
+      const prompt = this.store.getPrompt(promptId);
+      if (!prompt || prompt.bindingId !== bindingId || prompt.state !== "queued") return;
+      if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.scheduleSteering(bindingId, prompt.parentPromptId);
+      else this.scheduleWorker(bindingId);
+    });
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
     await this.lark.stop();
     this.stopInboundSubscription?.();
+    this.stopAnswerCardReadySubscription?.();
+    this.stopAnswerCardReadySubscription = null;
     const pending = [
       ...this.workers.values(),
       ...this.steeringWorkers.values(),

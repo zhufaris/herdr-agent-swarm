@@ -16,6 +16,7 @@ export class LarkChannelPublisher {
   private stopPromise: Promise<void> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
+  private readonly answerCardReadyListeners = new Set<(bindingId: string, promptId: string) => void>();
 
   constructor(
     private readonly bus: BridgeEventBus,
@@ -33,6 +34,11 @@ export class LarkChannelPublisher {
   onStreamCardCreated(listener: (promptId: string, viewVersion: number) => void): () => void {
     this.streamCardCreatedListeners.add(listener);
     return () => this.streamCardCreatedListeners.delete(listener);
+  }
+
+  onAnswerCardReady(listener: (bindingId: string, promptId: string) => void): () => void {
+    this.answerCardReadyListeners.add(listener);
+    return () => this.answerCardReadyListeners.delete(listener);
   }
 
   stop(): Promise<void> {
@@ -168,6 +174,9 @@ export class LarkChannelPublisher {
         else sent = await this.lark.replyCard(reply.rootMessageId, card, reply.idempotencyKey);
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sent.cardId);
         this.store.recordBridgeMessage(sent.messageId);
+        if (reply.bindingId && reply.promptId) {
+          for (const listener of this.answerCardReadyListeners) listener(reply.bindingId, reply.promptId);
+        }
         if (reply.promptId && reply.attemptCount > 0 && decoded.stream && decoded.stream.pageIndex > 0) {
           for (const listener of this.streamCardCreatedListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
         }

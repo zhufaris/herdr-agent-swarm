@@ -602,7 +602,7 @@ export class SqliteBindingStore implements BindingStorePort {
       `);
       createCard.run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, input.view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), timestamp, timestamp, timestamp);
       this.database.exec("COMMIT");
-      return { prompt: this.getPrompt(input.prompt.id), view: this.loadRunCard(input.prompt.id)!, inserted: true };
+      return { prompt: this.requirePrompt(input.prompt.id), view: this.loadRunCard(input.prompt.id)!, inserted: true };
     } catch (error) {
       if (this.database.isTransaction) this.database.exec("ROLLBACK");
       throw error;
@@ -614,7 +614,7 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!view || view.answerMessageId) return;
     const existing = this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`);
     if (existing) return;
-    const prompt = this.getPrompt(promptId);
+    const prompt = this.requirePrompt(promptId);
     this.enqueueOutboundReply({
       id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.bindingId, promptId, viewVersion: view.viewVersion,
       cardRole: "answer", rootMessageId, kind: "card_reply", payload: JSON.stringify(card)
@@ -658,7 +658,7 @@ export class SqliteBindingStore implements BindingStorePort {
       if (!row) { this.database.exec("COMMIT"); return null; }
       this.database.prepare("UPDATE prompt_jobs SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(now(), row.id);
       this.database.exec("COMMIT");
-      return this.getPrompt(row.id);
+      return this.requirePrompt(row.id);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -902,10 +902,15 @@ export class SqliteBindingStore implements BindingStorePort {
     return mapBinding(row);
   }
 
-  private getPrompt(id: string): PromptJob {
+  getPrompt(id: string): PromptJob | null {
     const row = this.database.prepare("SELECT * FROM prompt_jobs WHERE id = ?").get(id) as PromptRow | undefined;
-    if (!row) throw new Error(`Prompt not found: ${id}`);
-    return mapPrompt(row);
+    return row ? mapPrompt(row) : null;
+  }
+
+  private requirePrompt(id: string): PromptJob {
+    const prompt = this.getPrompt(id);
+    if (!prompt) throw new Error(`Prompt not found: ${id}`);
+    return prompt;
   }
 
   private getOutboundReply(id: string): OutboundReply | null {
