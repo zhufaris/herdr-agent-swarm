@@ -31,6 +31,27 @@ This bridge deliberately omits remote stop and approval actions. High-risk
 approval stays in Herdr. For the reliability model, recovery path, and module
 ownership, see [Architecture](docs/architecture.md).
 
+## Security model
+
+A message accepted from the configured Lark chat is submitted to a real TraeX
+process as the host user that runs the service. That means **every member of the
+configured chat can run commands and edit files on the host with that user's
+privileges**, and the agent's output is posted back into the chat. Treat the chat
+as an authorization boundary: use a dedicated, tightly-scoped group, a least-
+privilege service account, and a non-critical host or container.
+
+TraeX is launched with `--permission-mode $TRAEX_PERMISSION_MODE` (default
+`suggest`). Set it to `auto` only when every chat member is trusted to act as
+the host user; in the default `suggest` mode each command waits for local
+approval in the Herdr pane and the Lark card turns orange until someone approves
+or rejects it there. The bridge intentionally has no remote approve/stop action.
+
+Inbound messages are accepted only from the configured chat ID and from user
+(not bot) senders; card-action callbacks must also originate from that chat.
+Logger, command-runner, and terminal-parser redaction strip known credential
+shapes before persistence or delivery, but redaction is best-effort and is not a
+substitute for the trust boundary above.
+
 ## Prerequisites
 
 - Linux with Node.js 22.5 or newer. Node.js 24 LTS is recommended.
@@ -58,13 +79,20 @@ project uses the built-in `node:sqlite` module.
 In the Lark developer console:
 
 1. Create a custom app and enable its bot.
-2. Enable long-connection event delivery.
-3. Subscribe to `im.message.receive_v1` and the `card.action.trigger` callback.
-4. Grant the app permissions to receive group messages, create and reply to
-   messages, and patch interactive messages.
+2. Enable long-connection (WebSocket) event delivery; no public callback URL is
+   required.
+3. Subscribe to the `im.message.receive_v1` event and enable the
+   `card.action.trigger` card callback.
+4. Grant the permissions the bot needs: read messages in groups, send and reply
+   to messages, create/update/patch interactive (CardKit) messages, and read
+   message/thread metadata. The exact scope names vary by tenant console; enable
+   the IM message and interactive-card capabilities and review the consent
+   screen before publishing.
 5. Publish or install the app for the intended tenant.
 6. Add the bot to the target topic-enabled group.
-7. Record the app ID, app secret, group chat ID, and bot open ID.
+7. Record the app ID, app secret, group chat ID (`oc_...`), and bot open ID
+   (`ou_...`). The open ID is available from the bot's contact entry or the
+   event-subscription test console.
 
 The bridge accepts messages only from the configured chat ID.
 
@@ -126,6 +154,7 @@ BRIDGE_HTTP_PORT=8787
 HERDR_BRIDGE_EVENT_PORT=18787
 HERDR_BIN=herdr
 TRAEX_BIN=traex
+TRAEX_PERMISSION_MODE=suggest
 LOG_LEVEL=info
 COMMAND_TIMEOUT_MS=30000
 TURN_TIMEOUT_MS=3600000
@@ -139,7 +168,9 @@ LARK_MESSAGE_CHUNK_SIZE=3500
 `projects.json` is the project allowlist shown by `/herdr new`. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
 and absolute `cwd`; `defaultProjectId` must reference one entry. The registry is
-required; a missing or invalid file prevents startup.
+required; a missing or invalid file prevents startup. Copy
+`config/projects.example.json` to `config/projects.json` (or to the plugin
+config directory) and replace the workspace ID and cwd with your own values.
 
 The plugin defaults `PROJECTS_CONFIG_PATH` to its config directory and
 `BRIDGE_DATABASE_PATH` to `$HERDR_PLUGIN_STATE_DIR/bridge.db`. Explicit absolute

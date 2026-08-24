@@ -1,0 +1,13 @@
+{
+  "defaultProjectId": "my-project",
+  "projects": [
+    {
+      "id": "my-project",
+      "displayName": "My Project",
+      "spaceName": "my-project",
+      "description": "A repository driven by TraeX through Lark topics",
+      "workspaceId": "REPLACE_WITH_HERDR_WORKSPACE_ID",
+      "cwd": "/absolute/path/to/your/project"
+    }
+  ]
+}

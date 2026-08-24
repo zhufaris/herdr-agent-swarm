@@ -188,6 +188,6 @@ and credentials.
 
 - [Feishu group usage](feishu-group-usage.md) explains user commands and safety
   behavior.
-- [Terminal streaming design](superpowers/specs/2026-08-23-terminal-streaming-answer-card-design.md) records detailed CardKit behavior.
-- [Herdr-native runtime design](superpowers/specs/2026-08-23-herdr-native-runtime-architecture-design.md) records plugin and service migration decisions.
-- Historical iteration records live in [archive/designs](archive/designs/).
+- Historical design and iteration records live in
+  [archive/](archive/), including [archive/designs](archive/designs/) and
+  [archive/superpowers](archive/superpowers/).
