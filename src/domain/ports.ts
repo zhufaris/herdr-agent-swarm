@@ -65,6 +65,7 @@ export interface BindingStorePort {
     rootMessageId: string | null;
     title: string;
   }): Binding;
+  resetTopicBinding(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string }): { previous: Binding; replacement: Binding; cancelledPromptIds: string[] };
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection;
   getProjectSelection(id: string): ProjectSelection | null;
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;

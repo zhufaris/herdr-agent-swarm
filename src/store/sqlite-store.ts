@@ -12,6 +12,7 @@ import { transitionSession, type AttachmentState, type ProvisioningCheckpoint, t
 type SqlValue = string | number | bigint | null;
 type BindingRow = Record<string, SqlValue> & {
   id: string; project_id: string | null; workspace_id: string; chat_id: string; topic_id: string | null; root_message_id: string | null;
+  retired_topic_id: string | null; retired_root_message_id: string | null;
   pane_id: string | null; traex_session_id: string | null; title: string; runtime: string; state: string;
   status_message_id: string | null; last_agent_state: string; last_output_fingerprint: string | null;
   lifecycle: string; attachment: string; generation: number; provisioning_checkpoint: string; degradation_count: number;
@@ -40,7 +41,7 @@ const FENCED_TABLES = [
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
-  rootMessageId: "root_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
+  rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
   title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
   lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
   lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint",
@@ -184,6 +185,33 @@ export class SqliteBindingStore implements BindingStorePort {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
     `).run(input.id, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
     return this.requireBinding(input.id);
+  }
+
+  resetTopicBinding(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string }): { previous: Binding; replacement: Binding; cancelledPromptIds: string[] } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.requireBinding(input.oldBindingId);
+      if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId) {
+        throw new Error("Binding is not eligible for in-topic reset");
+      }
+      const timestamp = now();
+      const cancelledPromptIds = (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' ORDER BY created_at, id").all(previous.id) as Array<{ id: string }>).map((row) => row.id);
+      this.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'queued'")
+        .run("话题已开启新会话，排队请求未提交给 TraeX。", timestamp, previous.id);
+      this.database.prepare("UPDATE prompt_jobs SET observation_state = 'detached', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'running'")
+        .run("话题已开启新会话；Bridge 不再观察该 TraeX 请求，也不会重放。", timestamp, previous.id);
+      this.database.prepare("UPDATE outbound_replies SET state = 'dismissed', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'pending'")
+        .run("话题已开启新会话；不再投递旧会话更新。", timestamp, previous.id);
+      this.database.prepare(`UPDATE bindings SET topic_id = NULL, root_message_id = NULL, retired_topic_id = ?, retired_root_message_id = ?, lifecycle = 'archived', state = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`)
+        .run(previous.topicId, previous.rootMessageId, timestamp, timestamp, previous.id);
+      this.database.prepare(`INSERT INTO bindings(id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, lifecycle, attachment, generation, provisioning_checkpoint, degradation_count, has_completed_turn, last_activity_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', 'provisioning', 'unattached', 1, 'selected', 0, 0, ?, ?, ?)` )
+        .run(input.newBindingId, previous.projectId, previous.workspaceId, previous.chatId, previous.topicId, previous.rootMessageId, input.title, timestamp, timestamp, timestamp);
+      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset', ?, 'handoff', ?)")
+        .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
+      this.database.exec("COMMIT");
+      return { previous: this.requireBinding(previous.id), replacement: this.requireBinding(input.newBindingId), cancelledPromptIds };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection {
@@ -848,7 +876,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS bindings(
         id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
-        root_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
+        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
         status_message_id TEXT,
@@ -916,11 +944,18 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
+    this.ensureBindingResetColumns();
     this.ensurePromptCancelledState();
     this.ensurePromptObservationColumn();
     this.ensureOutboundDismissedState();
     this.ensurePaneCloseOperationState();
     this.ensureQueryIndexes();
+  }
+
+  private ensureBindingResetColumns(): void {
+    const columns = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!columns.has("retired_topic_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN retired_topic_id TEXT");
+    if (!columns.has("retired_root_message_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN retired_root_message_id TEXT");
   }
 
   private ensureQueryIndexes(): void {
@@ -1143,7 +1178,7 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
 function mapBinding(row: BindingRow): Binding {
   return {
     id: row.id, projectId: row.project_id, workspaceId: row.workspace_id, chatId: row.chat_id, topicId: row.topic_id,
-    rootMessageId: row.root_message_id, paneId: row.pane_id, traexSessionId: row.traex_session_id,
+    rootMessageId: row.root_message_id, retiredTopicId: row.retired_topic_id ?? null, retiredRootMessageId: row.retired_root_message_id ?? null, paneId: row.pane_id, traexSessionId: row.traex_session_id,
     title: row.title, runtime: "traex", state: row.state as BindingState, statusMessageId: row.status_message_id,
     lastAgentState: row.last_agent_state as AgentState, lastOutputFingerprint: row.last_output_fingerprint,
     lifecycle: row.lifecycle as SessionLifecycle, attachment: row.attachment as AttachmentState, generation: Number(row.generation),

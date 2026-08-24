@@ -25,6 +25,10 @@ export class TurnSupervisor {
     if (this.active.get(bindingId)?.promptId === promptId) this.active.delete(bindingId);
   }
 
+  abort(bindingId: string): void {
+    this.active.get(bindingId)?.abortController.abort();
+  }
+
   abortAll(onDetach: (turn: Readonly<ActiveTurn>) => void): void {
     for (const turn of this.active.values()) {
       onDetach(turn);

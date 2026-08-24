@@ -75,6 +75,8 @@ export interface Binding {
   chatId: string;
   topicId: string | null;
   rootMessageId: string | null;
+  retiredTopicId: string | null;
+  retiredRootMessageId: string | null;
   paneId: string | null;
   traexSessionId: string | null;
   title: string;
@@ -221,6 +223,7 @@ export interface IncomingLarkMessage {
 
 export type BridgeCommand =
   | { kind: "model"; name: string | null }
+  | { kind: "reset"; title: string | null }
   | { kind: "new"; title: string | null }
   | { kind: "projects" }
   | { kind: "spaces" }

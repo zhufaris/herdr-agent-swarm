@@ -9,6 +9,70 @@ import { LarkChannelPublisher } from "../src/events/lark-channel-publisher.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("pane/thread lifecycle integration", () => {
+  it("resets a working topic into a new pane without stopping or delivering the old session", async () => {
+    const submitted: string[] = [];
+    const created: string[] = [];
+    let oldObserverAborted = false;
+    const oldPane = { paneId: "w1:old", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "old", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { throw new Error("/new must not create another Lark topic"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async replyStreamingCard() { return { messageId: `card-${Math.random()}`, cardId: `cardkit-${Math.random()}` }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : id === newPane.paneId ? newPane : null; },
+      async createPane(_workspaceId, _cwd, options) { created.push(options?.title ?? ""); return newPane; }, async startTraex() {},
+      async runPrompt(_paneId, text, _timeout, _observation, signal, onDispatched) {
+        submitted.push(text); await onDispatched?.();
+        await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { oldObserverAborted = true; reject(new Error("observer detached")); }, { once: true }));
+        return "done";
+      },
+      async readOutput() { return "◆ old output that must not reach the topic"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
+    store.updateBinding("old", { paneId: oldPane.paneId, traexSessionId: oldPane.terminalId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const activeRuntime = runtime(store, herdr, lark);
+    await activeRuntime.coordinator.start();
+
+    await activeRuntime.coordinator.handleMessage({ ...message(1, "old request"), mentionsBot: true });
+    await vi.waitFor(() => expect(submitted).toEqual(["old request"]));
+    await activeRuntime.coordinator.handleMessage({ ...message(2, "queued old request") });
+    await activeRuntime.coordinator.handleMessage({ ...message(3, "/new fresh session"), mentionsBot: true });
+
+    await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
+    const retired = store.getBinding("old")!;
+    const replacement = store.findBindingByLarkScope("topic", "root")!;
+    expect(retired).toMatchObject({ id: "old", lifecycle: "archived", topicId: null, retiredTopicId: "topic", paneId: oldPane.paneId });
+    expect(replacement).toMatchObject({ lifecycle: "active", topicId: "topic", rootMessageId: "root", paneId: newPane.paneId });
+    expect(created).toEqual(["fresh session"]);
+    expect(oldObserverAborted).toBe(true);
+    expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = 'm2'").get()).toEqual({ state: "cancelled" });
+    expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs WHERE lark_message_id = 'm1'").get()).toEqual({ state: "running", observation_state: "detached" });
+
+    await activeRuntime.coordinator.stop(); await activeRuntime.projector.stop(); await activeRuntime.publisher.stop(); store.close();
+  });
+
+  it("attaches a surviving failed reset pane back to its current topic", async () => {
+    const pane = { paneId: "w1:survived", terminalId: "term-reset", workspaceId: "w1", cwd: "/repo", label: "survived", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane(id) { return id === pane.paneId ? pane : null; },
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "failed-reset", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / fresh" });
+    store.updateBinding("failed-reset", { paneId: pane.paneId, state: "failed" });
+    const activeRuntime = runtime(store, herdr, lark);
+    await activeRuntime.coordinator.start();
+
+    await activeRuntime.coordinator.handleMessage({ ...message(4, "/herdr attach repo w1:survived"), mentionsBot: true });
+
+    expect(store.getBinding("failed-reset")).toMatchObject({ state: "active", lifecycle: "active", attachment: "attached", paneId: pane.paneId, traexSessionId: pane.terminalId });
+    await activeRuntime.coordinator.stop(); await activeRuntime.projector.stop(); await activeRuntime.publisher.stop(); store.close();
+  });
+
   it("drains the active turn, cancels queued work, then archives without closing the pane", async () => {
     let finish!: () => void;
     const activeTurn = new Promise<void>((resolve) => { finish = resolve; });
@@ -237,7 +301,7 @@ function config(): BridgeConfig {
   return {
     lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
     herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
-    projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
+    projects: [{ id: "repo", displayName: "Repo", spaceName: "repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
     databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
   };
 }

@@ -5,6 +5,8 @@ describe("commands", () => {
   it("parses supported commands", () => {
     expect(parseCommand("/herdr new fix build")).toEqual({ kind: "new", title: "fix build" });
     expect(parseCommand("/herdr new")).toEqual({ kind: "new", title: null });
+    expect(parseCommand("/new")).toEqual({ kind: "reset", title: null });
+    expect(parseCommand("/new fresh start")).toEqual({ kind: "reset", title: "fresh start" });
     expect(parseCommand("/herdr projects")).toEqual({ kind: "projects" });
     expect(parseCommand("/herdr spaces")).toEqual({ kind: "spaces" });
     expect(parseCommand("/herdr spaces extra")).toEqual({ kind: "help" });

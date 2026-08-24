@@ -73,7 +73,8 @@ becomes `failed`; the old binding remains archived and detached. The bridge
 does not restore its topic identifiers, because the external creation call may
 have succeeded despite an uncertain response. A durable failure card explains
 that the old session is still available in Herdr and tells the user to retry
-`/new` or use `/herdr attach <space> <pane>` to attach a surviving new pane.
+`/herdr attach <space> <pane>` to attach a surviving new pane; it does not
+automatically retry `/new`, because the original create call may have succeeded.
 Startup recovery must never automatically create another pane for a reset
 binding left at `selected`; it uses the same inspect-and-attach rule as other
 uncertain provisioning.

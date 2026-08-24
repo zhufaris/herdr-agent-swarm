@@ -6,6 +6,8 @@ export function parseCommand(text: string): BridgeCommand | null {
   const trimmed = text.trim();
   const modelMatch = /^\/model(?:\s+([\s\S]*))?$/i.exec(trimmed);
   if (modelMatch) return { kind: "model", name: (modelMatch[1] ?? "").trim() || null };
+  const resetMatch = /^\/new(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  if (resetMatch) return { kind: "reset", title: (resetMatch[1] ?? "").trim() || null };
   if (!trimmed.startsWith("/herdr")) return null;
 
   const match = /^\/herdr(?:\s+([a-z]+))?(?:\s+([\s\S]*))?$/i.exec(trimmed);

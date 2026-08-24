@@ -34,6 +34,22 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT state, detail FROM pane_close_requests WHERE id = 'r2'").get()).toEqual({ state: "succeeded", detail: null });
   });
 
+  it("atomically hands an existing topic to a fresh binding during reset", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old", projectId: "alpha", workspaceId: "w1", chatId: "c1", topicId: "topic-1", rootMessageId: "root-1", title: "Old" });
+    store.updateBinding("old", { state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueuePrompt({ id: "queued", bindingId: "old", larkMessageId: "message-queued", actorOpenId: "u1", body: "later" });
+    store.enqueueOutboundReply({ id: "outbound", idempotencyKey: "old-update", bindingId: "old", rootMessageId: "root-1", kind: "text", payload: "old update" });
+
+    const handoff = store.resetTopicBinding({ oldBindingId: "old", newBindingId: "new", title: "Fresh", actorOpenId: "u1" });
+
+    expect(handoff.cancelledPromptIds).toEqual(["queued"]);
+    expect(handoff.previous).toMatchObject({ id: "old", state: "archived", lifecycle: "archived", topicId: null, rootMessageId: null, retiredTopicId: "topic-1", retiredRootMessageId: "root-1" });
+    expect(handoff.replacement).toMatchObject({ id: "new", projectId: "alpha", topicId: "topic-1", rootMessageId: "root-1", state: "pending", lifecycle: "provisioning" });
+    expect(store.findBindingByLarkScope("topic-1", "root-1")?.id).toBe("new");
+    expect(store.listPendingOutboundReplies().map((item) => item.id)).not.toContain("outbound");
+  });
+
   it("preserves an uncertain pane-close operation without replaying it", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
