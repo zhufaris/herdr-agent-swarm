@@ -25,7 +25,15 @@ interface HerdrRuntimeReconcilerOptions {
   isBindingBusy(bindingId: string): boolean;
 }
 
-export class HerdrRuntimeReconciler {
+export interface HerdrRuntimeReconcilerPort {
+  captureBaselines(): Promise<void>;
+  reconcile(workspaceIds?: readonly string[]): Promise<void>;
+  requestReconciliation(workspaceIds?: readonly string[]): Promise<void>;
+  start(intervalMs: number): void;
+  stop(): Promise<void>;
+}
+
+export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private reconciliation: Promise<void> | null = null;
   private pendingReconciliation: Set<string> | null | undefined;
   private stopping = false;

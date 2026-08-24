@@ -4,7 +4,7 @@ import type { BridgeEvent } from "../domain/events.js";
 import type { OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
-import type { BridgeEventBus } from "./bridge-event-bus.js";
+import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../runtime/answer-stream.js";
@@ -20,7 +20,7 @@ export class ConversationViewProjector {
   private readonly scheduler: CardUpdateScheduler;
 
   constructor(
-    private readonly bus: BridgeEventBus,
+    private readonly bus: LifecycleEventSubscriber,
     private readonly store: ProjectionStore,
     private readonly channelPublisher: OutboundIntentPort,
     private readonly logger: Logger

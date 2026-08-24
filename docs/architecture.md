@@ -69,9 +69,9 @@ the source of workflow policy.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-The composition root creates the concrete infrastructure adapters and injects
-capability-focused ports into the application workflows. Runtime modules do not
-read plugin paths or process-manager state directly.
+The composition root creates all concrete workflows and infrastructure adapters,
+then injects capability-focused ports into `InboundRouter` and the workflows.
+Runtime modules do not read plugin paths or process-manager state directly.
 
 ### Current implementation map
 
@@ -83,6 +83,7 @@ The implementation uses the following workflow decomposition.
 | `PromptRunWorkflow` | FIFO turn draining, steering, detached observation, `TurnSupervisor`, and prompt-specific shutdown | Prompt execution boundary |
 | `BindingProvisioningWorkflow` | Project selection, pane creation/discovery, attach, reset, replace, and interrupted provisioning recovery | Provisioning boundary |
 | `OperationsWorkflow` | Close, archive/resume, rename/model, operator views, and dead-letter actions | Operator-command boundary |
+| `StartupViewConverger` | Deterministic startup repair of topic/run-card projections and missing Answer-card intent | Startup recovery boundary |
 | `InProcessPromptWorkScheduler` | Coalesced process-local binding and detached-prompt wake-ups behind `PromptWorkScheduler` | Best-effort scheduling adapter |
 | `HerdrRuntimeReconciler` | Herdr snapshot convergence and scoped prompt scheduling hints | Runtime authority boundary |
 | `BridgeEventBus` | Lifecycle projection events behind `LifecycleEventPublisher`; inbound work uses a separate notifier | Process-local lifecycle adapter |

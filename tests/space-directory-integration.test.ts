@@ -2,7 +2,7 @@ import pino from "pino";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { InboundRouter } from "../src/coordinator/inbound-router.js";
+import { createTestRouter } from "./helpers/create-test-router.js";
 import { buildSpaceDirectoryGroups, selectSpaceDirectoryBinding } from "../src/coordinator/operations-workflow.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
@@ -49,8 +49,8 @@ describe("space directory command", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, logger);
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
     await coordinator.start();
     listPanes.mockClear();
 
@@ -108,8 +108,8 @@ describe("space directory command", () => {
     const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new InboundRouter({
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter({
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
     }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
@@ -143,8 +143,8 @@ describe("space directory command", () => {
     store.createPendingBinding({ id: "b1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "omt-target", rootMessageId: "om-target", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new InboundRouter({
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter({
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
     }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();

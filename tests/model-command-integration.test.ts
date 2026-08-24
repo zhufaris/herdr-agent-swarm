@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { InboundRouter } from "../src/coordinator/inbound-router.js";
+import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
@@ -113,9 +113,9 @@ async function setup(
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
-  const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+  const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;
   return { coordinator, store, bindingId, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };

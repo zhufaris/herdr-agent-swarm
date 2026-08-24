@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { InboundRouter } from "../src/coordinator/inbound-router.js";
+import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
@@ -91,9 +91,9 @@ describe("pane/thread lifecycle integration", () => {
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage(message(1, "first"));
@@ -133,10 +133,10 @@ describe("pane/thread lifecycle integration", () => {
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
     const logger = { info: vi.fn(), warn: (value: object) => warnings.push(value), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(), trace: vi.fn(), silent: vi.fn(), level: "silent", child: () => logger } as unknown as ReturnType<typeof pino>;
-    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, logger, 10);
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 10);
     await coordinator.start();
 
     await coordinator.handleMessage(message(20, "active"));
@@ -249,9 +249,9 @@ describe("pane/thread lifecycle integration", () => {
     store.transitionBinding("b1", { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
     store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "old-message", actorOpenId: "user", body: "do not replay" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ ...message(10, "/herdr reattach w1:p1"), mentionsBot: true });
@@ -273,8 +273,8 @@ describe("pane/thread lifecycle integration", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active" });
-    const bus = new BridgeEventBus(); const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const bus = new BridgeEventBus(); const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     failWorkspace = true;
     await coordinator.reconcile();
@@ -291,9 +291,9 @@ function message(index: number, text: string) {
 
 function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000) {
   const bus = new BridgeEventBus();
-  const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+  const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), shutdownGraceMs);
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), shutdownGraceMs);
   return { coordinator, projector, publisher };
 }
 

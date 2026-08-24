@@ -22,7 +22,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stop = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
 
@@ -57,7 +57,7 @@ describe("event-driven card projection", () => {
     store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
     const stopProjector = projector.start();
@@ -100,7 +100,7 @@ describe("event-driven card projection", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
     const stopProjector = projector.start();
@@ -142,7 +142,7 @@ describe("event-driven card projection", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
     await publisher.drain();
 
@@ -179,7 +179,7 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
     await publisher.drain();
 
@@ -209,7 +209,7 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
     await publisher.drain();
 
@@ -247,7 +247,7 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
     await publisher.drain();
 
@@ -280,7 +280,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
     projector.start();
@@ -319,7 +319,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
 
     const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "First" } });
@@ -344,7 +344,7 @@ describe("event-driven card projection", () => {
     store.saveTopicView = (view) => { if (failOnce) { failOnce = false; throw new Error("projection failed"); } originalSave(view); };
     const bus = new BridgeEventBus();
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
 
     await expect(bus.publish({ eventId: "failed", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Failed" } })).rejects.toThrow("projection failed");
@@ -368,7 +368,7 @@ describe("event-driven card projection", () => {
       async updateCard(messageId) { if (messageId === "card-b1") await firstBlocked; }
     };
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
 
     const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Blocked" } });

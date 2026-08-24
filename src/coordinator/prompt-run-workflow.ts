@@ -5,7 +5,7 @@ import type { BridgeEvent } from "../domain/events.js";
 import type { HerdrPort, PromptRunStore } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
-import type { BridgeEventBus } from "../events/bridge-event-bus.js";
+import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptRunOutboundPort } from "../domain/ports.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { outputFingerprint } from "../runtime/output.js";
@@ -19,10 +19,18 @@ export interface ActiveTurnSnapshot {
   state: Binding["lastAgentState"];
 }
 
+export interface PromptRunWorkflowPort {
+  prepareRecovery(): void;
+  start(): void;
+  activeTurn(bindingId: string): ActiveTurnSnapshot | null;
+  isBindingBusy(bindingId: string): boolean;
+  stop(): Promise<void>;
+}
+
 interface PromptRunWorkflowOptions {
   store: PromptRunStore;
   herdr: HerdrPort;
-  bus: BridgeEventBus;
+  bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler;
   channelPublisher: PromptRunOutboundPort;
   logger: Logger;
@@ -30,7 +38,7 @@ interface PromptRunWorkflowOptions {
   shutdownGraceMs?: number;
 }
 
-export class PromptRunWorkflow {
+export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
   private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly turns = new TurnSupervisor();

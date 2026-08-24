@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { LarkPort, OutboundIntentPort, OutboxDispatcherControl, OutboxStore } from "../domain/ports.js";
 import type { OutboundReply } from "../domain/types.js";
-import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { answerElementId } from "../domain/run-card-view.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
@@ -20,7 +19,6 @@ export class LarkOutboxDispatcher implements OutboundIntentPort, OutboxDispatche
   private scheduler: PromptWorkScheduler | null = null;
 
   constructor(
-    private readonly bus: BridgeEventBus,
     private readonly store: OutboxStore,
     private readonly lark: LarkPort,
     private readonly logger: Logger

@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { InboundRouter } from "../src/coordinator/inbound-router.js";
+import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { AgentState } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
@@ -161,9 +161,9 @@ async function setup(initialAgentState: AgentState, failClose = false) {
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
-  const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })); publisher.start();
+  const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = new InboundRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;
   return { cards, closePane, coordinator, store, bindingId, setAgentState(state: AgentState) { agentState = state; }, setTerminalId(value: string | null) { terminalId = value; }, setPanePresent(value: boolean) { panePresent = value; }, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };

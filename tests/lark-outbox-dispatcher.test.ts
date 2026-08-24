@@ -20,7 +20,7 @@ describe("Lark channel publisher", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     await publisher.drain();
     await publisher.enqueueStreamContent("b1", "p1", "cardkit-1", answerElementId("p1", 0), "Working\nDone", 2);
 
@@ -41,7 +41,7 @@ describe("Lark channel publisher", () => {
     const second = createQueuedRunCard({ promptId: "p2", bindingId: "b1", title: "Second", workspaceId: "w1", paneId: "w1:p1", requestText: "second", queuePosition: 1, occurredAt: "later" });
     store.acceptPrompt({ prompt: { id: "p2", bindingId: "b1", larkMessageId: "user-2", actorOpenId: "u1", body: "second" }, view: second, rootMessageId: "root-1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) { if (reply.promptId === "p2") store.markOutboundReplyDelivered(reply.id, "answer-2", "cardkit-2"); }
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
 
     await expect(publisher.enqueueStreamContent("b1", "p2", "cardkit-1", "answer-content-p1-0", "wrong target", 2)).rejects.toThrow(/target mismatch/);
     expect(stream).not.toHaveBeenCalled();
@@ -53,7 +53,7 @@ describe("Lark channel publisher", () => {
     const cards: object[] = [];
     const lark = fakeLark({ async replyCard(_root, card) { if (fail) throw new Error("temporary"); cards.push(card); return { messageId: "card-1" }; } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     publisher.start();
 
     await publisher.enqueueCard("root-1", "standalone:1", { schema: "2.0" });
@@ -76,7 +76,7 @@ describe("Lark channel publisher", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, fakeLark({ replyStreamingCard: created }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: created }), pino({ enabled: false }));
     const resumed = vi.fn();
     publisher.onStreamCardCreated(resumed);
     store.enqueueOutboundReply({
@@ -106,7 +106,7 @@ describe("Lark channel publisher", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, fakeLark({ createStreamingCard: create, replyStreamingCardReference: reply }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ createStreamingCard: create, replyStreamingCardReference: reply }), pino({ enabled: false }));
 
     await publisher.drain();
     expect(create).toHaveBeenCalledTimes(1);
@@ -133,7 +133,7 @@ describe("Lark channel publisher", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, fakeLark({
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
       async createStreamingCard() { return { cardId: "cardkit-1" }; },
       replyStreamingCardReference: reply
     }), pino({ enabled: false }));
@@ -155,7 +155,7 @@ describe("Lark channel publisher", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
     store.enqueueOutboundReply({ id: "stale-page", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: {}, stream: { pageIndex: 2, pageStart: 20_000, elementId: answerElementId("p1", 2) } }) });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
 
     await publisher.drain();
 
@@ -180,7 +180,7 @@ describe("Lark channel publisher", () => {
       id: "invalid-page", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create",
       payload: JSON.stringify({ card: { body: { elements: [{ element_id: cardId }] } }, stream: { pageIndex: 1, pageStart: 20_000, elementId: metadataId } })
     });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
 
     await publisher.drain();
 
@@ -197,7 +197,7 @@ describe("Lark channel publisher", () => {
     const lark = fakeLark({ async replyCard() { throw new Error("network unavailable"); } });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, logger);
+    const publisher = new LarkOutboxDispatcher(store, lark, logger);
 
     await publisher.enqueueCard("root-1", "failure:1", { secret: "private card payload" }, "b1");
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-retry-scheduled", replyKind: "card_reply", attempt: 1, outcome: "retry" }), expect.any(String));
@@ -219,7 +219,7 @@ describe("Lark channel publisher", () => {
     });
     const lark = fakeLark({ async updateCard() { throw failure; } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, logger);
+    const publisher = new LarkOutboxDispatcher(store, lark, logger);
 
     await publisher.enqueueCardUpdate(null, "card-1", "failure:safe-error", { secret: "private card payload" });
 
@@ -238,7 +238,7 @@ describe("Lark channel publisher", () => {
     let delivered = false;
     const lark = fakeLark({ async replyCard() { await gate; delivered = true; return { messageId: "card-1" }; } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     publisher.start();
     const publishing = publisher.enqueueCard("root-1", "standalone:stop", { schema: "2.0" });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -257,7 +257,7 @@ describe("Lark channel publisher", () => {
     const lark = fakeLark({ async updateCard(_messageId, card) { versions.push(JSON.stringify(card)); } });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 2, "task", { version: 2 });
     await publisher.enqueueRunCardUpdate("b1", "p1", "card-1", 3, "task", { version: 3 });
     expect(versions).toEqual([JSON.stringify({ version: 2 }), JSON.stringify({ version: 3 })]);
@@ -275,7 +275,7 @@ describe("Lark channel publisher", () => {
       }
     });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     store.enqueueOutboundReply({ id: "slow", idempotencyKey: "card-update:slow", rootMessageId: "slow-card", kind: "card_update", payload: "{}" });
     store.enqueueOutboundReply({ id: "fast", idempotencyKey: "card-update:fast", rootMessageId: "fast-card", kind: "card_update", payload: "{}" });
 
@@ -301,7 +301,7 @@ describe("Lark channel publisher", () => {
       }
     });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     store.enqueueOutboundReply({ id: "same-1", idempotencyKey: "card-update:same:1", rootMessageId: "same-card", kind: "card_update", payload: JSON.stringify({ version: 1 }) });
     store.enqueueOutboundReply({ id: "same-2", idempotencyKey: "card-update:same:2", rootMessageId: "same-card", kind: "card_update", payload: JSON.stringify({ version: 2 }) });
     store.enqueueOutboundReply({ id: "other", idempotencyKey: "card-update:other", rootMessageId: "other-card", kind: "card_update", payload: JSON.stringify({ version: 1 }) });
@@ -331,7 +331,7 @@ describe("Lark channel publisher", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
 
     await publisher.enqueueStreamContent("b1", "p1", "cardkit-1", answerElementId("p1", 0), "content", 2);
     await publisher.enqueueStreamFinish("b1", "p1", "cardkit-1", "Completed", 3);
@@ -358,7 +358,7 @@ describe("Lark channel publisher", () => {
 
     store = new SqliteBindingStore(path);
     const delivered: string[] = [];
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, fakeLark({
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
       async streamCardContent() { delivered.push("content"); },
       async finishStreamingCard() { delivered.push("finish"); }
     }), pino({ enabled: false }));
@@ -382,7 +382,7 @@ describe("Lark channel publisher", () => {
       active -= 1;
     } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     for (let index = 0; index < 10; index += 1) {
       store.enqueueOutboundReply({ id: `reply-${index}`, idempotencyKey: `reply-${index}`, rootMessageId: `card-${index}`, kind: "card_update", payload: "{}" });
     }
@@ -410,7 +410,7 @@ describe("Lark channel publisher", () => {
       return { messageId: "card-1" };
     } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
 
     await publisher.enqueueCard("root-1", "automatic-retry", {});
     expect(attempt).toBe(1);
@@ -434,7 +434,7 @@ describe("Lark channel publisher", () => {
     const error = Object.assign(new Error("rate limited"), { response: { status: 429, headers } });
     const lark = fakeLark({ async replyCard() { throw error; } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
 
     await publisher.enqueueCard("root-1", `rate-limit-${header}`, {});
 

@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { InboundRouter } from "../src/coordinator/inbound-router.js";
+import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
@@ -35,8 +35,8 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, logger);
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
 
     await coordinator.start();
     await coordinator.reconcile();
@@ -95,10 +95,10 @@ describe("Herdr discovery", () => {
         answerUpdates.push(event.payload.answerUpdate ?? "replace");
       }
     });
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-dedup", messageId: "message-dedup", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
@@ -153,10 +153,10 @@ describe("Herdr discovery", () => {
     const stopObserver = bus.onBridgeEvent((event) => {
       if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
     });
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-unknown", messageId: "message-unknown", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
@@ -195,10 +195,10 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await publisher.drain();
@@ -235,10 +235,10 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "new", messageId: "root-2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", actorOpenId: "user", text: "/herdr new Initial pane", mentionsBot: true, isRootMessage: true });
@@ -282,10 +282,10 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     output = "initial terminal\n❯ next prompt";
     await coordinator.reconcile();
@@ -326,8 +326,8 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const stopChannelPublisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false })), pino({ enabled: false }));
+    const stopChannelPublisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false })).start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, new LarkOutboxDispatcher(store, lark, pino({ enabled: false })), pino({ enabled: false }));
     await coordinator.start();
 
     output = `${output}\n◆ actual answer`;
@@ -367,11 +367,11 @@ describe("Herdr discovery", () => {
     const inboundEvents: string[] = [];
     const inboundWork = new InProcessInboundWorkNotifier();
     const stopInboundObserver = inboundWork.subscribe((event) => { inboundEvents.push(event.type); });
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false }));
     const stopProjector = projector.start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
@@ -426,10 +426,10 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
 
@@ -485,10 +485,10 @@ describe("Herdr discovery", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
 
@@ -534,10 +534,10 @@ describe("Herdr discovery", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "status-1" });
     const bus = new BridgeEventBus();
-    const publisher = new LarkOutboxDispatcher(bus, store, lark, pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
     const stopProjector = new ConversationViewProjector(bus, store, publisher, pino({ enabled: false })).start();
-    const coordinator = new InboundRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-retry", messageId: "message-retry", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });

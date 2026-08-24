@@ -26,6 +26,8 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
   > After this: normalized Lark ingress delegates commands through `InboundRouter`; no monolithic coordinator or broad `BindingStorePort` consumer remains.
 - [x] **S09: Integrated recovery and operator verification** `risk:medium` `depends:[S08]`
   > After this: full tests, build, migration tests, shutdown/restart scenarios, and a non-mutating real-user smoke prove the assembled architecture.
+- [x] **S10: Enforce the composition-root boundary** `risk:medium` `depends:[S09]`
+  > After this: `main` constructs every concrete workflow; `InboundRouter` depends only on workflow/control ports; startup view repair has its own module; and structural tests prevent concrete coupling from returning.
 
 ## Success criteria
 
@@ -88,10 +90,11 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
 | Preserve provisioning and operations behavior | S04, S05, S08, S09 |
 | Remove monolithic coordinator and broad port | S08 |
 | Preserve uncertain-dispatch and local-approval safety | S01, S04, S06, S09 |
+| Keep concrete workflow construction in the composition root | S10 |
 
 ## Definition of done
 
-- All nine slices meet their demo line and focused acceptance tests.
+- All ten slices meet their demo line and focused acceptance tests.
 - No compatibility wrapper remains for superseded module names.
 - `BindingStorePort` and `SyncCoordinator` have no production consumers.
 - Architecture, spec, and implementation names agree.
@@ -108,9 +111,12 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
   `SqliteBindingStore` and as the source of the `Pick`-based capability types.
 - The prompt-to-artifact audit is recorded in the architecture document under
   “Implemented guarantees and verification.”
-- The full Vitest suite passes: 47 files and 349 tests. TypeScript typecheck and
+- The full Vitest suite passes: 48 files and 351 tests. TypeScript typecheck and
   the production build pass; the generated build identity is
-  `sha256:b6bac5494fc5f90db931546a98e95541ba2a091fed4c7b0c92e9e4db07927e6e`.
+  `sha256:2f0db97d043bd693e4f844ddd4ea559bd07461f1b6ef90646d8491b534c7fa56`.
+- The completion audit additionally verifies that concrete workflow construction
+  occurs only in `main`, startup projection repair is isolated in
+  `StartupViewConverger`, and lifecycle publishers/subscribers use ports.
 - The non-mutating real-user smoke completed its 121-second polling window with
   zero status failures. Every sampled status response was healthy and held the
   lease with no pending outbox work. It observed 45 existing dead letters and

@@ -276,6 +276,16 @@ This avoids a repository-wide rename that provides no architectural leverage.
 - Existing command behavior, CardKit rendering, and safety rules do not change.
 - Focused tests, the full test suite, typecheck, and build pass.
 
+## Implementation outcome
+
+The migration is implemented. The final completion audit found and closed one
+additional composition gap: `InboundRouter` had stopped owning workflow logic
+but still instantiated the concrete workflows and contained startup projection
+repair. Concrete construction now lives in `main`; `InboundRouter` accepts
+workflow/control ports, and `StartupViewConverger` owns deterministic startup
+view repair. A structural test protects this dependency direction and also
+ensures lifecycle publishers/subscribers remain behind their ports.
+
 ## Deferred decisions
 
 - A durable cross-process scheduler is deferred until multiple bridge processes

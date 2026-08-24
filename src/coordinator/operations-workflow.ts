@@ -18,7 +18,24 @@ import { safeLogError } from "../runtime/safe-error.js";
 interface OutboundOperationsPort extends OutboundIntentPort { drain(): Promise<void>; retryPending(): Promise<void>; }
 interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; lark: LarkPort; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundOperationsPort; scheduler: PromptWorkScheduler; isBindingBusy(bindingId: string): boolean; logger: Logger; }
 
-export class OperationsWorkflow {
+export interface OperationsWorkflowPort {
+  recover(): Promise<void>;
+  openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void>;
+  decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void>;
+  listSpaces(message: IncomingLarkMessage): Promise<void>;
+  listSessions(message: IncomingLarkMessage): Promise<void>;
+  listFailures(message: IncomingLarkMessage): Promise<void>;
+  emitStatus(binding: Binding): Promise<void>;
+  rename(message: IncomingLarkMessage, binding: Binding | null, title: string): Promise<boolean>;
+  archive(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
+  resume(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
+  runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean>;
+  selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void>;
+  requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
+  confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>;
+}
+
+export class OperationsWorkflow implements OperationsWorkflowPort {
   constructor(private readonly options: Options) {}
 
   async recover(): Promise<void> {
