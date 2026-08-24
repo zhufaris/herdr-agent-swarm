@@ -24,7 +24,7 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
   > After this: projection callers can only record outbound intent and the Lark dispatcher alone controls lane claims, retries, checkpoints, and dead letters.
 - [x] **S08: Replace SyncCoordinator with InboundRouter** `risk:high` `depends:[S04,S05,S06,S07]`
   > After this: normalized Lark ingress delegates commands through `InboundRouter`; no monolithic coordinator or broad `BindingStorePort` consumer remains.
-- [ ] **S09: Integrated recovery and operator verification** `risk:medium` `depends:[S08]`
+- [x] **S09: Integrated recovery and operator verification** `risk:medium` `depends:[S08]`
   > After this: full tests, build, migration tests, shutdown/restart scenarios, and a non-mutating real-user smoke prove the assembled architecture.
 
 ## Success criteria
@@ -98,3 +98,22 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
 - `git diff --check`, focused tests, full tests, typecheck, and build pass.
 - A prompt-to-artifact audit maps every spec acceptance criterion to code and
   current verification evidence.
+
+## S09 verification record
+
+- The source-boundary audit found no production or test imports of
+  `SyncCoordinator`, `CardProjector`, or `LarkChannelPublisher`.
+- Production consumers depend on capability-focused store types. The aggregate
+  `BindingStorePort` remains only as the contract implemented by
+  `SqliteBindingStore` and as the source of the `Pick`-based capability types.
+- The prompt-to-artifact audit is recorded in the architecture document under
+  “Implemented guarantees and verification.”
+- The full Vitest suite passes: 47 files and 349 tests. TypeScript typecheck and
+  the production build pass; the generated build identity is
+  `sha256:b6bac5494fc5f90db931546a98e95541ba2a091fed4c7b0c92e9e4db07927e6e`.
+- The non-mutating real-user smoke completed its 121-second polling window with
+  zero status failures. Every sampled status response was healthy and held the
+  lease with no pending outbox work. It observed 45 existing dead letters and
+  36 existing orphaned bindings without mutating them.
+- The smoke still reports `manualConfirmationRequired=true`: no real Lark
+  message or card action was sent as part of this migration verification.
