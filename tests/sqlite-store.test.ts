@@ -34,18 +34,29 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT state, detail FROM pane_close_requests WHERE id = 'r2'").get()).toEqual({ state: "succeeded", detail: null });
   });
 
-  it("atomically hands an existing topic to a fresh binding during reset", () => {
+  it("keeps topic ownership intact until a reset candidate is ready, then cuts over atomically", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "alpha", workspaceId: "w1", chatId: "c1", topicId: "topic-1", rootMessageId: "root-1", title: "Old" });
-    store.updateBinding("old", { state: "active", lifecycle: "active", attachment: "attached" });
+    store.updateBinding("old", { paneId: "w1:old", traexSessionId: "term-old", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "queued", bindingId: "old", larkMessageId: "message-queued", actorOpenId: "u1", body: "later" });
     store.enqueueOutboundReply({ id: "outbound", idempotencyKey: "old-update", bindingId: "old", rootMessageId: "root-1", kind: "text", payload: "old update" });
 
-    const handoff = store.resetTopicBinding({ oldBindingId: "old", newBindingId: "new", title: "Fresh", actorOpenId: "u1" });
+    const candidate = store.createResetCandidate({ oldBindingId: "old", newBindingId: "new", title: "Fresh", actorOpenId: "u1", resetMessageId: "reset-1" });
+    expect(candidate.created).toBe(true);
+    expect(candidate.previous).toMatchObject({ id: "old", state: "active", topicId: "topic-1" });
+    expect(candidate.replacement).toMatchObject({ id: "new", topicId: null, reservedTopicId: "topic-1", replacesBindingId: "old", lifecycle: "provisioning" });
+    expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE id = 'queued'").get()).toEqual({ state: "queued" });
+    expect(store.listPendingOutboundReplies().map((item) => item.id)).toContain("outbound");
+
+    store.updateBinding("new", { paneId: "w1:new", traexSessionId: "term-new" });
+    store.transitionBinding("new", { type: "pane_created" });
+    store.transitionBinding("new", { type: "runtime_started" });
+    const handoff = store.cutoverResetCandidate({ oldBindingId: "old", newBindingId: "new", cleanupOperationId: "cleanup-1", actorOpenId: "u1", expectedCwd: "/repo" });
 
     expect(handoff.cancelledPromptIds).toEqual(["queued"]);
     expect(handoff.previous).toMatchObject({ id: "old", state: "archived", lifecycle: "archived", topicId: null, rootMessageId: null, retiredTopicId: "topic-1", retiredRootMessageId: "root-1" });
-    expect(handoff.replacement).toMatchObject({ id: "new", projectId: "alpha", topicId: "topic-1", rootMessageId: "root-1", state: "pending", lifecycle: "provisioning" });
+    expect(handoff.replacement).toMatchObject({ id: "new", projectId: "alpha", topicId: "topic-1", rootMessageId: "root-1", state: "active", lifecycle: "active" });
+    expect(handoff.cleanup).toMatchObject({ id: "cleanup-1", oldBindingId: "old", replacementBindingId: "new", paneId: "w1:old", state: "pending" });
     expect(store.findBindingByLarkScope("topic-1", "root-1")?.id).toBe("new");
     expect(store.listPendingOutboundReplies().map((item) => item.id)).not.toContain("outbound");
   });

@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -67,7 +67,12 @@ export interface BindingStorePort {
     rootMessageId: string | null;
     title: string;
   }): Binding;
-  resetTopicBinding(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string }): { previous: Binding; replacement: Binding; cancelledPromptIds: string[] };
+  createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean };
+  cutoverResetCandidate(input: { oldBindingId: string; newBindingId: string; cleanupOperationId: string; actorOpenId: string; expectedCwd: string }): { previous: Binding; replacement: Binding; cleanup: RetiredPaneCleanupOperation; cancelledPromptIds: string[] };
+  listRetiredPaneCleanupOperations(states?: readonly RetiredPaneCleanupOperation["state"][]): RetiredPaneCleanupOperation[];
+  claimRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null;
+  updateRetiredPaneCleanup(id: string, state: RetiredPaneCleanupOperation["state"], detail?: string | null): RetiredPaneCleanupOperation | null;
+  completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null;
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection;
   getProjectSelection(id: string): ProjectSelection | null;
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;
@@ -189,10 +194,15 @@ export type RuntimeReconciliationStore = Pick<BindingStorePort,
 
 export type BindingProvisioningStore = Pick<BindingStorePort,
   | "attachBindingPane" | "audit" | "claimProjectSelection" | "completeProjectSelection"
-  | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
+  | "countPendingPrompts" | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
   | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindings"
   | "listProcessingProjectSelections" | "loadTopicView" | "pauseProjectSelection" | "recordBridgeMessage"
-  | "resetTopicBinding" | "saveTopicView" | "transitionBinding" | "updateBinding"
+  | "createResetCandidate" | "cutoverResetCandidate" | "saveTopicView" | "transitionBinding" | "updateBinding"
+>;
+
+export type RetiredPaneCleanupStore = Pick<BindingStorePort,
+  | "claimRetiredPaneCleanup" | "completeRetiredPaneCleanup" | "countPendingPrompts" | "getBinding"
+  | "listRetiredPaneCleanupOperations" | "updateRetiredPaneCleanup"
 >;
 
 export type OperationsStore = Pick<BindingStorePort,

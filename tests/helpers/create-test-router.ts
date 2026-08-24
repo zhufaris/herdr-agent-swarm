@@ -5,6 +5,7 @@ import { HerdrRuntimeReconciler } from "../../src/coordinator/herdr-runtime-reco
 import { InboundRouter } from "../../src/coordinator/inbound-router.js";
 import { OperationsWorkflow } from "../../src/coordinator/operations-workflow.js";
 import { PromptRunWorkflow } from "../../src/coordinator/prompt-run-workflow.js";
+import { RetiredPaneCleanupWorkflow } from "../../src/coordinator/retired-pane-cleanup-workflow.js";
 import { StartupViewConverger } from "../../src/coordinator/startup-view-converger.js";
 import type { HerdrPort, LarkPort } from "../../src/domain/ports.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
@@ -32,7 +33,8 @@ export function createTestRouter(
   const writer = new OutboundIntentWriter(store, outboundWork);
   outbound.connectPromptScheduler(scheduler);
   const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
-  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, logger });
+  const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
+  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
   const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
@@ -41,6 +43,6 @@ export function createTestRouter(
   });
   return new InboundRouter({
     config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, provisioning, operations, reconciler, startupViews: new StartupViewConverger(config, store, writer, outboundWork)
+    promptRun, provisioning, operations, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork)
   });
 }

@@ -9,6 +9,62 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("pane/thread lifecycle integration", () => {
+  it("closes an idle retired pane only after /new activates its replacement", async () => {
+    const oldPane = { paneId: "w1:old", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "old", agentState: "done" as const, foregroundExecutables: ["traex"] };
+    const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    let oldClosed = false;
+    const closePane = vi.fn(async () => { oldClosed = true; });
+    let replacementCreated = false;
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return replacementCreated ? [oldPane, newPane] : [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; },
+      async observeRuntime(id) { const pane = id === oldPane.paneId && !oldClosed ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentState === "idle", evidenceSource: pane ? "structured" : "none" }; },
+      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}, closePane
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
+    store.updateBinding("old", { paneId: oldPane.paneId, traexSessionId: oldPane.terminalId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "done" });
+    const active = runtime(store, herdr, lark);
+    await active.coordinator.start();
+
+    await active.coordinator.handleMessage({ ...message(1, "/new fresh"), mentionsBot: true });
+
+    await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
+    await vi.waitFor(() => expect(store.getBinding("old")?.lifecycle).toBe("closed"));
+    expect(closePane).toHaveBeenCalledWith(oldPane.paneId);
+    expect(store.getBinding("old")).toMatchObject({ lifecycle: "closed", attachment: "unattached" });
+    expect(store.listRetiredPaneCleanupOperations(["succeeded"])).toMatchObject([{ oldBindingId: "old", replacementBindingId: expect.any(String), paneId: oldPane.paneId, state: "succeeded" }]);
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
+  it("leaves the old pane untouched when replacement provisioning fails", async () => {
+    const oldPane = { paneId: "w1:old", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "old", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const closePane = vi.fn(async () => undefined);
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : null; },
+      async createPane() { throw new Error("new pane creation failed"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}, closePane
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
+    store.updateBinding("old", { paneId: oldPane.paneId, traexSessionId: oldPane.terminalId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const active = runtime(store, herdr, lark);
+    await active.coordinator.start();
+
+    await active.coordinator.handleMessage({ ...message(1, "/new fresh"), mentionsBot: true });
+
+    expect(closePane).not.toHaveBeenCalled();
+    expect(store.getBinding("old")).toMatchObject({ lifecycle: "active", state: "active", paneId: oldPane.paneId });
+    expect(store.findBindingByLarkScope("topic", "root")).toMatchObject({ id: "old", state: "active" });
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
   it("resets a working topic into a new pane without stopping or delivering the old session", async () => {
     const submitted: string[] = [];
     const created: string[] = [];
@@ -22,13 +78,14 @@ describe("pane/thread lifecycle integration", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : id === newPane.paneId ? newPane : null; },
+      async observeRuntime(id) { const pane = id === oldPane.paneId ? oldPane : id === newPane.paneId ? newPane : null; return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentState === "idle", evidenceSource: pane ? "structured" : "none" }; },
       async createPane(_workspaceId, _cwd, options) { created.push(options?.title ?? ""); return newPane; }, async startTraex() {},
       async runPrompt(_paneId, text, _timeout, _observation, signal, onDispatched) {
         submitted.push(text); await onDispatched?.();
         await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { oldObserverAborted = true; reject(new Error("observer detached")); }, { once: true }));
         return "done";
       },
-      async readOutput() { return "◆ old output that must not reach the topic"; }, async renamePane() {}
+      async readOutput() { return "◆ old output that must not reach the topic"; }, async renamePane() {}, async closePane() { throw new Error("must not close a pane with an active prompt"); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });

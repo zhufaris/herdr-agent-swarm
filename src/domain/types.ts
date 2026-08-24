@@ -11,6 +11,7 @@ export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
+export type RetiredPaneCleanupState = "pending" | "waiting_busy" | "executing" | "succeeded" | "retained";
 export type PromptWorkHint =
   | { kind: "prompt-ready"; bindingId: string }
   | { kind: "steering-ready"; bindingId: string; parentPromptId: string }
@@ -87,6 +88,10 @@ export interface Binding {
   rootMessageId: string | null;
   retiredTopicId: string | null;
   retiredRootMessageId: string | null;
+  replacesBindingId: string | null;
+  reservedTopicId: string | null;
+  reservedRootMessageId: string | null;
+  resetMessageId: string | null;
   paneId: string | null;
   traexSessionId: string | null;
   title: string;
@@ -131,6 +136,23 @@ export interface PaneCloseOperation {
   state: PaneCloseOperationState;
 }
 
+export interface RetiredPaneCleanupOperation {
+  id: string;
+  oldBindingId: string;
+  replacementBindingId: string;
+  paneId: string;
+  expectedWorkspaceId: string;
+  expectedProjectId: string;
+  expectedCwd: string;
+  expectedTerminalId: string;
+  actorOpenId: string;
+  state: RetiredPaneCleanupState;
+  attemptCount: number;
+  detail: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface OutboundReply {
   id: string;
   idempotencyKey: string;
@@ -171,6 +193,12 @@ export interface OperationalSummary {
   recoverableProvisioning: number;
   archivedPanesPresent: number;
   cleanupCandidates: number;
+  retiredPaneCleanup: {
+    states: Record<RetiredPaneCleanupState, number>;
+    oldestActiveAt: string | null;
+    oldestActiveAgeSeconds: number | null;
+    latestOutcome: { operationId: string; state: RetiredPaneCleanupState; updatedAt: string; detail: string | null } | null;
+  };
   oldestInactiveAt: string | null;
 }
 

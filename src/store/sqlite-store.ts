@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, SessionSummary } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -16,6 +16,7 @@ type SqlValue = string | number | bigint | null;
 type BindingRow = Record<string, SqlValue> & {
   id: string; project_id: string | null; workspace_id: string; chat_id: string; topic_id: string | null; root_message_id: string | null;
   retired_topic_id: string | null; retired_root_message_id: string | null;
+  replaces_binding_id: string | null; reserved_topic_id: string | null; reserved_root_message_id: string | null; reset_message_id: string | null;
   pane_id: string | null; traex_session_id: string | null; title: string; runtime: string; state: string;
   status_message_id: string | null; last_agent_state: string; last_output_fingerprint: string | null;
   lifecycle: string; attachment: string; generation: number; provisioning_checkpoint: string; degradation_count: number;
@@ -39,15 +40,18 @@ type ProjectSelectionRow = Record<string, SqlValue> & {
   id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
   requested_title: string | null; selected_project_id: string | null; binding_id: string | null; state: string; error: string | null; expires_at: string; created_at: string; updated_at: string;
 };
+type RetiredPaneCleanupRow = Record<string, SqlValue> & {
+  id: string; old_binding_id: string; replacement_binding_id: string; pane_id: string; expected_workspace_id: string; expected_project_id: string; expected_cwd: string; expected_terminal_id: string; actor_open_id: string; state: string; attempt_count: number; detail: string | null; created_at: string; updated_at: string;
+};
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "project_selections", "pane_close_requests", "audit_log", "lifecycle_events", "topic_views", "run_cards"
+  "project_selections", "pane_close_requests", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards"
 ] as const;
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
-  rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
+    rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
   title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
   lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
   lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint",
@@ -193,13 +197,31 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.requireBinding(input.id);
   }
 
-  resetTopicBinding(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string }): { previous: Binding; replacement: Binding; cancelledPromptIds: string[] } {
+  createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const previous = this.requireBinding(input.oldBindingId);
-      if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId) {
-        throw new Error("Binding is not eligible for in-topic reset");
-      }
+      const existing = this.database.prepare("SELECT * FROM bindings WHERE reset_message_id = ?").get(input.resetMessageId) as BindingRow | undefined;
+      if (existing) { this.database.exec("COMMIT"); return { previous, replacement: mapBinding(existing), created: false }; }
+      if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId) throw new Error("Binding is not eligible for in-topic reset");
+      const timestamp = now();
+      this.database.prepare(`INSERT INTO bindings(id, project_id, workspace_id, chat_id, topic_id, root_message_id, replaces_binding_id, reserved_topic_id, reserved_root_message_id, reset_message_id, title, runtime, state, last_agent_state, lifecycle, attachment, generation, provisioning_checkpoint, degradation_count, has_completed_turn, last_activity_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', 'provisioning', 'unattached', 1, 'selected', 0, 0, ?, ?, ?)` )
+        .run(input.newBindingId, previous.projectId, previous.workspaceId, previous.chatId, previous.id, previous.topicId, previous.rootMessageId, input.resetMessageId, input.title, timestamp, timestamp, timestamp);
+      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset.candidate', ?, 'created', ?)")
+        .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
+      this.database.exec("COMMIT");
+      return { previous, replacement: this.requireBinding(input.newBindingId), created: true };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  cutoverResetCandidate(input: { oldBindingId: string; newBindingId: string; cleanupOperationId: string; actorOpenId: string; expectedCwd: string }): { previous: Binding; replacement: Binding; cleanup: RetiredPaneCleanupOperation; cancelledPromptIds: string[] } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.requireBinding(input.oldBindingId);
+      const candidate = this.requireBinding(input.newBindingId);
+      if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId || !previous.paneId || !previous.traexSessionId) throw new Error("Binding is not eligible for reset cutover");
+      if (candidate.replacesBindingId !== previous.id || candidate.reservedTopicId !== previous.topicId || candidate.reservedRootMessageId !== previous.rootMessageId || candidate.lifecycle !== "provisioning" || candidate.provisioningCheckpoint !== "runtime_started" || !candidate.paneId || !candidate.traexSessionId) throw new Error("Reset candidate is not ready for cutover");
       const timestamp = now();
       const cancelledPromptIds = (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' ORDER BY created_at, id").all(previous.id) as Array<{ id: string }>).map((row) => row.id);
       this.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'queued'")
@@ -210,13 +232,45 @@ export class SqliteBindingStore implements BindingStorePort {
         .run("话题已开启新会话；不再投递旧会话更新。", timestamp, previous.id);
       this.database.prepare(`UPDATE bindings SET topic_id = NULL, root_message_id = NULL, retired_topic_id = ?, retired_root_message_id = ?, lifecycle = 'archived', state = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`)
         .run(previous.topicId, previous.rootMessageId, timestamp, timestamp, previous.id);
-      this.database.prepare(`INSERT INTO bindings(id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, lifecycle, attachment, generation, provisioning_checkpoint, degradation_count, has_completed_turn, last_activity_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', 'provisioning', 'unattached', 1, 'selected', 0, 0, ?, ?, ?)` )
-        .run(input.newBindingId, previous.projectId, previous.workspaceId, previous.chatId, previous.topicId, previous.rootMessageId, input.title, timestamp, timestamp, timestamp);
-      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset', ?, 'handoff', ?)")
+      this.database.prepare(`UPDATE bindings SET topic_id = ?, root_message_id = ?, status_message_id = ?, lifecycle = 'active', attachment = 'attached', state = 'active', provisioning_checkpoint = 'activated', updated_at = ? WHERE id = ?`)
+        .run(previous.topicId, previous.rootMessageId, previous.rootMessageId, timestamp, candidate.id);
+      this.database.prepare(`INSERT INTO retired_pane_cleanup_operations(id, old_binding_id, replacement_binding_id, pane_id, expected_workspace_id, expected_project_id, expected_cwd, expected_terminal_id, actor_open_id, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)` )
+        .run(input.cleanupOperationId, previous.id, candidate.id, previous.paneId, previous.workspaceId, previous.projectId, input.expectedCwd, previous.traexSessionId, input.actorOpenId, timestamp, timestamp);
+      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset', ?, 'cutover', ?)")
         .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
       this.database.exec("COMMIT");
-      return { previous: this.requireBinding(previous.id), replacement: this.requireBinding(input.newBindingId), cancelledPromptIds };
+      return { previous: this.requireBinding(previous.id), replacement: this.requireBinding(input.newBindingId), cleanup: this.requireRetiredPaneCleanup(input.cleanupOperationId), cancelledPromptIds };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  listRetiredPaneCleanupOperations(states: readonly RetiredPaneCleanupState[] = ["pending", "waiting_busy", "executing"]): RetiredPaneCleanupOperation[] {
+    if (states.length === 0) return [];
+    const placeholders = states.map(() => "?").join(",");
+    return (this.database.prepare(`SELECT * FROM retired_pane_cleanup_operations WHERE state IN (${placeholders}) ORDER BY created_at, id`).all(...states) as RetiredPaneCleanupRow[]).map(mapRetiredPaneCleanup);
+  }
+
+  claimRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null {
+    const result = this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'executing', attempt_count = attempt_count + 1, detail = NULL, updated_at = ? WHERE id = ? AND state IN ('pending','waiting_busy')").run(now(), id);
+    return result.changes === 1 ? this.requireRetiredPaneCleanup(id) : null;
+  }
+
+  updateRetiredPaneCleanup(id: string, state: RetiredPaneCleanupState, detail: string | null = null): RetiredPaneCleanupOperation | null {
+    const result = this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('pending','waiting_busy','executing')").run(state, detail, now(), id);
+    return result.changes === 1 ? this.requireRetiredPaneCleanup(id) : null;
+  }
+
+  completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const operation = this.requireRetiredPaneCleanup(id);
+      if (operation.state !== "executing") { this.database.exec("COMMIT"); return null; }
+      const binding = this.requireBinding(operation.oldBindingId);
+      if (binding.lifecycle !== "archived" || binding.paneId !== operation.paneId) throw new Error("Retired pane cleanup binding identity changed");
+      const timestamp = now();
+      this.database.prepare("UPDATE bindings SET lifecycle = 'closed', attachment = 'unattached', state = 'archived', last_agent_state = 'unknown', updated_at = ? WHERE id = ?").run(timestamp, binding.id);
+      this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'succeeded', detail = NULL, updated_at = ? WHERE id = ? AND state = 'executing'").run(timestamp, id);
+      this.database.exec("COMMIT");
+      return this.requireRetiredPaneCleanup(id);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -914,6 +968,8 @@ export class SqliteBindingStore implements BindingStorePort {
     const recoverableProvisioning = this.database.prepare("SELECT COUNT(*) AS count FROM project_selections WHERE state = 'processing' AND binding_id IS NOT NULL").get() as { count: number };
     const archivedPanesPresent = this.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL").get() as { count: number };
     const cleanupCandidates = this.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL AND archived_at <= datetime('now', '-30 days')").get() as { count: number };
+    const oldestActiveCleanup = this.database.prepare("SELECT MIN(created_at) AS value FROM retired_pane_cleanup_operations WHERE state IN ('pending','waiting_busy','executing')").get() as { value: string | null };
+    const latestCleanup = this.database.prepare("SELECT id, state, updated_at, detail FROM retired_pane_cleanup_operations ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; state: RetiredPaneCleanupState; updated_at: string; detail: string | null } | undefined;
     return {
       bindings: groupedCounts<BindingState>("bindings", "state", ["pending", "active", "archived", "orphaned", "failed"]),
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
@@ -928,6 +984,12 @@ export class SqliteBindingStore implements BindingStorePort {
       attachment: groupedCounts<AttachmentState>("bindings", "attachment", ["unattached", "attached", "degraded", "orphaned"]),
       recoverableProvisioning: Number(recoverableProvisioning.count), archivedPanesPresent: Number(archivedPanesPresent.count),
       cleanupCandidates: Number(cleanupCandidates.count), oldestInactiveAt: oldestInactive.value,
+      retiredPaneCleanup: {
+        states: groupedCounts<RetiredPaneCleanupState>("retired_pane_cleanup_operations", "state", ["pending", "waiting_busy", "executing", "succeeded", "retained"]),
+        oldestActiveAt: oldestActiveCleanup.value,
+        oldestActiveAgeSeconds: oldestActiveCleanup.value === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(oldestActiveCleanup.value)) / 1_000)),
+        latestOutcome: latestCleanup ? { operationId: latestCleanup.id, state: latestCleanup.state, updatedAt: latestCleanup.updated_at, detail: latestCleanup.detail } : null
+      },
       recentFailedPrompt: recentFailedPrompt ? { promptId: recentFailedPrompt.id, bindingId: recentFailedPrompt.binding_id, updatedAt: recentFailedPrompt.updated_at, error: boundedError(recentFailedPrompt.error) } : null,
       recentDeadLetter: recentDeadLetter ? { replyId: recentDeadLetter.id, bindingId: recentDeadLetter.binding_id, promptId: recentDeadLetter.prompt_id, attemptCount: Number(recentDeadLetter.attempt_count), updatedAt: recentDeadLetter.updated_at, error: boundedError(recentDeadLetter.error) } : null
     };
@@ -1014,7 +1076,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS bindings(
         id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
-        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
+        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
         status_message_id TEXT,
@@ -1052,6 +1114,12 @@ export class SqliteBindingStore implements BindingStorePort {
         state TEXT NOT NULL CHECK(state IN ('pending','consumed','executing','succeeded','rejected','uncertain','expired','cancelled')), detail TEXT, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
+      CREATE TABLE IF NOT EXISTS retired_pane_cleanup_operations(
+        id TEXT PRIMARY KEY, old_binding_id TEXT NOT NULL UNIQUE REFERENCES bindings(id), replacement_binding_id TEXT NOT NULL REFERENCES bindings(id),
+        pane_id TEXT NOT NULL, expected_workspace_id TEXT NOT NULL, expected_project_id TEXT NOT NULL, expected_cwd TEXT NOT NULL, expected_terminal_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','waiting_busy','executing','succeeded','retained')), attempt_count INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS retired_pane_cleanup_state_created ON retired_pane_cleanup_operations(state, created_at, id);
       CREATE TABLE IF NOT EXISTS audit_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, actor_open_id TEXT NOT NULL, action TEXT NOT NULL,
         target TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL
@@ -1084,6 +1152,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
     this.ensureBindingResetColumns();
+    this.ensureTwoPhaseResetState();
     this.ensurePromptCancelledState();
     this.ensurePromptObservationColumn();
     this.ensureOutboundDeliveryOrder();
@@ -1126,6 +1195,24 @@ export class SqliteBindingStore implements BindingStorePort {
     const columns = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!columns.has("retired_topic_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN retired_topic_id TEXT");
     if (!columns.has("retired_root_message_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN retired_root_message_id TEXT");
+  }
+
+  private ensureTwoPhaseResetState(): void {
+    const columns = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!columns.has("replaces_binding_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN replaces_binding_id TEXT REFERENCES bindings(id)");
+    if (!columns.has("reserved_topic_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN reserved_topic_id TEXT");
+    if (!columns.has("reserved_root_message_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN reserved_root_message_id TEXT");
+    if (!columns.has("reset_message_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN reset_message_id TEXT");
+    this.database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS bindings_reset_message ON bindings(reset_message_id) WHERE reset_message_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS bindings_unfinished_reset_predecessor ON bindings(replaces_binding_id) WHERE replaces_binding_id IS NOT NULL AND lifecycle = 'provisioning';
+      CREATE TABLE IF NOT EXISTS retired_pane_cleanup_operations(
+        id TEXT PRIMARY KEY, old_binding_id TEXT NOT NULL UNIQUE REFERENCES bindings(id), replacement_binding_id TEXT NOT NULL REFERENCES bindings(id),
+        pane_id TEXT NOT NULL, expected_workspace_id TEXT NOT NULL, expected_project_id TEXT NOT NULL, expected_cwd TEXT NOT NULL, expected_terminal_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','waiting_busy','executing','succeeded','retained')), attempt_count INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS retired_pane_cleanup_state_created ON retired_pane_cleanup_operations(state, created_at, id);
+    `);
   }
 
   private ensureQueryIndexes(): void {
@@ -1344,6 +1431,12 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!view) this.recreateRunCardsView();
   }
 
+  private requireRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation {
+    const row = this.database.prepare("SELECT * FROM retired_pane_cleanup_operations WHERE id = ?").get(id) as RetiredPaneCleanupRow | undefined;
+    if (!row) throw new Error(`Retired pane cleanup ${id} not found`);
+    return mapRetiredPaneCleanup(row);
+  }
+
   private ensureOutboundReplyColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
@@ -1421,13 +1514,23 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
 function mapBinding(row: BindingRow): Binding {
   return {
     id: row.id, projectId: row.project_id, workspaceId: row.workspace_id, chatId: row.chat_id, topicId: row.topic_id,
-    rootMessageId: row.root_message_id, retiredTopicId: row.retired_topic_id ?? null, retiredRootMessageId: row.retired_root_message_id ?? null, paneId: row.pane_id, traexSessionId: row.traex_session_id,
+    rootMessageId: row.root_message_id, retiredTopicId: row.retired_topic_id ?? null, retiredRootMessageId: row.retired_root_message_id ?? null,
+    replacesBindingId: row.replaces_binding_id ?? null, reservedTopicId: row.reserved_topic_id ?? null, reservedRootMessageId: row.reserved_root_message_id ?? null, resetMessageId: row.reset_message_id ?? null,
+    paneId: row.pane_id, traexSessionId: row.traex_session_id,
     title: row.title, runtime: "traex", state: row.state as BindingState, statusMessageId: row.status_message_id,
     lastAgentState: row.last_agent_state as AgentState, lastOutputFingerprint: row.last_output_fingerprint,
     lifecycle: row.lifecycle as SessionLifecycle, attachment: row.attachment as AttachmentState, generation: Number(row.generation),
     provisioningCheckpoint: row.provisioning_checkpoint as ProvisioningCheckpoint, degradationCount: Number(row.degradation_count),
     hasCompletedTurn: Boolean(row.has_completed_turn), lastObservedAt: row.last_observed_at, archivedAt: row.archived_at, lastActivityAt: row.last_activity_at,
     createdAt: row.created_at, updatedAt: row.updated_at
+  };
+}
+
+function mapRetiredPaneCleanup(row: RetiredPaneCleanupRow): RetiredPaneCleanupOperation {
+  return {
+    id: row.id, oldBindingId: row.old_binding_id, replacementBindingId: row.replacement_binding_id, paneId: row.pane_id,
+    expectedWorkspaceId: row.expected_workspace_id, expectedProjectId: row.expected_project_id, expectedCwd: row.expected_cwd, expectedTerminalId: row.expected_terminal_id,
+    actorOpenId: row.actor_open_id, state: row.state as RetiredPaneCleanupState, attemptCount: Number(row.attempt_count), detail: row.detail, createdAt: row.created_at, updatedAt: row.updated_at
   };
 }
 

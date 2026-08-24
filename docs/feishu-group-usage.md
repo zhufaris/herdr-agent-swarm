@@ -36,8 +36,10 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 ### `/new [标题]`
 
-在当前已绑定话题中开启新的 TraeX 会话，继续使用同一个飞书话题。旧 Herdr pane
-和 TraeX 不会被停止，但后续输出不再发送到该话题；尚未提交的旧队列也不会转移或重放。
+在当前已绑定话题中先创建并确认新的 TraeX 会话可用，再原子切换同一个飞书话题。
+如果新 pane 创建或 TraeX 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
+只会自动关闭经过 fresh observation 确认身份匹配且处于 idle/done 的旧 pane；working、
+blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 Herdr 本地检查。
 
 ```text
 /new 重新排查登录问题

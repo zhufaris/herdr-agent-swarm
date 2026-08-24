@@ -48,8 +48,9 @@ export function startHealthServer(options: {
       try { promptWorker = options.promptWorker?.snapshot(); }
       catch (error) { promptWorker = { error: boundedError(error) }; }
       response.statusCode = 200;
+      const operationalDegraded = "error" in operational || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300;
       response.end(JSON.stringify({
-        status: readiness.status === "ready" && !("error" in operational)
+        status: readiness.status === "ready" && !operationalDegraded
           && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
         ...(outboxDispatcher ? { outboxDispatcher } : {}),

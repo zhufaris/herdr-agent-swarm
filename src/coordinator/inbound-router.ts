@@ -17,6 +17,7 @@ import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-wor
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
 import type { OperationsWorkflowPort } from "./operations-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
+import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
 
 export interface InboundRouterPort {
@@ -42,6 +43,7 @@ export interface InboundRouterOptions {
   provisioning: BindingProvisioningWorkflowPort;
   operations: OperationsWorkflowPort;
   reconciler: HerdrRuntimeReconcilerPort;
+  retiredPaneCleanup: RetiredPaneCleanupWorkflowPort;
   startupViews: StartupViewConvergerPort;
 }
 
@@ -52,7 +54,7 @@ export class InboundRouter implements InboundRouterPort {
   constructor(private readonly options: InboundRouterOptions) {}
 
   async start(): Promise<void> {
-    const { config, store, herdr, lark, logger, promptRun, reconciler, operations, provisioning, inboundWork, startupViews } = this.options;
+    const { config, store, herdr, lark, logger, promptRun, reconciler, operations, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
@@ -62,9 +64,11 @@ export class InboundRouter implements InboundRouterPort {
     for (const workspaceId of new Set(config.projects.map((project) => project.workspaceId))) await herdr.assertWorkspace(workspaceId);
     await reconciler.captureBaselines();
     await operations.recover();
+    await retiredPaneCleanup.recover();
     await reconciler.reconcile();
     promptRun.start();
     reconciler.start(config.reconcileIntervalMs);
+    retiredPaneCleanup.start(config.reconcileIntervalMs);
     this.stopInboundSubscription = inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
     await lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
     await provisioning.recover();
@@ -74,11 +78,11 @@ export class InboundRouter implements InboundRouterPort {
   async stop(): Promise<void> {
     await this.options.lark.stop();
     this.stopInboundSubscription?.();
-    await Promise.allSettled([this.options.reconciler.stop(), this.options.promptRun.stop(), ...(this.inboundDrain ? [this.inboundDrain] : [])]);
+    await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(), ...(this.inboundDrain ? [this.inboundDrain] : [])]);
   }
 
   reconcileHerdrWorkspaces(workspaceIds?: readonly string[]): Promise<void> { return this.options.reconciler.requestReconciliation(workspaceIds); }
-  reconcile(): Promise<void> { return this.options.reconciler.reconcile(); }
+  async reconcile(): Promise<void> { await Promise.all([this.options.reconciler.reconcile(), this.options.retiredPaneCleanup.requestScan()]); }
 
   async handleMessage(message: IncomingLarkMessage): Promise<void> {
     const { config, logger, store } = this.options;
