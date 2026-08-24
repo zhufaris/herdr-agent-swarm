@@ -40,15 +40,20 @@ Lark message or card action                 Herdr plugin event
              v                                      v
   durable inbound acceptance                    UDP wake-up hint
              |                                      |
-             +----------> SyncCoordinator <---------+
+             +----------> SyncCoordinator     +
+                              |               |
+                durable SQLite transition    |
+                              |               v
+                              +------> SessionReconciler
+                              |               |
+                              v               v
+                     WorkflowWakeupBus   authoritative Herdr snapshot
                               |
-                +-------------+--------------+
-                |                            |
-                v                            v
-        prompt and binding workflow    SessionReconciler
-                |                            |
-                v                            v
-          Herdr command adapter      authoritative Herdr snapshot
+                              v
+                  PromptExecutionWorkflow
+                              |
+                              v
+                    Herdr command adapter
                 |                            |
                 +------------ BridgeEvent ---+
                               |
@@ -60,8 +65,10 @@ Lark message or card action                 Herdr plugin event
 ```
 
 The composition root creates every adapter and injects it into the application
-modules. Runtime modules do not read plugin paths or process-manager state
-directly.
+modules. `SyncCoordinator` owns inbound routing and higher-level session
+operations. `PromptExecutionWorkflow` owns ordinary FIFO workers, steering,
+detached observation, and `TurnSupervisor`. Runtime modules do not read plugin
+paths or process-manager state directly.
 
 ## Request lifecycle
 
@@ -76,7 +83,9 @@ directly.
    ordinary prompts without cancelling or reordering them. In every other
    state, including a race where the turn stops before injection, it is rejected
    and never falls back to the ordinary FIFO.
-4. A per-binding worker claims one dispatchable job. The user text is sent to
+4. After durable acceptance, the coordinator publishes a process-local wake-up.
+   `PromptExecutionWorkflow` reloads SQLite state and a per-binding worker claims
+   one dispatchable job. The user text is sent to
    Herdr unchanged; the bridge adds no hidden prompt suffix.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
    process evidence provide bounded fallbacks where Herdr reports `unknown`.
@@ -108,6 +117,14 @@ recovery:
 
 Periodic reconciliation remains required. A missed UDP datagram may delay an
 update, but must not change the final converged state.
+
+The same rule applies to internal `WorkflowWakeupBus` events. Prompt acceptance,
+Answer-card delivery checkpoints, and reconciliation persist their state before
+publishing a scoped wake-up. Wake-ups are coalesced and may be duplicated,
+reordered, or lost. Workers atomically claim current SQLite work, and startup
+plus periodic reconciliation scan durable queues and detached observers to
+recover lost hints. `BridgeEventBus` remains separate: it carries lifecycle
+events to deterministic card projections, not commands to execute work.
 
 ## Answer streaming and pagination
 
@@ -186,10 +203,10 @@ and credentials.
    need more than the active page and outbox history.
 2. Make Lark delivery concurrent across independent card targets while retaining
    strict sequence order within each target.
-3. Split the coordinator into dedicated inbound, binding-provisioning, prompt
-   execution, and operations workflows.
-4. Narrow the store dependency into capability-focused interfaces so workflows
-   do not depend on the entire SQLite surface.
+3. Continue splitting binding provisioning and session operations out of the
+   coordinator; prompt execution already lives in `PromptExecutionWorkflow`.
+4. Continue replacing the broad store dependency with capability-focused
+   interfaces; prompt execution already uses `PromptExecutionStore`.
 
 ## Related documents
 
