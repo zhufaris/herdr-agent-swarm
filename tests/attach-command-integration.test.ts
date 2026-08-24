@@ -100,6 +100,48 @@ describe("attach existing pane command", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("recovers a same-chat orphaned binding without replaying queued work", async () => {
+    let exposePane = false;
+    const createTopic = vi.fn(async () => ({ topicId: "unused-topic", rootMessageId: "unused-root" }));
+    const runPrompt = vi.fn<HerdrPort["runPrompt"]>();
+    const replyCards: object[] = [];
+    const pane = { paneId: "w5:p20", terminalId: "term-main", workspaceId: "w5", cwd: "/repo", label: "main", agentState: "done" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, createTopic,
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { replyCards.push(card); return { messageId: `reply-${replyCards.length}` }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return pane; },
+      async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
+      async createPane() { throw new Error("unexpected createPane"); }, async startTraex() { throw new Error("unexpected startTraex"); },
+      runPrompt, async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "orphaned", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "old-topic", rootMessageId: "old-root", title: "datasage_semantic_knowledge / main" });
+    store.updateBinding("orphaned", { paneId: pane.paneId, state: "active", lifecycle: "active", attachment: "attached" });
+    store.transitionBinding("orphaned", { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
+    store.enqueuePrompt({ id: "queued", bindingId: "orphaned", larkMessageId: "queued-message", actorOpenId: "user", body: "must not replay" });
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+    exposePane = true;
+
+    await coordinator.handleMessage(command(1, "main"));
+
+    expect(store.getBinding("orphaned")).toMatchObject({ lifecycle: "archived", attachment: "attached", state: "archived", paneId: "w5:p20", traexSessionId: "term-main" });
+    expect(store.listBindings()).toHaveLength(1);
+    expect(createTopic).not.toHaveBeenCalled();
+    expect(runPrompt).not.toHaveBeenCalled();
+    expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("/herdr resume");
+    expect(JSON.stringify(replyCards.at(-1))).not.toContain("已绑定到其他会话");
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("requires an explicitly configured exact space name", async () => {
     const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
     const replyCards: object[] = [];

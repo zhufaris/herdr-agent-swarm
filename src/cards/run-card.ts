@@ -54,11 +54,14 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
-export function renderAttachStatusCard(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean }): object {
-  const title = input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
+export function renderAttachStatusCard(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object {
+  const title = input.resumeRequired ? "Pane 已恢复连接" : input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
+  const message = input.resumeRequired
+    ? "已安全恢复原会话连接，未重放任何任务。点击“发送话题入口”进入原话题，再发送 `/herdr resume` 恢复队列。"
+    : input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。";
   const elements: object[] = [{
     tag: "markdown",
-    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。"}${input.bindingId ? " 点击“发送话题入口”后，请打开群里随后出现的话题卡片。" : ""}`
+    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${message}${input.bindingId && !input.resumeRequired ? " 点击“发送话题入口”后，请打开群里随后出现的话题卡片。" : ""}`
   }];
   if (input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "发送话题入口" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
   return {

@@ -112,6 +112,9 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 不会再生成无效的 `openMessageId` 链接。如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题。
 未知或重复的 space、其他 workspace
 中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。
+如果 pane 属于当前群、当前项目中因观测失败变为 `orphaned` 的原会话，`attach` 会在
+重新验证 workspace、项目目录、TraeX 和 terminal identity 后恢复原绑定。恢复过程不会
+创建新绑定或重放任务；请通过返回的话题入口进入原话题，再发送 `/herdr resume`。
 
 ### `/herdr status`
 
