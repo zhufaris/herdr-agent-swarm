@@ -3,18 +3,18 @@ import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { ProjectConfig, Binding, HerdrPane } from "../domain/types.js";
-import type { BindingStorePort, HerdrPort } from "../domain/ports.js";
-import type { BridgeEventBus } from "../events/bridge-event-bus.js";
+import type { HerdrPort, RuntimeReconciliationStore } from "../domain/ports.js";
+import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { extractFinalTraexAnswer } from "../runtime/traex-output-parser.js";
 
-interface SessionReconcilerOptions {
+interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
-  store: BindingStorePort;
+  store: RuntimeReconciliationStore;
   herdr: HerdrPort;
-  bus: BridgeEventBus;
+  lifecycleEvents: LifecycleEventPublisher;
   channelPublisher: {
     drain(): Promise<void>;
     enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "answer", card: object): Promise<void>;
@@ -25,7 +25,7 @@ interface SessionReconcilerOptions {
   isBindingBusy(bindingId: string): boolean;
 }
 
-export class SessionReconciler {
+export class HerdrRuntimeReconciler {
   private reconciliation: Promise<void> | null = null;
   private pendingReconciliation: Set<string> | null | undefined;
   private stopping = false;
@@ -34,7 +34,7 @@ export class SessionReconciler {
   private readonly observedOutputRevisions = new Map<string, number>();
   private skippedPaneReasons = new Map<string, string>();
 
-  constructor(private readonly options: SessionReconcilerOptions) {}
+  constructor(private readonly options: HerdrRuntimeReconcilerOptions) {}
 
   async captureBaselines(): Promise<void> {
     for (const binding of this.options.store.listBindingsByState("active").filter((item) => item.paneId)) {
@@ -252,7 +252,7 @@ export class SessionReconciler {
   }
 
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> {
-    await this.options.bus.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
+    await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
   }
 }
 

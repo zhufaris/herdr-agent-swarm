@@ -21,13 +21,13 @@ import { safeLogError } from "../runtime/safe-error.js";
 import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import { PromptRunWorkflow } from "./prompt-run-workflow.js";
-import { SessionReconciler } from "./session-reconciler.js";
+import { HerdrRuntimeReconciler } from "./herdr-runtime-reconciler.js";
 
 export class SyncCoordinator {
   private readonly scheduler: PromptWorkScheduler;
   private readonly inboundWork: InboundWorkNotifier;
   private readonly promptRun: PromptRunWorkflow;
-  private readonly reconciler: SessionReconciler;
+  private readonly reconciler: HerdrRuntimeReconciler;
   private inboundDrain: Promise<void> | null = null;
   private stopping = false;
   private stopInboundSubscription: (() => void) | null = null;
@@ -48,8 +48,8 @@ export class SyncCoordinator {
     this.inboundWork = inboundWork ?? new InProcessInboundWorkNotifier();
     channelPublisher.connectPromptScheduler(this.scheduler);
     this.promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler: this.scheduler, channelPublisher, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
-    this.reconciler = new SessionReconciler({
-      projects: config.projects, store, herdr, bus, channelPublisher, logger,
+    this.reconciler = new HerdrRuntimeReconciler({
+      projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher, logger,
       discoverPane: (pane, project) => this.createFromHerdr(pane, project),
       scheduler: this.scheduler,
       isBindingBusy: (bindingId) => this.promptRun.isBindingBusy(bindingId)

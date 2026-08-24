@@ -161,3 +161,15 @@ export type PromptRunStore = Pick<BindingStorePort,
   | "loadTopicView"
   | "transitionBindingWithOutbox"
 >;
+
+export type RuntimeReconciliationStore = Pick<BindingStorePort,
+  | "convergePromptBacklog"
+  | "countPendingPrompts"
+  | "findBindingByPane"
+  | "listBindingsByState"
+  | "listDetachedPrompts"
+  | "listRunCardsByPhases"
+  | "saveRunCard"
+  | "transitionBinding"
+  | "updateBinding"
+>;

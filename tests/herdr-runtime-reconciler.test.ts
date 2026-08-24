@@ -1,23 +1,23 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
-import { SessionReconciler } from "../src/coordinator/session-reconciler.js";
+import { HerdrRuntimeReconciler } from "../src/coordinator/herdr-runtime-reconciler.js";
 import type { HerdrPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
-describe("SessionReconciler", () => {
+describe("HerdrRuntimeReconciler", () => {
   it("coalesces overlapping reconciliation calls into one workspace scan", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const listPanes = vi.fn(async () => { await blocked; return []; });
     const herdr = { listPanes } as unknown as HerdrPort;
     const store = new SqliteBindingStore(":memory:");
-    const reconciler = new SessionReconciler({
+    const reconciler = new HerdrRuntimeReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
       store,
       herdr,
-      bus: new BridgeEventBus(),
+      lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
       logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); },
@@ -80,12 +80,12 @@ describe("SessionReconciler", () => {
   it("scans only requested workspaces for event-driven reconciliation", async () => {
     const listPanes = vi.fn(async () => []);
     const store = new SqliteBindingStore(":memory:");
-    const reconciler = new SessionReconciler({
+    const reconciler = new HerdrRuntimeReconciler({
       projects: [
         { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
         { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
       ],
-      store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
+      store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
     });
@@ -102,12 +102,12 @@ describe("SessionReconciler", () => {
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const listPanes = vi.fn(async (workspaceId: string) => { if (workspaceId === "w1") await blocked; return []; });
     const store = new SqliteBindingStore(":memory:");
-    const reconciler = new SessionReconciler({
+    const reconciler = new HerdrRuntimeReconciler({
       projects: [
         { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
         { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
       ],
-      store, herdr: { listPanes } as unknown as HerdrPort, bus: new BridgeEventBus(),
+      store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
     });
@@ -198,10 +198,10 @@ describe("SessionReconciler", () => {
     const wake = vi.fn();
     const scheduler = new InProcessPromptWorkScheduler();
     scheduler.subscribe(wake);
-    const reconciler = new SessionReconciler({
+    const reconciler = new HerdrRuntimeReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
       store, herdr: { async listAllPanes() { return [unknownPane]; }, observeRuntime, async readOutput() { return "❯ Use /skills to list available skills"; } } as unknown as HerdrPort,
-      bus: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false
     });
 
@@ -218,11 +218,11 @@ describe("SessionReconciler", () => {
 function fixture(
   store: SqliteBindingStore,
   herdr: HerdrPort,
-  discoverPane: ConstructorParameters<typeof SessionReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); }
+  discoverPane: ConstructorParameters<typeof HerdrRuntimeReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); }
 ) {
-  return new SessionReconciler({
+  return new HerdrRuntimeReconciler({
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
-    store, herdr, bus: new BridgeEventBus(),
+    store, herdr, lifecycleEvents: new BridgeEventBus(),
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
     logger: pino({ enabled: false }), discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
   });
