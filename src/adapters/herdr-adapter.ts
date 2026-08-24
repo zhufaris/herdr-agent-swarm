@@ -130,7 +130,8 @@ export class HerdrCliAdapter implements HerdrPort {
     throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
     try {
-      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs, onDispatched);
+      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
+      await onDispatched?.();
     } catch (error) {
       if (!isUnsupportedAgentPromptError(error)) throw error;
       await this.submitPromptText(paneId, text, before, signal, onDispatched);

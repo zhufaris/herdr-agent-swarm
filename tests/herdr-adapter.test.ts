@@ -719,6 +719,40 @@ describe("Herdr adapter", () => {
       .rejects.toThrow("Timed out waiting for prompt text in pane w1:p1");
     expect(calls.some((args) => args[0] === "pane" && args[1] === "send-keys")).toBe(false);
   });
+
+  it("does not report a prompt as dispatched when agent prompt falls back and the composer never echoes it", async () => {
+    const calls: string[][] = [];
+    let dispatched = 0;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "agent" && args[1] === "prompt") throw new Error('{"error":{"code":"agent_not_ready"}}');
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "Select Model and Mode\nPress enter to confirm or esc to go back", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 40).runPrompt("w1:p1", "lost prompt", 1_000, undefined, undefined, () => { dispatched += 1; }))
+      .rejects.toThrow("Timed out waiting for prompt text in pane w1:p1");
+    expect(dispatched).toBe(0);
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "lost prompt"]);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "send-keys")).toBe(false);
+  });
+
+  it("reports direct agent prompt dispatch only after the command succeeds", async () => {
+    let dispatched = 0;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "before", stderr: "" };
+        if (args[0] === "agent" && args[1] === "prompt") throw new Error("transport failed");
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1_000).runPrompt("w1:p1", "hello", 1_000, undefined, undefined, () => { dispatched += 1; }))
+      .rejects.toThrow("transport failed");
+    expect(dispatched).toBe(0);
+  });
 });
 
 function json(result: unknown) { return Promise.resolve({ stdout: JSON.stringify({ id: "test", result }), stderr: "" }); }
