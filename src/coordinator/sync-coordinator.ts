@@ -23,6 +23,7 @@ import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../event
 import { PromptRunWorkflow } from "./prompt-run-workflow.js";
 import { HerdrRuntimeReconciler } from "./herdr-runtime-reconciler.js";
 import { BindingProvisioningWorkflow } from "./binding-provisioning-workflow.js";
+import { OperationsWorkflow } from "./operations-workflow.js";
 
 export class SyncCoordinator {
   private readonly scheduler: PromptWorkScheduler;
@@ -30,6 +31,7 @@ export class SyncCoordinator {
   private readonly promptRun: PromptRunWorkflow;
   private readonly reconciler: HerdrRuntimeReconciler;
   private readonly provisioning: BindingProvisioningWorkflow;
+  private readonly operations: OperationsWorkflow;
   private inboundDrain: Promise<void> | null = null;
   private stopping = false;
   private stopInboundSubscription: (() => void) | null = null;
@@ -51,6 +53,7 @@ export class SyncCoordinator {
     channelPublisher.connectPromptScheduler(this.scheduler);
     this.promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler: this.scheduler, channelPublisher, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
     this.provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: channelPublisher, scheduler: this.scheduler, logger });
+    this.operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: channelPublisher, scheduler: this.scheduler, isBindingBusy: (bindingId) => this.promptRun.isBindingBusy(bindingId), logger });
     this.reconciler = new HerdrRuntimeReconciler({
       projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher, logger,
       discoverPane: (pane, project) => this.provisioning.discover(pane, project),
@@ -90,7 +93,7 @@ export class SyncCoordinator {
     if (recoveredInbound > 0) this.logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     for (const workspaceId of new Set(this.config.projects.map((project) => project.workspaceId))) await this.herdr.assertWorkspace(workspaceId);
     await this.reconciler.captureBaselines();
-    await this.recoverPaneCloseOperations();
+    await this.operations.recover();
     await this.reconciler.reconcile();
     this.promptRun.start();
     this.reconciler.start(this.config.reconcileIntervalMs);
@@ -137,35 +140,17 @@ export class SyncCoordinator {
     if (action.chatId !== this.config.lark.chatId) return;
     const modelSelection = parseModelSelectionAction(action.value, action.option);
     if (modelSelection) {
-      await this.runModelSelection(action, modelSelection.bindingId, modelSelection.model);
+      await this.operations.selectModel(action, modelSelection.bindingId, modelSelection.model);
       return;
     }
     const openThread = parseOpenThreadAction(action.value);
     if (openThread) {
-      const binding = this.store.getBinding(openThread.bindingId);
-      if (!binding || binding.chatId !== action.chatId) return;
-      const topicOrRootMessageId = binding.topicId ?? binding.rootMessageId;
-      if (!topicOrRootMessageId) return;
-      try {
-        await this.lark.shareThread(topicOrRootMessageId, { messageId: action.messageId, chatId: action.chatId });
-        this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
-      } catch (error) {
-        this.logger.error({ event: "thread-entry-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share project thread entry");
-        await this.lark.replyText(action.messageId, "话题入口发送失败，请重新执行 `/herdr spaces` 后重试。");
-        this.store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "failed" });
-      }
+      await this.operations.openThread(action, openThread.bindingId);
       return;
     }
     const deadLetter = parseDeadLetterAction(action.value);
     if (deadLetter) {
-      const outcome = deadLetter.action === "retry_dead_letter"
-        ? this.store.retryDeadLetter(deadLetter.replyId, action.chatId, action.operatorOpenId)
-        : this.store.dismissDeadLetter(deadLetter.replyId, action.chatId, action.operatorOpenId);
-      this.logger.info({ event: "dead-letter-action-decided", replyId: deadLetter.replyId, action: deadLetter.action, outcome }, "processed dead-letter action");
-      if (outcome === "retried") await this.channelPublisher.retryPending();
-      const notice = outcome === "retried" ? "已重新提交该消息发送；不会重放 TraeX 任务。" : outcome === "dismissed" ? "已忽略该发送失败并保留历史记录。" : "该操作已失效或无权执行。";
-      const cards = renderFailureCards(this.store.listFailures(action.chatId), notice);
-      await this.channelPublisher.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${deadLetter.replyId}:${outcome}`, cards[0]!);
+      await this.operations.decideDeadLetter(action, deadLetter.replyId, deadLetter.action);
       return;
     }
     const paneClaim = parsePaneClaimAction(action.value);
@@ -221,46 +206,32 @@ export class SyncCoordinator {
       } else if (command?.kind === "stop") {
         disposition = await this.stopActiveTurn(message, binding) ? "prompt_queued" : "rejected";
       } else if (command?.kind === "model") {
-        disposition = await this.runModelCommand(message, binding, command.name) ? "command_completed" : "rejected";
+        disposition = await this.operations.runModel(message, binding, command.name) ? "command_completed" : "rejected";
       } else if (command?.kind === "reset") {
         disposition = await this.provisioning.reset(message, binding, command.title) ? "command_completed" : "rejected";
       } else if (command?.kind === "new" || command?.kind === "projects") {
         await this.provisioning.selectProject(message, command.kind === "new" ? command.title : null);
       } else if (command?.kind === "spaces") {
-        await this.publishSpaceDirectory(message);
+        await this.operations.listSpaces(message);
       } else if (command?.kind === "sessions") {
-        await this.publishOperationCards(message, "sessions", renderSessionCards(this.store.listSessions(message.chatId)));
+        await this.operations.listSessions(message);
       } else if (command?.kind === "failures") {
-        await this.publishOperationCards(message, "failures", renderFailureCards(this.store.listFailures(message.chatId)));
+        await this.operations.listFailures(message);
       } else if (command?.kind === "attach") {
         disposition = await this.provisioning.attach(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
       } else if (command?.kind === "status") {
         if (!binding) {
           await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard("这个话题尚未连接 Herdr。请发送 `/herdr new` 创建项目。"));
           disposition = "rejected";
-        } else await this.emitState(binding, binding.lastAgentState);
+        } else await this.operations.emitStatus(binding);
       } else if (command?.kind === "rename") {
-        if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") {
-          await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard("这个话题没有可重命名的活动 Pane。请进入活动项目话题，或发送 `/herdr new`。"));
-          disposition = "rejected";
-        } else {
-          const pane = await this.herdr.getPane(binding.paneId);
-          const project = this.config.projects.find((candidate) => candidate.id === binding.projectId);
-          const title = formatProjectPaneTitle(project ? projectSpaceName(project) : null, pane?.cwd ?? this.config.herdr.workspaceCwd, command.title, binding.paneId);
-          await this.herdr.renamePane(binding.paneId, command.title, { tabTitle: command.title });
-          this.store.updateBinding(binding.id, { title });
-          await this.publish(binding.id, "BindingRenamed", "lark", { title });
-          this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" });
-        }
+        disposition = await this.operations.rename(message, binding, command.title) ? "command_completed" : "rejected";
       } else if (command?.kind === "close") {
-        if (!binding || binding.lifecycle !== "active") {
-          await this.channelPublisher.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard("这个话题没有可归档的活动会话。"));
-          disposition = "rejected";
-        } else await this.archiveBinding(binding, message.actorOpenId);
+        disposition = await this.operations.archive(message, binding) ? "command_completed" : "rejected";
       } else if (command?.kind === "pane_close_request") {
-        disposition = await this.requestPaneClose(message, binding) ? "command_completed" : "rejected";
+        disposition = await this.operations.requestPaneClose(message, binding) ? "command_completed" : "rejected";
       } else if (command?.kind === "pane_close_confirm") {
-        disposition = await this.confirmPaneClose(message, binding, command.code) ? "command_completed" : "rejected";
+        disposition = await this.operations.confirmPaneClose(message, binding, command.code) ? "command_completed" : "rejected";
       } else if (command?.kind === "reattach") {
         if (!binding || binding.attachment !== "orphaned") {
           await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected";
@@ -270,15 +241,7 @@ export class SyncCoordinator {
           await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected";
         } else await this.provisioning.replace(binding, message.actorOpenId);
       } else if (command?.kind === "resume") {
-        if (!binding || binding.lifecycle !== "archived" || !binding.paneId) {
-          await this.reject(message, "只有已归档且仍保留 Pane 的会话可以恢复。"); disposition = "rejected";
-        } else {
-          const pane = await this.requireMatchingPane(binding, binding.paneId);
-          const resumed = this.store.transitionBinding(binding.id, { type: "activate" });
-          await this.publish(resumed.id, "BindingActivated", "lark", { paneId: pane.paneId, topicId: resumed.topicId! });
-          this.store.audit({ actorOpenId: message.actorOpenId, action: "binding.resume", target: binding.id, outcome: "success" });
-          this.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
-        }
+        disposition = await this.operations.resume(message, binding) ? "command_completed" : "rejected";
       } else if (binding?.state === "active" && binding.lifecycle === "active") {
         await this.enqueue(binding, message);
         disposition = "prompt_queued";

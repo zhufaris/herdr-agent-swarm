@@ -16,7 +16,7 @@ Herdr runtime authority, Lark delivery behavior, and prompt safety unchanged.
   > After this: restarting after a lifecycle state commit but before projection delivery reconstructs the correct run-card/topic state and outbox intent without replaying TraeX.
 - [x] **S04: Extract binding provisioning workflow** `risk:high` `depends:[S01]`
   > After this: new, selected-project, attach, replace, reset, discovery, and provisioning recovery paths run through one independently tested workflow.
-- [ ] **S05: Extract operations workflow** `risk:medium` `depends:[S01]`
+- [x] **S05: Extract operations workflow** `risk:medium` `depends:[S01]`
   > After this: close, resume, rename, model, listing, failure, and dead-letter actions run without coordinator-owned Herdr or rendering logic.
 - [x] **S06: Deepen runtime reconciliation** `risk:medium` `depends:[S01,S03]`
   > After this: plugin and periodic observations converge through `HerdrRuntimeReconciler`, which can only persist runtime transitions, publish lifecycle outcomes, and wake durable prompt work.

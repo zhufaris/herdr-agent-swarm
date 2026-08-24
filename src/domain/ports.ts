@@ -182,6 +182,13 @@ export type BindingProvisioningStore = Pick<BindingStorePort,
   | "resetTopicBinding" | "saveTopicView" | "transitionBinding" | "updateBinding"
 >;
 
+export type OperationsStore = Pick<BindingStorePort,
+  | "audit" | "cancelQueuedPrompts" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
+  | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"
+  | "listFailures" | "listRunCards" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
+  | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBinding"
+>;
+
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
 
 export type OutboxStore = Pick<BindingStorePort,
