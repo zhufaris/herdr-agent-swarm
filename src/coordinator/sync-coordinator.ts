@@ -15,7 +15,7 @@ import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
-import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
+import type { LarkOutboxDispatcher } from "../events/lark-outbox-dispatcher.js";
 import { cleanTerminalOutput } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -38,7 +38,7 @@ export class SyncCoordinator {
     private readonly herdr: HerdrPort,
     private readonly lark: LarkPort,
     private readonly bus: BridgeEventBus,
-    private readonly channelPublisher: LarkChannelPublisher,
+    private readonly channelPublisher: LarkOutboxDispatcher,
     private readonly logger: Logger,
     private readonly shutdownGraceMs = 30_000,
     scheduler?: PromptWorkScheduler,

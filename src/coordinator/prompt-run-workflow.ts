@@ -6,7 +6,7 @@ import type { HerdrPort, PromptRunStore } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
 import type { BridgeEventBus } from "../events/bridge-event-bus.js";
-import type { LarkChannelPublisher } from "../events/lark-channel-publisher.js";
+import type { PromptRunOutboundPort } from "../domain/ports.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -24,7 +24,7 @@ interface PromptRunWorkflowOptions {
   herdr: HerdrPort;
   bus: BridgeEventBus;
   scheduler: PromptWorkScheduler;
-  channelPublisher: LarkChannelPublisher;
+  channelPublisher: PromptRunOutboundPort;
   logger: Logger;
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
