@@ -108,7 +108,9 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
 
   async resume(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding?.paneId || binding.lifecycle !== "archived") { await this.reject(message, "只有已归档且仍保留 Pane 的会话可以恢复。"); return false; }
-    const pane = await this.requireMatchingPane(binding, binding.paneId); const resumed = this.options.store.transitionBinding(binding.id, { type: "activate" });
+    const pane = await this.requireMatchingPane(binding, binding.paneId);
+    this.options.store.updateBinding(binding.id, { lastAgentState: pane.agentState });
+    const resumed = this.options.store.transitionBinding(binding.id, { type: "activate" });
     await this.publish(resumed.id, "BindingActivated", "lark", { paneId: pane.paneId, topicId: resumed.topicId! }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.resume", target: binding.id, outcome: "success" }); this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true;
   }
 

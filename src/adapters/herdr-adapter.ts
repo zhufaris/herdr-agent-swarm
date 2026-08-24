@@ -259,10 +259,11 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
+    const foregroundExecutables = kind === "codex" || kind === "traex" ? ["traex"] : kind ? [kind] : [];
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentKind: kind, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
-      agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables: kind ? [kind] : []
+      agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables
     };
   }
 

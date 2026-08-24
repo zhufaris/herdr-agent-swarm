@@ -58,6 +58,19 @@ describe("Herdr adapter", () => {
     expect(calls).toEqual([["api", "snapshot"]]);
   });
 
+  it("normalizes a detected Codex agent as a TraeX runtime in snapshots", async () => {
+    const runner: CommandRunner = { async run() {
+      return json({ snapshot: {
+        panes: [{ pane_id: "w5:p20", workspace_id: "w5", cwd: "/repo", agent: "codex", agent_status: "done", terminal_id: "term-main" }],
+        agents: [{ pane_id: "w5:p20", workspace_id: "w5", agent: "codex", agent_status: "done", terminal_id: "term-main" }]
+      } });
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).listAllPanes()).resolves.toMatchObject([{
+      paneId: "w5:p20", agentKind: "codex", agentState: "done", foregroundExecutables: ["traex"]
+    }]);
+  });
+
   it("falls back to pane process inspection when snapshot is incompatible", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

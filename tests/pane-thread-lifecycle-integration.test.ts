@@ -259,7 +259,7 @@ describe("pane/thread lifecycle integration", () => {
     expect(submitted).toEqual([]);
 
     await coordinator.handleMessage({ ...message(11, "/herdr resume"), mentionsBot: true });
-    expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", attachment: "attached", generation: 1 });
+    expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", attachment: "attached", lastAgentState: "idle", generation: 1 });
     // The queued job has no delivered cards, so it remains visible/non-runnable instead of being replayed.
     expect(submitted).toEqual([]);
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
