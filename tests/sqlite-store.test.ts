@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -361,6 +361,7 @@ describe("SQLite store", () => {
     const canonicalId = store.loadRunCard("p1")!.answerElementId;
     const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
     store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE prompt_id = 'p1'").run(JSON.stringify({ body: { elements: [{ element_id: legacyId }] }, stream: { pageIndex: 0, pageStart: 0, elementId: legacyId } }));
+    store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", rootMessageId: "m1", kind: "text", payload: legacyId });
     store.database.prepare("DELETE FROM schema_migrations WHERE version = 2").run();
     store.close();
 
@@ -369,6 +370,13 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("p1")?.answerElementId).toBe(canonicalId);
     expect(payload.body.elements[0].element_id).toBe(canonicalId);
     expect(payload.stream.elementId).toBe(canonicalId);
+    expect(store.listPendingOutboundReplies().find((reply) => reply.id === "unrelated")?.payload).toBe(legacyId);
+  });
+
+  it("uses the prompt-oriented index for Answer payload migration lookups", () => {
+    store = new SqliteBindingStore(":memory:");
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT id, kind, payload FROM outbound_replies INDEXED BY outbound_replies_prompt_role_state WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter')").all("p1") as Array<{ detail: string }>;
+    expect(plan.map((row) => row.detail).join(" ")).toContain("outbound_replies_prompt_role_state");
   });
 
   it("does not change the SQLite schema version on a no-op reopen", () => {
@@ -446,6 +454,9 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
+    expect(store.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1 });
+    store.enqueueOutboundReply({ id: "o2", idempotencyKey: "key-2", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
+    expect(store.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2 });
   });
 
   it("adds streaming run-card columns before rebuilding a legacy outbox", () => {
@@ -494,6 +505,53 @@ describe("SQLite store", () => {
     const answerCreate = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(answerCreate.id, "answer-card", "cardkit-1");
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+  });
+
+  it("selects bounded durable lane heads without letting later rows bypass backoff", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (let index = 0; index < 8; index += 1) {
+      store.enqueueOutboundReply({ id: `head-${index}`, idempotencyKey: `head-${index}`, rootMessageId: `card-${index}`, kind: "card_update", payload: "{}" });
+    }
+    store.enqueueOutboundReply({ id: "same-lane-later", idempotencyKey: "same-lane-later", rootMessageId: "card-0", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailed("head-0", "temporary");
+
+    expect(store.listOutboundLaneHeads(4, new Date().toISOString()).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
+    expect(store.listOutboundLaneHeads(4, null).map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
+    expect(store.listOutboundLaneHeads(4, null, ["message:card-0"]).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
+    expect(store.getNextOutboundLaneHeadAttemptAt()).toBe(store.listPendingOutboundReplies()[1]!.nextAttemptAt);
+  });
+
+  it("preserves Answer lane insertion order across reopen and VACUUM", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-outbox-order-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
+    store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "root", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "second", idempotencyKey: "second", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "root", kind: "card_update", payload: "{}" });
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    store.database.exec("VACUUM");
+
+    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["first"]);
+  });
+
+  it("jitters exponential retries and honors an explicit retry delay", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "jitter", idempotencyKey: "jitter", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "rate-limit", idempotencyKey: "rate-limit", rootMessageId: "card-2", kind: "card_update", payload: "{}" });
+
+    expect(store.markOutboundReplyFailed("jitter", "temporary")?.nextAttemptAt).toBe("2026-08-24T00:00:00.800Z");
+    expect(store.markOutboundReplyFailed("rate-limit", "limited", 7_000)?.nextAttemptAt).toBe("2026-08-24T00:00:07.000Z");
+
+    random.mockRestore();
+    vi.useRealTimers();
   });
 
   it("atomically claims a prompt only while its binding is dispatchable", () => {

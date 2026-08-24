@@ -41,6 +41,7 @@ const environmentSchema = z.object({
   TRAEX_PERMISSION_MODE: z.enum(["default", "bypass_permissions", "auto"]).default("auto"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  LARK_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
@@ -59,7 +60,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   }
   const defaultProject = registry.projects.find((project) => project.id === registry.defaultProjectId)!;
   return {
-    lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID },
+    lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS },
     herdr: { workspaceId: defaultProject.workspaceId, workspaceCwd: defaultProject.cwd, executable: value.HERDR_BIN },
     projects: registry.projects,
     defaultProjectId: registry.defaultProjectId,

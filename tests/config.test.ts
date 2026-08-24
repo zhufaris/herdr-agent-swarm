@@ -59,6 +59,14 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, TRAEX_PERMISSION_MODE: "suggest" })).toThrow();
   });
 
+  it("configures Lark request timeout independently from command execution", () => {
+    expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000" }).lark.requestTimeoutMs).toBe(30_000);
+    expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000", LARK_REQUEST_TIMEOUT_MS: "12000" })).toMatchObject({
+      commandTimeoutMs: 45_000, lark: { requestTimeoutMs: 12_000 }
+    });
+    expect(() => loadConfig({ ...requiredEnvironment, LARK_REQUEST_TIMEOUT_MS: "0" })).toThrow();
+  });
+
   it("uses plugin-native paths unless explicit paths override them", () => {
     expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
       PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"

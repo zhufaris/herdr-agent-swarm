@@ -114,10 +114,11 @@ export interface BindingStorePort {
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];
-  listDueOutboundReplies(): OutboundReply[];
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[]): OutboundReply[];
+  getNextOutboundLaneHeadAttemptAt(): string | null;
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void;
   checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null;
-  markOutboundReplyFailed(id: string, error: string): OutboundReply | null;
+  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number): OutboundReply | null;
   markOutboundReplyDeadLetter(id: string, error: string): OutboundReply | null;
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;

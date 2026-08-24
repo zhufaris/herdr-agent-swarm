@@ -125,8 +125,11 @@ export class LarkChannelPublisher {
   private async drainPending(force: boolean): Promise<void> {
     const blockedTargets = new Set<string>();
     while (true) {
-      const batch = firstReplyPerTarget(this.store.listPendingOutboundReplies(), blockedTargets, force ? null : Date.now())
-        .slice(0, LarkChannelPublisher.MAX_CONCURRENT_DELIVERIES);
+      const batch = this.store.listOutboundLaneHeads(
+        LarkChannelPublisher.MAX_CONCURRENT_DELIVERIES,
+        force ? null : new Date().toISOString(),
+        [...blockedTargets]
+      );
       if (batch.length === 0) return;
       await Promise.all(batch.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
     }
@@ -136,9 +139,9 @@ export class LarkChannelPublisher {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     if (this.stopping) return;
-    const heads = firstReplyPerTarget(this.store.listPendingOutboundReplies(), new Set(), null);
-    if (heads.length === 0) return;
-    const dueAt = Math.min(...heads.map((reply) => Date.parse(reply.nextAttemptAt)));
+    const nextAttemptAt = this.store.getNextOutboundLaneHeadAttemptAt();
+    if (!nextAttemptAt) return;
+    const dueAt = Date.parse(nextAttemptAt);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       void this.drain();
@@ -190,9 +193,10 @@ export class LarkChannelPublisher {
       }
     } catch (error) {
       const permanent = error instanceof PermanentDeliveryError;
+      const retryDelayMs = permanent ? undefined : retryAfterDelayMs(error);
       const failed = permanent
         ? this.store.markOutboundReplyDeadLetter(reply.id, errorMessage(error))
-        : this.store.markOutboundReplyFailed(reply.id, errorMessage(error));
+        : this.store.markOutboundReplyFailed(reply.id, errorMessage(error), retryDelayMs);
       const context = {
         event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled",
         err: safeLogError(error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
@@ -206,19 +210,6 @@ export class LarkChannelPublisher {
   }
 }
 
-function firstReplyPerTarget(replies: OutboundReply[], blockedTargets: Set<string>, dueAt: number | null): OutboundReply[] {
-  const selected: OutboundReply[] = [];
-  const selectedTargets = new Set<string>();
-  for (const reply of replies) {
-    const target = deliveryTargetKey(reply);
-    if (blockedTargets.has(target) || selectedTargets.has(target)) continue;
-    selectedTargets.add(target);
-    if (dueAt !== null && Date.parse(reply.nextAttemptAt) > dueAt) continue;
-    selected.push(reply);
-  }
-  return selected;
-}
-
 function deliveryTargetKey(reply: OutboundReply): string {
   if (reply.cardRole === "answer" && reply.promptId) return `answer:${reply.promptId}`;
   return reply.kind === "stream_content" || reply.kind === "stream_finish"
@@ -227,6 +218,21 @@ function deliveryTargetKey(reply: OutboundReply): string {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function retryAfterDelayMs(error: unknown): number | undefined {
+  if (!isRecord(error)) return undefined;
+  const response = isRecord(error.response) ? error.response : null;
+  if (response?.status !== 429 || !isRecord(response.headers)) return undefined;
+  const get = typeof response.headers.get === "function" ? response.headers.get as (name: string) => unknown : null;
+  const header = get?.call(response.headers, "retry-after")
+    ?? Object.entries(response.headers).find(([key]) => key.toLowerCase() === "retry-after")?.[1];
+  if (typeof header !== "string" && typeof header !== "number") return undefined;
+  const value = String(header).trim();
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
+}
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string } } {
   const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };
   return decoded.card && decoded.stream

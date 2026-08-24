@@ -31,6 +31,7 @@ type OutboundReplyRow = Record<string, SqlValue> & {
   id: string; idempotency_key: string; binding_id: string | null; prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; root_message_id: string; kind: string; payload: string; state: string;
   attempt_count: number; error: string | null; delivered_message_id: string | null; next_attempt_at: string; created_at: string; updated_at: string;
   card_id_checkpoint: string | null;
+  delivery_order: number;
 };
 type ProjectSelectionRow = Record<string, SqlValue> & {
   id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
@@ -709,11 +710,36 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   listPendingOutboundReplies(): OutboundReply[] {
-    return (this.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' ORDER BY created_at, rowid").all() as OutboundReplyRow[]).map(mapOutboundReply);
+    return (this.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' ORDER BY delivery_order").all() as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
-  listDueOutboundReplies(): OutboundReply[] {
-    return (this.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY next_attempt_at, created_at, CASE card_role WHEN 'task' THEN 0 WHEN 'answer' THEN 1 ELSE 2 END, id").all(now()) as OutboundReplyRow[]).map(mapOutboundReply);
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = []): OutboundReply[] {
+    if (!Number.isInteger(limit) || limit <= 0) return [];
+    const exclusions = excludedLaneKeys.length > 0 ? `AND lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
+    const due = dueAt === null ? "" : "AND next_attempt_at <= ?";
+    const parameters: SqlValue[] = [...excludedLaneKeys];
+    if (dueAt !== null) parameters.push(dueAt);
+    parameters.push(limit);
+    return (this.database.prepare(`
+      WITH ranked AS (
+        SELECT *, ${outboundLaneKeySql()} AS lane_key,
+          ROW_NUMBER() OVER (PARTITION BY ${outboundLaneKeySql()} ORDER BY delivery_order) AS lane_position
+        FROM outbound_replies WHERE state = 'pending'
+      )
+      SELECT * FROM ranked WHERE lane_position = 1 ${exclusions} ${due}
+      ORDER BY delivery_order LIMIT ?
+    `).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
+  }
+
+  getNextOutboundLaneHeadAttemptAt(): string | null {
+    const row = this.database.prepare(`
+      WITH ranked AS (
+        SELECT next_attempt_at, ROW_NUMBER() OVER (PARTITION BY ${outboundLaneKeySql()} ORDER BY delivery_order) AS lane_position
+        FROM outbound_replies WHERE state = 'pending'
+      )
+      SELECT MIN(next_attempt_at) AS next_attempt_at FROM ranked WHERE lane_position = 1
+    `).get() as { next_attempt_at: string | null };
+    return row.next_attempt_at;
   }
 
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
@@ -744,7 +770,7 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.getOutboundReply(id);
   }
 
-  markOutboundReplyFailed(id: string, error: string): OutboundReply | null {
+  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number): OutboundReply | null {
     const row = this.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
     if (!row) return null;
     const attempts = Number(row.attempt_count) + 1;
@@ -754,7 +780,7 @@ export class SqliteBindingStore implements BindingStorePort {
       return this.getOutboundReply(id);
     }
     this.database.prepare("UPDATE outbound_replies SET error = ?, attempt_count = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?")
-      .run(error, attempts, retryAt(attempts), timestamp, id);
+      .run(error, attempts, retryAt(attempts, retryDelayMs), timestamp, id);
     return this.getOutboundReply(id);
   }
 
@@ -921,7 +947,7 @@ export class SqliteBindingStore implements BindingStorePort {
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
-        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
       CREATE TABLE IF NOT EXISTS project_selections(
@@ -968,7 +994,9 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureBindingResetColumns();
     this.ensurePromptCancelledState();
     this.ensurePromptObservationColumn();
+    this.ensureOutboundDeliveryOrder();
     this.ensureOutboundDismissedState();
+    this.ensureOutboundDeliveryOrder();
     this.ensurePaneCloseOperationState();
     this.ensureRunCardsView();
     this.ensureQueryIndexes();
@@ -983,15 +1011,21 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   private canonicalizeLegacyAnswerTargets(timestamp: string): void {
-    const legacyCards = this.database.prepare("SELECT prompt_id, answer_element_id, answer_page_index FROM run_cards WHERE answer_element_id != ''").all() as Array<{ prompt_id: string; answer_element_id: string; answer_page_index: number }>;
-    for (const card of legacyCards) {
-      const canonical = answerElementId(card.prompt_id, Number(card.answer_page_index));
-      if (canonical !== card.answer_element_id) this.database.prepare("UPDATE run_cards SET answer_element_id = ?, updated_at = ? WHERE prompt_id = ?").run(canonical, timestamp, card.prompt_id);
-      const replies = this.database.prepare("SELECT id, kind, payload FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter')").all(card.prompt_id) as Array<{ id: string; kind: string; payload: string }>;
-      for (const reply of replies) {
-        const payload = canonicalizeAnswerPayload(reply.kind, reply.payload, card.prompt_id, canonical);
-        if (payload !== reply.payload) this.database.prepare("UPDATE outbound_replies SET payload = ?, updated_at = ? WHERE id = ?").run(payload, timestamp, reply.id);
+    let afterPromptId = "";
+    while (true) {
+      const cards = this.database.prepare("SELECT prompt_id, answer_element_id, answer_page_index FROM run_cards WHERE answer_element_id != '' AND prompt_id > ? ORDER BY prompt_id LIMIT 100")
+        .all(afterPromptId) as Array<{ prompt_id: string; answer_element_id: string; answer_page_index: number }>;
+      if (cards.length === 0) return;
+      for (const card of cards) {
+        const canonical = answerElementId(card.prompt_id, Number(card.answer_page_index));
+        if (canonical !== card.answer_element_id) this.database.prepare("UPDATE run_cards SET answer_element_id = ?, updated_at = ? WHERE prompt_id = ?").run(canonical, timestamp, card.prompt_id);
+        const replies = this.database.prepare("SELECT id, kind, payload FROM outbound_replies INDEXED BY outbound_replies_prompt_role_state WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter')").all(card.prompt_id) as Array<{ id: string; kind: string; payload: string }>;
+        for (const reply of replies) {
+          const payload = canonicalizeAnswerPayload(reply.kind, reply.payload, card.prompt_id, canonical);
+          if (payload !== reply.payload) this.database.prepare("UPDATE outbound_replies SET payload = ?, updated_at = ? WHERE id = ?").run(payload, timestamp, reply.id);
+        }
       }
+      afterPromptId = cards.at(-1)!.prompt_id;
     }
   }
 
@@ -1017,10 +1051,10 @@ export class SqliteBindingStore implements BindingStorePort {
       PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
       CREATE TABLE outbound_replies_next(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, next_attempt_at, created_at, updated_at)
-      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, next_attempt_at, created_at, updated_at)
+      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
       CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
     `);
@@ -1144,6 +1178,20 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!columns.some((column) => column.name === "card_id_checkpoint")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN card_id_checkpoint TEXT");
   }
 
+  private ensureOutboundDeliveryOrder(): void {
+    const columns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "delivery_order")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN delivery_order INTEGER");
+    this.database.exec(`
+      UPDATE outbound_replies SET delivery_order = rowid WHERE delivery_order IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS outbound_replies_delivery_order ON outbound_replies(delivery_order);
+      CREATE TRIGGER IF NOT EXISTS outbound_replies_assign_delivery_order
+      AFTER INSERT ON outbound_replies WHEN NEW.delivery_order IS NULL
+      BEGIN
+        UPDATE outbound_replies SET delivery_order = (SELECT COALESCE(MAX(delivery_order), 0) + 1 FROM outbound_replies WHERE id != NEW.id) WHERE id = NEW.id;
+      END;
+    `);
+  }
+
   private ensureDualRequestCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
@@ -1218,11 +1266,19 @@ export class SqliteBindingStore implements BindingStorePort {
 }
 
 function now(): string { return new Date().toISOString(); }
+function outboundLaneKeySql(): string {
+  return "CASE WHEN card_role = 'answer' AND prompt_id IS NOT NULL THEN 'answer:' || prompt_id WHEN kind IN ('stream_content','stream_finish') THEN 'stream:' || root_message_id ELSE 'message:' || root_message_id END";
+}
 function mapInstanceLease(row: { owner_id: string; fencing_token: number; expires_at: string; updated_at: string }): InstanceLease {
   return { ownerId: row.owner_id, fencingToken: Number(row.fencing_token), expiresAt: row.expires_at, updatedAt: row.updated_at };
 }
 function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
-function retryAt(attempt: number): string { return new Date(Date.now() + Math.min(60_000, 1_000 * 2 ** (attempt - 1))).toISOString(); }
+function retryAt(attempt: number, explicitDelayMs?: number): string {
+  const exponential = Math.min(60_000, 1_000 * 2 ** (attempt - 1));
+  const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
+  const delay = explicitDelayMs === undefined ? jittered : Math.max(exponential, Math.min(3_600_000, explicitDelayMs));
+  return new Date(Date.now() + delay).toISOString();
+}
 function streamCardState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
   try {
     const decoded = JSON.parse(payload) as { stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };

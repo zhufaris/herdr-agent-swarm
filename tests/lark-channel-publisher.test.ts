@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "pino";
@@ -114,6 +117,33 @@ describe("Lark channel publisher", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(reply).toHaveBeenLastCalledWith("root-1", "cardkit-1", "run-card:create:p1:answer");
     expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "message-for-cardkit-1-run-card:create:p1:answer", answerCardId: "cardkit-1" });
+    store.close();
+  });
+
+  it("uses one logical message when the first idempotent reply times out after remote acceptance", async () => {
+    const logicalMessages = new Map<string, string>();
+    let firstAttempt = true;
+    const reply = vi.fn(async (_root: string, _cardId: string, idempotencyKey: string) => {
+      const messageId = logicalMessages.get(idempotencyKey) ?? `message-${logicalMessages.size + 1}`;
+      logicalMessages.set(idempotencyKey, messageId);
+      if (firstAttempt) { firstAttempt = false; throw new Error("timeout after acceptance"); }
+      return { messageId };
+    });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, fakeLark({
+      async createStreamingCard() { return { cardId: "cardkit-1" }; },
+      replyStreamingCardReference: reply
+    }), pino({ enabled: false }));
+
+    await publisher.drain();
+    await publisher.drain(true);
+
+    expect(reply.mock.calls.map((call) => call[2])).toEqual(["run-card:create:p1:answer", "run-card:create:p1:answer"]);
+    expect(logicalMessages).toEqual(new Map([["run-card:create:p1:answer", "message-1"]]));
+    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "message-1", answerCardId: "cardkit-1" });
     store.close();
   });
 
@@ -312,6 +342,34 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("preserves Answer lane ordering after the store is reopened", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-answer-lane-restart-"));
+    const path = join(directory, "bridge.db");
+    let store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    store.enqueueOutboundReply({ id: "content", idempotencyKey: "content", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ elementId: answerElementId("p1", 0), content: "done", sequence: 2 }) });
+    store.enqueueOutboundReply({ id: "finish", idempotencyKey: "finish", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_finish", payload: JSON.stringify({ summary: "Done", sequence: 3 }) });
+    store.markOutboundReplyFailed("content", "temporary", 60_000);
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const delivered: string[] = [];
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, fakeLark({
+      async streamCardContent() { delivered.push("content"); },
+      async finishStreamingCard() { delivered.push("finish"); }
+    }), pino({ enabled: false }));
+    await publisher.drain();
+    expect(delivered).toEqual([]);
+    await publisher.drain(true);
+    expect(delivered).toEqual(["content", "finish"]);
+    await publisher.stop();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   it("bounds delivery concurrency across independent targets", async () => {
     let active = 0;
     let peak = 0;
@@ -355,10 +413,31 @@ describe("Lark channel publisher", () => {
 
     await publisher.enqueueCard("root-1", "automatic-retry", {});
     expect(attempt).toBe(1);
-    await vi.advanceTimersByTimeAsync(1_100);
+    await vi.advanceTimersByTimeAsync(1_300);
     await vi.waitFor(() => expect(attempt).toBe(2));
     expect(store.listPendingOutboundReplies()).toEqual([]);
 
+    await publisher.stop();
+    store.close();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    { header: "5", delay: 5_000 },
+    { header: "Sun, 24 Aug 2026 00:00:09 GMT", delay: 9_000 },
+    { header: { get: () => "7" }, delay: 7_000 }
+  ])("honors HTTP 429 Retry-After $header", async ({ header, delay }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    const headers = typeof header === "object" ? header : { "retry-after": header };
+    const error = Object.assign(new Error("rate limited"), { response: { status: 429, headers } });
+    const lark = fakeLark({ async replyCard() { throw error; } });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+
+    await publisher.enqueueCard("root-1", `rate-limit-${header}`, {});
+
+    expect(store.listPendingOutboundReplies()[0]?.nextAttemptAt).toBe(new Date(Date.now() + delay).toISOString());
     await publisher.stop();
     store.close();
     vi.useRealTimers();
