@@ -21,6 +21,6 @@ printf 'Editing project registry: %s\n' "$PROJECTS"
 mv -f "$ENV_DRAFT" "$ENV_FILE"
 mv -f "$PROJECTS_DRAFT" "$PROJECTS"
 trap - EXIT
-"$SCRIPT_DIR/service.sh" install
-"$SCRIPT_DIR/service.sh" restart
+bash "$SCRIPT_DIR/service.sh" install
+bash "$SCRIPT_DIR/service.sh" restart
 pause_if_interactive

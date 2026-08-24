@@ -15,4 +15,4 @@ EDITOR_COMMAND="${EDITOR:-vim}"
 "${NODE_BIN:-$(resolve_command node)}" "$ROOT/dist/cli/validate-config.js" "$(bridge_env_file)" "$DRAFT"
 mv -f "$DRAFT" "$PROJECTS"
 trap - EXIT
-"$SCRIPT_DIR/service.sh" restart
+bash "$SCRIPT_DIR/service.sh" restart
