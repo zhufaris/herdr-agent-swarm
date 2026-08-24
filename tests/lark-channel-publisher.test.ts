@@ -79,7 +79,7 @@ describe("Lark channel publisher", () => {
     store.enqueueOutboundReply({
       id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 7, cardRole: "answer",
       rootMessageId: "root-1", kind: "stream_card_create",
-      payload: JSON.stringify({ card: { schema: "2.0" }, stream: { pageIndex: 1, pageStart: 28_000, elementId: "answer_content_p1_1" } })
+      payload: JSON.stringify({ card: { schema: "2.0", body: { elements: [{ element_id: answerElementId("p1", 1) }] } }, stream: { pageIndex: 1, pageStart: 28_000, elementId: answerElementId("p1", 1) } })
     });
 
     await publisher.drain();
@@ -89,6 +89,31 @@ describe("Lark channel publisher", () => {
 
     expect(created).toHaveBeenCalledTimes(2);
     expect(resumed).toHaveBeenCalledWith("p1", 8);
+    store.close();
+  });
+
+  it("reuses a checkpointed CardKit entity when replying is retried", async () => {
+    let failReply = true;
+    const create = vi.fn(async () => ({ cardId: "cardkit-1" }));
+    const reply = vi.fn(async (_root: string, cardId: string, idempotencyKey: string) => {
+      if (failReply) throw new Error("temporary");
+      return { messageId: `message-for-${cardId}-${idempotencyKey}` };
+    });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, fakeLark({ createStreamingCard: create, replyStreamingCardReference: reply }), pino({ enabled: false }));
+
+    await publisher.drain();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(store.listPendingOutboundReplies()[0]).toMatchObject({ cardIdCheckpoint: "cardkit-1" });
+    failReply = false;
+    await publisher.drain(true);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenLastCalledWith("root-1", "cardkit-1", "run-card:create:p1:answer");
+    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "message-for-cardkit-1-run-card:create:p1:answer", answerCardId: "cardkit-1" });
     store.close();
   });
 
@@ -108,6 +133,29 @@ describe("Lark channel publisher", () => {
     expect(store.getOperationalSummary().deadLetters).toBe(1);
     expect(store.listPendingOutboundReplies()).toEqual([]);
     expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-1", answerPageIndex: 0 });
+    store.close();
+  });
+
+  it.each([
+    { name: "non-derived metadata id", metadataId: "element_wrong", cardId: "element_wrong" },
+    { name: "card id differing from metadata", metadataId: answerElementId("p1", 1), cardId: "element_wrong" }
+  ])("dead-letters a continuation with $name", async ({ metadataId, cardId }) => {
+    const create = vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }));
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    store.enqueueOutboundReply({
+      id: "invalid-page", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create",
+      payload: JSON.stringify({ card: { body: { elements: [{ element_id: cardId }] } }, stream: { pageIndex: 1, pageStart: 20_000, elementId: metadataId } })
+    });
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+
+    await publisher.drain();
+
+    expect(create).not.toHaveBeenCalled();
+    expect(store.getOperationalSummary().deadLetters).toBe(1);
     store.close();
   });
 
@@ -235,6 +283,85 @@ describe("Lark channel publisher", () => {
     expect(delivered).toEqual(["other-card:1", "same-card:1", "same-card:2"]);
     expect(store.listPendingOutboundReplies()).toEqual([]);
     store.close();
+  });
+
+  it("keeps a backed-off Answer lane head ahead of later finish work", async () => {
+    let failContent = true;
+    const delivered: string[] = [];
+    const lark = fakeLark({
+      async streamCardContent() {
+        if (failContent) throw new Error("temporary");
+        delivered.push("content");
+      },
+      async finishStreamingCard() { delivered.push("finish"); }
+    });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+
+    await publisher.enqueueStreamContent("b1", "p1", "cardkit-1", answerElementId("p1", 0), "content", 2);
+    await publisher.enqueueStreamFinish("b1", "p1", "cardkit-1", "Completed", 3);
+
+    expect(delivered).toEqual([]);
+    failContent = false;
+    await publisher.drain(true);
+    expect(delivered).toEqual(["content", "finish"]);
+    store.close();
+  });
+
+  it("bounds delivery concurrency across independent targets", async () => {
+    let active = 0;
+    let peak = 0;
+    const releases: Array<() => void> = [];
+    const lark = fakeLark({ async updateCard() {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+    } });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+    for (let index = 0; index < 10; index += 1) {
+      store.enqueueOutboundReply({ id: `reply-${index}`, idempotencyKey: `reply-${index}`, rootMessageId: `card-${index}`, kind: "card_update", payload: "{}" });
+    }
+
+    const draining = publisher.drain();
+    await vi.waitFor(() => expect(releases).toHaveLength(4));
+    expect(peak).toBe(4);
+    while (store.listPendingOutboundReplies().length > 0 || active > 0) {
+      const release = releases.shift();
+      if (release) release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await draining;
+
+    expect(peak).toBe(4);
+    store.close();
+  });
+
+  it("automatically wakes a backed-off delivery when it becomes due", async () => {
+    vi.useFakeTimers();
+    let attempt = 0;
+    const lark = fakeLark({ async replyCard() {
+      attempt += 1;
+      if (attempt === 1) throw new Error("temporary");
+      return { messageId: "card-1" };
+    } });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkChannelPublisher(new BridgeEventBus(), store, lark, pino({ enabled: false }));
+
+    await publisher.enqueueCard("root-1", "automatic-retry", {});
+    expect(attempt).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_100);
+    await vi.waitFor(() => expect(attempt).toBe(2));
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+
+    await publisher.stop();
+    store.close();
+    vi.useRealTimers();
   });
 
   it("supersedes an older failed pending version with the latest view", async () => {

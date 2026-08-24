@@ -10,6 +10,7 @@ interface LarkAdapterOptions {
   appSecret: string;
   chatId: string;
   botOpenId: string;
+  requestTimeoutMs?: number;
 }
 
 export class LarkSdkAdapter implements LarkPort {
@@ -18,7 +19,10 @@ export class LarkSdkAdapter implements LarkPort {
   private ready = false;
 
   constructor(private readonly options: LarkAdapterOptions, private readonly logger?: Logger) {
-    this.client = new lark.Client({ appId: options.appId, appSecret: options.appSecret });
+    this.client = new lark.Client({
+      appId: options.appId, appSecret: options.appSecret,
+      httpInstance: withRequestTimeout(lark.defaultHttpInstance as unknown as lark.HttpInstance, options.requestTimeoutMs ?? 30_000)
+    });
     this.wsClient = new lark.WSClient({
       appId: options.appId,
       appSecret: options.appSecret,
@@ -76,31 +80,41 @@ export class LarkSdkAdapter implements LarkPort {
     return { topicId: response.data?.thread_id ?? messageId, rootMessageId: messageId };
   }
 
-  async replyText(rootMessageId: string, text: string): Promise<{ messageId: string }> {
+  async replyText(rootMessageId: string, text: string, idempotencyKey?: string): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "text", content: JSON.stringify({ text }), reply_in_thread: true }
+      data: { msg_type: "text", content: JSON.stringify({ text }), reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
 
-  async replyCard(rootMessageId: string, card: object): Promise<{ messageId: string }> {
+  async replyCard(rootMessageId: string, card: object, idempotencyKey?: string): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "interactive", content: JSON.stringify(normalizeLarkCardElementIds(card)), reply_in_thread: true }
+      data: { msg_type: "interactive", content: JSON.stringify(normalizeLarkCardElementIds(card)), reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) }
     });
     return { messageId: requireMessageId(response.data?.message_id) };
   }
 
   async replyStreamingCard(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }> {
+    const { cardId } = await this.createStreamingCard(card);
+    const { messageId } = await this.replyStreamingCardReference(rootMessageId, cardId, "");
+    return { messageId, cardId };
+  }
+
+  async createStreamingCard(card: object): Promise<{ cardId: string }> {
     const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(normalizeLarkCardElementIds(card)) } });
     const cardId = created.data?.card_id;
     if (!cardId) throw new Error(`Lark CardKit create returned no card_id (${safeResponseMetadata(created)})`);
+    return { cardId };
+  }
+
+  async replyStreamingCardReference(rootMessageId: string, cardId: string, idempotencyKey: string): Promise<{ messageId: string }> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: rootMessageId },
-      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), reply_in_thread: true }
+      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) }
     });
-    return { messageId: requireMessageId(response.data?.message_id), cardId };
+    return { messageId: requireMessageId(response.data?.message_id) };
   }
 
   async streamCardContent(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
@@ -156,6 +170,20 @@ export class LarkSdkAdapter implements LarkPort {
     const threadId = response.data?.items?.[0]?.thread_id;
     return threadId ?? null;
   }
+}
+
+function withRequestTimeout(base: lark.HttpInstance, timeout: number): lark.HttpInstance {
+  const options = <D>(input?: lark.HttpRequestOptions<D>): lark.HttpRequestOptions<D> => ({ ...input, timeout });
+  return {
+    request: (input) => base.request(options(input)),
+    get: (url, input) => base.get(url, options(input)),
+    delete: (url, input) => base.delete(url, options(input)),
+    head: (url, input) => base.head(url, options(input)),
+    options: (url, input) => base.options(url, options(input)),
+    post: (url, data, input) => base.post(url, data, options(input)),
+    put: (url, data, input) => base.put(url, data, options(input)),
+    patch: (url, data, input) => base.patch(url, data, options(input))
+  };
 }
 
 function stripFenceLanguages(content: string): string {

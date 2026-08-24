@@ -305,8 +305,8 @@ describe("SQLite store", () => {
     expect(store.recoverLegacyElementIdDeadLetters()).toBe(1);
     const [recovered] = store.listPendingOutboundReplies();
     expect(recovered).toMatchObject({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null });
-    expect(store.loadRunCard("legacy-id")?.answerElementId).toBe("element_e8aa1ef57445");
-    expect(JSON.parse(recovered!.payload)).toMatchObject({ body: { elements: [{ element_id: "element_e8aa1ef57445" }] } });
+    expect(store.loadRunCard("legacy-id")?.answerElementId).toBe(answerElementId("legacy-id", 0));
+    expect(JSON.parse(recovered!.payload)).toMatchObject({ body: { elements: [{ element_id: answerElementId("legacy-id", 0) }] } });
     expect(store.getOperationalSummary().deadLetters).toBe(1);
 
     store.markOutboundReplyDelivered(legacyReply!.id, "answer-1", "cardkit-1");
@@ -327,7 +327,7 @@ describe("SQLite store", () => {
 
     const repaired = store.listPendingOutboundReplies().find((reply) => reply.id === "page-2")!;
     const payload = JSON.parse(repaired.payload);
-    expect(store.loadRunCard("p1")?.answerElementId).toMatch(/^element_[a-f0-9]{12}$/);
+    expect(store.loadRunCard("p1")?.answerElementId).toBe(answerElementId("p1", 1));
     expect(payload.stream.elementId).toBe(store.loadRunCard("p1")?.answerElementId);
     expect(payload.card.body.elements[0].element_id).toBe(payload.stream.elementId);
   });
@@ -342,12 +342,46 @@ describe("SQLite store", () => {
     const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
     store.database.prepare("UPDATE run_cards SET answer_element_id = ? WHERE prompt_id = 'p1'").run(legacyId);
     store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE prompt_id = 'p1'").run(JSON.stringify({ body: { elements: [{ element_id: legacyId }] } }));
+    store.database.prepare("DELETE FROM schema_migrations WHERE version = 2").run();
     store.close();
 
     store = new SqliteBindingStore(path);
 
-    expect(store.loadRunCard("p1")?.answerElementId).toBe("element_e8aa1ef57445");
-    expect(JSON.parse(store.listPendingOutboundReplies()[0]!.payload)).toMatchObject({ body: { elements: [{ element_id: "element_e8aa1ef57445" }] } });
+    expect(store.loadRunCard("p1")?.answerElementId).toBe(answerElementId("p1", 0));
+    expect(JSON.parse(store.listPendingOutboundReplies()[0]!.payload)).toMatchObject({ body: { elements: [{ element_id: answerElementId("p1", 0) }] } });
+  });
+
+  it("repairs answer payloads when the persisted run-card id is already canonical", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-element-payload-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    const canonicalId = store.loadRunCard("p1")!.answerElementId;
+    const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
+    store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE prompt_id = 'p1'").run(JSON.stringify({ body: { elements: [{ element_id: legacyId }] }, stream: { pageIndex: 0, pageStart: 0, elementId: legacyId } }));
+    store.database.prepare("DELETE FROM schema_migrations WHERE version = 2").run();
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const payload = JSON.parse(store.listPendingOutboundReplies()[0]!.payload);
+    expect(store.loadRunCard("p1")?.answerElementId).toBe(canonicalId);
+    expect(payload.body.elements[0].element_id).toBe(canonicalId);
+    expect(payload.stream.elementId).toBe(canonicalId);
+  });
+
+  it("does not change the SQLite schema version on a no-op reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-schema-idempotency-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = new SqliteBindingStore(path);
+    const before = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    store.close();
+    store = new SqliteBindingStore(path);
+    const after = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    expect(after.schema_version).toBe(before.schema_version);
   });
 
   it("does not let a late continuation delivery roll the active page backward", () => {

@@ -43,7 +43,7 @@ describe("operational commands", () => {
     const value = findAction(failureCard, "retry_dead_letter");
     await onAction!({ messageId: "failure-card", chatId: "chat", operatorOpenId: "u1", value });
 
-    expect(replyCard).toHaveBeenCalledWith("root", {});
+    expect(replyCard).toHaveBeenCalledWith("root", {}, "failed-output");
     expect(store.getOperationalSummary().prompts.failed).toBe(1);
     expect(store.countPendingPrompts("b1")).toBe(0);
     expect(JSON.stringify(updates.at(-1))).toContain("不会重放 TraeX 任务");

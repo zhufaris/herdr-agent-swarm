@@ -6,6 +6,7 @@ import type { BindingStorePort } from "../domain/ports.js";
 import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, RequestCardRole, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
+import { answerElementId } from "../domain/run-card-view.js";
 import type { BridgeEvent } from "../domain/events.js";
 import { transitionSession, type AttachmentState, type ProvisioningCheckpoint, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
@@ -29,6 +30,7 @@ type PromptRow = Record<string, SqlValue> & {
 type OutboundReplyRow = Record<string, SqlValue> & {
   id: string; idempotency_key: string; binding_id: string | null; prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; root_message_id: string; kind: string; payload: string; state: string;
   attempt_count: number; error: string | null; delivered_message_id: string | null; next_attempt_at: string; created_at: string; updated_at: string;
+  card_id_checkpoint: string | null;
 };
 type ProjectSelectionRow = Record<string, SqlValue> & {
   id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
@@ -601,7 +603,7 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.exec("COMMIT");
       return { prompt: this.getPrompt(input.prompt.id), view: this.loadRunCard(input.prompt.id)!, inserted: true };
     } catch (error) {
-      this.database.exec("ROLLBACK");
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
       throw error;
     }
   }
@@ -687,7 +689,7 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply {
     const timestamp = now();
     if ((input.kind === "card_update" || input.kind === "stream_content") && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
       this.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?")
@@ -707,7 +709,7 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   listPendingOutboundReplies(): OutboundReply[] {
-    return (this.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' ORDER BY next_attempt_at, created_at, CASE card_role WHEN 'task' THEN 0 WHEN 'answer' THEN 1 ELSE 2 END, id").all() as OutboundReplyRow[]).map(mapOutboundReply);
+    return (this.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' ORDER BY created_at, rowid").all() as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
   listDueOutboundReplies(): OutboundReply[] {
@@ -734,6 +736,12 @@ export class SqliteBindingStore implements BindingStorePort {
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null {
+    this.database.prepare("UPDATE outbound_replies SET card_id_checkpoint = COALESCE(card_id_checkpoint, ?), updated_at = ? WHERE id = ? AND state = 'pending'")
+      .run(cardId, now(), id);
+    return this.getOutboundReply(id);
   }
 
   markOutboundReplyFailed(id: string, error: string): OutboundReply | null {
@@ -913,7 +921,7 @@ export class SqliteBindingStore implements BindingStorePort {
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
-        error TEXT, delivered_message_id TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
       CREATE TABLE IF NOT EXISTS project_selections(
@@ -947,6 +955,7 @@ export class SqliteBindingStore implements BindingStorePort {
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
     `);
     this.ensureOutboundReplyColumns();
+    this.ensureOutboundCardCheckpoint();
     this.ensureRequestCardOutboxColumns();
     this.ensureRunCardRequestText();
     this.ensureRunCardSpaceName();
@@ -961,23 +970,26 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptObservationColumn();
     this.ensureOutboundDismissedState();
     this.ensurePaneCloseOperationState();
+    this.ensureRunCardsView();
     this.ensureQueryIndexes();
+    const answerTargetMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
+    if (answerTargetMigration) return;
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.canonicalizeLegacyAnswerTargets(now());
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (2)").run();
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   private canonicalizeLegacyAnswerTargets(timestamp: string): void {
-    const legacyCards = this.database.prepare("SELECT prompt_id, answer_element_id FROM run_cards WHERE answer_element_id != ''").all() as Array<{ prompt_id: string; answer_element_id: string }>;
+    const legacyCards = this.database.prepare("SELECT prompt_id, answer_element_id, answer_page_index FROM run_cards WHERE answer_element_id != ''").all() as Array<{ prompt_id: string; answer_element_id: string; answer_page_index: number }>;
     for (const card of legacyCards) {
-      const canonical = normalizeLarkElementId(card.answer_element_id);
-      if (canonical === card.answer_element_id) continue;
-      this.database.prepare("UPDATE run_cards SET answer_element_id = ?, updated_at = ? WHERE prompt_id = ?").run(canonical, timestamp, card.prompt_id);
+      const canonical = answerElementId(card.prompt_id, Number(card.answer_page_index));
+      if (canonical !== card.answer_element_id) this.database.prepare("UPDATE run_cards SET answer_element_id = ?, updated_at = ? WHERE prompt_id = ?").run(canonical, timestamp, card.prompt_id);
       const replies = this.database.prepare("SELECT id, kind, payload FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter')").all(card.prompt_id) as Array<{ id: string; kind: string; payload: string }>;
       for (const reply of replies) {
-        const payload = canonicalizeAnswerPayload(reply.kind, reply.payload);
+        const payload = canonicalizeAnswerPayload(reply.kind, reply.payload, card.prompt_id, canonical);
         if (payload !== reply.payload) this.database.prepare("UPDATE outbound_replies SET payload = ?, updated_at = ? WHERE id = ?").run(payload, timestamp, reply.id);
       }
     }
@@ -994,6 +1006,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS bindings_state_created ON bindings(state, created_at, id);
       CREATE INDEX IF NOT EXISTS bindings_root_created ON bindings(root_message_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS run_cards_binding_phase_created ON run_cards(binding_id, phase, created_at, prompt_id);
+      CREATE INDEX IF NOT EXISTS outbound_replies_prompt_role_state ON outbound_replies(prompt_id, card_role, state);
     `);
   }
 
@@ -1004,10 +1017,10 @@ export class SqliteBindingStore implements BindingStorePort {
       PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
       CREATE TABLE outbound_replies_next(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, next_attempt_at, created_at, updated_at)
-      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, next_attempt_at, created_at, updated_at)
+      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
       CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
     `);
@@ -1018,13 +1031,14 @@ export class SqliteBindingStore implements BindingStorePort {
   private ensureStreamingCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    if (!names.has("answer_card_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_card_id TEXT");
-    if (!names.has("answer_element_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_element_id TEXT NOT NULL DEFAULT ''");
-    if (!names.has("answer_sequence")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_sequence INTEGER NOT NULL DEFAULT 0");
-    if (!names.has("answer_page_index")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_index INTEGER NOT NULL DEFAULT 0");
-    if (!names.has("answer_page_start")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_start INTEGER NOT NULL DEFAULT 0");
+    let changed = false;
+    if (!names.has("answer_card_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_card_id TEXT"); changed = true; }
+    if (!names.has("answer_element_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_element_id TEXT NOT NULL DEFAULT ''"); changed = true; }
+    if (!names.has("answer_sequence")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_sequence INTEGER NOT NULL DEFAULT 0"); changed = true; }
+    if (!names.has("answer_page_index")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_index INTEGER NOT NULL DEFAULT 0"); changed = true; }
+    if (!names.has("answer_page_start")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_start INTEGER NOT NULL DEFAULT 0"); changed = true; }
     this.database.exec("UPDATE run_cards SET answer_element_id = 'answer-content-' || replace(prompt_id, ':', '-') WHERE answer_element_id = ''");
-    this.recreateRunCardsView();
+    if (changed) this.recreateRunCardsView();
   }
 
   private ensurePromptCancelledState(): void {
@@ -1125,22 +1139,29 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!names.has("card_role")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN card_role TEXT CHECK(card_role IN ('task','answer'))");
   }
 
+  private ensureOutboundCardCheckpoint(): void {
+    const columns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "card_id_checkpoint")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN card_id_checkpoint TEXT");
+  }
+
   private ensureDualRequestCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    if (!names.has("answer_message_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_message_id TEXT");
-    if (!names.has("answer_delivered_version")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_delivered_version INTEGER NOT NULL DEFAULT 0");
-    this.recreateRunCardsView();
+    let changed = false;
+    if (!names.has("answer_message_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_message_id TEXT"); changed = true; }
+    if (!names.has("answer_delivered_version")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_delivered_version INTEGER NOT NULL DEFAULT 0"); changed = true; }
+    if (changed) this.recreateRunCardsView();
   }
 
   private ensureRunCardAnswerState(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    if (!names.has("answer_segments_json")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_segments_json TEXT NOT NULL DEFAULT '[]'");
-    if (!names.has("answer_draft")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft TEXT NOT NULL DEFAULT ''");
-    if (!names.has("answer_draft_transient")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft_transient INTEGER NOT NULL DEFAULT 0");
+    let changed = false;
+    if (!names.has("answer_segments_json")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_segments_json TEXT NOT NULL DEFAULT '[]'"); changed = true; }
+    if (!names.has("answer_draft")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft TEXT NOT NULL DEFAULT ''"); changed = true; }
+    if (!names.has("answer_draft_transient")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft_transient INTEGER NOT NULL DEFAULT 0"); changed = true; }
     this.database.exec("UPDATE run_cards SET answer_segments_json = json_array(answer) WHERE answer <> '' AND answer_segments_json = '[]' AND answer_draft = ''");
-    this.recreateRunCardsView();
+    if (changed) this.recreateRunCardsView();
   }
 
   private ensureRunCardRequestText(): void {
@@ -1166,6 +1187,11 @@ export class SqliteBindingStore implements BindingStorePort {
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'answerDeliveredVersion', answer_delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
       ) AS state_json FROM run_cards;
     `);
+  }
+
+  private ensureRunCardsView(): void {
+    const view = this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'run_cards_view'").get();
+    if (!view) this.recreateRunCardsView();
   }
 
   private ensureOutboundReplyColumns(): void {
@@ -1205,17 +1231,27 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
       ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
   } catch { return null; }
 }
-function canonicalizeAnswerPayload(kind: string, payload: string): string {
+function canonicalizeAnswerPayload(kind: string, payload: string, promptId: string, fallbackElementId: string): string {
   try {
     const decoded = JSON.parse(payload) as unknown;
-    const normalized = normalizeLarkCardElementIds(decoded);
+    const pageIndex = isRecord(decoded) && isRecord(decoded.stream) && Number.isInteger(decoded.stream.pageIndex)
+      ? Number(decoded.stream.pageIndex) : null;
+    const elementId = pageIndex === null ? fallbackElementId : answerElementId(promptId, pageIndex);
+    const normalized = replaceCardElementIds(normalizeLarkCardElementIds(decoded), elementId);
     if (!isRecord(normalized)) return payload;
     if ((kind === "stream_card_create" || kind === "stream_content") && isRecord(normalized.stream) && typeof normalized.stream.elementId === "string") {
-      normalized.stream.elementId = normalizeLarkElementId(normalized.stream.elementId);
+      normalized.stream.elementId = elementId;
     }
-    if (kind === "stream_content" && typeof normalized.elementId === "string") normalized.elementId = normalizeLarkElementId(normalized.elementId);
+    if (kind === "stream_content" && typeof normalized.elementId === "string") normalized.elementId = elementId;
     return JSON.stringify(normalized);
   } catch { return payload; }
+}
+function replaceCardElementIds(value: unknown, elementId: string): unknown {
+  if (Array.isArray(value)) return value.map((item) => replaceCardElementIds(item, elementId));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key, key === "element_id" && typeof item === "string" ? elementId : replaceCardElementIds(item, elementId)
+  ]));
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 
@@ -1244,7 +1280,7 @@ function mapOutboundReply(row: OutboundReplyRow): OutboundReply {
   return {
     id: row.id, idempotencyKey: row.idempotency_key, bindingId: row.binding_id, rootMessageId: row.root_message_id,
     promptId: row.prompt_id, viewVersion: row.view_version === null ? null : Number(row.view_version), selectionId: row.selection_id, cardRole: row.card_role as RequestCardRole | null, kind: row.kind as OutboundReplyKind, payload: row.payload, state: row.state as OutboundReplyState,
-    attemptCount: Number(row.attempt_count), error: row.error, deliveredMessageId: row.delivered_message_id, nextAttemptAt: row.next_attempt_at,
+    attemptCount: Number(row.attempt_count), error: row.error, deliveredMessageId: row.delivered_message_id, cardIdCheckpoint: row.card_id_checkpoint ?? null, nextAttemptAt: row.next_attempt_at,
     createdAt: row.created_at, updatedAt: row.updated_at
   };
 }

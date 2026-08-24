@@ -2,7 +2,6 @@ import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
-import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 
 const RUN_STATE_VIEW = {
@@ -198,13 +197,9 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     body: { elements: [
       { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input)) },
       { tag: "hr" },
-      { tag: "markdown", element_id: input.answerElementId || answerElementId(input.promptId), content }
+      { tag: "markdown", element_id: input.answerElementId, content }
     ] }
   };
-}
-
-export function answerElementId(promptId: string): string {
-  return normalizeLarkElementId(`answer-content-${promptId}`);
 }
 
 export function renderHelpCard(): object {

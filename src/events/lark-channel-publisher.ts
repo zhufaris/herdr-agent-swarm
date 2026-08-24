@@ -4,14 +4,17 @@ import type { BindingStorePort, LarkPort } from "../domain/ports.js";
 import type { OutboundReply } from "../domain/types.js";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { answerElementId } from "../domain/run-card-view.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkChannelPublisher {
+  private static readonly MAX_CONCURRENT_DELIVERIES = 4;
   private draining: Promise<void> | null = null;
   private readonly activeHandlers = new Set<Promise<void>>();
   private unsubscribe: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
 
   constructor(
@@ -37,6 +40,8 @@ export class LarkChannelPublisher {
     this.stopping = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     this.stopPromise = this.waitForActiveWork();
     return this.stopPromise;
   }
@@ -94,7 +99,10 @@ export class LarkChannelPublisher {
       await this.draining;
       return this.drain(force);
     }
-    this.draining = this.drainPending(force).finally(() => { this.draining = null; });
+    this.draining = this.drainPending(force).finally(() => {
+      this.draining = null;
+      this.scheduleRetry();
+    });
     return this.draining;
   }
 
@@ -117,10 +125,25 @@ export class LarkChannelPublisher {
   private async drainPending(force: boolean): Promise<void> {
     const blockedTargets = new Set<string>();
     while (true) {
-      const batch = firstReplyPerTarget(force ? this.store.listPendingOutboundReplies() : this.store.listDueOutboundReplies(), blockedTargets);
+      const batch = firstReplyPerTarget(this.store.listPendingOutboundReplies(), blockedTargets, force ? null : Date.now())
+        .slice(0, LarkChannelPublisher.MAX_CONCURRENT_DELIVERIES);
       if (batch.length === 0) return;
       await Promise.all(batch.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
     }
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    if (this.stopping) return;
+    const heads = firstReplyPerTarget(this.store.listPendingOutboundReplies(), new Set(), null);
+    if (heads.length === 0) return;
+    const dueAt = Math.min(...heads.map((reply) => Date.parse(reply.nextAttemptAt)));
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.drain();
+    }, Math.max(0, dueAt - Date.now()));
+    this.retryTimer.unref?.();
   }
 
   private async deliverReply(reply: OutboundReply, blockedTargets: Set<string>): Promise<void> {
@@ -131,11 +154,15 @@ export class LarkChannelPublisher {
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
       } else if (reply.kind === "stream_card_create") {
         const decoded = decodeStreamingCardPayload(reply.payload);
-        assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.stream);
+        assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.card, decoded.stream);
         const card = decoded.card;
-        const sent = this.lark.replyStreamingCard
-          ? await this.lark.replyStreamingCard(reply.rootMessageId, card)
-          : { ...(await this.lark.replyCard(reply.rootMessageId, card)), cardId: undefined };
+        let sent: { messageId: string; cardId?: string };
+        if (this.lark.createStreamingCard && this.lark.replyStreamingCardReference) {
+          const cardId = reply.cardIdCheckpoint ?? (await this.lark.createStreamingCard(card)).cardId;
+          if (!reply.cardIdCheckpoint) this.store.checkpointOutboundReplyCard(reply.id, cardId);
+          sent = { ...(await this.lark.replyStreamingCardReference(reply.rootMessageId, cardId, reply.idempotencyKey)), cardId };
+        } else if (this.lark.replyStreamingCard) sent = await this.lark.replyStreamingCard(reply.rootMessageId, card);
+        else sent = await this.lark.replyCard(reply.rootMessageId, card, reply.idempotencyKey);
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sent.cardId);
         this.store.recordBridgeMessage(sent.messageId);
         if (reply.promptId && reply.attemptCount > 0 && decoded.stream && decoded.stream.pageIndex > 0) {
@@ -155,8 +182,8 @@ export class LarkChannelPublisher {
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
       } else {
         const sent = reply.kind === "text"
-          ? await this.lark.replyText(reply.rootMessageId, reply.payload)
-          : await this.lark.replyCard(reply.rootMessageId, JSON.parse(reply.payload) as object);
+          ? await this.lark.replyText(reply.rootMessageId, reply.payload, reply.idempotencyKey)
+          : await this.lark.replyCard(reply.rootMessageId, JSON.parse(reply.payload) as object, reply.idempotencyKey);
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId);
         this.store.recordBridgeMessage(sent.messageId);
         if (reply.kind === "card_reply" && reply.bindingId && !reply.promptId) this.store.updateBinding(reply.bindingId, { statusMessageId: sent.messageId });
@@ -179,19 +206,21 @@ export class LarkChannelPublisher {
   }
 }
 
-function firstReplyPerTarget(replies: OutboundReply[], blockedTargets: Set<string>): OutboundReply[] {
+function firstReplyPerTarget(replies: OutboundReply[], blockedTargets: Set<string>, dueAt: number | null): OutboundReply[] {
   const selected: OutboundReply[] = [];
   const selectedTargets = new Set<string>();
   for (const reply of replies) {
     const target = deliveryTargetKey(reply);
     if (blockedTargets.has(target) || selectedTargets.has(target)) continue;
     selectedTargets.add(target);
+    if (dueAt !== null && Date.parse(reply.nextAttemptAt) > dueAt) continue;
     selected.push(reply);
   }
   return selected;
 }
 
 function deliveryTargetKey(reply: OutboundReply): string {
+  if (reply.cardRole === "answer" && reply.promptId) return `answer:${reply.promptId}`;
   return reply.kind === "stream_content" || reply.kind === "stream_finish"
     ? `stream:${reply.rootMessageId}`
     : `message:${reply.rootMessageId}`;
@@ -213,6 +242,7 @@ class PermanentDeliveryError extends Error {}
 
 function assertAnswerCardCreateTarget(
   store: BindingStorePort, bindingId: string | null, promptId: string | null, rootMessageId: string,
+  card: object,
   stream?: { pageIndex: number; pageStart: number; elementId: string }
 ): void {
   if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card create target is missing binding or prompt identity");
@@ -228,6 +258,19 @@ function assertAnswerCardCreateTarget(
   if (!view.answerCardId || stream.pageIndex !== view.answerPageIndex + 1 || stream.pageStart <= view.answerPageStart || !stream.elementId) {
     throw new PermanentDeliveryError(`Answer continuation target mismatch for prompt ${promptId}`);
   }
+  const expectedElementId = answerElementId(promptId, stream.pageIndex);
+  const cardElementIds = collectElementIds(card);
+  if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) {
+    throw new PermanentDeliveryError(`Answer continuation element mismatch for prompt ${promptId}`);
+  }
+}
+
+function collectElementIds(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(collectElementIds);
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, item]) =>
+    key === "element_id" && typeof item === "string" ? [item] : collectElementIds(item)
+  );
 }
 
 function assertAnswerCardTarget(store: BindingStorePort, bindingId: string | null, promptId: string | null, cardId: string): void {

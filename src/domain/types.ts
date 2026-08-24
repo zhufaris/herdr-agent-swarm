@@ -136,6 +136,7 @@ export interface OutboundReply {
   attemptCount: number;
   error: string | null;
   deliveredMessageId: string | null;
+  cardIdCheckpoint: string | null;
   nextAttemptAt: string;
   createdAt: string;
   updatedAt: string;

@@ -8,11 +8,14 @@ const forwardThread = vi.fn();
 const createCard = vi.fn();
 const streamContent = vi.fn();
 const updateSettings = vi.fn();
+let clientOptions: Record<string, unknown> | undefined;
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
+    constructor(options: Record<string, unknown>) { clientOptions = options; }
     im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage }, thread: { forward: forwardThread } } };
     cardkit = { v1: { card: { create: createCard, settings: updateSettings }, cardElement: { content: streamContent } } };
   },
+  defaultHttpInstance: { request: vi.fn(), get: vi.fn(), delete: vi.fn(), head: vi.fn(), options: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn() },
   WSClient: class { async start() {} close() {} },
   EventDispatcher: class { register() { return this; } }
 }));
@@ -22,6 +25,7 @@ import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../s
 beforeEach(() => {
   createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
   createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset();
+  clientOptions = undefined;
 });
 
 describe("Lark streaming Answer cards", () => {
@@ -36,6 +40,21 @@ describe("Lark streaming Answer cards", () => {
       path: { message_id: "root-1" },
       data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: "card-1" } }), reply_in_thread: true }
     });
+  });
+
+  it("replies with a persisted CardKit reference and stable idempotency key", async () => {
+    replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", requestTimeoutMs: 12_345 });
+    const http = clientOptions?.httpInstance as { get: (url: string, options?: object) => Promise<unknown> };
+
+    await expect(adapter.replyStreamingCardReference("root-1", "card-1", "outbox-1")).resolves.toEqual({ messageId: "answer-1" });
+    expect(replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "root-1" },
+      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: "card-1" } }), reply_in_thread: true, uuid: "outbox-1" }
+    });
+    await http.get("/probe", { headers: { test: "yes" } });
+    const sdk = await import("@larksuiteoapi/node-sdk");
+    expect(sdk.defaultHttpInstance.get).toHaveBeenCalledWith("/probe", { headers: { test: "yes" }, timeout: 12_345 });
   });
 
   it("reports safe CardKit response metadata when creation returns no card id", async () => {
