@@ -1,5 +1,5 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
-import type { RunCardView } from "../domain/run-card-view.js";
+import type { RunCardView, RunProgressEvent } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
@@ -166,10 +166,11 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     : "";
   const answer = structuredAnswer || input.answer;
   const prose = stripNativeTraexStatus(answer);
+  const stepProgress = progressSummary(input.progressEvents);
   const baseContent = prose
     ? truncateLarkMarkdownTail(normalizeLarkPreview(prose), 12_000)
-    : input.phase === "running" && input.progressEvents.some((event) => event.kind === "step")
-      ? `TraeX 正在执行 · ${input.progressEvents.filter((event) => event.kind === "step" && event.state === "done").length}/${input.progressEvents.filter((event) => event.kind === "step").length}`
+    : input.phase === "running" && stepProgress.total > 0
+      ? `TraeX 正在执行 · ${stepProgress.done}/${stepProgress.total}`
     : input.phase === "running" ? "⏳ 已接收请求"
       : input.phase === "queued" ? "⏳ 已接收请求"
         : input.phase === "completed" ? "本次未产生可展示的回答。"
@@ -192,6 +193,17 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     },
     body: { elements }
   };
+}
+
+function progressSummary(events: readonly RunProgressEvent[]): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  for (const event of events) {
+    if (event.kind !== "step") continue;
+    total += 1;
+    if (event.state === "done") done += 1;
+  }
+  return { done, total };
 }
 
 export function renderHelpCard(): object {

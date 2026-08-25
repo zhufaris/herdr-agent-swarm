@@ -67,11 +67,14 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
 
 function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
   const result = [...current];
+  const positions = new Map(result.map((item, index) => [item.key, index]));
   for (const update of updates) {
     const event = { ...update, occurredAt };
-    const existing = result.findIndex((item) => item.key === event.key);
-    if (existing >= 0) result[existing] = event;
-    else result.push(event);
+    const position = positions.get(event.key);
+    if (position === undefined) {
+      positions.set(event.key, result.length);
+      result.push(event);
+    } else result[position] = event;
   }
   return result;
 }

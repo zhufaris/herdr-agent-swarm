@@ -177,6 +177,22 @@ describe("Lark topic sharing", () => {
     });
   });
 
+  it("resolves source and target threads concurrently before forwarding", async () => {
+    const release = new Map<string, () => void>();
+    getMessage.mockImplementation((request: { path: { message_id: string } }) => new Promise((resolve) => {
+      release.set(request.path.message_id, () => resolve({ data: { items: [{ thread_id: `omt-${request.path.message_id}` }] } }));
+    }));
+    forwardThread.mockResolvedValue({ data: { message_id: "om_forwarded" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    const shared = adapter.shareThread("om_root", { messageId: "om_spaces", chatId: "oc_target" });
+    await vi.waitFor(() => expect(getMessage.mock.calls.map(([request]) => request.path.message_id).sort()).toEqual(["om_root", "om_spaces"]));
+    release.get("om_root")!();
+    release.get("om_spaces")!();
+
+    await expect(shared).resolves.toEqual({ messageId: "om_forwarded" });
+  });
+
   it("forwards a persisted thread id without another lookup", async () => {
     getMessage.mockResolvedValue({ data: { items: [{ message_id: "om_spaces", thread_id: "omt_spaces" }] } });
     forwardThread.mockResolvedValue({ data: { message_id: "om_forwarded" } });

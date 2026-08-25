@@ -7,6 +7,7 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
+import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("event-driven card projection", () => {
   it("reduces an event, persists the view, then updates the same card", async () => {
@@ -124,7 +125,7 @@ describe("event-driven card projection", () => {
     stopProjector(); stopPublisher(); store.close(); vi.useRealTimers();
   });
 
-  it("finalizes a full answer card and continues streaming on a persisted continuation card", async () => {
+  it("freezes a bounded answer card and continues on a persisted new card", async () => {
     const created: object[] = [];
     const streamed: Array<{ cardId: string; elementId: string; content: string; sequence: number }> = [];
     const finished: Array<{ cardId: string; sequence: number; summary: string }> = [];
@@ -146,21 +147,26 @@ describe("event-driven card projection", () => {
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     await publisher.drain();
 
-    const answer = `${"a".repeat(20_000)}\n${"b".repeat(12_000)}`;
+    const answer = `${"a".repeat(2_000)}\n${"b".repeat(2_000)}`;
     await bus.publish({ eventId: "done", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
     await vi.waitFor(() => expect(finished).toHaveLength(2));
 
+    const fullContent = `⏳ 已接收请求\n\n${answer}`;
+    const firstPage = renderAnswerStreamPage(fullContent, 0, ANSWER_STREAM_PAGE_LIMIT);
+    const secondPage = renderAnswerStreamPage(fullContent, firstPage.nextPageStart!, ANSWER_STREAM_PAGE_LIMIT);
+    expect(answer.length).toBeLessThan(28_000);
+    expect(firstPage.nextPageStart).not.toBeNull();
     expect(created).toHaveLength(2);
     expect(streamed.map(({ cardId, elementId, content }) => ({ cardId, elementId, content }))).toEqual([
-      { cardId: "cardkit-1", elementId: "answer_content_p1_0", content: `⏳ 已接收请求\n\n${"a".repeat(20_000)}\n` },
-      { cardId: "cardkit-2", elementId: "answer_content_p1_1", content: "b".repeat(12_000) }
+      { cardId: "cardkit-1", elementId: "answer_content_p1_0", content: firstPage.page },
+      { cardId: "cardkit-2", elementId: "answer_content_p1_1", content: secondPage.page }
     ]);
     expect(finished.map(({ cardId, summary }) => ({ cardId, summary }))).toEqual([
       { cardId: "cardkit-1", summary: "回答将在第 2 页继续" }, { cardId: "cardkit-2", summary: "Completed" }
     ]);
     expect(JSON.stringify(created[1])).toContain("TraeX 继续回复 · 第 2 页");
     expect(JSON.stringify(created[1])).toContain('\"streaming_mode\":true');
-    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: 20_010, answerElementId: "answer_content_p1_1" });
+    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: firstPage.nextPageStart, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();
   });

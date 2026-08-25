@@ -93,8 +93,8 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     const pane = observation.pane;
     if (pane) {
       const snapshot = this.snapshots.get(pane.workspaceId);
-      if (snapshot) this.snapshots.set(pane.workspaceId, { ...snapshot, panes: snapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) });
-      if (this.allSnapshot) this.allSnapshot = { ...this.allSnapshot, panes: this.allSnapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) };
+      if (snapshot) replaceCachedPane(snapshot, pane);
+      if (this.allSnapshot) replaceCachedPane(this.allSnapshot, pane);
     }
     return observation;
   }
@@ -164,4 +164,9 @@ export class WorkspaceSnapshotCache implements HerdrPort {
 
 function clonePanes(panes: readonly HerdrPane[]): HerdrPane[] {
   return panes.map((pane) => ({ ...pane, ...(pane.agentSession ? { agentSession: { ...pane.agentSession } } : {}), foregroundExecutables: [...pane.foregroundExecutables] }));
+}
+
+function replaceCachedPane(snapshot: Snapshot, pane: HerdrPane): void {
+  const index = snapshot.panes.findIndex((candidate) => candidate.paneId === pane.paneId);
+  if (index >= 0) snapshot.panes[index] = { ...pane };
 }

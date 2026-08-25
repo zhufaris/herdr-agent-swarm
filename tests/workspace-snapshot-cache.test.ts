@@ -97,8 +97,10 @@ describe("workspace snapshot cache", () => {
     const observeRuntime = vi.fn(async () => observation);
     const cache = new WorkspaceSnapshotCache(adapter({ listPanes, observeRuntime }));
 
-    expect((await cache.listPanes("w1"))[0]?.agentState).toBe("unknown");
+    const initial = await cache.listPanes("w1");
+    expect(initial[0]?.agentState).toBe("unknown");
     expect(await cache.observeRuntime("w1:p1")).toEqual(observation);
+    expect(initial[0]?.agentState).toBe("unknown");
     expect((await cache.listPanes("w1"))[0]).toEqual(observed);
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(listPanes).toHaveBeenCalledOnce();

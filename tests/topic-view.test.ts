@@ -60,6 +60,22 @@ describe("topic view reducer", () => {
     expect(view.answer).toBe(`${"0".repeat(100)}${"1".repeat(300)}${"2".repeat(300)}${"3".repeat(300)}${"4".repeat(300)}${"5".repeat(300)}${"6".repeat(300)}${"7".repeat(300)}${"8".repeat(300)}`);
   });
 
+  it("updates repeated progress keys in place within one incremental snapshot", () => {
+    let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    view = reduceTopicView(view, event("TurnOutputObserved", {
+      promptId: "p1", answerSnapshot: "", progressEvents: [
+        { key: "read:config", kind: "read", label: "config", state: "active" },
+        { key: "test", kind: "test", label: "tests", state: "active" },
+        { key: "read:config", kind: "read", label: "config", state: "done" }
+      ]
+    }));
+
+    expect(view.recentProgress).toEqual([
+      expect.objectContaining({ key: "read:config", state: "done" }),
+      expect.objectContaining({ key: "test", state: "active" })
+    ]);
+  });
+
   it("resets the rolling window when a new request starts", () => {
     let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     view = reduceTopicView(view, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "old", progressEvents: [{ key: "old", kind: "edit", label: "old", state: "done" }] }));

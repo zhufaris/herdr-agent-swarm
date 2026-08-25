@@ -97,6 +97,26 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("keeps a pane unclaimed when multiple projects share its workspace and directory", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const store = new SqliteBindingStore(":memory:");
+    const discoverPane = vi.fn();
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [
+        { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/repo" },
+        { id: "two", displayName: "Two", description: "Two", workspaceId: "w1", cwd: "/repo" }
+      ],
+      store, herdr: { async listPanes() { return [pane]; } } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
+      channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+
+    expect(discoverPane).not.toHaveBeenCalled();
+    store.close();
+  });
+
   it("scans only requested workspaces for event-driven reconciliation", async () => {
     const listPanes = vi.fn(async () => []);
     const store = new SqliteBindingStore(":memory:");

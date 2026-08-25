@@ -24,10 +24,15 @@ export function renderProgressTimeline(events: RunProgressEvent[], phase: Timeli
 }
 
 function timelineTitle(events: RunProgressEvent[], phase: TimelinePhase): string {
-  const steps = events.filter((event) => event.kind === "step");
-  const done = steps.filter((event) => event.state === "done").length;
+  let stepCount = 0;
+  let doneStepCount = 0;
+  for (const event of events) {
+    if (event.kind !== "step") continue;
+    stepCount += 1;
+    if (event.state === "done") doneStepCount += 1;
+  }
   if (phase === "blocked" || phase === "failed" || phase === "error") return `过程轨迹 · 需要处理 · ${events.length} 项`;
-  if (phase === "running") return steps.length ? `过程轨迹 · 进行中 · ${done}/${steps.length}` : `过程轨迹 · 进行中 · ${events.length} 项`;
+  if (phase === "running") return stepCount ? `过程轨迹 · 进行中 · ${doneStepCount}/${stepCount}` : `过程轨迹 · 进行中 · ${events.length} 项`;
   if (phase === "completed" || phase === "done") return `过程轨迹 · 已完成 · ${events.length} 项`;
   return `过程轨迹 · ${events.length} 项`;
 }

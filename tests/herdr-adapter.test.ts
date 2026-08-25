@@ -84,6 +84,24 @@ describe("Herdr adapter", () => {
     expect(calls).toEqual([["api", "snapshot"], ["pane", "list", "--workspace", "w1"], ["pane", "process-info", "--pane", "w1:p1"]]);
   });
 
+  it("bounds concurrent process inspection in the snapshot compatibility fallback", async () => {
+    let active = 0;
+    let peakActive = 0;
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] === "api") return json({ incompatible: true });
+      if (args[1] === "list") return json({ panes: Array.from({ length: 7 }, (_, index) => ({ pane_id: `w1:p${index}`, workspace_id: "w1", agent_status: "idle" })) });
+      active += 1;
+      peakActive = Math.max(peakActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      active -= 1;
+      return json({ process_info: { foreground_processes: [{ name: args.at(-1) }] } });
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1"))
+      .resolves.toMatchObject(Array.from({ length: 7 }, (_, index) => ({ paneId: `w1:p${index}`, foregroundExecutables: [`w1:p${index}`] })));
+    expect(peakActive).toBe(4);
+  });
+
   it("waits for composer evidence without restarting an existing TraeX process", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {

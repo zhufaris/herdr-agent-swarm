@@ -140,10 +140,10 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   async shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }> {
-    const threadId = topicOrRootMessageId.startsWith("omt_")
-      ? topicOrRootMessageId
-      : await this.resolveThreadId(topicOrRootMessageId);
-    const targetThreadId = await this.resolveOptionalThreadId(target.messageId);
+    const [threadId, targetThreadId] = await Promise.all([
+      topicOrRootMessageId.startsWith("omt_") ? Promise.resolve(topicOrRootMessageId) : this.resolveThreadId(topicOrRootMessageId),
+      this.resolveOptionalThreadId(target.messageId)
+    ]);
     if (targetThreadId === threadId) return this.replyText(target.messageId, "当前已在该项目话题中。");
     const response = await this.client.im.v1.thread.forward({
       path: { thread_id: threadId },

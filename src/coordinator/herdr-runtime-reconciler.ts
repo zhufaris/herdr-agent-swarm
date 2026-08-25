@@ -114,6 +114,13 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
     const panesByWorkspace = new Map<string, HerdrPane[]>();
     const configuredWorkspaceIds = new Set(this.options.projects.map((project) => project.workspaceId));
+    const projectsByWorkspaceAndCwd = new Map<string, ProjectConfig[]>();
+    for (const project of this.options.projects) {
+      const key = workspaceCwdKey(project.workspaceId, project.cwd);
+      const projects = projectsByWorkspaceAndCwd.get(key) ?? [];
+      projects.push(project);
+      projectsByWorkspaceAndCwd.set(key, projects);
+    }
     const workspaceIds = requestedWorkspaceIds
       ? [...requestedWorkspaceIds].filter((workspaceId) => configuredWorkspaceIds.has(workspaceId))
       : [...configuredWorkspaceIds];
@@ -129,6 +136,8 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       }
     } else await this.loadWorkspacePanes(workspaceIds, panesByWorkspace);
 
+    const paneIdsByWorkspace = new Map<string, Set<string>>();
+    for (const [workspaceId, workspacePanes] of panesByWorkspace) paneIdsByWorkspace.set(workspaceId, new Set(workspacePanes.map((pane) => pane.paneId)));
     const allActiveBindings = this.options.store.listBindingsByState("active");
     const activeBindings = requestedWorkspaceIds
       ? allActiveBindings.filter((binding) => requestedWorkspaceIds.has(binding.workspaceId))
@@ -143,8 +152,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", { reason: `Herdr workspace ${binding.workspaceId} remained unavailable` });
         continue;
       }
-      const paneIds = new Set(workspacePanes.map((pane) => pane.paneId));
-      if (binding.paneId && !paneIds.has(binding.paneId)) await this.orphanMissingPane(binding);
+      if (binding.paneId && !paneIdsByWorkspace.get(binding.workspaceId)!.has(binding.paneId)) await this.orphanMissingPane(binding);
     }
 
     const nextSkippedPaneReasons = requestedWorkspaceIds ? new Map(this.skippedPaneReasons) : new Map<string, string>();
@@ -170,7 +178,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       }
       if (!pane.foregroundExecutables.includes("traex")) continue;
       if (!existing) {
-        const projects = this.options.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
+        const projects = projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? [];
         if (projects.length !== 1) {
           const reason = projects.length === 0 ? "unregistered" : "ambiguous";
           const signature = `${reason}:${projects.map((project) => project.id).sort().join(",")}`;
@@ -195,7 +203,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         continue;
       }
       if (!existing.projectId) {
-        const projects = this.options.projects.filter((project) => project.workspaceId === pane.workspaceId && project.cwd === pane.cwd);
+        const projects = projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? [];
         if (projects.length === 1) existing = this.options.store.updateBinding(existing.id, { projectId: projects[0]!.id });
       }
       if (existing.lifecycle === "provisioning") continue;
@@ -299,6 +307,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
   }
+}
+
+function workspaceCwdKey(workspaceId: string, cwd: string | null): string {
+  return `${workspaceId}\u0000${cwd ?? ""}`;
 }
 
 async function forEachConcurrent<T>(items: readonly T[], limit: number, operation: (item: T) => Promise<void>): Promise<void> {

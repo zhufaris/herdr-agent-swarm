@@ -1,4 +1,10 @@
-export const ANSWER_STREAM_PAGE_LIMIT = 28_000;
+/**
+ * A Lark streaming element is visually rendered as a whole-card refresh. Keep
+ * the mutable portion intentionally short, then freeze it and continue in a
+ * new card. This makes completed pages stable while preserving the durable
+ * continuation/recovery protocol.
+ */
+export const ANSWER_STREAM_PAGE_LIMIT = 3_500;
 
 const FENCE = /^ {0,3}(`{3,})([A-Za-z0-9_+.-]{0,32})\s*$/;
 

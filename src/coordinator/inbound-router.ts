@@ -51,8 +51,13 @@ export class InboundRouter implements InboundRouterPort {
   private inboundDrain: Promise<void> | null = null;
   private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
+  private readonly projectsById: Map<string, BridgeConfig["projects"][number]>;
+  private readonly uniqueProjectByWorkspace: Map<string, BridgeConfig["projects"][number] | null>;
 
-  constructor(private readonly options: InboundRouterOptions) {}
+  constructor(private readonly options: InboundRouterOptions) {
+    this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
+    this.uniqueProjectByWorkspace = uniqueProjectsByWorkspace(options.config.projects);
+  }
 
   async start(): Promise<void> {
     const { config, store, herdr, lark, logger, promptRun, reconciler, operations, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
@@ -110,8 +115,8 @@ export class InboundRouter implements InboundRouterPort {
     if (deadLetter) return this.options.operations.decideDeadLetter(action, deadLetter.replyId, deadLetter.action);
     const paneClaim = parsePaneClaimAction(action.value);
     if (paneClaim) {
-      const project = this.options.config.projects.find((candidate) => candidate.id === paneClaim.projectId && candidate.workspaceId === paneClaim.workspaceId);
-      if (!project) return;
+      const project = this.projectsById.get(paneClaim.projectId);
+      if (!project || project.workspaceId !== paneClaim.workspaceId) return;
       const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
       const attached = await this.options.provisioning.attach(synthetic, projectSpaceName(project), paneClaim.paneId);
       this.options.logger.info({ event: "space-pane-claim-decided", projectId: project.id, workspaceId: project.workspaceId, paneId: paneClaim.paneId, outcome: attached ? "attached" : "rejected" }, "processed Space pane claim");
@@ -179,13 +184,21 @@ export class InboundRouter implements InboundRouterPort {
     if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
   }
 
-  private spaceNameFor(binding: Binding): string { const matches = binding.projectId ? this.options.config.projects.filter((project) => project.id === binding.projectId) : this.options.config.projects.filter((project) => project.workspaceId === binding.workspaceId); return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved"; }
+  private spaceNameFor(binding: Binding): string {
+    const project = binding.projectId ? this.projectsById.get(binding.projectId) : this.uniqueProjectByWorkspace.get(binding.workspaceId);
+    return project ? projectSpaceName(project) : "legacy/unresolved";
+  }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }
   private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card); }
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, origin, payload)); }
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> {
+  const result = new Map<string, BridgeConfig["projects"][number] | null>();
+  for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project);
+  return result;
+}
 function requestTitle(body: string): string { const normalized = body.replace(/\s+/g, " " ).trim(); return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request"; }
 function parseOpenThreadAction(value: unknown): { bindingId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return item.action === "open_project_thread" && typeof item.bindingId === "string" ? { bindingId: item.bindingId } : null; }
 function parseModelSelectionAction(value: unknown, option?: string | null): { bindingId: string; model: string } | null { if (!value || typeof value !== "object" || !option) return null; const item = value as Record<string, unknown>; return item.action === "select_model" && typeof item.bindingId === "string" && /^[a-z0-9][a-z0-9._:+/-]{0,127}$/i.test(option) ? { bindingId: item.bindingId, model: option } : null; }

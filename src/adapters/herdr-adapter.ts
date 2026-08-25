@@ -28,6 +28,7 @@ const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
 const nativeReadSchema = z.object({ read: z.object({ text: z.string() }).passthrough() }).passthrough();
+const PROCESS_INFO_CONCURRENCY = 4;
 
 interface HerdrNativeRequestClient {
   request(method: string, params: object, timeoutMs: number): Promise<unknown>;
@@ -55,7 +56,7 @@ export class HerdrCliAdapter implements HerdrPort {
     } catch {
       const result = await this.json(["pane", "list", "--workspace", workspaceId]);
       const panes = z.object({ panes: z.array(paneSchema) }).parse(result).panes;
-      return Promise.all(panes.map((pane) => this.enrichPane(pane)));
+      return mapWithConcurrency(panes, PROCESS_INFO_CONCURRENCY, (pane) => this.enrichPane(pane));
     }
   }
 
@@ -472,6 +473,20 @@ export class HerdrCliAdapter implements HerdrPort {
     const envelope = envelopeSchema.parse(JSON.parse(stdout));
     return envelope.result;
   }
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, operation: (item: T) => Promise<R>): Promise<R[]> {
+  const result = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      result[index] = await operation(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return result;
 }
 
 function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
