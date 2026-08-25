@@ -100,6 +100,7 @@ describe("active-turn steering", () => {
     const hold = new Promise<void>((resolve) => { release = resolve; });
     const turns: string[] = [];
     const steering: string[] = [];
+    const escapes: string[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
@@ -117,6 +118,7 @@ describe("active-turn steering", () => {
         return "done";
       },
       async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },
+      async sendEscape(paneId) { escapes.push(paneId); },
       async readOutput() { return output; }, async renamePane() {}
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
@@ -131,7 +133,11 @@ describe("active-turn steering", () => {
     await send(2, "later turn");
     const pendingBeforeStop = store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id);
     await send(3, "/stop");
-    expect(steering).toEqual([]); expect(turns).toEqual(["parent"]);
+    await send(4, "/steer capacity queue status");
+    await vi.waitFor(() => expect(steering).toEqual(["capacity queue status"]));
+    await send(5, "/stop");
+    await vi.waitFor(() => expect(steering).toEqual(["capacity queue status"]));
+    expect(escapes).toEqual(["w1:p1", "w1:p1"]); expect(turns).toEqual(["parent"]);
     expect(store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id)).toBe(pendingBeforeStop);
     expect(store.listRunCards(store.findBindingByPane("w1:p1")!.id).some((view) => view.requestText === "/stop")).toBe(false);
     release();

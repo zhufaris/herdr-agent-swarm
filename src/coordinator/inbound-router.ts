@@ -173,7 +173,7 @@ export class InboundRouter implements InboundRouterPort {
 
   private async stopActiveTurn(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。"); return false; }
-    const activeRun = this.options.promptRun.activeTurn(binding.id); if (!activeRun || activeRun.state !== "working") { await this.reject(message, "当前没有确认处于 working 的 TraeX 任务。`/stop` 未进入任务队列。"); return false; }
+    const activeRun = this.options.promptRun.activeTurn(binding.id); if (!activeRun) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/stop` 未进入任务队列。"); return false; }
     if (!this.options.herdr.sendEscape) { await this.reject(message, "当前 Herdr 适配器不支持 Esc 停止。"); return false; }
     try {
       await this.options.herdr.sendEscape(activeRun.paneId);
@@ -189,7 +189,7 @@ export class InboundRouter implements InboundRouterPort {
   private async steerActiveTurn(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean> {
     if (!binding || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
     const activeRun = this.options.promptRun.activeTurn(binding.id);
-    if (!activeRun || activeRun.state !== "working") { await this.reject(message, "当前没有确认处于 working 的 TraeX 任务。`/steer` 未进入任务队列。"); return false; }
+    if (!activeRun) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/steer` 未进入任务队列。"); return false; }
     await this.enqueue(binding, message, text, activeRun.promptId);
     return true;
   }

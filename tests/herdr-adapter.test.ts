@@ -675,10 +675,10 @@ describe("Herdr adapter", () => {
     await expect(turn).rejects.toThrow("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed");
   });
 
-  it("steers only while structured pane state is working", async () => {
+  it("steers while structured pane state is working or blocked", async () => {
     const calls: string[][] = [];
     let state: "working" | "blocked" = "working";
-    const outputs = ["before", "before\n❯ change course"];
+    const outputs = ["before", "before\n❯ change course", "before\n❯ change course", "before\n❯ change course while blocked"];
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
@@ -696,8 +696,8 @@ describe("Herdr adapter", () => {
 
     state = "blocked";
     calls.length = 0;
-    await expect(adapter.steerPrompt("w1:p1", "do not inject")).resolves.toBe("not_working");
-    expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
+    await expect(adapter.steerPrompt("w1:p1", "change course while blocked")).resolves.toBe("injected");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "change course while blocked"]);
   });
 
   it("sends Esc directly without requiring named-agent working state", async () => {
