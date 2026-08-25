@@ -168,13 +168,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         const result = this.options.herdr.steerPrompt ? await this.options.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
         if (result === "not_working") {
-          if (prompt.body === "/stop") {
-            const message = "TraeX 已不再处于 working 状态，`/stop` 未加入后续任务队列。";
-            this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
-            await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
-            this.options.logger.warn({ event: "stop-steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "not_working" }, "stop steering target was no longer working");
-            continue;
-          }
           this.options.store.requeueSteeringAsTurn(prompt.id);
           this.options.logger.warn({ event: "steering-fell-back-to-turn", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "requeued", reason: "not_working" }, "steering target was no longer working");
           await this.refreshQueuePositions(bindingId);

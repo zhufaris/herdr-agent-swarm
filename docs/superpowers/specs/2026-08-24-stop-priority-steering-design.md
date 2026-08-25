@@ -1,5 +1,10 @@
 # Stop Priority Steering Design
 
+> **Superseded by `2026-08-25-stop-esc-and-explicit-steer-design.md`.** `/stop`
+> is no longer injected as a steering prompt; it is a local Herdr `Esc` control
+> that creates no `prompt_jobs` row. This document is retained for history only
+> and is not the current behavioral authority.
+
 ## Scope and intent
 
 Lark topic message `/stop` asks the currently working TraeX turn to stop by
