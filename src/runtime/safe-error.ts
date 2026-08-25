@@ -1,6 +1,6 @@
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
-export interface SafeLogError {
+interface SafeLogError {
   name: string;
   message: string;
   code?: string | number;

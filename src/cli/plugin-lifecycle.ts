@@ -201,13 +201,6 @@ function positiveMilliseconds(value: string | undefined, fallback: number): numb
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-async function probe(host: string, port: number, path: string, expectedStatus: string): Promise<boolean> {
-  try {
-    const result = await getJson(host, port, path);
-    return typeof result === "object" && result !== null && (result as { status?: string }).status === expectedStatus;
-  } catch { return false; }
-}
-
 async function probeStatus(host: string, port: number, path: string): Promise<{ status: string; detail: string }> {
   try {
     const result = await getJson(host, port, path, true);

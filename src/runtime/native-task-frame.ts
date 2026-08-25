@@ -1,7 +1,7 @@
 import type { ProgressEventState } from "../domain/run-card-view.js";
 
-export interface NativeTaskStep { key: string; label: string; state: ProgressEventState }
-export interface NativeTaskFrame { start: number; end: number; steps: NativeTaskStep[] }
+interface NativeTaskStep { key: string; label: string; state: ProgressEventState }
+interface NativeTaskFrame { start: number; end: number; steps: NativeTaskStep[] }
 
 const TASK_COUNT = /^\s*\d+\s+tasks?\s*\(.*\)\s*$/i;
 const TASK_ROW = /^\s*([✔✓■◻□✕✖✘×])\s+(.+?)\s*$/;

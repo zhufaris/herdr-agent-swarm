@@ -4,8 +4,8 @@ import { stripTerminalControl } from "./output.js";
 import { findNativeTaskFrame } from "./native-task-frame.js";
 import { normalizeLarkPreview } from "./lark-markdown.js";
 
-export interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
-export interface ParsedTraexOutput {
+interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
+interface ParsedTraexOutput {
   answerSnapshot: string;
   previousAnswerSnapshot: string;
   answerUpdate: "append" | "replace" | "replace-status";
@@ -19,7 +19,7 @@ const MAX_TERMINAL_DELTA_CHARS = 12_000;
 const MIN_RELIABLE_TERMINAL_OVERLAP = 64;
 const LIVE_WINDOW_NOTICE = "较早的实时输出已省略，以下为最新状态。";
 
-export interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace-all" }
+interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace-all" }
 
 /** True when TraeX is visibly waiting at its composer despite missing structured agent state. */
 export function isTraexComposerReady(output: string): boolean {

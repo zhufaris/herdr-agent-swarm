@@ -11,7 +11,7 @@ const projectSchema = z.object({
   workspaceId: z.string().trim().min(1),
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path")
 });
-export const projectRegistrySchema = z.object({
+const projectRegistrySchema = z.object({
   defaultProjectId: z.string().min(1),
   projects: z.array(projectSchema).min(1)
 }).superRefine((registry, context) => {

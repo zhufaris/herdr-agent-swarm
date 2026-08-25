@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 import { safeLogError } from "./safe-error.js";
 
 export const MAX_HERDR_EVENT_BYTES = 8_192;
-export interface HerdrEventHint { event: string; workspaceIds: string[]; paneIds: string[]; receivedAt: string }
+interface HerdrEventHint { event: string; workspaceIds: string[]; paneIds: string[]; receivedAt: string }
 
 export class HerdrEventInbox {
   private socket: Socket | null = null;
@@ -81,7 +81,7 @@ export class HerdrEventInbox {
   }
 }
 
-export function parseHerdrEventHint(value: unknown): HerdrEventHint {
+function parseHerdrEventHint(value: unknown): HerdrEventHint {
   if (!value || typeof value !== "object") throw new Error("event hint must be an object");
   const record = value as Record<string, unknown>;
   if (typeof record.event !== "string" || !record.event || record.event.length > 128) throw new Error("invalid event name");

@@ -4,7 +4,7 @@ const MAX_CARD_SERIALIZED_LENGTH = 12_000;
 const MAX_PANE_ROWS_PER_PAGE = 16;
 const MAX_FIELD_LENGTH = 160;
 
-export interface SpaceDirectoryPane {
+interface SpaceDirectoryPane {
   paneId: string;
   name: string;
   agentState: AgentState;

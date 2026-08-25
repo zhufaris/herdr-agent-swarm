@@ -2,7 +2,7 @@ export const ANSWER_STREAM_PAGE_LIMIT = 28_000;
 
 const FENCE = /^ {0,3}(`{3,})([A-Za-z0-9_+.-]{0,32})\s*$/;
 
-export interface RenderedAnswerStreamPage {
+interface RenderedAnswerStreamPage {
   page: string;
   nextPageStart: number | null;
 }

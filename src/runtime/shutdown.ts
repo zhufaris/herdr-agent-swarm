@@ -1,6 +1,6 @@
 import { safeLogError } from "./safe-error.js";
 
-export interface ShutdownLogger {
+interface ShutdownLogger {
   info(value: object, message: string): void;
   error(value: object, message: string): void;
 }

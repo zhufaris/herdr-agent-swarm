@@ -29,10 +29,6 @@ export type SessionTransition =
   | { type: "pane_reattached"; replacement: boolean }
   | { type: "turn_completed" };
 
-export function initialSessionState(): PaneThreadSessionState {
-  return { lifecycle: "provisioning", attachment: "unattached", runtime: "unknown", generation: 1, provisioningCheckpoint: "selected", degradationCount: 0, hasCompletedTurn: false };
-}
-
 export function transitionSession(state: PaneThreadSessionState, transition: SessionTransition): PaneThreadSessionState {
   switch (transition.type) {
     case "pane_created":
