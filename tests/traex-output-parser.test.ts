@@ -183,4 +183,19 @@ describe("TraeX output parser", () => {
       ]
     });
   });
+
+  it("joins terminal-wrapped native task labels into one progress line", () => {
+    const wrapped = [
+      "◆ Run bridge checks (1m • 2K tokens)",
+      "  2 tasks (0 done, 1 in progress, 1 open)",
+      "  ■ Run npm test -- --runInBand for the lark card renderer and",
+      "    verify /data00/home/feiyu.zhu/work/herdr-lark-bridge output",
+      "  ◻ 发布修复"
+    ].join("\n");
+
+    expect(parseTraexOutput("", wrapped, "/repo").progressEvents).toMatchObject([
+      { label: "Run npm test -- --runInBand for the lark card renderer and verify /data00/home/feiyu.zhu/work/herdr-lark-bridge output", state: "active" },
+      { label: "发布修复", state: "pending" }
+    ]);
+  });
 });

@@ -96,6 +96,22 @@ describe("run card", () => {
     expect(serialized).toContain("最近动态");
   });
 
+  it("renders progress labels as one bounded line", () => {
+    const wrappedLabel = `Run tool with a narrow terminal\n  then inspect the resulting card ${"x".repeat(240)}`;
+    const card = renderRunCard({
+      ...initialTopicView("b1"), phase: "running", recentProgress: [
+        { key: "tool:wrapped", kind: "test", label: wrappedLabel, state: "active", occurredAt: "now" }
+      ]
+    });
+    const progress = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**执行进度**"))?.content ?? "";
+
+    expect(progress).toContain("🧪 Run tool with a narrow terminal then inspect the resulting card");
+    expect(progress).not.toContain("terminal\n");
+    expect(progress).toContain("…");
+    expect(progress.length).toBeLessThanOrEqual(220);
+  });
+
   it("shows the three newest tool activities and up to twenty latest answer lines on the project card", () => {
     const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
     const card = renderProjectEntryCard({

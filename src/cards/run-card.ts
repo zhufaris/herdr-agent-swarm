@@ -316,12 +316,17 @@ function latestLines(source: string, limit: number): string | null {
   return tail || null;
 }
 function projectProgressLine(event: RunCardView["progressEvents"][number]): string {
-  return event.kind === "step" ? progressLine(event) : `🛠️ ${event.label}`;
+  return event.kind === "step" ? progressLine(event) : `🛠️ ${progressLabel(event.label)}`;
 }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
-  if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${event.label}`;
-  if (event.state === "failed") return `❌ ${event.label}`;
-  if (event.kind === "test" && event.state === "done") return `✅ ${event.label}`;
+  const label = progressLabel(event.label);
+  if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${label}`;
+  if (event.state === "failed") return `❌ ${label}`;
+  if (event.kind === "test" && event.state === "done") return `✅ ${label}`;
   const icon = { analyze: "🧠", search: "🔍", read: "📖", edit: "✏️", test: "🧪" }[event.kind];
-  return `${icon} ${event.label}`;
+  return `${icon} ${label}`;
+}
+function progressLabel(label: string): string {
+  const normalized = label.replace(/\s+/g, " " ).trim();
+  return normalized.length > 200 ? `${normalized.slice(0, 199).trimEnd()}…` : normalized;
 }
