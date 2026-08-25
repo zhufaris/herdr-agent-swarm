@@ -144,7 +144,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
     schema: "2.0",
-    config: { update_multi: true, summary: { content: view.label } },
+    config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
     header: {
       title: { tag: "plain_text", content: agentTitle(input.title) },
       subtitle: { tag: "plain_text", content: "HERDR PROJECT" },
@@ -280,7 +280,7 @@ function agentPaneTitle(spaceName: string, paneId: string | null): string {
   return truncate(`TraeX · ${spaceName} / ${paneId ?? "provisioning"}`, 96);
 }
 function agentTitle(title: string): string {
-  return truncate(`TraeX · ${title.replace(/\s+/g, " " ).trim() || "未命名任务"}`, 96);
+  return boundedTitle(title);
 }
 function boundedTitle(title: string): string { return truncate(title.replace(/\s+/g, " " ).trim() || "未命名任务", 64); }
 function requestStatusLabel(phase: RunCardView["phase"]): string {

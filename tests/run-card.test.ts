@@ -84,7 +84,10 @@ describe("run card", () => {
     });
     const serialized = JSON.stringify(card);
 
-    expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage / Fix login" } } });
+    expect(card).toMatchObject({
+      config: { summary: { content: "datasage / Fix login" } },
+      header: { title: { content: "datasage / Fix login" } }
+    });
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).toContain("wD:p9");
     expect(serialized).toContain("TraeX 正在处理");
