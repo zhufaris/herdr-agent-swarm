@@ -4,7 +4,7 @@
  * new card. This makes completed pages stable while preserving the durable
  * continuation/recovery protocol.
  */
-export const ANSWER_STREAM_PAGE_LIMIT = 3_500;
+export const ANSWER_STREAM_PAGE_LIMIT = 9_000;
 
 const FENCE = /^ {0,3}(`{3,})([A-Za-z0-9_+.-]{0,32})\s*$/;
 

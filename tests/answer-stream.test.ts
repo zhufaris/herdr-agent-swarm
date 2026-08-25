@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { renderAnswerStreamPage, splitAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage, splitAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("Answer stream pagination", () => {
+  it("uses a 9,000-character default page limit", () => {
+    expect(ANSWER_STREAM_PAGE_LIMIT).toBe(9_000);
+  });
+
   it("keeps short content on one card", () => {
     expect(splitAnswerStreamPage("Working\nDone", 28_000)).toEqual({ page: "Working\nDone", remainder: "" });
   });

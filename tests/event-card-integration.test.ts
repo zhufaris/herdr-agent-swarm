@@ -147,7 +147,8 @@ describe("event-driven card projection", () => {
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
     await publisher.drain();
 
-    const answer = `${"a".repeat(2_000)}\n${"b".repeat(2_000)}`;
+    const pageHalf = Math.ceil(ANSWER_STREAM_PAGE_LIMIT / 2);
+    const answer = `${"a".repeat(pageHalf)}\n${"b".repeat(pageHalf)}`;
     await bus.publish({ eventId: "done", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
     await vi.waitFor(() => expect(finished).toHaveLength(2));
 
