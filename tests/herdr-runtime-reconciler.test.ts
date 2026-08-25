@@ -158,6 +158,45 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("does not regress Agent state from an older native state sequence", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle" });
+    let pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const,
+      agentKind: "codex", outputRevision: 7, stateChangeSeq: 10, foregroundExecutables: ["traex"]
+    };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return "working"; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+    pane = { ...pane, agentState: "idle" as const, outputRevision: 8, stateChangeSeq: 9 };
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")?.lastAgentState).toBe("working");
+    store.close();
+  });
+
+  it("resets the Agent state sequence fence when the terminal identity changes", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "codex-hook", agentSessionAgent: "codex", agentSessionKind: "id", agentSessionValue: "conversation-1",
+      state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+    let pane = {
+      paneId: "w1:p1", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const,
+      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 10, foregroundExecutables: ["traex"]
+    };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+    pane = { ...pane, terminalId: "new-terminal", agentState: "idle" as const, stateChangeSeq: 1, outputRevision: 1 };
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "new-terminal", lastAgentState: "idle", attachment: "attached" });
+    store.close();
+  });
+
   it("retries the same output revision after a transient terminal read failure", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

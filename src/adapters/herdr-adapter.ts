@@ -7,13 +7,14 @@ import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-out
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
-  pane_id: z.string(), tab_id: z.string().nullish(), workspace_id: z.string(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
+  pane_id: z.string(), tab_id: z.string().nullish(), workspace_id: z.string(), cwd: z.string().nullish(), foreground_cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
   agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).optional()
 }).passthrough();
 const tabSchema = z.object({ tab_id: z.string(), label: z.string() }).passthrough();
 const processSchema = z.object({
   foreground_processes: z.array(z.object({ name: z.string().optional(), argv: z.array(z.string()).optional() }).passthrough()).default([])
 }).passthrough();
+const nativeProcessInfoSchema = z.object({ process_info: processSchema }).passthrough();
 const agentSessionSchema = z.object({
   source: z.string(), agent: z.string(), kind: z.enum(["id", "path"]), value: z.string()
 });
@@ -26,13 +27,20 @@ const snapshotPaneSchema = paneSchema.extend({
 const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
+const nativeReadSchema = z.object({ read: z.object({ text: z.string() }).passthrough() }).passthrough();
+
+interface HerdrNativeRequestClient {
+  request(method: string, params: object, timeoutMs: number): Promise<unknown>;
+  waitForPaneEvent?(paneId: string, timeoutMs: number): Promise<boolean>;
+}
 
 export class HerdrCliAdapter implements HerdrPort {
   constructor(
     private readonly runner: CommandRunner,
     private readonly executable: string,
     private readonly commandTimeoutMs: number,
-    private readonly traexPermissionMode = "auto"
+    private readonly traexPermissionMode = "auto",
+    private readonly native?: HerdrNativeRequestClient
   ) {}
 
   async assertWorkspace(workspaceId: string): Promise<void> {
@@ -52,7 +60,12 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async listAllPanes(): Promise<HerdrPane[]> {
-    const result = snapshotSchema.parse(await this.json(["api", "snapshot"])).snapshot;
+    let parsed: z.infer<typeof snapshotSchema>;
+    if (this.native) {
+      try { parsed = snapshotSchema.parse(await this.native.request("session.snapshot", {}, this.commandTimeoutMs)); }
+      catch { parsed = snapshotSchema.parse(await this.json(["api", "snapshot"])); }
+    } else parsed = snapshotSchema.parse(await this.json(["api", "snapshot"]));
+    const result = parsed.snapshot;
     const agents = new Map(result.agents.map((agent) => [agent.pane_id, agent]));
     return result.panes.map((pane) => this.fromSnapshot(pane, agents.get(pane.pane_id)));
   }
@@ -86,6 +99,10 @@ export class HerdrCliAdapter implements HerdrPort {
     } catch {
       return { pane: observed, traexProcess, composerReady: false, evidenceSource: "process" };
     }
+  }
+
+  async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    await this.waitForPaneChange(paneId, timeoutMs, signal);
   }
 
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> {
@@ -190,11 +207,13 @@ export class HerdrCliAdapter implements HerdrPort {
     const before = await this.readOutput(paneId, 240);
     await this.submitPromptText(paneId, "/model", before);
     const deadline = Date.now() + timeoutMs;
+    await this.waitForOutputMarker(paneId, "Select Model and Effort", deadline);
     while (Date.now() < deadline) {
       const output = await this.readOutput(paneId, 240);
       if (/Select Model and Effort/i.test(output) && /esc to go back/i.test(output)) {
         await this.runner.run(this.executable, ["pane", "send-text", paneId, model], this.commandTimeoutMs);
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+        await this.waitForOutputMarker(paneId, "Select Model and Mode", deadline);
         while (Date.now() < deadline) {
           const selected = await this.readOutput(paneId, 240);
           const modes = interactiveModelModes(selected);
@@ -227,10 +246,29 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   private async readOutputSource(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
+    if (this.native) {
+      try {
+        const result = nativeReadSchema.parse(await this.native.request("agent.read", {
+          target: paneId, source: source === "recent-unwrapped" ? "recent_unwrapped" : source, lines, format: "text", strip_ansi: true
+        }, this.commandTimeoutMs));
+        return result.read.text;
+      } catch { /* Read-only native failure falls back to the Pane CLI. */ }
+    }
     const { stdout } = await this.runner.run(this.executable, [
       "pane", "read", paneId, "--source", source, "--lines", String(lines), "--format", "text"
     ], this.commandTimeoutMs);
     return unwrapText(stdout);
+  }
+
+  private async waitForOutputMarker(paneId: string, marker: string, deadline: number): Promise<void> {
+    if (!this.native) return;
+    const timeoutMs = Math.max(1, Math.min(500, deadline - Date.now()));
+    try {
+      await this.native.request("pane.wait_for_output", {
+        pane_id: paneId, source: "recent_unwrapped", lines: 240, strip_ansi: true,
+        match: { type: "substring", value: marker }, timeout_ms: timeoutMs
+      }, timeoutMs);
+    } catch { /* The bounded polling loop remains the compatibility fallback. */ }
   }
 
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> {
@@ -265,15 +303,20 @@ export class HerdrCliAdapter implements HerdrPort {
   private async enrichPane(raw: z.infer<typeof paneSchema>): Promise<HerdrPane> {
     const foregroundExecutables = await this.foregroundExecutables(raw.pane_id);
     return {
-      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
+      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
+      ...(raw.foreground_cwd !== null && raw.foreground_cwd !== undefined ? { foregroundCwd: raw.foreground_cwd } : {}), label: raw.label ?? null,
       agentState: raw.agent_status ?? "unknown", foregroundExecutables: [...new Set(foregroundExecutables)]
     };
   }
 
   private async foregroundExecutables(paneId: string): Promise<string[]> {
     try {
-      const result = await this.json(["pane", "process-info", "--pane", paneId]);
-      const processInfo = z.object({ process_info: processSchema }).parse(result).process_info;
+      let value: unknown;
+      if (this.native) {
+        try { value = await this.native.request("pane.process_info", { pane_id: paneId }, this.commandTimeoutMs); }
+        catch { value = await this.json(["pane", "process-info", "--pane", paneId]); }
+      } else value = await this.json(["pane", "process-info", "--pane", paneId]);
+      const processInfo = nativeProcessInfoSchema.parse(value).process_info;
       return [...new Set(processInfo.foreground_processes.flatMap((process) => {
         const values = [process.name, process.argv?.[0]].filter((value): value is string => Boolean(value));
         return values.map((value) => value.split("/").at(-1) ?? value);
@@ -285,9 +328,11 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
+    const foregroundCwd = raw.foreground_cwd ?? agent?.foreground_cwd ?? null;
     const foregroundExecutables = kind === "codex" || kind === "traex" ? ["traex"] : kind ? [kind] : [];
     return {
-      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
+      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
+      ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,
       agentKind: kind, agentSession: agent?.agent_session ?? raw.agent_session ?? null, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       agentState: agent?.agent_status ?? raw.agent_status ?? "unknown", foregroundExecutables
     };
@@ -311,6 +356,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const previousOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
     await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
     const deadline = Date.now() + this.commandTimeoutMs;
+    await this.waitForOutputMarker(paneId, text, Math.min(deadline, Date.now() + 250));
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       const output = await this.readOutput(paneId, 240);
@@ -394,10 +440,23 @@ export class HerdrCliAdapter implements HerdrPort {
       } else {
         stableIdlePolls = 0;
       }
-      await abortableDelay(250, signal);
+      await this.waitForPaneChange(paneId, 250, signal);
     }
 
     throw new Error(`Timed out waiting for TraeX turn in pane ${paneId}`);
+  }
+
+  private async waitForPaneChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    if (!this.native?.waitForPaneEvent) { await abortableDelay(timeoutMs, signal); return; }
+    throwIfAborted(signal);
+    if (!signal) { await this.native.waitForPaneEvent(paneId, timeoutMs); return; }
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new Error("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try { await Promise.race([this.native.waitForPaneEvent(paneId, timeoutMs), aborted]); }
+    finally { signal.removeEventListener("abort", onAbort); }
   }
 
   private async json(args: string[], timeoutMs = this.commandTimeoutMs): Promise<unknown> {

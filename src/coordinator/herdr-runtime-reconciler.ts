@@ -39,6 +39,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private timer: NodeJS.Timeout | null = null;
   private readonly observedTerminalOutputs = new Map<string, string>();
   private readonly observedOutputRevisions = new Map<string, number>();
+  private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
   private skippedPaneReasons = new Map<string, string>();
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {}
@@ -194,6 +195,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         if (projects.length === 1) existing = this.options.store.updateBinding(existing.id, { projectId: projects[0]!.id });
       }
       if (existing.lifecycle === "provisioning") continue;
+      pane = this.withMonotonicAgentState(pane);
       const previous = existing.lastAgentState;
       if (existing.traexSessionId && pane.terminalId && existing.traexSessionId !== pane.terminalId) {
         if (sameNativeAgentSession(existing, pane)) {
@@ -225,6 +227,18 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
+  }
+
+  private withMonotonicAgentState(pane: HerdrPane): HerdrPane {
+    const sequence = pane.stateChangeSeq;
+    if (sequence === null || sequence === undefined) return pane;
+    const terminalId = pane.terminalId ?? null;
+    const previous = this.observedAgentStates.get(pane.paneId);
+    if (previous && previous.terminalId === terminalId && sequence <= previous.sequence) {
+      return { ...pane, agentState: previous.state };
+    }
+    this.observedAgentStates.set(pane.paneId, { terminalId, sequence, state: pane.agentState });
+    return pane;
   }
 
   private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {

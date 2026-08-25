@@ -28,9 +28,10 @@ the bridge must not replace it with the separate `codex` executable.
 ## Architecture
 
 Replace the event-only Socket subscriber with a process-owned `HerdrSocketClient`.
-It owns one newline-delimited JSON connection, multiplexes responses by request
-ID, and dispatches validated subscription events. The Herdr adapter receives an
-optional native client and prefers it for supported operations.
+It owns one persistent newline-delimited event connection plus one short-lived
+connection per RPC and dispatches validated subscription events. The Herdr
+adapter receives an optional native client and prefers it for supported
+operations.
 
 ```text
 workflows -> HerdrPort -> Herdr adapter -> HerdrSocketClient -> Herdr server
@@ -39,11 +40,12 @@ workflows -> HerdrPort -> Herdr adapter -> HerdrSocketClient -> Herdr server
 HerdrSocketClient events -> coalesced reconciliation -> authoritative snapshot
 ```
 
-The native client supports `session.snapshot`, `agent.get`, `agent.read`,
-`agent.prompt`, `agent.wait`, `pane.process_info`, and `pane.wait_for_output`.
-Topology/control commands may remain CLI-backed until they have an independently
-tested migration. One connection may carry both requests and subscription events;
-responses are matched by opaque request IDs and never interpreted as events.
+This phase enables `session.snapshot`, `agent.read`, `pane.process_info`, and
+`pane.wait_for_output`. Prompt submission and topology/control commands remain
+CLI-backed until they have an independently tested migration. The client owns a persistent event-stream connection and one
+short-lived connection per RPC because Herdr 0.7.5 dedicates a connection after
+`events.subscribe` and closes an RPC connection after one response. Request IDs
+remain opaque correlation keys and responses are never interpreted as events.
 
 ## Connection and fallback semantics
 
@@ -109,9 +111,9 @@ unsupported for the current connection and uses the CLI path. Runtime health
 reports Socket connectivity and fallback counts, but readiness depends on whether
 Herdr is usable through either transport.
 
-The migration is incremental: first provide the request multiplexer and snapshot
-path, then Agent read/prompt/wait, then output-match waits. Existing CLI behavior
-stays behind the same `HerdrPort`, so workflows do not depend on transport details.
+The migration remains incremental: this phase provides snapshot, Agent read,
+process-info, event wake-ups, and output-match waits. Existing CLI behavior stays
+behind the same `HerdrPort`, so workflows do not depend on transport details.
 
 ## Testing and acceptance
 

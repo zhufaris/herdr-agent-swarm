@@ -8,6 +8,7 @@ interface Snapshot { panes: HerdrPane[]; capturedAt: number }
 export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly refreshes = new Map<string, Promise<HerdrPane[]>>();
+  private allRefresh: Promise<HerdrPane[]> | null = null;
   private hits = 0;
   private misses = 0;
   private coalescedRefreshes = 0;
@@ -42,7 +43,17 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (!this.delegate.listAllPanes) {
       throw new Error("Herdr adapter does not support an all-workspace snapshot");
     }
-    const panes = await this.delegate.listAllPanes();
+    if (this.allRefresh) {
+      this.coalescedRefreshes += 1;
+      return clonePanes(await this.allRefresh);
+    }
+    this.misses += 1;
+    const refresh = this.delegate.listAllPanes();
+    this.allRefresh = refresh;
+    let panes: HerdrPane[];
+    try { panes = await refresh; }
+    catch (error) { this.refreshFailures += 1; throw error; }
+    finally { this.allRefresh = null; }
     const capturedAt = this.clock();
     const byWorkspace = new Map<string, HerdrPane[]>();
     for (const pane of panes) {
@@ -76,6 +87,10 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       if (snapshot) this.snapshots.set(pane.workspaceId, { ...snapshot, panes: snapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) });
     }
     return observation;
+  }
+  async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    if (this.delegate.waitForRuntimeChange) await this.delegate.waitForRuntimeChange(paneId, timeoutMs, signal);
+    else await new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
   }
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> {
     const pane = await this.delegate.createPane(workspaceId, cwd, options);

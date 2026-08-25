@@ -299,7 +299,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;
         }
-        await abortableWait(500, abortController.signal);
+        if (this.options.herdr.waitForRuntimeChange) await this.options.herdr.waitForRuntimeChange(paneId, 500, abortController.signal);
+        else await abortableWait(500, abortController.signal);
       }
     } catch (error) {
       if (abortController.signal.aborted || this.stopping) return;

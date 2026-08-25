@@ -53,6 +53,22 @@ describe("workspace snapshot cache", () => {
     await expect(cache.listAllPanes()).rejects.toThrow(/does not support an all-workspace snapshot/);
   });
 
+  it("coalesces concurrent all-workspace snapshots without caching completed results", async () => {
+    let release!: (panes: ReturnType<typeof pane>[]) => void;
+    const listAllPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { release = resolve; }));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }));
+
+    const first = cache.listAllPanes();
+    const second = cache.listAllPanes();
+    release([pane("w1", 1)]);
+    const [a, b] = await Promise.all([first, second]);
+    a[0]!.label = "mutated";
+    expect(b[0]!.label).toBe("v1");
+    listAllPanes.mockResolvedValueOnce([pane("w1", 2)]);
+    expect((await cache.listAllPanes())[0]?.label).toBe("v2");
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+  });
+
   it("forwards runtime observation and updates the cached pane without refreshing the workspace", async () => {
     const unknown = { ...pane("w1", 1), agentState: "unknown" as const, foregroundExecutables: [] };
     const observed = { ...unknown, agentState: "idle" as const, foregroundExecutables: ["traex"] };

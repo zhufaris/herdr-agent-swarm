@@ -22,6 +22,7 @@ describe("health server", () => {
       herdr: { async assertWorkspace() { throw new Error("workspace unavailable"); } } as never,
       promptWorker: { snapshot: () => ({ state: "running", activeTurnWorkers: 0, activeSteeringWorkers: 0, lastScanAt: "2026-08-24T00:00:00.000Z", lastScanOutcome: "idle", lastDiscovered: { turns: 0, steering: 0, detached: 0, cancelled: 0 }, lastScanFailureAt: null }) },
       outboxDispatcher: { snapshot: () => ({ state: "idle", activeDeliveries: 0, scanPending: false, lastScanAt: null, lastScanOutcome: null, lastDeliveryAt: null, lastDeliveryFailureAt: null }) },
+      herdrSocket: { status: () => ({ connected: true, eventsConnected: true, requests: 4, responses: 3, requestFailures: 1, transportFailures: 0, pendingRequests: 0 }) },
       lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
       buildIdentity
     });
@@ -40,7 +41,7 @@ describe("health server", () => {
     const status = await fetch(`http://127.0.0.1:${port}/status`);
     expect(status.status).toBe(200);
     const body = await status.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, outboxLanes: { pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null, oldestHeadAt: null, oldestHeadAgeSeconds: null } }, outboxDispatcher: { state: "idle", activeDeliveries: 0 }, promptWorker: { state: "running", activeTurnWorkers: 0, lastScanOutcome: "idle" } });
+    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, outboxLanes: { pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null, oldestHeadAt: null, oldestHeadAgeSeconds: null } }, outboxDispatcher: { state: "idle", activeDeliveries: 0 }, promptWorker: { state: "running", activeTurnWorkers: 0, lastScanOutcome: "idle" }, herdrSocket: { connected: true, eventsConnected: true, requests: 4, responses: 3, requestFailures: 1, transportFailures: 0, pendingRequests: 0 } });
     expect(body).toHaveProperty("uptimeSeconds");
     expect(body).toHaveProperty("timestamp");
     expect(body).toHaveProperty("lease.ownerSuffix", "owner123");

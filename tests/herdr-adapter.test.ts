@@ -373,6 +373,30 @@ describe("Herdr adapter", () => {
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(3);
   });
 
+  it("uses native output waits to wake model and mode selector reads", async () => {
+    const outputs = [
+      "answer\n❯", "answer\n❯ /model",
+      "Select Model and Effort\n1. GPT-5.6-Terra\nPress enter to confirm or esc to go back",
+      "Select Model and Mode\n❯ 1. GPT-5.6-Terra / Standard\n  2. GPT-5.6-Terra / Max\nPress enter to confirm or esc to go back"
+    ];
+    const nativeCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const native = { async request(method: string, params: Record<string, unknown>) {
+      nativeCalls.push({ method, params });
+      if (method === "agent.read") return { type: "pane_read", read: { text: outputs.shift() ?? "" } };
+      if (method === "pane.wait_for_output") return { type: "wait_matched" };
+      throw new Error(`unexpected method: ${method}`);
+    } };
+    const runner: CommandRunner = { async run() { return { stdout: "", stderr: "" }; } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native);
+
+    await expect(adapter.beginPaneModelSelection("w1:p1", "GPT-5.6-Terra", 1000)).resolves.toEqual({ kind: "mode_required", modes: ["Standard", "Max"] });
+    expect(nativeCalls.filter(({ method }) => method === "pane.wait_for_output").map(({ params }) => params.match)).toEqual([
+      { type: "substring", value: "/model" },
+      { type: "substring", value: "Select Model and Effort" },
+      { type: "substring", value: "Select Model and Mode" }
+    ]);
+  });
+
   it("creates default panes with an explicit downward split", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
@@ -470,6 +494,78 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).readOutput("wA:p3", 240))
       .resolves.toBe("TraeX ready");
     expect(calls).toEqual([["pane", "read", "wA:p3", "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]]);
+  });
+
+  it("prefers native session snapshots and Agent reads when the Socket is available", async () => {
+    const calls: Array<{ method: string; params: object }> = [];
+    const native = { async request(method: string, params: object) {
+      calls.push({ method, params });
+      if (method === "session.snapshot") return { type: "session_snapshot", snapshot: {
+        panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", foreground_cwd: "/repo/subdir", terminal_id: "term-1", agent_status: "idle" }],
+        agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "idle", state_change_seq: 9 }]
+      } };
+      if (method === "agent.read") return { type: "pane_read", read: { text: "native TraeX output" } };
+      throw new Error(`unexpected native method: ${method}`);
+    } };
+    const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native);
+
+    await expect(adapter.listAllPanes()).resolves.toMatchObject([{
+      paneId: "w1:p1", foregroundCwd: "/repo/subdir", agentKind: "codex", stateChangeSeq: 9
+    }]);
+    await expect(adapter.readOutput("w1:p1", 120)).resolves.toBe("native TraeX output");
+    expect(calls).toEqual([
+      { method: "session.snapshot", params: {} },
+      { method: "agent.read", params: { target: "w1:p1", source: "recent_unwrapped", lines: 120, format: "text", strip_ansi: true } }
+    ]);
+  });
+
+  it("falls back to CLI for native read-only failures", async () => {
+    const cliCalls: string[][] = [];
+    const native = { async request() { throw new Error("socket unavailable"); } };
+    const runner: CommandRunner = { async run(_executable, args) {
+      cliCalls.push(args);
+      if (args[0] === "api") return json({ snapshot: { panes: [], agents: [] } });
+      if (args[0] === "pane" && args[1] === "read") return { stdout: "CLI output", stderr: "" };
+      throw new Error(`unexpected CLI args: ${args.join(" ")}`);
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native);
+
+    await expect(adapter.listAllPanes()).resolves.toEqual([]);
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("CLI output");
+    expect(cliCalls).toEqual([
+      ["api", "snapshot"],
+      ["pane", "read", "w1:p1", "--source", "recent-unwrapped", "--lines", "80", "--format", "text"]
+    ]);
+  });
+
+  it("falls back to the CLI when a native snapshot response has an incompatible schema", async () => {
+    const native = { async request() { return { type: "unexpected" }; } };
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] === "api") return json({ snapshot: { panes: [], agents: [] } });
+      throw new Error(`unexpected CLI args: ${args.join(" ")}`);
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).listAllPanes()).resolves.toEqual([]);
+  });
+
+  it("uses native process metadata for an unknown Agent pane", async () => {
+    const methods: string[] = [];
+    const native = { async request(method: string) {
+      methods.push(method);
+      if (method === "session.snapshot") return { type: "session_snapshot", snapshot: {
+        panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }], agents: []
+      } };
+      if (method === "pane.process_info") return { type: "pane_process_info", process_info: { foreground_processes: [{ name: "traex", argv: ["/opt/traex"] }] } };
+      if (method === "agent.read") return { type: "pane_read", read: { text: "❯ Use /skills to list available skills" } };
+      throw new Error(`unexpected native method: ${method}`);
+    } };
+    const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).observeRuntime("w1:p1")).resolves.toMatchObject({
+      traexProcess: true, composerReady: true, evidenceSource: "recent", pane: { foregroundExecutables: ["traex"] }
+    });
+    expect(methods).toContain("pane.process_info");
   });
 
   it("identifies TraeX from process metadata, not the compatibility label", async () => {
@@ -726,6 +822,38 @@ describe("Herdr adapter", () => {
     const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
     const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read");
     expect(readsBeforeEnter).toHaveLength(3);
+  });
+
+  it("uses a native output wait only as a prompt echo wake-up hint", async () => {
+    const nativeCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const reads = ["◆ hi\n❯", "◆ hi\n❯", "◆ hi\n❯ hi"];
+    const native = { async request(method: string, params: Record<string, unknown>) {
+      nativeCalls.push({ method, params });
+      if (method === "session.snapshot") return { snapshot: {
+        panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "working" }], agents: []
+      } };
+      if (method === "agent.read") return { read: { text: reads.shift() ?? "◆ hi\n❯ hi" } };
+      if (method === "pane.wait_for_output") return { type: "wait_matched" };
+      throw new Error(`unexpected native method: ${method}`);
+    } };
+    const commands: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      commands.push(args);
+      return { stdout: "", stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).steerPrompt("w1:p1", "hi"))
+      .resolves.toBe("injected");
+
+    const outputWait = nativeCalls.find(({ method }) => method === "pane.wait_for_output");
+    expect(outputWait?.params).toMatchObject({
+      pane_id: "w1:p1", source: "recent_unwrapped", match: { type: "substring", value: "hi" }
+    });
+    expect(nativeCalls.filter(({ method }) => method === "agent.read")).toHaveLength(3);
+    expect(commands).toEqual([
+      ["pane", "send-text", "w1:p1", "hi"],
+      ["pane", "send-keys", "w1:p1", "Enter"]
+    ]);
   });
 
   it("confirms prompt text when a narrow pane soft-wraps it", async () => {

@@ -4,6 +4,7 @@ import type { InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, P
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
+import type { HerdrSocketStatus } from "../runtime/herdr-socket-subscriber.js";
 
 interface ComponentState { ok: boolean; error?: string }
 interface Readiness {
@@ -22,6 +23,7 @@ export function startHealthServer(options: {
   lifecycleEvents?: LifecycleEventDiagnostics;
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
+  herdrSocket?: { status(): HerdrSocketStatus };
   buildIdentity: BuildIdentity;
 }): Promise<Server> {
   const server = createServer(async (request, response) => {
@@ -58,6 +60,7 @@ export function startHealthServer(options: {
         ...(outboxDispatcher ? { outboxDispatcher } : {}),
         ...(promptWorker ? { promptWorker } : {}),
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
+        ...(options.herdrSocket ? { herdrSocket: options.herdrSocket.status() } : {}),
         ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));
       return;

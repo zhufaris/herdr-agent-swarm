@@ -290,6 +290,7 @@ export interface HerdrPane {
   stateChangeSeq?: number | null;
   workspaceId: string;
   cwd: string | null;
+  foregroundCwd?: string | null;
   label: string | null;
   agentState: AgentState;
   foregroundExecutables: string[];

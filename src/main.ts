@@ -39,7 +39,19 @@ const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
-const rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode);
+let rawHerdr!: HerdrCliAdapter;
+const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
+  ? new HerdrSocketSubscriber(
+      process.env.HERDR_SOCKET_PATH,
+      async () => {
+        const configuredWorkspaceIds = new Set(config.projects.map((project) => project.workspaceId));
+        return (await rawHerdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
+      },
+      ({ workspaceIds }) => coordinator.reconcileHerdrWorkspaces(workspaceIds.length > 0 ? workspaceIds : undefined),
+      logger
+    )
+  : null;
+rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
 const herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
@@ -65,24 +77,12 @@ let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)
   : null;
-const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
-  ? new HerdrSocketSubscriber(
-      process.env.HERDR_SOCKET_PATH,
-      async () => {
-        const configuredWorkspaceIds = new Set(config.projects.map((project) => project.workspaceId));
-        return (await rawHerdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
-      },
-      ({ workspaceIds }) => coordinator.reconcileHerdrWorkspaces(workspaceIds.length > 0 ? workspaceIds : undefined),
-      logger
-    )
-  : null;
-
 try {
   await herdrEventInbox?.start();
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, buildIdentity });
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   lease.start(() => shutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; }));
@@ -93,7 +93,7 @@ try {
   logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
   herdrEventInbox?.activate();
-  herdrSocketSubscriber?.start();
+  herdrSocketSubscriber?.startEvents();
   logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");
 } catch (error) {
   logger.fatal({ event: "bridge-startup-failed", err: safeLogError(error), durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");

@@ -47,7 +47,7 @@ the source of workflow policy.
                │ SDK / HTTP           │ CLI / snapshot            │ lifecycle
                v                      v                           v
 ┌──────────────────────── Infrastructure and adapters ─────────────────────┐
-│ Lark adapter · Herdr adapter · command runner · Socket subscriber         │
+│ Lark adapter · Herdr adapter · command runner · Socket RPC/event client   │
 │ UDP event inbox · SQLite store · health server · lease runtime            │
 └───────────────────────┬──────────────────────────────────────────────────┘
                         │ implements ports
@@ -238,8 +238,17 @@ explicitly uncertain. Jobs that never started remain queued.
 
 ## Reconciliation and events
 
-The process subscribes to supported Pane and Agent events on the Herdr Unix
-socket. Herdr 0.7.5 requires `pane.agent_status_changed` subscriptions to name
+The process uses one Herdr Unix Socket client with a persistent event-stream
+connection and one short-lived connection per RPC because Herdr 0.7.5 dedicates
+an event connection after `events.subscribe` and closes an RPC connection after
+one response. Read-only snapshot, Agent
+read, process-info, and bounded output-wait operations prefer Socket RPC and
+fall back to the CLI when the connection or method is unavailable. TraeX startup
+continues to use the configured executable through `pane run`; the bridge never
+substitutes the separate Codex executable. Prompt submission remains on the
+existing CLI path so its uncertain-dispatch/no-replay boundary stays unchanged.
+
+Herdr 0.7.5 requires `pane.agent_status_changed` subscriptions to name
 each Pane, so the subscriber reconnects and refreshes that set after Pane create
 or move events. It validates newline-delimited frames, reconnects with bounded
 backoff, and requests convergence after reconnect. Socket health is not a
@@ -249,6 +258,12 @@ Herdr 0.7.5 does not allow `pane.output_changed` in a Socket subscription. The
 plugin hook continues to send that event as a small loopback UDP datagram. Both
 inputs carry only bounded identity metadata and request the same reconciler;
 neither mutates bindings from event payloads.
+
+Native Pane events also wake active and detached turn observers. The wait is
+bounded and always falls back to polling, so a missing event cannot stall a turn.
+`state_change_seq` prevents an older native observation from regressing projected
+Agent state for the same terminal identity. Output reads remain gated by the
+snapshot revision and are retried when a read fails.
 
 `HerdrRuntimeReconciler` is the sole convergence path for event-driven and periodic
 recovery:
