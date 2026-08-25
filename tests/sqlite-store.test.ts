@@ -584,6 +584,47 @@ describe("SQLite store", () => {
     vi.useRealTimers();
   });
 
+  it("coalesces pending binding status-card snapshots behind the in-flight-safe lane head", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+
+    store.enqueueOutboundReply({ id: "working", idempotencyKey: "status:working", bindingId: "b1", rootMessageId: "status-card", kind: "card_update", payload: "working" });
+    store.enqueueOutboundReply({ id: "progress", idempotencyKey: "status:progress", bindingId: "b1", rootMessageId: "status-card", kind: "card_update", payload: "progress" });
+    store.enqueueOutboundReply({ id: "done", idempotencyKey: "status:done", bindingId: "b1", rootMessageId: "status-card", kind: "card_update", payload: "done" });
+
+    expect(store.listPendingOutboundReplies().map((reply) => ({ id: reply.id, payload: reply.payload }))).toEqual([
+      { id: "working", payload: "working" },
+      { id: "done", payload: "done" }
+    ]);
+    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["working"]);
+
+    store.markOutboundReplyDelivered("working", "status-card");
+    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["done"]);
+  });
+
+  it("keeps status-card coalescing isolated by binding, target, and lane", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "One" });
+    store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c1", topicId: "t2", rootMessageId: "root-2", title: "Two" });
+    store.enqueueOutboundReply({ id: "b1-head", idempotencyKey: "b1-head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head" });
+    store.enqueueOutboundReply({ id: "b1-next", idempotencyKey: "b1-next", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "next" });
+    store.enqueueOutboundReply({ id: "b2-head", idempotencyKey: "b2-head", bindingId: "b2", rootMessageId: "card-1", kind: "card_update", payload: "other binding" });
+    store.enqueueOutboundReply({ id: "other-card", idempotencyKey: "other-card", bindingId: "b1", rootMessageId: "card-2", kind: "card_update", payload: "other card" });
+    store.enqueueOutboundReply({ id: "b1-latest", idempotencyKey: "b1-latest", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "latest" });
+
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["b1-head", "b2-head", "other-card", "b1-latest"]);
+  });
+
+  it("rolls back status-card pruning when insertion fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head" });
+    store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "successor" });
+
+    expect(() => store!.enqueueOutboundReply({ id: "head", idempotencyKey: "replacement", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "fails" })).toThrow();
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["head", "successor"]);
+  });
+
   it("reports an empty durable outbox lane summary without identifiers", () => {
     store = new SqliteBindingStore(":memory:");
 

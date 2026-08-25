@@ -816,21 +816,45 @@ export class SqliteBindingStore implements BindingStorePort {
 
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply {
     const timestamp = now();
-    if ((input.kind === "card_update" || input.kind === "stream_content") && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
-      this.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?")
-        .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
+    const laneKey = outboundLaneKey(input);
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (input.kind === "card_update" && input.bindingId && !input.promptId) {
+        // Preserve the oldest pending row as an in-flight-safe lane barrier,
+        // then keep only the newest snapshot behind it. Pruning and insertion
+        // share this transaction so a failed insert cannot lose the successor.
+        this.database.prepare(`
+          DELETE FROM outbound_replies
+          WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
+            AND lane_key = ? AND kind = 'card_update' AND state = 'pending'
+            AND delivery_order > (
+              SELECT MIN(delivery_order) FROM outbound_replies
+              WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
+                AND lane_key = ? AND kind = 'card_update' AND state = 'pending'
+            )
+        `).run(input.bindingId, input.rootMessageId, laneKey, input.bindingId, input.rootMessageId, laneKey);
+      }
+      if ((input.kind === "card_update" || input.kind === "stream_content") && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
+        this.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?")
+          .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
+      }
+      this.database.prepare(`
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        ON CONFLICT(idempotency_key) DO UPDATE SET
+          payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
+          view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
+          updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
+      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
+      const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
+      if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
+      if (ownsTransaction) this.database.exec("COMMIT");
+      return mapOutboundReply(row);
+    } catch (error) {
+      if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
     }
-    this.database.prepare(`
-      INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
-      ON CONFLICT(idempotency_key) DO UPDATE SET
-        payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
-        view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
-        updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-    `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.rootMessageId, input.kind, input.payload, outboundLaneKey(input), timestamp, timestamp, timestamp);
-    const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
-    if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
-    return mapOutboundReply(row);
   }
 
   listPendingOutboundReplies(): OutboundReply[] {
