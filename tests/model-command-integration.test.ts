@@ -263,6 +263,31 @@ describe("model command", () => {
     await fixture.close();
   });
 
+  it("accepts a mode callback after PTY restoration when the native Agent session still matches", async () => {
+    const cards: object[] = [];
+    const beginPaneModelSelection = vi.fn(async () => ({ kind: "mode_required" as const, modes: ["Standard", "Max"] }));
+    const completePaneModelMode = vi.fn(async () => undefined);
+    const restoredPane = {
+      paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"],
+      agentSession: { source: "traex", agent: "traex", kind: "id" as const, value: "session-1" }
+    };
+    const fixture = await setup(cards, vi.fn(async () => "Current model: GPT-5.6-Terra / Max"), {
+      pane: restoredPane, beginPaneModelSelection, completePaneModelMode
+    });
+    fixture.store.updateBinding(fixture.bindingId, { traexSessionId: "term-1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+
+    await fixture.coordinator.handleCardAction({ messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "GPT-5.6-Terra", value: { action: "select_model", bindingId: fixture.bindingId } });
+    await vi.waitFor(() => expect(beginPaneModelSelection).toHaveBeenCalled());
+    const operation = fixture.store.database.prepare("SELECT id FROM pane_control_operations WHERE kind = 'model'").get() as { id: string };
+    fixture.store.updateBinding(fixture.bindingId, { traexSessionId: "term-2" });
+
+    await fixture.coordinator.handleCardAction({ messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "Max", value: { action: "select_model_mode", bindingId: fixture.bindingId, operationId: operation.id } });
+
+    expect(completePaneModelMode).toHaveBeenCalledWith("w1:p1", "Max", 1000);
+    expect(fixture.store.getPaneControlOperation(operation.id)).toMatchObject({ state: "confirmed" });
+    await fixture.close();
+  });
+
   it("updates the model card with a visible error when a dropdown switch fails", async () => {
     const cards: object[] = [];
     const updates: Array<{ messageId: string; card: object }> = [];
