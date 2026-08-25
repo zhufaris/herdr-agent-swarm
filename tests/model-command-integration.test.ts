@@ -127,6 +127,7 @@ describe("model command", () => {
 
     await vi.waitFor(() => expect(completePaneModelMode).toHaveBeenCalledWith("w1:p1", "Max", 1000));
     expect(fixture.store.getPaneControlOperation(operation.id)).toMatchObject({ state: "confirmed" });
+    expect(JSON.stringify(updates.at(-1)?.card)).toContain('"template":"green"');
 
     await fixture.coordinator.handleCardAction({
       messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "Max",
@@ -157,11 +158,37 @@ describe("model command", () => {
     await fixture.close();
   });
 
+  it("rejects a mode that was not advertised by the live TraeX selector", async () => {
+    const cards: object[] = [];
+    const updates: Array<{ messageId: string; card: object }> = [];
+    const beginPaneModelSelection = vi.fn(async () => ({ kind: "mode_required" as const, modes: ["Standard", "Max"] }));
+    const completePaneModelMode = vi.fn(async () => undefined);
+    const fixture = await setup(cards, vi.fn(async () => "unused"), { updates, beginPaneModelSelection, completePaneModelMode });
+
+    await fixture.coordinator.handleCardAction({
+      messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "GPT-5.6-Terra",
+      value: { action: "select_model", bindingId: fixture.bindingId }
+    });
+    await vi.waitFor(() => expect(beginPaneModelSelection).toHaveBeenCalled());
+    const operation = fixture.store.database.prepare("SELECT id FROM pane_control_operations WHERE kind = 'model'").get() as { id: string };
+
+    await fixture.coordinator.handleCardAction({
+      messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "Unadvertised",
+      value: { action: "select_model_mode", bindingId: fixture.bindingId, operationId: operation.id }
+    });
+
+    expect(completePaneModelMode).not.toHaveBeenCalled();
+    expect(fixture.store.getPaneControlOperation(operation.id)).toMatchObject({ state: "applied" });
+    expect(updates.some((update) => update.messageId === "model-card-1" && JSON.stringify(update.card).includes("模型模式选择已失效"))).toBe(true);
+    await fixture.close();
+  });
+
   it("expires a pending mode choice during recovery and releases ordinary prompts", async () => {
     const cards: object[] = [];
     const updates: Array<{ messageId: string; card: object }> = [];
     const beginPaneModelSelection = vi.fn(async () => ({ kind: "mode_required" as const, modes: ["Standard", "Max"] }));
-    const fixture = await setup(cards, vi.fn(async () => "unused"), { updates, beginPaneModelSelection });
+    const runPrompt = vi.fn(async () => "done" as const);
+    const fixture = await setup(cards, vi.fn(async () => "unused"), { updates, beginPaneModelSelection, runPrompt });
 
     await fixture.coordinator.handleCardAction({
       messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "GPT-5.6-Terra",
@@ -169,6 +196,9 @@ describe("model command", () => {
     });
     await vi.waitFor(() => expect(beginPaneModelSelection).toHaveBeenCalled());
     const operation = fixture.store.database.prepare("SELECT id, detail FROM pane_control_operations WHERE kind = 'model'").get() as { id: string; detail: string };
+    await fixture.coordinator.handleMessage(message("ordinary work"));
+    expect(fixture.store.countPendingPrompts(fixture.bindingId)).toBe(1);
+    expect(runPrompt).not.toHaveBeenCalled();
     const detail = JSON.parse(operation.detail) as { expiresAt: string };
     expect(Date.parse(detail.expiresAt)).toBeGreaterThan(Date.now());
     fixture.store.database.prepare("UPDATE pane_control_operations SET detail = ? WHERE id = ?").run(JSON.stringify({ ...JSON.parse(operation.detail), expiresAt: "2020-01-01T00:00:00.000Z" }), operation.id);
@@ -177,8 +207,8 @@ describe("model command", () => {
     await fixture.coordinator.start();
 
     expect(fixture.store.getPaneControlOperation(operation.id)).toMatchObject({ state: "rejected" });
-    await vi.waitFor(() => expect(JSON.stringify(updates.at(-1)?.card)).toContain("模型模式选择已过期"));
-    expect(fixture.store.claimNextDispatchablePrompt(fixture.bindingId)).toBeNull();
+    await vi.waitFor(() => expect(updates.some((update) => update.messageId === "model-card-1" && JSON.stringify(update.card).includes("模型模式选择已过期"))).toBe(true));
+    await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledWith("w1:p1", "ordinary work", 1000, expect.any(Function), expect.any(AbortSignal), expect.any(Function)));
     await fixture.close();
   });
 
@@ -259,6 +289,7 @@ async function setup(
     updates?: Array<{ messageId: string; card: object }>;
     beginPaneModelSelection?: HerdrPort["beginPaneModelSelection"];
     completePaneModelMode?: HerdrPort["completePaneModelMode"];
+    runPrompt?: HerdrPort["runPrompt"];
   } = {}
 ) {
   const lark: LarkPort = {
@@ -274,7 +305,7 @@ async function setup(
     observeRuntime: options.observeRuntime ?? (async () => ({ pane, traexProcess: pane.foregroundExecutables.includes("traex"), composerReady: pane.agentState === "idle", evidenceSource: "structured" })),
     ...(options.beginPaneModelSelection ? { beginPaneModelSelection: options.beginPaneModelSelection } : {}),
     ...(options.completePaneModelMode ? { completePaneModelMode: options.completePaneModelMode } : {}),
-    async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; },
+    async createPane() { throw new Error("unused"); }, async startTraex() {}, runPrompt: options.runPrompt ?? (async () => "done"),
     runPaneCommand, async readOutput() { return ""; }, async renamePane() {}
   };
   const store = new SqliteBindingStore(":memory:");
