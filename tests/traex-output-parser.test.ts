@@ -69,6 +69,30 @@ describe("TraeX output parser", () => {
     expect(delta).not.toContain("\u001b");
   });
 
+  it("reconstructs terminal-wrapped tool headings without flattening tool output", () => {
+    const current = [
+      "◆ Ran sqli",
+      "  │ te3",
+      "  └ database result",
+      "◆ Read 2",
+      "  │  files",
+      "```text",
+      "keep",
+      "line breaks",
+      "```"
+    ].join("\n");
+
+    expect(parseTerminalStreamDelta("", current, "inspect").delta).toBe([
+      "◆ Ran sqlite3",
+      "  └ database result",
+      "◆ Read 2 files",
+      "```text",
+      "keep",
+      "line breaks",
+      "```"
+    ].join("\n"));
+  });
+
   it("replaces an oversized live delta with its newest user-facing window", () => {
     const newest = "◆ Final live status: all focused tests passed";
     const oversized = `very first live output\n${"older output\n".repeat(1_100)}${newest}`;

@@ -108,6 +108,13 @@ function normalizeTerminalForLark(source: string, promptEcho: string): string {
     const line = lines[index]!;
     if (isTerminalChrome(line)) { index += 1; continue; }
     if (/^\s*◆\s+/.test(line)) {
+      if (index + 1 < lines.length && isToolHeadingContinuation(lines[index + 1]!)) {
+        const heading = [line];
+        index += 1;
+        while (index < lines.length && isToolHeadingContinuation(lines[index]!)) heading.push(lines[index++]!);
+        output.push(joinToolHeading(heading));
+        continue;
+      }
       const block = [line];
       index += 1;
       while (index < lines.length && isWrappedAnswerContinuation(lines[index]!)) block.push(lines[index++]!);
@@ -118,6 +125,14 @@ function normalizeTerminalForLark(source: string, promptEcho: string): string {
     index += 1;
   }
   return output.join("\n");
+}
+
+function isToolHeadingContinuation(line: string): boolean {
+  return /^\s*│/.test(line);
+}
+
+function joinToolHeading(lines: string[]): string {
+  return lines[0]! + lines.slice(1).map((line) => line.replace(/^\s*│ ?/, "")).join("");
 }
 
 function stripTraeCodeBanner(source: string): string {
