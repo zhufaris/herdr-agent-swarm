@@ -136,6 +136,7 @@ describe("SQLite store", () => {
     const inbound = { eventId: "e1", messageId: "m2", chatId: "c1", topicId: "t1", rootMessageId: "m1", actorOpenId: "u1", text: "first", mentionsBot: false, isRootMessage: false };
     expect(store.recordInboundMessage(inbound)).toBe(true);
     expect(store.recordInboundMessage(inbound)).toBe(false);
+    expect(store.recordInboundMessage({ ...inbound, eventId: "retried-event" })).toBe(false);
     expect(store.claimNextInboundMessage()).toEqual(inbound);
     expect(store.recoverProcessingInboundMessages()).toBe(1);
     expect(store.claimNextInboundMessage()).toEqual(inbound);
@@ -841,5 +842,20 @@ describe("SQLite store", () => {
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+  });
+
+  it("deduplicates control operations and gives accepted model control priority over queued turns", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.enqueuePrompt({ id: "turn", bindingId: "b1", larkMessageId: "turn-message", actorOpenId: "u1", body: "ordinary" });
+    const first = store.acceptPaneControlOperation({ id: "model-1", idempotencyKey: "message:model", bindingId: "b1", paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "u1", sourceMessageId: "message" });
+    const duplicate = store.acceptPaneControlOperation({ id: "model-2", idempotencyKey: "message:model", bindingId: "b1", paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "u1", sourceMessageId: "message" });
+
+    expect(first.inserted).toBe(true);
+    expect(duplicate).toMatchObject({ inserted: false, operation: { id: "model-1", state: "accepted" } });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.claimNextPaneControlOperation("b1")).toMatchObject({ id: "model-1", state: "running" });
+    store.finishPaneControlOperation("model-1", "confirmed");
   });
 });

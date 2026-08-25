@@ -67,19 +67,21 @@ describe("active-turn steering", () => {
 
     await coordinator.handleMessage(message(1, "parent"));
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
+    const runningModel = store.acceptPaneControlOperation({ id: "running-model", idempotencyKey: "test:running-model", bindingId, paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "user", sourceMessageId: "model-message" });
+    expect(store.claimPaneControlOperation(runningModel.operation.id)).toMatchObject({ state: "running" });
     const queued = createQueuedRunCard({ promptId: "queued-turn", bindingId, title: "queued turn", workspaceId: "w1", paneId: "w1:p1", requestText: "queued turn", queuePosition: 1, occurredAt: new Date().toISOString() });
     store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
     await publisher.drain();
     await coordinator.handleMessage(message(4, "/stop"));
     await vi.waitFor(() => expect(escapes).toEqual(["w1:p1"]));
+    store.finishPaneControlOperation(runningModel.operation.id, "confirmed");
     expect(store.listRunCards(bindingId).some((view) => view.requestText === "/stop")).toBe(false);
     await Promise.all([coordinator.handleMessage(message(2, "/steer steer one")), coordinator.handleMessage(message(3, "/steer steer two"))]);
     await vi.waitFor(() => expect(steering).toEqual(["steer one", "steer two"]));
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).filter((view) => ["steer one", "steer two"].includes(view.requestText)).every((view) => view.phase === "completed")).toBe(true));
+    await vi.waitFor(() => expect(["steer one", "steer two"].every((text) => store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = ?").get(text)?.state === "confirmed")).toBe(true));
     await coordinator.handleMessage(message(2, "/steer steer one"));
     expect(steering).toEqual(["steer one", "steer two"]);
-    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "prompt-dispatch-decided", dispatchKind: "steering", outcome: "accepted" }), expect.any(String));
-    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "steering-delivered", outcome: "delivered" }), expect.any(String));
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM pane_control_operations WHERE kind = 'steer' AND state = 'confirmed'").get()).toEqual({ count: 2 });
     expect(JSON.stringify(info.mock.calls)).not.toContain("steer one");
 
     expect(turns).toHaveLength(1);
@@ -133,7 +135,7 @@ describe("active-turn steering", () => {
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
     await coordinator.handleMessage(message(2, "/steer late steer"));
     await vi.waitFor(() => expect(steering).toEqual(["late steer"]));
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).find((view) => view.requestText === "late steer")?.phase).toBe("failed"));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = 'late steer'").get()).toEqual({ state: "rejected" }));
     // Never promoted to an ordinary turn, before or after the parent finishes.
     expect(store.listQueuedTurnPromptIds(bindingId)).toEqual([]);
     release();
@@ -141,6 +143,40 @@ describe("active-turn steering", () => {
     expect(turns).toEqual(["parent"]);
     expect(store.listQueuedTurnPromptIds(bindingId)).toEqual([]);
 
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
+  it("rejects /steer on a local approval screen without injecting text", async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const steering = vi.fn();
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation) { await onObservation?.({ state: "blocked", stateSource: "structured", output: "❯ needs approval" }); await hold; return "done"; },
+      async steerPrompt() { steering(); return "injected"; }, async sendEscape() {},
+      async readOutput() { return "❯ Approval required: allow this action?"; }, async renamePane() {}
+    };
+    const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
+    const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `approval-e${n}`, messageId: `approval-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
+
+    await send(1, "parent");
+    await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
+    await send(2, "/steer continue");
+    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = 'continue'").get()).toEqual({ state: "rejected" }));
+    expect(steering).not.toHaveBeenCalled();
+
+    release();
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 

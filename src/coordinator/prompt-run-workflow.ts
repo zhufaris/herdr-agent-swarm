@@ -258,6 +258,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         for (const steeringId of orphaned) await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: notice });
         if (orphaned.length > 0) await this.refreshQueuePositions(bindingId);
         this.turns.detach(bindingId, prompt.id);
+        this.options.scheduler.wake({ kind: "control-ready", bindingId });
         const latestBinding = this.options.store.getBinding(bindingId);
         if (!observerDetached && latestBinding?.lifecycle === "draining") await this.archiveDrainedBinding(latestBinding);
       }

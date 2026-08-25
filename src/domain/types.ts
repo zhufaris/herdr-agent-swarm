@@ -13,12 +13,34 @@ export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
+export type PaneControlOperationKind = "stop" | "steer" | "model";
+export type PaneControlOperationState = "accepted" | "running" | "applied" | "confirmed" | "rejected" | "failed" | "uncertain";
 export type RetiredPaneCleanupState = "pending" | "waiting_busy" | "executing" | "succeeded" | "retained";
 export type PromptWorkHint =
   | { kind: "prompt-ready"; bindingId: string }
+  | { kind: "control-ready"; bindingId: string }
   | { kind: "steering-ready"; bindingId: string; parentPromptId: string }
   | { kind: "detached-observer-ready"; bindingId: string; promptId: string }
   | { kind: "binding-runtime-changed"; bindingId: string };
+
+export interface PaneControlOperation {
+  id: string;
+  idempotencyKey: string;
+  bindingId: string;
+  paneId: string;
+  terminalId: string | null;
+  bindingGeneration: number;
+  kind: PaneControlOperationKind;
+  payload: string | null;
+  parentPromptId: string | null;
+  state: PaneControlOperationState;
+  attemptCount: number;
+  detail: string | null;
+  actorOpenId: string;
+  sourceMessageId: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface DurablePromptWorkScan {
   cancelled: number;

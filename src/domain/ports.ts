@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -104,6 +104,12 @@ export interface BindingStorePort {
   listFailures(chatId: string): FailureSummary[];
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
+  acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean };
+  claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null;
+  claimPaneControlOperation(id: string): PaneControlOperation | null;
+  getPaneControlOperation(id: string): PaneControlOperation | null;
+  listRecoverablePaneControlOperations(): PaneControlOperation[];
+  finishPaneControlOperation(id: string, state: Extract<PaneControlOperation["state"], "applied" | "confirmed" | "rejected" | "failed" | "uncertain">, detail?: string | null): void;
   recoverRunningPrompts(): number;
   scanDurablePromptWork(): DurablePromptWorkScan;
   listDetachedPrompts(): PromptJob[];
@@ -207,6 +213,7 @@ export type RetiredPaneCleanupStore = Pick<BindingStorePort,
 
 export type OperationsStore = Pick<BindingStorePort,
   | "audit" | "cancelQueuedPrompts" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
+  | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
   | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"
   | "listFailures" | "listRunCards" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
   | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBinding"

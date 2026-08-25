@@ -5,7 +5,7 @@ import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, InboundStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
+import type { InboundStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -31,7 +31,7 @@ type InboundRouterStore = InboundStore & PromptAcceptanceStore;
 export interface InboundRouterOptions {
   config: BridgeConfig;
   store: InboundRouterStore;
-  herdr: Pick<HerdrPort, "assertWorkspace" | "sendEscape">;
+  herdr: { assertWorkspace(workspaceId: string): Promise<void> };
   lark: Pick<LarkPort, "start" | "stop">;
   lifecycleEvents: LifecycleEventPublisher;
   outbound: OutboundIntentPort;
@@ -50,6 +50,7 @@ export interface InboundRouterOptions {
 export class InboundRouter implements InboundRouterPort {
   private inboundDrain: Promise<void> | null = null;
   private stopInboundSubscription: (() => void) | null = null;
+  private stopControlSubscription: (() => void) | null = null;
 
   constructor(private readonly options: InboundRouterOptions) {}
 
@@ -63,6 +64,9 @@ export class InboundRouter implements InboundRouterPort {
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     for (const workspaceId of new Set(config.projects.map((project) => project.workspaceId))) await herdr.assertWorkspace(workspaceId);
     await reconciler.captureBaselines();
+    this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
+      if (event.kind === "control-ready") void this.options.operations.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
+    });
     await operations.recover();
     await retiredPaneCleanup.recover();
     await reconciler.reconcile();
@@ -78,6 +82,7 @@ export class InboundRouter implements InboundRouterPort {
   async stop(): Promise<void> {
     await this.options.lark.stop();
     this.stopInboundSubscription?.();
+    this.stopControlSubscription?.();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(), ...(this.inboundDrain ? [this.inboundDrain] : [])]);
   }
 
@@ -132,8 +137,8 @@ export class InboundRouter implements InboundRouterPort {
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
       if (command?.kind === "help") await this.reply(message.rootMessageId ?? message.messageId, renderHelpCard());
-      else if (command?.kind === "stop") disposition = await this.stopActiveTurn(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "steer") disposition = await this.steerActiveTurn(message, binding, command.text) ? "prompt_queued" : "rejected";
+      else if (command?.kind === "stop") disposition = await this.options.operations.stop(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "steer") disposition = await this.options.operations.steer(message, binding, command.text) ? "command_completed" : "rejected";
       else if (command?.kind === "model") disposition = await this.options.operations.runModel(message, binding, command.name) ? "command_completed" : "rejected";
       else if (command?.kind === "reset") disposition = await this.options.provisioning.reset(message, binding, command.title) ? "command_completed" : "rejected";
       else if (command?.kind === "new" || command?.kind === "projects") await this.options.provisioning.selectProject(message, command.kind === "new" ? command.title : null);
@@ -169,29 +174,6 @@ export class InboundRouter implements InboundRouterPort {
     await this.publish(binding.id, dispatchKind === "steering" ? "SteeringQueued" : "PromptQueued", "lark", dispatchKind === "steering" ? { promptId: prompt.id, parentPromptId: parentPromptId!, actorOpenId: message.actorOpenId } : { promptId: prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
     this.options.store.audit({ actorOpenId: message.actorOpenId, action: dispatchKind === "steering" ? "prompt.steer" : "prompt.queue", target: binding.id, outcome: "success" });
     if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
-  }
-
-  private async stopActiveTurn(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
-    if (!binding || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。"); return false; }
-    const activeRun = this.options.promptRun.activeTurn(binding.id); if (!activeRun) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/stop` 未进入任务队列。"); return false; }
-    if (!this.options.herdr.sendEscape) { await this.reject(message, "当前 Herdr 适配器不支持 Esc 停止。"); return false; }
-    try {
-      await this.options.herdr.sendEscape(activeRun.paneId);
-      this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.stop", target: binding.id, outcome: "success" });
-      return true;
-    } catch (error) {
-      await this.reject(message, `发送停止信号失败：${errorMessage(error)}`);
-      this.options.logger.warn({ event: "stop-escape-failed", err: safeLogError(error), bindingId: binding.id, paneId: activeRun.paneId, outcome: "failed" }, "failed to send stop Escape");
-      return false;
-    }
-  }
-
-  private async steerActiveTurn(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean> {
-    if (!binding || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
-    const activeRun = this.options.promptRun.activeTurn(binding.id);
-    if (!activeRun) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/steer` 未进入任务队列。"); return false; }
-    await this.enqueue(binding, message, text, activeRun.promptId);
-    return true;
   }
 
   private spaceNameFor(binding: Binding): string { const matches = binding.projectId ? this.options.config.projects.filter((project) => project.id === binding.projectId) : this.options.config.projects.filter((project) => project.workspaceId === binding.workspaceId); return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved"; }

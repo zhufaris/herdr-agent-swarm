@@ -10,16 +10,17 @@ import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort, LarkPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
-import type { Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
+import type { Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation, ProjectConfig } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; lark: LarkPort; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; isBindingBusy(bindingId: string): boolean; logger: Logger; }
+interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; lark: LarkPort; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; isBindingBusy(bindingId: string): boolean; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
 export interface OperationsWorkflowPort {
   recover(): Promise<void>;
+  drainPaneControls(bindingId: string): Promise<void>;
   openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void>;
   decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void>;
   listSpaces(message: IncomingLarkMessage): Promise<void>;
@@ -29,6 +30,8 @@ export interface OperationsWorkflowPort {
   rename(message: IncomingLarkMessage, binding: Binding | null, title: string): Promise<boolean>;
   archive(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
   resume(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
+  stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
+  steer(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean>;
   runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean>;
   selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void>;
   requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
@@ -36,6 +39,7 @@ export interface OperationsWorkflowPort {
 }
 
 export class OperationsWorkflow implements OperationsWorkflowPort {
+  private readonly workers = new Map<string, Promise<void>>();
   constructor(private readonly options: Options) {}
 
   async recover(): Promise<void> {
@@ -52,6 +56,89 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
         await this.publish(next.id, "BindingArchived", "bridge", { reason: `Herdr pane ${operation.paneId} 的关闭结果已在 Bridge 重启后确认。` });
       } catch (error) { store.finishPaneCloseRequest(operation.id, "uncertain", `restart verification failed: ${errorMessage(error)}`); }
     }
+    for (const operation of store.listRecoverablePaneControlOperations()) {
+      store.finishPaneControlOperation(operation.id, "uncertain", "Bridge restarted after pane input may have been sent; operation was not replayed");
+    }
+    for (const binding of store.listBindings()) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
+  }
+
+  async drainPaneControls(bindingId: string): Promise<void> {
+    const previous = this.workers.get(bindingId) ?? Promise.resolve();
+    const worker = previous.catch(() => undefined).then(() => this.drainPaneControlsOnce(bindingId)).finally(() => { if (this.workers.get(bindingId) === worker) this.workers.delete(bindingId); });
+    this.workers.set(bindingId, worker);
+    await worker;
+  }
+
+  async stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。"); return false; }
+    const active = this.options.activeTurn(binding.id);
+    if (!active || active.paneId !== binding.paneId || !this.options.herdr.sendEscape) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/stop` 未进入任务队列。"); return false; }
+    const accepted = this.acceptControl({ message, binding, kind: "stop", parentPromptId: active.promptId });
+    if (accepted.inserted) {
+      const claimed = this.options.store.claimPaneControlOperation(accepted.operation.id);
+      if (claimed) await this.executeStop(claimed, binding);
+      else this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
+    }
+    return true;
+  }
+
+  async steer(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean> {
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
+    const active = this.options.activeTurn(binding.id);
+    if (!active || active.paneId !== binding.paneId || !this.options.herdr.steerPrompt) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/steer` 未进入任务队列。"); return false; }
+    const accepted = this.acceptControl({ message, binding, kind: "steer", payload: text, parentPromptId: active.promptId });
+    if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
+    return true;
+  }
+
+  private async drainPaneControlsOnce(bindingId: string): Promise<void> {
+    for (let operation = this.options.store.claimNextPaneControlOperation(bindingId); operation; operation = this.options.store.claimNextPaneControlOperation(bindingId)) {
+      const binding = this.options.store.getBinding(operation.bindingId);
+      if (!binding || binding.paneId !== operation.paneId || binding.generation !== operation.bindingGeneration) {
+        this.options.store.finishPaneControlOperation(operation.id, "rejected", "Pane identity changed before control dispatch");
+        continue;
+      }
+      if (operation.kind === "stop") {
+        await this.executeStop(operation, binding);
+        continue;
+      }
+      if (operation.kind === "steer") {
+        await this.executeSteer(operation, binding);
+        continue;
+      }
+      await this.executeModel(operation, binding);
+    }
+  }
+
+  private async executeStop(operation: PaneControlOperation, binding: Binding): Promise<void> {
+    if (!this.options.activeTurn(binding.id) || !this.options.herdr.sendEscape) { this.options.store.finishPaneControlOperation(operation.id, "rejected", "No supervised active turn remains for Esc"); return; }
+    try {
+      await this.options.herdr.sendEscape(operation.paneId);
+      this.options.store.finishPaneControlOperation(operation.id, "applied", "Esc sent; awaiting runtime observation");
+      this.options.store.audit({ actorOpenId: operation.actorOpenId, action: "prompt.stop", target: binding.id, outcome: "esc_sent" });
+    } catch (error) {
+      this.options.store.finishPaneControlOperation(operation.id, "uncertain", `Esc result cannot be confirmed: ${errorMessage(error)}`);
+    }
+  }
+
+  private async executeSteer(operation: PaneControlOperation, binding: Binding): Promise<void> {
+    const active = this.options.activeTurn(binding.id);
+    if (!active || active.promptId !== operation.parentPromptId || active.paneId !== operation.paneId || !this.options.herdr.steerPrompt || !operation.payload) { this.options.store.finishPaneControlOperation(operation.id, "rejected", "TraeX is no longer steerable; text was not injected"); return; }
+    try {
+      const tail = await this.options.herdr.readOutput(operation.paneId, 80);
+      if (isApprovalPrompt(tail)) { this.options.store.finishPaneControlOperation(operation.id, "rejected", "TraeX approval remains local to Herdr; steering text was not injected"); return; }
+      const result = await this.options.herdr.steerPrompt(operation.paneId, operation.payload);
+      this.options.store.finishPaneControlOperation(operation.id, result === "injected" ? "confirmed" : "rejected", result === "injected" ? "Steering injected into active turn" : "TraeX is no longer steerable; text was not injected");
+      this.options.store.audit({ actorOpenId: operation.actorOpenId, action: "prompt.steer", target: binding.id, outcome: result });
+    } catch (error) { this.options.store.finishPaneControlOperation(operation.id, "uncertain", `Steering result cannot be confirmed: ${errorMessage(error)}`); }
+  }
+
+  private async executeModel(operation: PaneControlOperation, binding: Binding): Promise<void> {
+    if (this.options.activeTurn(binding.id) || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
+      this.options.store.finishPaneControlOperation(operation.id, "rejected", "Pane was not idle when model control was claimed");
+      return;
+    }
+    await this.runAcceptedModel(operation, binding.rootMessageId ?? operation.sourceMessageId, operation.payload);
   }
 
   async openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void> {
@@ -117,22 +204,52 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   async runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean> {
     const target = name ?? "list"; const { store, herdr, config } = this.options;
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") { await this.reject(message, "这个话题没有可切换模型的活动 TraeX Pane。"); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "inactive_binding" }); return false; }
-    if (this.options.isBindingBusy(binding.id) || store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") { await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，请在当前任务或队列完成后重试。"); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "busy" }); return false; }
     if (!herdr.runPaneCommand) { await this.reject(message, "当前 Herdr adapter 不支持模型切换。"); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "unsupported" }); return false; }
-    try { const pane = await this.requireMatchingPane(binding, binding.paneId); if (name) { if (!herdr.selectPaneModel) throw new Error("当前 Herdr adapter 不支持交互式模型选择。"); await herdr.selectPaneModel(pane.paneId, name, config.commandTimeoutMs); } const output = await herdr.runPaneCommand(pane.paneId, "/model", config.commandTimeoutMs); await this.reply(message.rootMessageId ?? message.messageId, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: name !== null })); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: name ? "switch_completed" : "list_completed" }); return true; }
-    catch (error) { await this.reject(message, `模型命令执行失败：${errorMessage(error)}`); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "failed" }); return false; }
+    const accepted = this.acceptControl({ message, binding, kind: "model", ...(name === null ? {} : { payload: name }) });
+    if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
+    return true;
   }
 
   async selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void> {
     const { store, herdr, config, outbound, logger } = this.options; const binding = store.getBinding(bindingId);
     if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
-    if (this.options.isBindingBusy(binding.id) || store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked" || !herdr.selectPaneModel || !herdr.runPaneCommand) return;
-    try { const pane = await this.requireMatchingPane(binding, binding.paneId); await herdr.selectPaneModel(pane.paneId, model, config.commandTimeoutMs); const output = await herdr.runPaneCommand(pane.paneId, "/model", config.commandTimeoutMs); await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: true })); store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "switch_completed" }); }
-    catch (error) {
-      const message = `模型切换失败：${errorMessage(error)}`;
-      logger.warn({ event: "model-selection-failed", err: safeLogError(error), bindingId, paneId: binding.paneId, outcome: "failed" }, "failed to select TraeX model");
-      await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}:failed`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: message, switched: false }));
-      store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "failed" });
+    if (!herdr.selectPaneModel || !herdr.runPaneCommand) {
+      await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}:unsupported`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: "当前 Herdr adapter 不支持模型切换。", switched: false }));
+      return;
+    }
+    const accepted = store.acceptPaneControlOperation({
+      id: randomUUID(), idempotencyKey: `card:${action.messageId}:${binding.id}:model:${model}`, bindingId: binding.id, paneId: binding.paneId, terminalId: null, bindingGeneration: binding.generation,
+      kind: "model", payload: model, actorOpenId: action.operatorOpenId, sourceMessageId: action.messageId
+    });
+    if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
+  }
+
+  private async runAcceptedModel(operation: PaneControlOperation, rootMessageId: string, name: string | null): Promise<boolean> {
+    const { store, herdr, config } = this.options;
+    const binding = store.getBinding(operation.bindingId);
+    if (!binding || binding.paneId !== operation.paneId || binding.generation !== operation.bindingGeneration || this.options.activeTurn(binding.id) || binding.lastAgentState === "working" || binding.lastAgentState === "blocked") {
+      store.finishPaneControlOperation(operation.id, "rejected", "Pane is no longer idle or identity changed before model control");
+      return false;
+    }
+    try {
+      const pane = await this.requireMatchingPane(binding, operation.paneId);
+      if (name) { if (!herdr.selectPaneModel) throw new Error("当前 Herdr adapter 不支持交互式模型选择。"); await herdr.selectPaneModel(pane.paneId, name, config.commandTimeoutMs); }
+      const output = await herdr.runPaneCommand!(pane.paneId, "/model", config.commandTimeoutMs);
+      store.finishPaneControlOperation(operation.id, "confirmed", name ? "Model selection confirmed" : "Model selector listed");
+      const card = renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: name !== null });
+      if (operation.idempotencyKey.startsWith("card:")) await this.options.outbound.enqueueCardUpdate(binding.id, operation.sourceMessageId, `model:${operation.id}:confirmed`, card);
+      else await this.reply(rootMessageId, card);
+      store.audit({ actorOpenId: operation.actorOpenId, action: "model.run", target: name ?? "list", outcome: name ? "switch_completed" : "list_completed" });
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+      return true;
+    } catch (error) {
+      store.finishPaneControlOperation(operation.id, "uncertain", `Model operation may have applied: ${errorMessage(error)}`);
+      const failure = `模型命令执行失败或无法确认：${errorMessage(error)}`;
+      if (operation.idempotencyKey.startsWith("card:")) await this.options.outbound.enqueueCardUpdate(binding.id, operation.sourceMessageId, `model:${operation.id}:uncertain`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: operation.paneId, output: failure, switched: false }));
+      else await this.reject({ eventId: operation.id, messageId: operation.sourceMessageId, chatId: binding.chatId, topicId: binding.topicId, rootMessageId, actorOpenId: operation.actorOpenId, text: "/model", mentionsBot: false, isRootMessage: false }, failure);
+      store.audit({ actorOpenId: operation.actorOpenId, action: "model.run", target: name ?? "list", outcome: "uncertain" });
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+      return false;
     }
   }
 
@@ -149,6 +266,15 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     const checked = await this.checkPaneCloseSafety(message, store.getBinding(binding.id), outcome.paneId); if (!checked) { store.finishPaneCloseRequest(outcome.operationId, "rejected", "safety_recheck_failed"); return false; }
     try { await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: `Herdr pane ${checked.pane.paneId} 已由飞书确认关闭。` }); await this.reply(message.rootMessageId ?? message.messageId, renderPaneCloseResultCard({ paneId: checked.pane.paneId })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" }); return true; }
     catch (error) { store.finishPaneCloseRequest(outcome.operationId, "uncertain", errorMessage(error)); await this.reject(message, `Pane 关闭失败或无法验证：${errorMessage(error)}`); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" }); return false; }
+  }
+
+  private acceptControl(input: { message: IncomingLarkMessage; binding: Binding; kind: PaneControlOperation["kind"]; payload?: string; parentPromptId?: string }): { operation: PaneControlOperation; inserted: boolean } {
+    const terminalId = null;
+    return this.options.store.acceptPaneControlOperation({
+      id: randomUUID(), idempotencyKey: `message:${input.message.messageId}:${input.kind}`, bindingId: input.binding.id, paneId: input.binding.paneId!, terminalId,
+      bindingGeneration: input.binding.generation, kind: input.kind, payload: input.payload ?? null, parentPromptId: input.parentPromptId ?? null,
+      actorOpenId: input.message.actorOpenId, sourceMessageId: input.message.messageId
+    });
   }
 
   private async checkPaneCloseSafety(message: IncomingLarkMessage, binding: Binding | null, expectedPaneId?: string): Promise<{ binding: Binding; pane: HerdrPane } | null> {
@@ -177,3 +303,4 @@ type SpaceDirectoryBindingCandidate = Pick<Binding, "id" | "paneId" | "chatId" |
 export function selectSpaceDirectoryBinding(bindings: readonly SpaceDirectoryBindingCandidate[], paneId: string, chatId: string): SpaceDirectoryBindingCandidate | null { const rank: Partial<Record<Binding["lifecycle"], number>> = { active: 0, draining: 1, archived: 2 }; return bindings.filter((binding) => binding.paneId === paneId && binding.chatId === chatId && Boolean(binding.topicId ?? binding.rootMessageId) && rank[binding.lifecycle] !== undefined).sort((left, right) => rank[left.lifecycle]! - rank[right.lifecycle]! || right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id))[0] ?? null; }
 function paneCloseCodeHash(code: string): string { return createHash("sha256").update(code.trim().toUpperCase()).digest("hex"); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function isApprovalPrompt(output: string): boolean { return /\b(?:approve|approval|required|allow this|waiting for user)\b|等待.*(?:批准|确认|用户)/iu.test(output); }

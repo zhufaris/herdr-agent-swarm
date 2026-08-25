@@ -52,7 +52,7 @@ channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
 const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
-const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
+const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,

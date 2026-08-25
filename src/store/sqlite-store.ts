@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, SessionSummary } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -44,10 +44,15 @@ type ProjectSelectionRow = Record<string, SqlValue> & {
 type RetiredPaneCleanupRow = Record<string, SqlValue> & {
   id: string; old_binding_id: string; replacement_binding_id: string; pane_id: string; expected_workspace_id: string; expected_project_id: string; expected_cwd: string; expected_terminal_id: string; actor_open_id: string; state: string; attempt_count: number; detail: string | null; created_at: string; updated_at: string;
 };
+type PaneControlOperationRow = Record<string, SqlValue> & {
+  id: string; idempotency_key: string; binding_id: string; pane_id: string; terminal_id: string | null; binding_generation: number;
+  kind: string; payload: string | null; parent_prompt_id: string | null; state: string; attempt_count: number; detail: string | null;
+  actor_open_id: string; source_message_id: string; created_at: string; updated_at: string;
+};
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "project_selections", "pane_close_requests", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards"
+  "project_selections", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards"
 ] as const;
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -145,11 +150,18 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   recordInboundMessage(message: IncomingLarkMessage): boolean {
-    const result = this.database.prepare(`
-      INSERT INTO inbound_messages(event_id, message_id, payload_json, state, created_at, updated_at)
-      VALUES (?, ?, ?, 'received', ?, ?) ON CONFLICT(event_id) DO NOTHING
-    `).run(message.eventId, message.messageId, JSON.stringify(message), now(), now());
-    return result.changes === 1;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.database.prepare("SELECT 1 FROM inbound_messages WHERE event_id = ? OR message_id = ?").get(message.eventId, message.messageId);
+      if (existing) { this.database.exec("COMMIT"); return false; }
+      const timestamp = now();
+      const result = this.database.prepare(`
+        INSERT INTO inbound_messages(event_id, message_id, payload_json, state, created_at, updated_at)
+        VALUES (?, ?, ?, 'received', ?, ?)
+      `).run(message.eventId, message.messageId, JSON.stringify(message), timestamp, timestamp);
+      this.database.exec("COMMIT");
+      return result.changes === 1;
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   claimNextInboundMessage(): IncomingLarkMessage | null {
@@ -542,6 +554,78 @@ export class SqliteBindingStore implements BindingStorePort {
     return (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn' ORDER BY created_at, rowid").all(bindingId) as Array<{ id: string }>).map((row) => row.id);
   }
 
+  acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const timestamp = now();
+      const result = this.database.prepare(`
+        INSERT INTO pane_control_operations(id, idempotency_key, binding_id, pane_id, terminal_id, binding_generation, kind, payload, parent_prompt_id, state, attempt_count, actor_open_id, source_message_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?, ?, ?)
+        ON CONFLICT(idempotency_key) DO NOTHING
+      `).run(input.id, input.idempotencyKey, input.bindingId, input.paneId, input.terminalId, input.bindingGeneration, input.kind, input.payload ?? null, input.parentPromptId ?? null, input.actorOpenId, input.sourceMessageId, timestamp, timestamp);
+      const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE idempotency_key = ?").get(input.idempotencyKey) as PaneControlOperationRow | undefined;
+      if (!row) throw new Error(`Pane control operation not found: ${input.idempotencyKey}`);
+      this.database.exec("COMMIT");
+      return { operation: mapPaneControlOperation(row), inserted: result.changes === 1 };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const scope = bindingId ? "AND operation.binding_id = ?" : "";
+      const row = this.database.prepare(`
+        SELECT operation.* FROM pane_control_operations AS operation
+        JOIN bindings AS binding ON binding.id = operation.binding_id
+        WHERE operation.state = 'accepted' ${scope}
+          AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
+          AND binding.pane_id = operation.pane_id AND binding.generation = operation.binding_generation
+          AND (operation.kind != 'model' OR NOT EXISTS (
+            SELECT 1 FROM prompt_jobs active_prompt
+            WHERE active_prompt.binding_id = operation.binding_id AND active_prompt.state = 'running'
+          ))
+          AND (operation.kind = 'stop' OR NOT EXISTS (
+            SELECT 1 FROM pane_control_operations active
+            WHERE active.binding_id = operation.binding_id AND active.kind != 'stop' AND active.state = 'running'
+          ))
+        ORDER BY CASE operation.kind WHEN 'stop' THEN 0 WHEN 'steer' THEN 1 ELSE 2 END, operation.created_at, operation.rowid
+        LIMIT 1
+      `).get(...(bindingId ? [bindingId] : [])) as PaneControlOperationRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), row.id);
+      if (result.changes !== 1) throw new Error(`Pane control operation ${row.id} was not atomically claimed`);
+      const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(row.id) as PaneControlOperationRow;
+      this.database.exec("COMMIT");
+      return mapPaneControlOperation(claimed);
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  claimPaneControlOperation(id: string): PaneControlOperation | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ? AND state = 'accepted'").get(id) as PaneControlOperationRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), id);
+      if (result.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow;
+      this.database.exec("COMMIT");
+      return mapPaneControlOperation(claimed);
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  getPaneControlOperation(id: string): PaneControlOperation | null {
+    const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow | undefined;
+    return row ? mapPaneControlOperation(row) : null;
+  }
+
+  listRecoverablePaneControlOperations(): PaneControlOperation[] {
+    return (this.database.prepare("SELECT * FROM pane_control_operations WHERE state IN ('running', 'applied') ORDER BY updated_at, id").all() as PaneControlOperationRow[]).map(mapPaneControlOperation);
+  }
+
+  finishPaneControlOperation(id: string, state: Extract<PaneControlOperationState, "applied" | "confirmed" | "rejected" | "failed" | "uncertain">, detail: string | null = null): void {
+    this.database.prepare("UPDATE pane_control_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ?").run(state, detail, now(), id);
+  }
+
   recoverRunningPrompts(): number {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
@@ -723,6 +807,7 @@ export class SqliteBindingStore implements BindingStorePort {
         WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
           AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
           AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
+          AND NOT EXISTS (SELECT 1 FROM pane_control_operations control WHERE control.binding_id = p.binding_id AND control.kind = 'model' AND control.state IN ('accepted','running'))
         ORDER BY p.created_at, p.rowid LIMIT 1
       `).get(bindingId) as PromptRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
@@ -1146,6 +1231,7 @@ export class SqliteBindingStore implements BindingStorePort {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS inbound_messages_pending ON inbound_messages(state, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id);
       CREATE TABLE IF NOT EXISTS bridge_messages(message_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS prompt_jobs(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
@@ -1172,6 +1258,14 @@ export class SqliteBindingStore implements BindingStorePort {
         state TEXT NOT NULL CHECK(state IN ('pending','consumed','executing','succeeded','rejected','uncertain','expired','cancelled')), detail TEXT, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
+      CREATE TABLE IF NOT EXISTS pane_control_operations(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, terminal_id TEXT, binding_generation INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('stop','steer','model')), payload TEXT, parent_prompt_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('accepted','running','applied','confirmed','rejected','failed','uncertain')), attempt_count INTEGER NOT NULL DEFAULT 0, detail TEXT,
+        actor_open_id TEXT NOT NULL, source_message_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS pane_control_operations_claim ON pane_control_operations(state, binding_id, kind, created_at);
+      CREATE INDEX IF NOT EXISTS pane_control_operations_recovery ON pane_control_operations(state, updated_at);
       CREATE TABLE IF NOT EXISTS retired_pane_cleanup_operations(
         id TEXT PRIMARY KEY, old_binding_id TEXT NOT NULL UNIQUE REFERENCES bindings(id), replacement_binding_id TEXT NOT NULL REFERENCES bindings(id),
         pane_id TEXT NOT NULL, expected_workspace_id TEXT NOT NULL, expected_project_id TEXT NOT NULL, expected_cwd TEXT NOT NULL, expected_terminal_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,
@@ -1199,6 +1293,7 @@ export class SqliteBindingStore implements BindingStorePort {
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
     `);
     this.ensureOutboundReplyColumns();
+    this.ensureInboundMessageIdempotency();
     this.ensureOutboundCardCheckpoint();
     this.ensureRequestCardOutboxColumns();
     this.ensureRunCardRequestText();
@@ -1219,6 +1314,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundLaneKey();
     this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
+    this.ensurePaneControlOperationState();
     this.ensureRunCardsView();
     this.ensureQueryIndexes();
     const answerTargetMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
@@ -1254,6 +1350,10 @@ export class SqliteBindingStore implements BindingStorePort {
     const columns = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!columns.has("retired_topic_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN retired_topic_id TEXT");
     if (!columns.has("retired_root_message_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN retired_root_message_id TEXT");
+  }
+
+  private ensureInboundMessageIdempotency(): void {
+    this.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id)");
   }
 
   private ensureTwoPhaseResetState(): void {
@@ -1404,6 +1504,19 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
   }
 
+  private ensurePaneControlOperationState(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS pane_control_operations(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, terminal_id TEXT, binding_generation INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('stop','steer','model')), payload TEXT, parent_prompt_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('accepted','running','applied','confirmed','rejected','failed','uncertain')), attempt_count INTEGER NOT NULL DEFAULT 0, detail TEXT,
+        actor_open_id TEXT NOT NULL, source_message_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS pane_control_operations_claim ON pane_control_operations(state, binding_id, kind, created_at);
+      CREATE INDEX IF NOT EXISTS pane_control_operations_recovery ON pane_control_operations(state, updated_at);
+    `);
+  }
+
   private ensureRequestCardOutboxColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
@@ -1540,6 +1653,13 @@ function outboundLaneKey(input: { cardRole?: RequestCardRole | null; promptId?: 
 }
 function mapInstanceLease(row: { owner_id: string; fencing_token: number; expires_at: string; updated_at: string }): InstanceLease {
   return { ownerId: row.owner_id, fencingToken: Number(row.fencing_token), expiresAt: row.expires_at, updatedAt: row.updated_at };
+}
+function mapPaneControlOperation(row: PaneControlOperationRow): PaneControlOperation {
+  return {
+    id: row.id, idempotencyKey: row.idempotency_key, bindingId: row.binding_id, paneId: row.pane_id, terminalId: row.terminal_id, bindingGeneration: Number(row.binding_generation),
+    kind: row.kind as PaneControlOperationKind, payload: row.payload, parentPromptId: row.parent_prompt_id, state: row.state as PaneControlOperationState,
+    attemptCount: Number(row.attempt_count), detail: row.detail, actorOpenId: row.actor_open_id, sourceMessageId: row.source_message_id, createdAt: row.created_at, updatedAt: row.updated_at
+  };
 }
 function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
 function retryAt(attempt: number, explicitDelayMs?: number): string {

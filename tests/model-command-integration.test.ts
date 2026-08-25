@@ -25,6 +25,21 @@ describe("model command", () => {
     await fixture.close();
   });
 
+  it("runs before queued ordinary prompts while the pane is idle", async () => {
+    const cards: object[] = [];
+    const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
+    const fixture = await setup(cards, runPaneCommand);
+    const queued = { id: "queued-turn", bindingId: fixture.bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "ordinary work" };
+    fixture.store.enqueuePrompt(queued);
+
+    await fixture.coordinator.handleMessage(message("/model"));
+
+    await vi.waitFor(() => expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model", 1000));
+    expect(fixture.store.getPrompt(queued.id)?.state).toBe("queued");
+    expect(fixture.store.database.prepare("SELECT state FROM pane_control_operations WHERE kind = 'model'").get()).toEqual({ state: "confirmed" });
+    await fixture.close();
+  });
+
   it("observes the bound pane when the workspace snapshot cannot identify TraeX", async () => {
     const cards: object[] = [];
     const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
@@ -57,7 +72,7 @@ describe("model command", () => {
     await fixture.coordinator.handleMessage(message("/model"));
 
     expect(runPaneCommand).not.toHaveBeenCalled();
-    expect(JSON.stringify(cards.at(-1))).toContain("当前任务或队列完成后");
+    expect(fixture.store.database.prepare("SELECT state FROM pane_control_operations WHERE kind = 'model'").get()).toEqual({ state: "rejected" });
     await fixture.close();
   });
 
@@ -74,7 +89,7 @@ describe("model command", () => {
       value: { action: "select_model", bindingId: fixture.bindingId }
     });
 
-    expect(selectPaneModel).toHaveBeenCalledWith("w1:p1", "GPT-5.6-Terra", 1000);
+    await vi.waitFor(() => expect(selectPaneModel).toHaveBeenCalledWith("w1:p1", "GPT-5.6-Terra", 1000));
     expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model", 1000);
     const modelUpdates = updates.filter((update) => update.messageId === "model-card-1");
     expect(modelUpdates).toHaveLength(1);
@@ -95,7 +110,7 @@ describe("model command", () => {
       value: { action: "select_model", bindingId: fixture.bindingId }
     });
 
-    expect(JSON.stringify(updates.at(-1)!.card)).toContain("模型切换失败");
+    await vi.waitFor(() => expect(JSON.stringify(updates.at(-1)?.card)).toContain("模型命令执行失败或无法确认"));
     await fixture.close();
   });
 });
