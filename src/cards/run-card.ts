@@ -213,15 +213,9 @@ export function renderHelpCard(): object {
       { tag: "markdown", content: [
         "**从飞书控制 Herdr 中的 TraeX pane**", "",
         "`/herdr new [标题]`  选择项目并创建 TraeX pane",
-<<<<<<< HEAD
         "`/new [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
         "`/stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
         "`/steer <文本>`  将文本注入当前活动 turn，不降级为普通任务",
-=======
-        "`/new [标题]`  在当前话题开启新的 TraeX 会话（旧 pane 保持运行）",
-        "`/stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
-        "`/steer <文本>`  将文本注入当前活动 turn，不降级为普通任务",
->>>>>>> 28af356 (feat: map stop to Herdr escape and add steer command)
         "`/herdr projects`  打开项目选择卡片",
         "`/herdr spaces`  按 Space 查看全部 Pane",
         "`/herdr sessions`  查看当前群的会话",
