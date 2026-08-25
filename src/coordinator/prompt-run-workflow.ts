@@ -214,13 +214,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           if (!this.isBindingActive(bindingId)) return;
           const parsed = parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
-          if (parsed.delta) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [] });
+          if (parsed.delta || parsed.model || parsed.context) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [], ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.context ? { context: parsed.context } : {}) });
           const previousState = binding.lastAgentState;
           if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
           if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
             binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: observedState });
-            await this.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: this.options.store.countPendingPrompts(bindingId), promptId: prompt.id });
-            if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: this.options.store.countPendingPrompts(bindingId), outcome: "waiting_for_user" }, "TraeX turn requires user action");
+            const observedQueueDepth = this.options.store.countPendingPrompts(bindingId);
+            await this.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: observedQueueDepth, promptId: prompt.id });
+            if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: observedQueueDepth, outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
         }, abortController.signal, () => { dispatched = true; this.options.store.markPromptDispatched(prompt.id); });
         if (!this.isBindingActive(bindingId)) return;

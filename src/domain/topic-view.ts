@@ -5,12 +5,12 @@ import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; paneId: string | null; phase: TopicViewPhase;
-  agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[];
+  agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", paneId: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [] };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
@@ -38,8 +38,10 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       const recentProgress = event.payload.hasProgressSnapshot
         ? stampProgress(event.payload.progressEvents, event.occurredAt)
         : mergeProgress(base.recentProgress ?? [], event.payload.progressEvents, event.occurredAt);
-      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && state.activePromptId === event.payload.promptId) return state;
-      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress };
+      const model = event.payload.model ?? state.model;
+      const context = event.payload.context ?? state.context;
+      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
+      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, model, context };
     }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;

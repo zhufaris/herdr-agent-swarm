@@ -133,6 +133,11 @@ export class HerdrSocketSubscriber {
       });
       socket.on("data", (chunk: string) => {
         buffer += chunk;
+        if (Buffer.byteLength(buffer) > this.maxFrameBytes) {
+          this.rejectRequest(id, "socket_response_too_large", "Herdr RPC response exceeded the frame limit", true);
+          socket.destroy();
+          return;
+        }
         const newline = buffer.indexOf("\n");
         if (newline < 0) return;
         try {
@@ -246,6 +251,9 @@ export class HerdrSocketSubscriber {
             for (const paneId of newPaneIds) this.subscribedPaneIds.add(paneId);
             this.scheduleSubscriptionRefresh();
           }
+        } else if (isPaneClosedEvent(parsed.data.event)) {
+          const removed = ids.paneIds.filter((paneId) => this.subscribedPaneIds.delete(paneId));
+          if (removed.length > 0) this.scheduleSubscriptionRefresh();
         }
       } catch (error) {
         this.logger.warn({ event: "herdr-socket-frame-invalid", err: safeLogError(error), outcome: "full_reconciliation" }, "ignored malformed Herdr socket frame");
@@ -370,6 +378,10 @@ export class HerdrSocketSubscriber {
 
 function isPaneTopologyEvent(event: string): boolean {
   return event === "pane.created" || event === "pane_created" || event === "pane.moved" || event === "pane_moved";
+}
+
+function isPaneClosedEvent(event: string): boolean {
+  return event === "pane.closed" || event === "pane_closed" || event === "pane.exited" || event === "pane_exited";
 }
 
 function mergeHints(current: HerdrNativeEventHint | null, next: HerdrNativeEventHint): HerdrNativeEventHint {

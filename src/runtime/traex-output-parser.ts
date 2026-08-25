@@ -19,7 +19,7 @@ const MAX_TERMINAL_DELTA_CHARS = 12_000;
 const MIN_RELIABLE_TERMINAL_OVERLAP = 64;
 const LIVE_WINDOW_NOTICE = "较早的实时输出已省略，以下为最新状态。";
 
-interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace-all" }
+interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "append" | "replace-all"; model?: string; context?: string }
 
 /** True when TraeX is visibly waiting at its composer despite missing structured agent state. */
 export function isTraexComposerReady(output: string): boolean {
@@ -40,7 +40,7 @@ export function inferTraexAgentState(output: string): AgentState {
 export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string, promptEcho: string): ParsedTerminalStreamDelta {
   const previous = stripTerminalControl(previousRaw).replace(/\r/g, "");
   const current = stripTerminalControl(currentRaw).replace(/\r/g, "");
-  if (current === previous) return { delta: "", snapshot: currentRaw, update: "append" };
+  if (current === previous) return { delta: "", snapshot: currentRaw, update: "append", ...extractTraexTelemetry(current) };
 
   const overlap = terminalDelta(previous, current, promptEcho);
   let update: ParsedTerminalStreamDelta["update"] = previous && overlap.fullSnapshot ? "replace-all" : "append";
@@ -147,9 +147,9 @@ function normalizeTerminalForLark(source: string, promptEcho: string): string {
 /** Remove TraeX's orchestration UI; it is not part of the agent's answer. */
 function isSubagentConsoleLine(line: string): boolean {
   const trimmed = line.trim();
-  return /^(?:\d+\s+agents?\s+running\b|[●○]\s+[^\n]+\b(?:running|idle|done|blocked)\b)/iu.test(trimmed)
+  return /^(?:\d+\s+agents?\s+running\b)/iu.test(trimmed)
     || /^(?:↓\s+to\s+select\s+agents|…\s*\+\d+\s+completed)$/u.test(trimmed)
-    || /^\s*[●○]\s+[^\n]+\[(?:default|subagent|worker|explorer|reviewer|plan)\][^\n]*$/iu.test(line);
+    || /^\s*[●○]\s+[^\n]+\[(?:default|subagent|worker|explorer|reviewer|plan)\]\s+(?:running|idle|done|blocked)\b[^\n]*$/iu.test(line);
 }
 
 export function stripTraexConsoleStatus(source: string): string {

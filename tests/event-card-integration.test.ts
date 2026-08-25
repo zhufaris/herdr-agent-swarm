@@ -159,6 +159,7 @@ describe("event-driven card projection", () => {
       { cardId: "cardkit-1", summary: "回答将在第 2 页继续" }, { cardId: "cardkit-2", summary: "Completed" }
     ]);
     expect(JSON.stringify(created[1])).toContain("TraeX 继续回复 · 第 2 页");
+    expect(JSON.stringify(created[1])).toContain('\"streaming_mode\":true');
     expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: 20_010, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();

@@ -70,6 +70,22 @@ describe("Herdr socket subscriber", () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
+  it("bounds an unterminated RPC response before it can grow the process heap", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-rpc-large-")), "herdr.sock");
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        if (!chunk.includes('"method":"events.subscribe"')) socket.write("x".repeat(513));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], () => {}, pino({ enabled: false }), 5, 20, 512);
+    await expect(subscriber.request("session.snapshot", {}, 1_000)).rejects.toMatchObject({ code: "socket_response_too_large", written: true });
+    expect(subscriber.status()).toMatchObject({ requestFailures: 1, pendingRequests: 0 });
+    await subscriber.stop();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
   it("wakes targeted Pane waiters from native events", async () => {
     const subscriber = new HerdrSocketSubscriber("unused", async () => [], () => {}, pino({ enabled: false }));
     const first = subscriber.waitForPaneEvent("w1:p1", 1_000);

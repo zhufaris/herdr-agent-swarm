@@ -61,6 +61,31 @@ describe("run card", () => {
     expect(serialized).not.toContain("wH");
   });
 
+  it("shows observed model and context in the main-card metrics", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), model: "GPT-5.6-Sol", context: "31.1K tokens"
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("MODEL");
+    expect(serialized).toContain("GPT-5.6-Sol");
+    expect(serialized).toContain("CONTEXT");
+    expect(serialized).toContain("31.1K tokens");
+  });
+
+  it("renders topic metrics as a vertical markdown block", () => {
+    const input = { ...initialTopicView("b1"), spaceName: "datasage", paneId: "w5:p3G", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
+    const cards = [renderRunCard(input), renderProjectEntryCard(input)] as Array<{ body: { elements: Array<{ tag: string; content?: string }> } }> ;
+
+    for (const card of cards) {
+      expect(card.body.elements[0]).toMatchObject({
+        tag: "markdown",
+        content: "**SPACE**  `datasage`\n**PANE**  `w5:p3G`\n**MODEL**  `GPT-5.6-Sol`\n**CONTEXT**  `31.1K tokens`\n**QUEUE**  `2`"
+      });
+      expect(card.body.elements.some((element) => element.tag === "column_set")).toBe(false);
+    }
+  });
+
   it("renders CardKit 2.0 from a projected state", () => {
     const card = renderRunCard({ ...initialTopicView("b1"), title: "Build bridge", workspaceId: "wG", spaceName: "datasage_semantic_knowledge", paneId: "wG:p2", phase: "blocked", agentState: "blocked", queueDepth: 2 });
     const serialized = JSON.stringify(card);
@@ -212,8 +237,8 @@ describe("run card", () => {
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
     expect(panels).toEqual([]);
-    expect(answerCard).toMatchObject({ header: { title: { content: "✨ TraeX 回复" }, subtitle: { content: "Fix login" } } });
-    expect(answerCard).toMatchObject({ config: { summary: { content: "完成 · Fix login" } } });
+    expect(answerCard).toMatchObject({ header: { title: { content: "✅ TraeX 回复已完成" }, subtitle: { content: "Fix login" }, template: "green" } });
+    expect(answerCard).toMatchObject({ config: { streaming_mode: false, summary: { content: "完成 · Fix login" } } });
     const answerElements = (answerCard as { body: { elements: Array<{ tag?: string; element_id?: string }> } }).body.elements;
     expect(answerElements).toContainEqual(expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" }));
     const elementId = answerElements.find((element) => element.element_id)?.element_id;
@@ -227,7 +252,8 @@ describe("run card", () => {
     const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
     const card = renderRequestAnswerCard(completed, { pageNumber: 7, initialContent: "Only page seven" }) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string; element_id?: string }> } };
 
-    expect(card.header).toMatchObject({ title: { content: "✨ TraeX 继续回复 · 第 7 页" }, subtitle: { content: "Explain rollout" } });
+    expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "Explain rollout" } });
+    expect(card).toMatchObject({ config: { streaming_mode: false }, header: { title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, template: "green" } });
     expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
     expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });

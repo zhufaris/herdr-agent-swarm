@@ -34,4 +34,20 @@ describe("StartupViewConverger", () => {
     );
     store.close();
   });
+
+  it("preserves unresolved legacy workspace naming when that workspace has multiple projects", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "legacy", projectId: null, workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "legacy task" });
+    store.updateBinding("legacy", { paneId: "w1:p1", statusMessageId: "root-card", state: "active" });
+    const enqueueCardUpdate = vi.fn<OutboundIntentPort["enqueueCardUpdate"]>().mockResolvedValue(undefined);
+    const multiProjectConfig = { projects: [
+      { id: "one", displayName: "One", spaceName: "one", description: "One", workspaceId: "w1", cwd: "/one" },
+      { id: "two", displayName: "Two", spaceName: "two", description: "Two", workspaceId: "w1", cwd: "/two" }
+    ] } as const satisfies Pick<BridgeConfig, "projects">;
+
+    await new StartupViewConverger(multiProjectConfig, store, { enqueueCardUpdate } as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }).converge();
+
+    expect(store.loadTopicView("legacy")?.spaceName).toBe("legacy/unresolved");
+    store.close();
+  });
 });

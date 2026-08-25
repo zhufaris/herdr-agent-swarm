@@ -7,6 +7,26 @@ import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-schedule
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("HerdrRuntimeReconciler", () => {
+  it("captures startup baselines with bounded parallel terminal reads", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    for (let index = 1; index <= 5; index += 1) {
+      store.createPendingBinding({ id: `b${index}`, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: `topic-${index}`, rootMessageId: `root-${index}`, title: `task-${index}` });
+      store.updateBinding(`b${index}`, { paneId: `w1:p${index}`, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    }
+    const release = new Map<string, () => void>();
+    const readOutput = vi.fn((paneId: string) => new Promise<string>((resolve) => { release.set(paneId, () => resolve("")); }));
+    const reconciler = fixture(store, { readOutput } as unknown as HerdrPort);
+
+    const capture = reconciler.captureBaselines();
+    await vi.waitFor(() => expect(readOutput).toHaveBeenCalledTimes(4));
+    expect(readOutput.mock.calls.map(([paneId]) => paneId).sort()).toEqual(["w1:p1", "w1:p2", "w1:p3", "w1:p4"]);
+    for (const releaseRead of release.values()) releaseRead();
+    await vi.waitFor(() => expect(readOutput).toHaveBeenCalledTimes(5));
+    release.get("w1:p5")!();
+    await capture;
+    store.close();
+  });
+
   it("coalesces overlapping reconciliation calls into one workspace scan", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -137,6 +157,21 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("keeps reading unknown panes when their snapshot revision is unchanged", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const readOutput = vi.fn().mockResolvedValueOnce("◆ first answer\n────────").mockResolvedValueOnce("◆ second answer\n────────");
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(readOutput).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
   it("reads terminal output when the output revision changes even if agent state does not", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -155,6 +190,27 @@ describe("HerdrRuntimeReconciler", () => {
     await reconciler.reconcile();
 
     expect(readOutput).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
+  it("projects passively observed model and context telemetry for an idle binding", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const bus = new BridgeEventBus();
+    const observed: Array<{ type: string; payload: unknown }> = [];
+    bus.onBridgeEvent("telemetry-test", (event) => { observed.push(event); });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { async listPanes() { return [pane]; }, async readOutput() { return "GPT-5.6-Terra · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort,
+      lifecycleEvents: bus, channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+
+    expect(observed.find((event) => event.type === "TurnOutputObserved")?.payload).toMatchObject({ model: "GPT-5.6-Terra", context: "31.1K tokens", answerSnapshot: "" });
     store.close();
   });
 
@@ -323,11 +379,37 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("loads workspace fallbacks concurrently while retaining each successful snapshot", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const release = new Map<string, () => void>();
+    const listPanes = vi.fn((workspaceId: string) => new Promise<HerdrPane[]>((resolve) => {
+      release.set(workspaceId, () => resolve([]));
+    }));
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [
+        { id: "repo-one", displayName: "Repo one", description: "Repo one", workspaceId: "w1", cwd: "/repo-one" },
+        { id: "repo-two", displayName: "Repo two", description: "Repo two", workspaceId: "w2", cwd: "/repo-two" }
+      ],
+      store, herdr: { async listAllPanes() { throw new Error("snapshot unavailable"); }, listPanes } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    const reconciliation = reconciler.reconcile();
+    await Promise.resolve();
+    expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId).sort()).toEqual(["w1", "w2"]);
+    release.get("w1")!();
+    release.get("w2")!();
+    await reconciliation;
+    store.close();
+  });
+
   it("enriches an unknown bound pane and wakes its queued FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "unknown" });
     store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "message-1", actorOpenId: "user", body: "queued work" });
+    const countPendingPrompts = vi.spyOn(store, "countPendingPrompts");
     const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, stateChangeSeq: 9, foregroundExecutables: [] };
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
@@ -345,6 +427,8 @@ describe("HerdrRuntimeReconciler", () => {
 
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "idle", attachment: "attached" });
+    expect(countPendingPrompts).toHaveBeenCalledTimes(1);
+    expect(countPendingPrompts).toHaveBeenCalledWith("b1");
     await Promise.resolve();
     expect(wake).toHaveBeenCalledWith({ kind: "binding-runtime-changed", bindingId: "b1" });
     expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });

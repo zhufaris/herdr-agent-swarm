@@ -8,12 +8,13 @@ const forwardThread = vi.fn();
 const createCard = vi.fn();
 const streamContent = vi.fn();
 const updateSettings = vi.fn();
+const updateCardEntity = vi.fn();
 let clientOptions: Record<string, unknown> | undefined;
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
     constructor(options: Record<string, unknown>) { clientOptions = options; }
     im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage }, thread: { forward: forwardThread } } };
-    cardkit = { v1: { card: { create: createCard, settings: updateSettings }, cardElement: { content: streamContent } } };
+    cardkit = { v1: { card: { create: createCard, settings: updateSettings, update: updateCardEntity }, cardElement: { content: streamContent } } };
   },
   defaultHttpInstance: { request: vi.fn(), get: vi.fn(), delete: vi.fn(), head: vi.fn(), options: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn() },
   WSClient: class { async start() {} close() {} },
@@ -24,7 +25,7 @@ import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../s
 
 beforeEach(() => {
   createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
-  createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset();
+  createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset(); updateCardEntity.mockReset();
   clientOptions = undefined;
 });
 
@@ -96,6 +97,16 @@ describe("Lark streaming Answer cards", () => {
 
     expect(streamContent).toHaveBeenCalledWith({ path: { card_id: "card-1", element_id: "answer_content_p1" }, data: { content: "one\ntwo", sequence: 4, uuid: "stream-card-1-4" } });
     expect(updateSettings).toHaveBeenCalledWith({ path: { card_id: "card-1" }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: "Completed" } } }), sequence: 5, uuid: "finish-card-1-5" } });
+  });
+
+  it("finalizes a completed streaming card through settings without replacing its card tree", async () => {
+    updateSettings.mockResolvedValue({});
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await adapter.finishStreamingCard("card-1", 5, "Completed");
+
+    expect(updateSettings).toHaveBeenCalledWith({ path: { card_id: "card-1" }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: "Completed" } } }), sequence: 5, uuid: "finish-card-1-5" } });
+    expect(updateCardEntity).not.toHaveBeenCalled();
   });
 
   it("normalizes element ids when replying with or updating a non-CardKit card", async () => {

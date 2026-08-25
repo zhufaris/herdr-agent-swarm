@@ -8,7 +8,7 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { extractFinalTraexAnswer } from "../runtime/traex-output-parser.js";
+import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -23,6 +23,8 @@ interface HerdrRuntimeReconcilerOptions {
   scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
 }
+
+const BASELINE_READ_CONCURRENCY = 4;
 
 export interface HerdrRuntimeReconcilerPort {
   captureBaselines(): Promise<void>;
@@ -45,17 +47,19 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {}
 
   async captureBaselines(): Promise<void> {
-    for (const binding of this.options.store.listBindingsByState("active").filter((item) => item.paneId)) {
+    const bindings = this.options.store.listBindingsByState("active").filter((item) => item.paneId);
+    await forEachConcurrent(bindings, BASELINE_READ_CONCURRENCY, async (binding) => {
       try {
         const output = cleanTerminalOutput(await this.options.herdr.readOutput(binding.paneId!, 240));
         this.observedTerminalOutputs.set(binding.paneId!, output);
         if (output) this.options.store.updateBinding(binding.id, { lastOutputFingerprint: outputFingerprint(output) });
+        if (output && !this.options.isBindingBusy(binding.id)) await this.publishTerminalTelemetry(binding, output);
       } catch (error) {
         const next = this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: isPaneMissing(error), orphanThreshold: 2 });
         if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", { reason: `Unable to read Herdr pane ${binding.paneId}: ${errorMessage(error)}` });
         this.options.logger.warn({ event: "binding-pane-probe-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment }, "failed to observe Herdr pane during startup");
       }
-    }
+    });
   }
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
@@ -217,12 +221,16 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       if (existing.attachment !== "orphaned" && (existing.lifecycle === "active" || existing.lifecycle === "draining")) this.options.store.transitionBinding(existing.id, { type: "pane_observed", runtime: pane.agentState });
       if (existing.state !== "active" || this.options.isBindingBusy(existing.id)) continue;
       if (previous !== pane.agentState) {
+        const queueDepth = this.options.store.countPendingPrompts(existing.id);
         this.options.store.updateBinding(existing.id, { lastAgentState: pane.agentState });
-        await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth: this.options.store.countPendingPrompts(existing.id) });
+        await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth });
+        this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
+        if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
       }
-      if (previous !== pane.agentState) this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
-      if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
-      if (pane.outputRevision !== null && pane.outputRevision !== undefined && this.observedOutputRevisions.get(pane.paneId) === pane.outputRevision) continue;
+      // Snapshot revisions describe pane metadata, not terminal content, for
+      // unstructured panes. Keep reading those bounded outputs and let the
+      // output fingerprint suppress unchanged projections.
+      if (pane.agentState !== "unknown" && pane.outputRevision !== null && pane.outputRevision !== undefined && this.observedOutputRevisions.get(pane.paneId) === pane.outputRevision) continue;
       await this.publishChangedLocalOutput(existing, pane.paneId);
       if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
     }
@@ -242,12 +250,12 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {
-    for (const workspaceId of workspaceIds) {
+    await Promise.all(workspaceIds.map(async (workspaceId) => {
       try { panesByWorkspace.set(workspaceId, await this.options.herdr.listPanes(workspaceId)); }
       catch (error) {
         this.options.logger.error({ event: "workspace-reconciliation-failed", err: safeLogError(error), workspaceId, outcome: "failed" }, "workspace reconciliation failed");
       }
-    }
+    }));
   }
 
   private async orphanMissingPane(binding: Binding): Promise<void> {
@@ -271,15 +279,37 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     this.observedTerminalOutputs.set(paneId, output);
     const fingerprint = outputFingerprint(output);
     const completedAnswerFingerprint = outputFingerprint(extractFinalTraexAnswer(output));
+    if (!this.options.isBindingBusy(binding.id)) await this.publishTerminalTelemetry(binding, output, fingerprint);
     if (fingerprint === binding.lastOutputFingerprint || completedAnswerFingerprint === binding.lastOutputFingerprint) return;
     this.options.store.updateBinding(binding.id, { lastOutputFingerprint: fingerprint });
     const answer = extractTraexAnswer(extractNewOutput(previous, output));
     if (answer) await this.publish(binding.id, "TurnCompleted", { promptId: `local:${fingerprint.slice(0, 16)}`, answer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
   }
 
+  private async publishTerminalTelemetry(binding: Binding, output: string, fingerprint = outputFingerprint(output)): Promise<void> {
+    const telemetry = parseTerminalStreamDelta("", output, "");
+    if (!telemetry.model && !telemetry.context) return;
+    await this.publish(binding.id, "TurnOutputObserved", {
+      promptId: `local:${fingerprint.slice(0, 16)}`, answerSnapshot: "", progressEvents: [],
+      ...(telemetry.model ? { model: telemetry.model } : {}),
+      ...(telemetry.context ? { context: telemetry.context } : {})
+    });
+  }
+
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
   }
+}
+
+async function forEachConcurrent<T>(items: readonly T[], limit: number, operation: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      if (item !== undefined) await operation(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {

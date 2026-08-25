@@ -32,6 +32,24 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("finalizes an Answer stream through settings without replacing the card tree", async () => {
+    const finish = vi.fn(async () => {});
+    const updateCard = vi.fn(async () => {});
+    const lark = fakeLark({ finishStreamingCard: finish, updateCard });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+
+    await connectedWriter(store, publisher).enqueueStreamFinish("b1", "p1", "cardkit-1", "Completed", 3);
+
+    expect(finish).toHaveBeenCalledWith("cardkit-1", 3, "Completed");
+    expect(updateCard).not.toHaveBeenCalled();
+    store.close();
+  });
+
   it("rejects a stream target belonging to another prompt", async () => {
     const stream = vi.fn(async () => {});
     const lark = fakeLark({ streamCardContent: stream });

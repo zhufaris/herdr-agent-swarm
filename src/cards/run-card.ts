@@ -77,15 +77,7 @@ export function renderAttachStatusCard(input: { spaceName: string; paneId: strin
 export function renderRunCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
   const elements: object[] = [
-    {
-      tag: "column_set",
-      horizontal_spacing: "8px",
-      columns: [
-        metric("SPACE", input.spaceName),
-        metric("PANE", input.paneId ?? "provisioning"),
-        metric("QUEUE", String(input.queueDepth))
-      ]
-    },
+    { tag: "markdown", content: verticalMetrics(input) },
     { tag: "hr" }
   ];
 
@@ -128,15 +120,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     ? null
     : latestLines(visibleAnswer, 20) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
   const elements: object[] = [
-    {
-      tag: "column_set",
-      horizontal_spacing: "8px",
-      columns: [
-        metric("SPACE", input.spaceName),
-        metric("PANE", input.paneId ?? "provisioning"),
-        metric("QUEUE", String(input.queueDepth))
-      ]
-    },
+    { tag: "markdown", content: verticalMetrics(input) },
     { tag: "hr" }
   ];
   elements.push({ tag: "markdown", content: projectWorkSummary(input) });
@@ -173,9 +157,10 @@ export function renderRequestRunCard(input: RunCardView): object {
   };
 }
 
-export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string } = {}): object {
+export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean } = {}): object {
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
+  const streaming = options.streaming ?? input.phase !== "completed";
   const structuredAnswer = Array.isArray(input.answerSegments) && typeof input.answerDraft === "string"
     ? [...input.answerSegments, input.answerDraft].filter((part) => part.trim()).join("\n\n")
     : "";
@@ -199,11 +184,11 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
-    schema: "2.0", config: { update_multi: true, streaming_mode: true, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
+    schema: "2.0", config: { update_multi: true, streaming_mode: streaming, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
-      title: { tag: "plain_text", content: pageNumber > 1 ? `✨ TraeX 继续回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复" },
+      title: { tag: "plain_text", content: input.phase === "completed" && !streaming ? (pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成") : (pageNumber > 1 ? `✨ TraeX 继续回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复") },
       subtitle: { tag: "plain_text", content: boundedTitle(input.title) },
-      template: state.color
+      template: input.phase === "completed" && !streaming ? "green" : state.color
     },
     body: { elements }
   };
@@ -265,10 +250,15 @@ export function renderMessageRejectedCard(message: string): object {
   };
 }
 
-function metric(label: string, value: string): object {
-  return { tag: "column", width: "weighted", weight: 1, elements: [
-    { tag: "markdown", content: `**${label}**\n\`${escapeCode(truncate(value, 28))}\`` }
-  ] };
+function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "paneId" | "model" | "context" | "queueDepth">): string {
+  const entries: Array<[label: string, value: string]> = [
+    ["SPACE", input.spaceName],
+    ["PANE", input.paneId ?? "provisioning"],
+    ["MODEL", input.model ?? "—"],
+    ["CONTEXT", input.context ?? "—"],
+    ["QUEUE", String(input.queueDepth)]
+  ];
+  return entries.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("\n");
 }
 
 function callout(color: string, content: string): object {

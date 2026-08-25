@@ -25,7 +25,9 @@ export function startHealthServer(options: {
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
   herdrSocket?: { status(): HerdrSocketStatus };
   buildIdentity: BuildIdentity;
+  readinessTtlMs?: number;
 }): Promise<Server> {
+  const readinessCache = new ReadinessCache(() => inspectReadiness(options), options.readinessTtlMs ?? 2_000);
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.url === "/health") {
@@ -33,13 +35,13 @@ export function startHealthServer(options: {
       response.statusCode = 200; response.end(JSON.stringify({ status: "ok", serviceId, version, buildId })); return;
     }
     if (request.url === "/ready") {
-      const readiness = await inspectReadiness(options);
+      const readiness = await readinessCache.read();
       response.statusCode = readiness.status === "ready" ? 200 : 503;
       response.end(JSON.stringify(readiness));
       return;
     }
     if (request.url === "/status") {
-      const readiness = await inspectReadiness(options);
+      const readiness = await readinessCache.read();
       let operational: ReturnType<HealthStore["getOperationalSummary"]> | { error: string };
       try { operational = options.store.getOperationalSummary(); }
       catch (error) { operational = { error: boundedError(error) }; }
@@ -71,6 +73,22 @@ export function startHealthServer(options: {
     server.once("error", reject);
     server.listen(options.port, options.host, () => resolve(server));
   });
+}
+
+class ReadinessCache {
+  private value: Readiness | null = null;
+  private refreshedAt = 0;
+  private refresh: Promise<Readiness> | null = null;
+
+  constructor(private readonly inspect: () => Promise<Readiness>, private readonly ttlMs: number, private readonly clock: () => number = Date.now) {}
+
+  async read(): Promise<Readiness> {
+    if (this.value && this.clock() - this.refreshedAt < this.ttlMs) return this.value;
+    if (this.refresh) return this.refresh;
+    const refresh = this.inspect().then((value) => { this.value = value; this.refreshedAt = this.clock(); return value; });
+    this.refresh = refresh;
+    try { return await refresh; } finally { if (this.refresh === refresh) this.refresh = null; }
+  }
 }
 
 async function inspectReadiness(options: { store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus } }): Promise<Readiness> {

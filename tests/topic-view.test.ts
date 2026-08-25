@@ -30,6 +30,13 @@ describe("topic view reducer", () => {
     expect(view).toMatchObject({ phase: "running", activePromptId: "new", answer: "live answer" });
   });
 
+  it("persists observed model and context telemetry on the main-card projection", () => {
+    const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    const observed = reduceTopicView(running, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "", progressEvents: [], model: "GPT-5.6-Sol", context: "31.1K tokens" }));
+
+    expect(observed).toMatchObject({ model: "GPT-5.6-Sol", context: "31.1K tokens" });
+  });
+
   it("does not update the project card for an identical visible snapshot", () => {
     const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     const first = reduceTopicView(running, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active" }] }));

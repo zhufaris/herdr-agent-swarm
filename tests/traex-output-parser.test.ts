@@ -162,6 +162,15 @@ describe("TraeX output parser", () => {
     ].join("\n"))).toBe("Review complete");
   });
 
+  it("preserves ordinary status bullets in the final answer", () => {
+    expect(extractFinalTraexAnswer([
+      "◆ 发布检查：",
+      "● Build done",
+      "● Smoke test done",
+      "────────"
+    ].join("\n"))).toBe("发布检查：\n● Build done\n● Smoke test done");
+  });
+
   it("marks a newly appended answer block separately from growth of the current block", () => {
     const first = "◆ First message";
     expect(parseTraexOutput(first, `${first} continues`, "/repo")).toMatchObject({ answerSnapshot: "First message continues", answerUpdate: "replace" });

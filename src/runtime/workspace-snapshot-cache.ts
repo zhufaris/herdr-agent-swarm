@@ -9,6 +9,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly refreshes = new Map<string, Promise<HerdrPane[]>>();
   private allRefresh: Promise<HerdrPane[]> | null = null;
+  private allSnapshot: Snapshot | null = null;
   private hits = 0;
   private misses = 0;
   private coalescedRefreshes = 0;
@@ -33,15 +34,19 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       return clonePanes(await active);
     }
     this.misses += 1;
-    const refresh = this.refresh(workspaceId);
+    const refresh = this.refresh(workspaceId, options);
     this.refreshes.set(workspaceId, refresh);
     try { return clonePanes(await refresh); }
     finally { this.refreshes.delete(workspaceId); }
   }
 
-  async listAllPanes(): Promise<HerdrPane[]> {
+  async listAllPanes(options: { forceRefresh?: boolean } = {}): Promise<HerdrPane[]> {
     if (!this.delegate.listAllPanes) {
       throw new Error("Herdr adapter does not support an all-workspace snapshot");
+    }
+    if (!options.forceRefresh && this.allSnapshot && this.clock() - this.allSnapshot.capturedAt < this.ttlMs) {
+      this.hits += 1;
+      return clonePanes(this.allSnapshot.panes);
     }
     if (this.allRefresh) {
       this.coalescedRefreshes += 1;
@@ -61,11 +66,15 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       group.push(pane);
       byWorkspace.set(pane.workspaceId, group);
     }
+    this.allSnapshot = { panes: clonePanes(panes), capturedAt };
     for (const [workspaceId, workspacePanes] of byWorkspace) this.snapshots.set(workspaceId, { panes: clonePanes(workspacePanes), capturedAt });
     return clonePanes(panes);
   }
 
-  invalidate(workspaceId: string): void { this.snapshots.delete(workspaceId); }
+  invalidate(workspaceId: string): void {
+    this.snapshots.delete(workspaceId);
+    this.allSnapshot = null;
+  }
 
   status(): WorkspaceCacheStatus {
     const now = this.clock();
@@ -85,6 +94,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (pane) {
       const snapshot = this.snapshots.get(pane.workspaceId);
       if (snapshot) this.snapshots.set(pane.workspaceId, { ...snapshot, panes: snapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) });
+      if (this.allSnapshot) this.allSnapshot = { ...this.allSnapshot, panes: this.allSnapshot.panes.map((candidate) => candidate.paneId === pane.paneId ? { ...pane } : candidate) };
     }
     return observation;
   }
@@ -130,8 +140,15 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (workspaceId) this.invalidate(workspaceId);
   }
 
-  private async refresh(workspaceId: string): Promise<HerdrPane[]> {
+  private async refresh(workspaceId: string, options: { forceRefresh?: boolean }): Promise<HerdrPane[]> {
     try {
+      if (this.delegate.listAllPanes) {
+        try {
+          return (await this.listAllPanes(options)).filter((pane) => pane.workspaceId === workspaceId);
+        } catch (error) {
+          this.logger?.debug({ event: "workspace-snapshot-fallback", workspaceId, err: safeLogError(error), outcome: "fallback" }, "all-workspace snapshot unavailable; falling back to workspace snapshot");
+        }
+      }
       const panes = await this.delegate.listPanes(workspaceId, { forceRefresh: true });
       const capturedAt = this.clock();
       this.snapshots.set(workspaceId, { panes: clonePanes(panes), capturedAt });

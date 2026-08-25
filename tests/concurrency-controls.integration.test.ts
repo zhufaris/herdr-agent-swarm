@@ -9,6 +9,29 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("coordinator concurrency controls", () => {
+  it("checks configured workspaces concurrently during startup", async () => {
+    const release = new Map<string, () => void>();
+    const assertWorkspace = vi.fn((workspaceId: string) => new Promise<void>((resolve) => { release.set(workspaceId, resolve); }));
+    const herdr = { ...emptyHerdr(), assertWorkspace };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const startupConfig = { ...config(), projects: [
+      { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+      { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
+    ], defaultProjectId: "one" };
+    const coordinator = createTestRouter(startupConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
+
+    const startup = coordinator.start();
+    await vi.waitFor(() => expect(assertWorkspace.mock.calls.map(([workspaceId]) => workspaceId).sort()).toEqual(["w1", "w2"]));
+    release.get("w1")!();
+    release.get("w2")!();
+    await startup;
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("coalesces concurrent reconciliation calls into one workspace scan", async () => {
     let block = false;
     let release!: () => void;

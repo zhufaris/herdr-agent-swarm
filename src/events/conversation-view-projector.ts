@@ -37,7 +37,9 @@ export class ConversationViewProjector {
           this.store.saveRunCard({ ...view, answerSequence: sequence });
           await this.channelPublisher.enqueueStreamContent(view.bindingId, promptId, view.answerCardId, view.answerElementId, page, sequence);
           if (nextPageStart === null) {
-            if (["completed", "failed"].includes(view.phase)) await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, view.phase === "completed" ? "Completed" : "Failed", sequence + 1);
+            if (["completed", "failed"].includes(view.phase)) await this.channelPublisher.enqueueStreamFinish(
+              view.bindingId, promptId, view.answerCardId, view.phase === "completed" ? "Completed" : "Failed", sequence + 1
+            );
             break;
           }
 
@@ -51,7 +53,7 @@ export class ConversationViewProjector {
           if (!binding?.rootMessageId) return;
           await this.channelPublisher.enqueueStreamCardCreate({
             bindingId: view.bindingId, promptId, rootMessageId: binding.rootMessageId, pageIndex, pageStart, elementId: nextElementId, viewVersion: view.viewVersion,
-            card: renderRequestAnswerCard(nextView, { pageNumber: pageIndex + 1, initialContent: nextPage })
+            card: renderRequestAnswerCard(nextView, { pageNumber: pageIndex + 1, initialContent: nextPage, streaming: true })
           });
           view = this.store.loadRunCard(promptId);
           if (!view?.answerCardId || view.answerPageIndex !== pageIndex) return;

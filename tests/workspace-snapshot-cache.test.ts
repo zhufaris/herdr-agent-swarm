@@ -32,6 +32,19 @@ describe("workspace snapshot cache", () => {
     expect(cache.status().coalescedRefreshes).toBe(1);
   });
 
+  it("serves concurrent workspace cache misses from one all-workspace snapshot", async () => {
+    const listAllPanes = vi.fn(async () => [pane("w1", 1), pane("w2", 2)]);
+    const listPanes = vi.fn(async (workspaceId: string) => [pane(workspaceId, 99)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }));
+
+    const [w1, w2] = await Promise.all([cache.listPanes("w1"), cache.listPanes("w2")]);
+
+    expect(w1[0]?.label).toBe("v1");
+    expect(w2[0]?.label).toBe("v2");
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).not.toHaveBeenCalled();
+  });
+
   it("does not extend a snapshot after refresh failure and invalidates after create and rename", async () => {
     let calls = 0;
     const listPanes = vi.fn(async () => { if (++calls === 2) throw new Error("offline"); return [pane("w1", calls)]; });
@@ -53,10 +66,11 @@ describe("workspace snapshot cache", () => {
     await expect(cache.listAllPanes()).rejects.toThrow(/does not support an all-workspace snapshot/);
   });
 
-  it("coalesces concurrent all-workspace snapshots without caching completed results", async () => {
+  it("coalesces and caches all-workspace snapshots until the TTL expires or a workspace is invalidated", async () => {
+    let now = 0;
     let release!: (panes: ReturnType<typeof pane>[]) => void;
     const listAllPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { release = resolve; }));
-    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }), 2_000, undefined, () => now);
 
     const first = cache.listAllPanes();
     const second = cache.listAllPanes();
@@ -64,9 +78,15 @@ describe("workspace snapshot cache", () => {
     const [a, b] = await Promise.all([first, second]);
     a[0]!.label = "mutated";
     expect(b[0]!.label).toBe("v1");
+    expect((await cache.listAllPanes())[0]?.label).toBe("v1");
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    cache.invalidate("w1");
     listAllPanes.mockResolvedValueOnce([pane("w1", 2)]);
     expect((await cache.listAllPanes())[0]?.label).toBe("v2");
-    expect(listAllPanes).toHaveBeenCalledTimes(2);
+    now = 2_001;
+    listAllPanes.mockResolvedValueOnce([pane("w1", 3)]);
+    expect((await cache.listAllPanes())[0]?.label).toBe("v3");
+    expect(listAllPanes).toHaveBeenCalledTimes(3);
   });
 
   it("forwards runtime observation and updates the cached pane without refreshing the workspace", async () => {

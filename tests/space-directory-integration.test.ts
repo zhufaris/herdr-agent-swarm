@@ -5,6 +5,7 @@ import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
 import { buildSpaceDirectoryGroups, selectSpaceDirectoryBinding } from "../src/coordinator/operations-workflow.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
+import type { HerdrPane } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
@@ -72,6 +73,40 @@ describe("space directory command", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
+  it("loads all workspaces concurrently before rendering the directory", async () => {
+    const cards: object[] = [];
+    const release = new Map<string, () => void>();
+    let blockDirectoryReads = false;
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card-1" }; }, async updateCard() {}
+    };
+    const listPanes = vi.fn((workspaceId: string) => blockDirectoryReads
+      ? new Promise<HerdrPane[]>((resolve) => { release.set(workspaceId, () => resolve([])); })
+      : Promise.resolve([]));
+    const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const config = {
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/one", executable: "herdr" },
+      projects: [{ id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" }, { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }],
+      defaultProjectId: "one", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
+    } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config, store, herdr, lark, new BridgeEventBus(), publisher, pino({ enabled: false }));
+    await coordinator.start();
+    listPanes.mockClear();
+    blockDirectoryReads = true;
+
+    const listing = coordinator.handleMessage({ eventId: "spaces-parallel", messageId: "spaces-parallel", chatId: "chat", topicId: null, rootMessageId: "spaces-parallel", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
+    await vi.waitFor(() => expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId).sort()).toEqual(["w1", "w2"]));
+    release.get("w1")!();
+    release.get("w2")!();
+    await listing;
+    expect(cards).not.toHaveLength(0);
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("merges projects sharing a space and workspace in configuration order", () => {
     const projects = [
       { id: "a", displayName: "A", spaceName: "shared", description: "A", workspaceId: "w1", cwd: "/a" },
@@ -82,6 +117,22 @@ describe("space directory command", () => {
     expect(groups).toMatchObject([
       { spaceName: "shared", directories: ["/a", "/b"] },
       { spaceName: "later", directories: ["/c"] }
+    ]);
+  });
+
+  it("routes panes directly by workspace and directory across spaces", () => {
+    const projects = [
+      { id: "alpha", displayName: "Alpha", spaceName: "first", description: "A", workspaceId: "w1", cwd: "/alpha" },
+      { id: "beta", displayName: "Beta", spaceName: "second", description: "B", workspaceId: "w1", cwd: "/beta" }
+    ];
+    const pane = (paneId: string, cwd: string | null): HerdrPane => ({ paneId, workspaceId: "w1", cwd, label: paneId, agentState: "idle", foregroundExecutables: [] });
+
+    const groups = buildSpaceDirectoryGroups(projects, new Map([["w1", [pane("w1:p1", "/beta"), pane("w1:p2", "/alpha"), pane("w1:p3", "/unknown")]]]), new Map());
+
+    expect(groups).toMatchObject([
+      { spaceName: "first", panes: [{ paneId: "w1:p2" }] },
+      { spaceName: "second", panes: [{ paneId: "w1:p1" }] },
+      { spaceName: "未注册", panes: [{ paneId: "w1:p3" }] }
     ]);
   });
 

@@ -40,19 +40,23 @@ const store = new SqliteBindingStore(config.databasePath);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
 let rawHerdr!: HerdrCliAdapter;
+let herdr!: WorkspaceSnapshotCache;
 const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
   ? new HerdrSocketSubscriber(
       process.env.HERDR_SOCKET_PATH,
       async () => {
         const configuredWorkspaceIds = new Set(config.projects.map((project) => project.workspaceId));
-        return (await rawHerdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
+        return (await herdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
       },
-      ({ workspaceIds }) => coordinator.reconcileHerdrWorkspaces(workspaceIds.length > 0 ? workspaceIds : undefined),
+      ({ workspaceIds }) => {
+        for (const workspaceId of workspaceIds) herdr.invalidate(workspaceId);
+        return coordinator.reconcileHerdrWorkspaces(workspaceIds.length > 0 ? workspaceIds : undefined);
+      },
       logger
     )
   : null;
 rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
-const herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
+herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);

@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startHealthServer } from "../src/health/server.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
@@ -46,6 +46,19 @@ describe("health server", () => {
     expect(body).toHaveProperty("timestamp");
     expect(body).toHaveProperty("lease.ownerSuffix", "owner123");
     expect(JSON.stringify(body)).not.toContain("payload");
+  });
+
+  it("shares one short-lived readiness probe across concurrent ready and status requests", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const assertWorkspace = vi.fn(async () => undefined);
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { assertWorkspace } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+    await Promise.all([fetch(`http://127.0.0.1:${port}/ready`), fetch(`http://127.0.0.1:${port}/status`)]);
+    expect(assertWorkspace).toHaveBeenCalledOnce();
   });
 
   it("becomes not ready when lease ownership is lost", async () => {

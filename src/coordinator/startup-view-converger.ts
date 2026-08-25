@@ -8,12 +8,21 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 
 export class StartupViewConverger implements StartupViewConvergerPort {
+  private readonly projectsById = new Map<string, BridgeConfig["projects"][number]>();
+  private readonly uniqueProjectsByWorkspace = new Map<string, BridgeConfig["projects"][number] | null>();
+
   constructor(
     private readonly config: Pick<BridgeConfig, "projects">,
     private readonly store: PromptAcceptanceStore,
     private readonly outbound: OutboundIntentPort,
     private readonly outboundWork: OutboundWorkNotifier
-  ) {}
+  ) {
+    for (const project of config.projects) {
+      this.projectsById.set(project.id, project);
+      const existing = this.uniqueProjectsByWorkspace.get(project.workspaceId);
+      this.uniqueProjectsByWorkspace.set(project.workspaceId, existing === undefined ? project : null);
+    }
+  }
 
   async converge(): Promise<void> {
     for (const binding of this.store.listBindings()) {
@@ -64,9 +73,9 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   }
 
   private spaceNameFor(binding: Binding): string {
-    const matches = binding.projectId
-      ? this.config.projects.filter((project) => project.id === binding.projectId)
-      : this.config.projects.filter((project) => project.workspaceId === binding.workspaceId);
-    return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved";
+    const project = binding.projectId
+      ? this.projectsById.get(binding.projectId)
+      : this.uniqueProjectsByWorkspace.get(binding.workspaceId) ?? null;
+    return project ? projectSpaceName(project) : "legacy/unresolved";
   }
 }

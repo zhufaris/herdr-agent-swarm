@@ -62,7 +62,7 @@ export class InboundRouter implements InboundRouterPort {
     await startupViews.converge();
     const recoveredInbound = store.recoverProcessingInboundMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
-    for (const workspaceId of new Set(config.projects.map((project) => project.workspaceId))) await herdr.assertWorkspace(workspaceId);
+    await Promise.all([...new Set(config.projects.map((project) => project.workspaceId))].map((workspaceId) => herdr.assertWorkspace(workspaceId)));
     await reconciler.captureBaselines();
     this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
       if (event.kind === "control-ready") void this.options.operations.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
