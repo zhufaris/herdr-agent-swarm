@@ -94,6 +94,56 @@ describe("active-turn steering", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("fails an uninjectable /steer instead of converting it into an ordinary turn", async () => {
+    let output = "initial";
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const turns: string[] = [];
+    const steering: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, text, _timeoutMs, onObservation) {
+        turns.push(text);
+        await onObservation?.({ state: "working", stateSource: "structured", output });
+        await hold;
+        output += "\n◆ parent answer\n────────";
+        await onObservation?.({ state: "done", stateSource: "structured", output });
+        return "done";
+      },
+      async steerPrompt(_paneId, text) { steering.push(text); return "not_working"; },
+      async sendEscape() {},
+      async readOutput() { return output; }, async renamePane() {}
+    };
+    const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
+    const bindingId = store.findBindingByPane("w1:p1")!.id;
+    const message = (n: number, text: string) => ({ eventId: `e${n}`, messageId: `m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
+
+    await coordinator.handleMessage(message(1, "parent"));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
+    await coordinator.handleMessage(message(2, "/steer late steer"));
+    await vi.waitFor(() => expect(steering).toEqual(["late steer"]));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId).find((view) => view.requestText === "late steer")?.phase).toBe("failed"));
+    // Never promoted to an ordinary turn, before or after the parent finishes.
+    expect(store.listQueuedTurnPromptIds(bindingId)).toEqual([]);
+    release();
+    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed" }));
+    expect(turns).toEqual(["parent"]);
+    expect(store.listQueuedTurnPromptIds(bindingId)).toEqual([]);
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("keeps messages FIFO while the active turn is blocked", async () => {
     let output = "initial";
     let release!: () => void;

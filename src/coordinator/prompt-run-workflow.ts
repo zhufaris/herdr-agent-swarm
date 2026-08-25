@@ -168,10 +168,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         const result = this.options.herdr.steerPrompt ? await this.options.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
         if (result === "not_working") {
-          this.options.store.requeueSteeringAsTurn(prompt.id);
-          this.options.logger.warn({ event: "steering-fell-back-to-turn", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "requeued", reason: "not_working" }, "steering target was no longer working");
-          await this.refreshQueuePositions(bindingId);
-          this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
+          const message = "TraeX 已不在可 steering 的状态，本次 `/steer` 未注入，也不会转为普通任务。";
+          this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
+          await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+          this.options.logger.warn({ event: "steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "failed", reason: "not_working" }, "steering target was no longer steerable");
           continue;
         }
         await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
@@ -253,7 +253,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       } finally {
         const steeringWorker = this.steeringWorkers.get(bindingId);
         if (steeringWorker) await steeringWorker;
-        if (this.options.store.requeueQueuedSteering(bindingId, prompt.id) > 0) await this.refreshQueuePositions(bindingId);
+        const notice = "父任务已结束，本次 `/steer` 未注入，也不会转为普通任务。";
+        const orphaned = this.options.store.failQueuedSteering(bindingId, prompt.id, notice);
+        for (const steeringId of orphaned) await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: notice });
+        if (orphaned.length > 0) await this.refreshQueuePositions(bindingId);
         this.turns.detach(bindingId, prompt.id);
         const latestBinding = this.options.store.getBinding(bindingId);
         if (!observerDetached && latestBinding?.lifecycle === "draining") await this.archiveDrainedBinding(latestBinding);

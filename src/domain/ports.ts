@@ -115,8 +115,7 @@ export interface BindingStorePort {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
-  requeueSteeringAsTurn(promptId: string): void;
-  requeueQueuedSteering(bindingId: string, parentPromptId: string): number;
+  failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];
   cancelQueuedPrompts(bindingId: string, reason: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
@@ -168,8 +167,7 @@ export type PromptRunStore = Pick<BindingStorePort,
   | "claimNextReadySteering"
   | "markPromptDispatched"
   | "markPromptObservationDetached"
-  | "requeueSteeringAsTurn"
-  | "requeueQueuedSteering"
+  | "failQueuedSteering"
   | "updatePrompt"
   | "completeTurn"
   | "failPrompt"

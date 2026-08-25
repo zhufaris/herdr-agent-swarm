@@ -787,7 +787,7 @@ describe("SQLite store", () => {
     expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, hints: [] });
   });
 
-  it("classifies, claims, falls back, and recovers steering jobs without replay", () => {
+  it("claims steering in order and fails leftovers instead of converting them to turns", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
@@ -806,13 +806,27 @@ describe("SQLite store", () => {
     store.markPromptDispatched("s1");
     store.updatePrompt("s1", "delivered");
     expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s2");
-    store.requeueSteeringAsTurn("s2");
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "s2", dispatchKind: "turn", parentPromptId: null });
 
+    // A queued steering job whose parent ended is failed, never promoted to a turn.
     store.updatePrompt("s2", "queued");
-    store.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'steering', parent_prompt_id = 'parent' WHERE id = 's2'").run();
+    expect(store.failQueuedSteering("b1", "parent", "父任务已结束")).toEqual(["s2"]);
+    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed", notice: "父任务已结束" });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
+  });
+
+  it("fails queued steering on restart recovery instead of replaying it as a turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "s2", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "s2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`, `cardkit-${reply.promptId}`);
+
     expect(store.recoverRunningPrompts()).toBe(0);
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "s2", dispatchKind: "turn" });
+    expect(store.getPrompt("s2")).toMatchObject({ dispatchKind: "steering", state: "failed" });
+    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed" });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
   it("marks interrupted steering as uncertain instead of replaying it", () => {

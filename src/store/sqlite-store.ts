@@ -546,7 +546,13 @@ export class SqliteBindingStore implements BindingStorePort {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'turn', parent_prompt_id = NULL, updated_at = ? WHERE state = 'queued' AND dispatch_kind = 'steering'").run(timestamp);
+      this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE state = 'queued' AND dispatch_kind = 'steering'")
+        .run("Bridge 重启，本次 `/steer` 未注入，也不会转为普通任务。", timestamp);
+      const orphanedSteering = this.database.prepare("SELECT prompt_id FROM run_cards c JOIN prompt_jobs p ON p.id = c.prompt_id WHERE p.dispatch_kind = 'steering' AND p.state = 'failed' AND c.phase = 'queued'").all() as Array<{ prompt_id: string }>;
+      for (const card of orphanedSteering) {
+        this.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
+          .run("Bridge 重启，本次 `/steer` 未注入，也不会转为普通任务。", timestamp, timestamp, card.prompt_id);
+      }
       const undispatched = this.database.prepare("SELECT id FROM prompt_jobs WHERE state = 'running' AND observation_state = 'not_started'").all() as Array<{ id: string }>;
       this.database.prepare("UPDATE prompt_jobs SET state = 'queued', observation_state = 'not_started', error = NULL, updated_at = ? WHERE state = 'running' AND observation_state = 'not_started'").run(timestamp);
       for (const prompt of undispatched) {
@@ -745,15 +751,19 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  requeueSteeringAsTurn(promptId: string): void {
-    this.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'turn', parent_prompt_id = NULL, state = 'queued', error = NULL, updated_at = ? WHERE id = ? AND dispatch_kind = 'steering'")
-      .run(now(), promptId);
-  }
-
-  requeueQueuedSteering(bindingId: string, parentPromptId: string): number {
-    const result = this.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'turn', parent_prompt_id = NULL, updated_at = ? WHERE binding_id = ? AND parent_prompt_id = ? AND dispatch_kind = 'steering' AND state = 'queued'")
-      .run(now(), bindingId, parentPromptId);
-    return Number(result.changes);
+  failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[] {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND parent_prompt_id = ? AND dispatch_kind = 'steering' AND state = 'queued'")
+        .all(bindingId, parentPromptId) as Array<{ id: string }>;
+      const timestamp = now();
+      for (const row of rows) {
+        this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run(notice, timestamp, row.id);
+        this.persistTerminalRunCard(row.id, { type: "failed", occurredAt: timestamp, notice });
+      }
+      this.database.exec("COMMIT");
+      return rows.map((row) => row.id);
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   updatePrompt(id: string, state: PromptState, error: string | null = null): void {
