@@ -220,7 +220,7 @@ describe("Herdr discovery", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; },
-      async getPane() { return { paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1", cwd: "/work/my-project", label: "Initial pane", agentState: "idle", foregroundExecutables: ["traex"] }; },
+      async getPane() { return { paneId: "w1:p2", tabId: "w1:t2", terminalId: "term-2", workspaceId: "w1", cwd: "/work/my-project", label: "Initial pane", agentState: "idle", foregroundExecutables: ["traex"] }; },
       async observeRuntime() { const pane = await this.getPane("w1:p2"); return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async createPane(workspaceId, cwd, options) { created.push(options); return { paneId: "w1:p2", tabId: "w1:t2", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
       async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; },

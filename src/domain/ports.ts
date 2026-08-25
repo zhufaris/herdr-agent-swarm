@@ -109,6 +109,7 @@ export interface BindingStorePort {
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null;
   claimPaneControlOperation(id: string): PaneControlOperation | null;
   claimAppliedPaneControlOperation(id: string): PaneControlOperation | null;
+  rejectAppliedPaneControlOperation(id: string, detail: string): PaneControlOperation | null;
   getPaneControlOperation(id: string): PaneControlOperation | null;
   listRecoverablePaneControlOperations(): PaneControlOperation[];
   finishPaneControlOperation(id: string, state: Extract<PaneControlOperation["state"], "applied" | "confirmed" | "rejected" | "failed" | "uncertain">, detail?: string | null): void;
@@ -216,7 +217,7 @@ export type RetiredPaneCleanupStore = Pick<BindingStorePort,
 export type OperationsStore = Pick<BindingStorePort,
   | "audit" | "cancelQueuedPrompts" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
   | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
-  | "claimAppliedPaneControlOperation"
+  | "claimAppliedPaneControlOperation" | "rejectAppliedPaneControlOperation"
   | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"
   | "listFailures" | "listRunCards" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
   | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBinding"

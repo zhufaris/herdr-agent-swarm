@@ -254,11 +254,10 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
       return;
     }
     if (Date.parse(pending.expiresAt) <= Date.now()) {
-      const claimed = store.claimAppliedPaneControlOperation(operation.id);
-      if (!claimed) return;
-      this.clearModelModeExpiry(claimed.id);
-      store.finishPaneControlOperation(claimed.id, "rejected", expiredModelModeDetail(pending));
-      await this.updateModelModeFailure(binding, claimed, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+      const rejected = store.rejectAppliedPaneControlOperation(operation.id, expiredModelModeDetail(pending));
+      if (!rejected) return;
+      this.clearModelModeExpiry(rejected.id);
+      await this.updateModelModeFailure(binding, rejected, "模型模式选择已过期，请重新发送 `/model`。", "expired");
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
       return;
     }
@@ -271,16 +270,16 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
       return;
     }
-    const claimed = store.claimAppliedPaneControlOperation(operation.id);
-    if (!claimed) return;
-    this.clearModelModeExpiry(claimed.id);
     try {
       let currentBinding = store.getBinding(binding.id);
-      if (!currentBinding || !modelOperationMatchesBinding(claimed, currentBinding)) throw new StaleModelModeError();
-      const pane = await this.requireMatchingPane(currentBinding, claimed.paneId);
+      if (!currentBinding || !modelOperationMatchesBinding(operation, currentBinding)) throw new StaleModelModeError();
+      const pane = await this.requireMatchingPane(currentBinding, operation.paneId);
       currentBinding = store.getBinding(binding.id);
-      if (!currentBinding || !modelOperationMatchesBinding(claimed, currentBinding)) throw new StaleModelModeError();
+      if (!currentBinding || !modelOperationMatchesBinding(operation, currentBinding)) throw new StaleModelModeError();
       if (Date.parse(pending.expiresAt) <= Date.now()) throw new ExpiredModelModeError();
+      const claimed = store.claimAppliedPaneControlOperation(operation.id);
+      if (!claimed) return;
+      this.clearModelModeExpiry(claimed.id);
       await herdr.completePaneModelMode(pane.paneId, mode, config.commandTimeoutMs);
       const output = await herdr.runPaneCommand!(pane.paneId, "/model", config.commandTimeoutMs);
       store.finishPaneControlOperation(claimed.id, "confirmed", "Model selection confirmed: " + pending.model + " / " + mode);
@@ -289,8 +288,11 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     } catch (error) {
       const stale = error instanceof StaleModelModeError;
       const expired = error instanceof ExpiredModelModeError;
-      store.finishPaneControlOperation(claimed.id, stale || expired ? "rejected" : "uncertain", stale ? "Binding identity changed before model mode input" : expired ? expiredModelModeDetail(pending) : "Model mode may have applied: " + errorMessage(error));
-      await this.updateModelModeFailure(binding, claimed, stale ? "Pane identity 已变化，请重新发送 `/model`。" : expired ? "模型模式选择已过期，请重新发送 `/model`。" : "模型模式选择无法确认：" + errorMessage(error), stale ? "stale-identity" : expired ? "expired" : "uncertain");
+      const current = store.getPaneControlOperation(operation.id);
+      if (current?.state === "applied") store.finishPaneControlOperation(operation.id, "rejected", stale ? "Binding identity changed before model mode input" : expired ? expiredModelModeDetail(pending) : "Model mode validation failed before input: " + errorMessage(error));
+      else if (current?.state === "running") store.finishPaneControlOperation(operation.id, stale || expired ? "rejected" : "uncertain", stale ? "Binding identity changed before model mode input" : expired ? expiredModelModeDetail(pending) : "Model mode may have applied: " + errorMessage(error));
+      const failed = store.getPaneControlOperation(operation.id) ?? operation;
+      await this.updateModelModeFailure(binding, failed, stale ? "Pane identity 已变化，请重新发送 `/model`。" : expired ? "模型模式选择已过期，请重新发送 `/model`。" : "模型模式选择无法确认：" + errorMessage(error), stale ? "stale-identity" : expired ? "expired" : current?.state === "running" ? "uncertain" : "failed-before-input");
     } finally { this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); }
   }
 
@@ -396,15 +398,14 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     const pending = pendingModelMode(operation.detail);
     if (!pending) return;
     if (Date.parse(pending.expiresAt) > Date.now()) { this.scheduleModelModeExpiry(operation, pending); return; }
-    const claimed = this.options.store.claimAppliedPaneControlOperation(operation.id);
-    if (!claimed) return;
-    this.options.store.finishPaneControlOperation(claimed.id, "rejected", expiredModelModeDetail(pending));
+    const rejected = this.options.store.rejectAppliedPaneControlOperation(operation.id, expiredModelModeDetail(pending));
+    if (!rejected) return;
     const binding = this.options.store.getBinding(operation.bindingId);
-    if (binding) await this.updateModelModeFailure(binding, claimed, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+    if (binding) await this.updateModelModeFailure(binding, rejected, "模型模式选择已过期，请重新发送 `/model`。", "expired");
     this.options.scheduler.wake({ kind: "prompt-ready", bindingId: operation.bindingId });
   }
 
-  private async requireMatchingPane(binding: Binding, paneId: string): Promise<HerdrPane> { const pane = (await this.options.herdr.observeRuntime(paneId)).pane; if (!pane) throw new Error(`Herdr pane ${paneId} not found`); if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`); const project = this.options.config.projects.find((item) => item.id === binding.projectId); if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`); if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${paneId}`); if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`); return pane; }
+  private async requireMatchingPane(binding: Binding, paneId: string): Promise<HerdrPane> { const pane = (await this.options.herdr.observeRuntime(paneId)).pane; if (!pane) throw new Error(`Herdr pane ${paneId} not found`); if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`); const project = this.options.config.projects.find((item) => item.id === binding.projectId); if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`); if (hasNativeAgentSession(binding) && pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${paneId}`); if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr pane identity changed for ${paneId}`); if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`); return pane; }
   private async transitionAndPublish(binding: Binding, transition: import("../domain/pane-thread-lifecycle.js").SessionTransition, type: "BindingDraining" | "BindingArchived", reason: string): Promise<Binding> { const event = createBridgeEvent(binding.id, type, "lark", { reason }); const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id); const view = reduceTopicView(current, event); if (!binding.statusMessageId) { const next = this.options.store.transitionBinding(binding.id, transition); await this.options.lifecycleEvents.publish(event); return next; } const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) }); this.options.outboundWork.wake(); await this.options.lifecycleEvents.publish(event); return next; }
   private async publishCards(message: IncomingLarkMessage, kind: string, cards: object[]): Promise<void> { for (const [index, card] of cards.entries()) await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `${kind}:${message.messageId}:${index}`, card); this.options.logger.info({ event: `operation-${kind}-listed`, chatId: message.chatId, pageCount: cards.length, outcome: "listed" }, `listed Herdr ${kind}`); }
   private spaceNameFor(binding: Binding): string { const matches = binding.projectId ? this.options.config.projects.filter((project) => project.id === binding.projectId) : this.options.config.projects.filter((project) => project.workspaceId === binding.workspaceId); return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved"; }
@@ -423,6 +424,8 @@ function paneCloseCodeHash(code: string): string { return createHash("sha256").u
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function pendingModelMode(detail: string | null): { model: string; modes: string[]; expiresAt: string } | null { try { const value = JSON.parse(detail ?? "") as unknown; if (!value || typeof value !== "object") return null; const item = value as { phase?: unknown; model?: unknown; modes?: unknown; expiresAt?: unknown }; return item.phase === "waiting_for_mode" && typeof item.model === "string" && Array.isArray(item.modes) && item.modes.every((mode) => typeof mode === "string") && typeof item.expiresAt === "string" && Number.isFinite(Date.parse(item.expiresAt)) ? { model: item.model, modes: item.modes as string[], expiresAt: item.expiresAt } : null; } catch { return null; } }
 function modelOperationMatchesBinding(operation: PaneControlOperation, binding: Binding): boolean { return binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.paneId === operation.paneId && binding.generation === operation.bindingGeneration && binding.traexSessionId === operation.terminalId; }
+function hasNativeAgentSession(binding: Binding): boolean { return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue); }
+function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean { return Boolean(pane.agentSession && binding.agentSessionSource === pane.agentSession.source && binding.agentSessionAgent === pane.agentSession.agent && binding.agentSessionKind === pane.agentSession.kind && binding.agentSessionValue === pane.agentSession.value); }
 function expiredModelModeDetail(pending: { model: string; modes: string[]; expiresAt: string }): string { return JSON.stringify({ phase: "expired", model: pending.model, modes: pending.modes, expiresAt: pending.expiresAt }); }
 class StaleModelModeError extends Error { constructor() { super("Binding identity changed before model mode input"); } }
 class ExpiredModelModeError extends Error { constructor() { super("Model mode selection expired before input"); } }

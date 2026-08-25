@@ -9,6 +9,41 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("pane/thread lifecycle integration", () => {
+  it("persists the post-start native identity when replacing an orphaned pane", async () => {
+    const createdPane = { paneId: "w1:new", terminalId: null, workspaceId: "w1", cwd: "/repo", label: "replacement", agentState: "unknown" as const, foregroundExecutables: [] };
+    const startedPane = {
+      ...createdPane,
+      terminalId: "new-terminal",
+      agentState: "idle" as const,
+      foregroundExecutables: ["traex"],
+      agentSession: { source: "traex", agent: "traex", kind: "id" as const, value: "native-session-1" }
+    };
+    let started = false;
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async observeRuntime(id) { return { pane: id === startedPane.paneId && started ? startedPane : null, traexProcess: started, composerReady: started, evidenceSource: started ? "structured" : "none" }; },
+      async createPane() { return createdPane; }, async startTraex() { started = true; },
+      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "orphaned", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
+    store.updateBinding("orphaned", { paneId: "w1:old", traexSessionId: "old-terminal", statusMessageId: "root", state: "orphaned", lifecycle: "active", attachment: "orphaned", lastAgentState: "unknown" });
+    const active = runtime(store, herdr, lark);
+    await active.coordinator.start();
+
+    await active.coordinator.handleMessage({ ...message(0, "/herdr replace"), mentionsBot: true });
+
+    expect(store.getBinding("orphaned")).toMatchObject({
+      paneId: "w1:new", traexSessionId: "new-terminal", generation: 2, attachment: "attached",
+      agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native-session-1"
+    });
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
   it("closes an idle retired pane only after /new activates its replacement", async () => {
     const oldPane = { paneId: "w1:old", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "old", agentState: "done" as const, foregroundExecutables: ["traex"] };
     const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] };

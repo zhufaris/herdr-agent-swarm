@@ -158,6 +158,21 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("retries the same output revision after a transient terminal read failure", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 8, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const readOutput = vi.fn().mockRejectedValueOnce(new Error("temporary read failure")).mockResolvedValue("◆ recovered output\n────────");
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
+
+    await expect(reconciler.reconcile()).rejects.toThrow("temporary read failure");
+    await expect(reconciler.reconcile()).resolves.toBeUndefined();
+
+    expect(readOutput).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
   it("accepts a restored terminal identity only when the native Agent session matches", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

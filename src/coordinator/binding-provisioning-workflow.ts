@@ -55,7 +55,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       binding = store.updateBinding(binding.id, paneIdentityPatch(pane));
       binding = store.transitionBinding(binding.id, { type: "pane_created" });
       await herdr.startTraex(pane.paneId, config.traex.executable);
-      binding = store.updateBinding(binding.id, { lastAgentState: "idle" });
+      const startedPane = await this.requireStartedPane(project, pane.paneId, binding.traexSessionId);
+      binding = store.updateBinding(binding.id, { ...paneIdentityPatch(startedPane), lastAgentState: startedPane.agentState });
       binding = store.transitionBinding(binding.id, { type: "runtime_started" });
       binding = store.transitionBinding(binding.id, { type: "thread_created" });
       binding = store.transitionBinding(binding.id, { type: "activate" });
@@ -168,11 +169,14 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (!pane) throw new Error(`Provisioned Herdr pane ${replacement.paneId ?? "unknown"} no longer exists`);
       if (replacement.provisioningCheckpoint === "pane_created") {
         await herdr.startTraex(pane.paneId, config.traex.executable);
-        replacement = store.updateBinding(replacement.id, { lastAgentState: "idle" });
+        const startedPane = await this.requireStartedPane(project, pane.paneId, replacement.traexSessionId);
+        replacement = store.updateBinding(replacement.id, { ...paneIdentityPatch(startedPane), lastAgentState: startedPane.agentState });
         replacement = store.transitionBinding(replacement.id, { type: "runtime_started" });
+        pane = startedPane;
       }
-      const observation = await herdr.observeRuntime(pane.paneId);
-      if (!observation.pane || !observation.traexProcess || !observation.composerReady || observation.pane.workspaceId !== project.workspaceId || observation.pane.cwd !== project.cwd || observation.pane.terminalId !== replacement.traexSessionId) throw new Error("Replacement TraeX runtime is not ready for topic cutover");
+      const observedPane = await this.requireStartedPane(project, pane.paneId, replacement.traexSessionId);
+      replacement = store.updateBinding(replacement.id, { ...paneIdentityPatch(observedPane), lastAgentState: observedPane.agentState });
+      pane = observedPane;
       const handoff = store.cutoverResetCandidate({ oldBindingId: binding.id, newBindingId: replacement.id, cleanupOperationId: randomUUID(), actorOpenId: message.actorOpenId, expectedCwd: project.cwd });
       replacement = handoff.replacement;
       this.options.wakeRetiredPaneCleanup?.();
@@ -254,7 +258,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const paneTitle = existingPane?.label?.trim() || binding.title.split(" / ").at(-1) || project.displayName;
     const pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation + 1, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
     await herdr.startTraex(pane.paneId, config.traex.executable);
-    const next = store.updateBinding(store.attachBindingPane(binding.id, pane, true).id, { lastAgentState: "idle" });
+    const startedPane = await this.requireStartedPane(project, pane.paneId, pane.terminalId ?? null);
+    const next = store.updateBinding(store.attachBindingPane(binding.id, startedPane, true).id, { lastAgentState: startedPane.agentState });
     await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });
     store.audit({ actorOpenId, action: "binding.replace", target: binding.id, outcome: "success" });
   }
@@ -277,7 +282,12 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       }
       if (!pane && binding.paneId) pane = await herdr.getPane(binding.paneId);
       if (!pane) throw new Error(`Provisioning checkpoint ${binding.provisioningCheckpoint} has no Herdr pane`);
-      if (binding.provisioningCheckpoint === "pane_created") { await herdr.startTraex(pane.paneId, config.traex.executable); binding = store.updateBinding(binding.id, { lastAgentState: "idle" }); binding = store.transitionBinding(binding.id, { type: "runtime_started" }); }
+      if (binding.provisioningCheckpoint === "pane_created") {
+        await herdr.startTraex(pane.paneId, config.traex.executable);
+        pane = await this.requireStartedPane(project, pane.paneId, binding.traexSessionId);
+        binding = store.updateBinding(binding.id, { ...paneIdentityPatch(pane), lastAgentState: pane.agentState });
+        binding = store.transitionBinding(binding.id, { type: "runtime_started" });
+      }
       const activatedEvent = createBridgeEvent(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: "pending" });
       const activeView = reduceTopicView(store.loadTopicView(binding.id) ?? initialTopicView(binding.id), activatedEvent);
       if (binding.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(renderProjectEntryCard(activeView), binding.id); store.recordBridgeMessage(topic.rootMessageId); binding = store.updateBinding(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); binding = store.transitionBinding(binding.id, { type: "thread_created" }); }
@@ -302,13 +312,27 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string): Promise<HerdrPane> {
-    const pane = (await this.options.herdr.observeRuntime(paneId)).pane;
+    let pane = (await this.options.herdr.observeRuntime(paneId)).pane;
     if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
     if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
     const project = this.options.config.projects.find((item) => item.id === binding.projectId);
     if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`);
-    if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${paneId}`);
+    if (hasNativeAgentSession(binding)) {
+      if (pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${paneId}`);
+    }
+    if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr pane identity changed for ${paneId}`);
+    if (hasNativeAgentSession(binding) && !pane.agentSession) pane = { ...pane, agentSession: persistedAgentSession(binding) };
     if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`);
+    return pane;
+  }
+
+  private async requireStartedPane(project: ProjectConfig, paneId: string, expectedTerminalId: string | null): Promise<HerdrPane> {
+    const observation = await this.options.herdr.observeRuntime(paneId);
+    const pane = observation.pane;
+    if (!pane || !observation.traexProcess || !observation.composerReady || pane.workspaceId !== project.workspaceId || pane.cwd !== project.cwd || !pane.terminalId) {
+      throw new Error(`TraeX runtime in pane ${paneId} is not ready`);
+    }
+    if (expectedTerminalId && pane.terminalId !== expectedTerminalId) throw new Error(`Herdr pane identity changed for ${paneId}`);
     return pane;
   }
 
@@ -348,6 +372,13 @@ function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSess
     agentSessionSource: pane.agentSession?.source ?? null, agentSessionAgent: pane.agentSession?.agent ?? null,
     agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
   };
+}
+function hasNativeAgentSession(binding: Binding): boolean { return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue); }
+function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {
+  return Boolean(pane.agentSession && binding.agentSessionSource === pane.agentSession.source && binding.agentSessionAgent === pane.agentSession.agent && binding.agentSessionKind === pane.agentSession.kind && binding.agentSessionValue === pane.agentSession.value);
+}
+function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSession"]> {
+  return { source: binding.agentSessionSource!, agent: binding.agentSessionAgent!, kind: binding.agentSessionKind!, value: binding.agentSessionValue! };
 }
 
 function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }

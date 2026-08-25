@@ -64,6 +64,7 @@ describe("project selection flow", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd, options) { created.push([workspaceId, cwd, options]); return { paneId: "wD:p9", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async observeRuntime() { return { pane: { paneId: "wD:p9", terminalId: "term-9", workspaceId: "wD", cwd: "/work/datasage", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async startTraex(paneId) { started.push(paneId); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; },
       async readOutput() { return ""; }, async renamePane() {}
     };
@@ -154,6 +155,7 @@ describe("project selection flow", () => {
         created.push({ title: options?.title });
         return { paneId: "w1:p7", workspaceId: "w1", cwd: "/work/alpha", label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] };
       },
+      async observeRuntime() { return { pane: { paneId: "w1:p7", terminalId: "term-7", workspaceId: "w1", cwd: "/work/alpha", label: created[0]?.title ?? null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
@@ -227,6 +229,7 @@ describe("project selection flow", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd) { return { paneId: "w1:p7", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
+      async observeRuntime() { return { pane: { paneId: "w1:p7", terminalId: "term-7", workspaceId: "w1", cwd: "/work/alpha", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");

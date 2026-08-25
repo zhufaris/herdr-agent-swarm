@@ -42,11 +42,10 @@ describe("Herdr socket subscriber", () => {
       '{"event":"pane_exited","data":{"workspace_id":"w2","pane_id":"w2:p2"}}\n' +
       'not-json\n'
     );
-    expect(received).toHaveBeenCalledWith({ event: "pane_exited", workspaceIds: ["w2"], paneIds: ["w2:p2"] });
-    expect(received).toHaveBeenCalledWith({ event: "socket.invalid", workspaceIds: [], paneIds: [] });
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ event: "socket.batch", workspaceIds: [], paneIds: [] }));
 
     receive("x".repeat(513));
-    expect(received.mock.calls.filter(([hint]) => hint.event === "socket.invalid")).toHaveLength(2);
+    await vi.waitFor(() => expect(received.mock.calls.some(([hint]) => hint.event === "socket.invalid" || hint.event === "socket.batch")).toBe(true));
   });
 
   it("contains rejected event handlers and leaves periodic reconciliation as fallback", async () => {
@@ -62,6 +61,23 @@ describe("Herdr socket subscriber", () => {
       '{"event":"pane_updated","data":{"workspace_id":"w1"}}\n'
     );
     await vi.waitFor(() => expect(warnings).toContainEqual(expect.objectContaining({ event: "herdr-socket-event-handler-failed" })));
+  });
+
+  it("coalesces event bursts while one reconciliation is in flight", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const received = vi.fn(async () => { if (received.mock.calls.length === 1) await blocked; });
+    const subscriber = new HerdrSocketSubscriber("unused", async () => [], received, pino({ enabled: false }));
+    const receive = (chunk: string) => (subscriber as unknown as { receive(value: string): void }).receive(chunk);
+
+    receive('{"event":"pane_updated","data":{"workspace_id":"w1","pane_id":"w1:p1"}}\n');
+    receive('{"event":"pane_exited","data":{"workspace_id":"w2","pane_id":"w2:p2"}}\n' +
+      '{"event":"pane_updated","data":{"workspace_id":"w3","pane_id":"w3:p3"}}\n');
+    expect(received).toHaveBeenCalledTimes(1);
+    release();
+
+    await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(2));
+    expect(received.mock.calls[1]?.[0]).toEqual({ event: "socket.batch", workspaceIds: ["w2", "w3"], paneIds: ["w2:p2", "w3:p3"] });
   });
 
   it("refreshes per-Pane Agent subscriptions after a Pane is created", async () => {

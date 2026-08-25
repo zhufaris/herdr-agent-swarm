@@ -98,6 +98,7 @@ function createHarness(options: { terminalId?: string } = {}) {
   const pane: HerdrPane = { paneId: "w1:p9", terminalId: options.terminalId ?? "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
     async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+    async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
     async createPane() { created += 1; return pane; }, async startTraex() { started += 1; }, async runPrompt() { return "done"; },
     async readOutput() { return ""; }, async renamePane() {}
   };

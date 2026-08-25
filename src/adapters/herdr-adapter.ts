@@ -8,7 +8,7 @@ import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-out
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
   pane_id: z.string(), tab_id: z.string().nullish(), workspace_id: z.string(), cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
-  agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).default("unknown")
+  agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).optional()
 }).passthrough();
 const tabSchema = z.object({ tab_id: z.string(), label: z.string() }).passthrough();
 const processSchema = z.object({
@@ -266,7 +266,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const foregroundExecutables = await this.foregroundExecutables(raw.pane_id);
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
-      agentState: raw.agent_status, foregroundExecutables: [...new Set(foregroundExecutables)]
+      agentState: raw.agent_status ?? "unknown", foregroundExecutables: [...new Set(foregroundExecutables)]
     };
   }
 
@@ -289,7 +289,7 @@ export class HerdrCliAdapter implements HerdrPort {
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
       agentKind: kind, agentSession: agent?.agent_session ?? raw.agent_session ?? null, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
-      agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables
+      agentState: agent?.agent_status ?? raw.agent_status ?? "unknown", foregroundExecutables
     };
   }
 
@@ -512,8 +512,11 @@ function isInteractiveModelModeSelector(output: string): boolean {
 
 function interactiveModelModes(output: string): string[] | null {
   if (!isInteractiveModelModeSelector(output)) return null;
-  const modes = output.split("\n").map((line) => /^\s*(?:❯\s*)?\d+\.\s+.+?\/\s+(.+?)\s*$/u.exec(line)?.[1]?.trim() ?? null).filter((mode): mode is string => Boolean(mode));
-  return modes.length ? [...new Set(modes)] : null;
+  const modes = output.split("\n")
+    .map((line) => /^\s*(?:❯\s*)?\d+\.\s+.+?\/\s+(.+?)\s*$/u.exec(line)?.[1]?.trim() ?? null)
+    .filter((mode): mode is string => mode !== null && mode.length > 0 && mode.length <= 128);
+  const uniqueModes = [...new Set(modes)].slice(0, 100);
+  return uniqueModes.length ? uniqueModes : null;
 }
 
 function interactiveModelSelectorOutput(command: string, output: string): string | null {

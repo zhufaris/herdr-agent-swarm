@@ -221,8 +221,8 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       if (previous !== pane.agentState) this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
       if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && this.options.store.countPendingPrompts(existing.id) > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
       if (pane.outputRevision !== null && pane.outputRevision !== undefined && this.observedOutputRevisions.get(pane.paneId) === pane.outputRevision) continue;
-      if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
       await this.publishChangedLocalOutput(existing, pane.paneId);
+      if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
   }

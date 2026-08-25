@@ -627,6 +627,11 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
+  rejectAppliedPaneControlOperation(id: string, detail: string): PaneControlOperation | null {
+    const result = this.database.prepare("UPDATE pane_control_operations SET state = 'rejected', detail = ?, updated_at = ? WHERE id = ? AND state = 'applied'").run(detail, now(), id);
+    return result.changes === 1 ? this.getPaneControlOperation(id) : null;
+  }
+
   getPaneControlOperation(id: string): PaneControlOperation | null {
     const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow | undefined;
     return row ? mapPaneControlOperation(row) : null;
