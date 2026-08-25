@@ -191,7 +191,7 @@ function quietLark(): LarkPort {
 }
 
 function message(index: number) {
-  return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: `m${index}`, rootMessageId: `m${index}`, actorOpenId: "user", text: "/herdr help", mentionsBot: true, isRootMessage: true };
+  return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: `m${index}`, rootMessageId: `m${index}`, actorOpenId: "user", text: "/swarm help", mentionsBot: true, isRootMessage: true };
 }
 
 function config(): BridgeConfig {

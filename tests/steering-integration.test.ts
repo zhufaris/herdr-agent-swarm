@@ -72,14 +72,14 @@ describe("active-turn steering", () => {
     const queued = createQueuedRunCard({ promptId: "queued-turn", bindingId, title: "queued turn", workspaceId: "w1", paneId: "w1:p1", requestText: "queued turn", queuePosition: 1, occurredAt: new Date().toISOString() });
     store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
     await publisher.drain();
-    await coordinator.handleMessage(message(4, "/stop"));
+    await coordinator.handleMessage(message(4, "/swarm stop"));
     await vi.waitFor(() => expect(escapes).toEqual(["w1:p1"]));
     store.finishPaneControlOperation(runningModel.operation.id, "confirmed");
-    expect(store.listRunCards(bindingId).some((view) => view.requestText === "/stop")).toBe(false);
-    await Promise.all([coordinator.handleMessage(message(2, "/steer steer one")), coordinator.handleMessage(message(3, "/steer steer two"))]);
+    expect(store.listRunCards(bindingId).some((view) => view.requestText === "/swarm stop")).toBe(false);
+    await Promise.all([coordinator.handleMessage(message(2, "/swarm steer steer one")), coordinator.handleMessage(message(3, "/swarm steer steer two"))]);
     await vi.waitFor(() => expect(steering).toEqual(["steer one", "steer two"]));
     await vi.waitFor(() => expect(["steer one", "steer two"].every((text) => store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = ?").get(text)?.state === "confirmed")).toBe(true));
-    await coordinator.handleMessage(message(2, "/steer steer one"));
+    await coordinator.handleMessage(message(2, "/swarm steer steer one"));
     expect(steering).toEqual(["steer one", "steer two"]);
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM pane_control_operations WHERE kind = 'steer' AND state = 'confirmed'").get()).toEqual({ count: 2 });
     expect(JSON.stringify(info.mock.calls)).not.toContain("steer one");
@@ -96,7 +96,7 @@ describe("active-turn steering", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("fails an uninjectable /steer instead of converting it into an ordinary turn", async () => {
+  it("fails an uninjectable /swarm steer instead of converting it into an ordinary turn", async () => {
     let output = "initial";
     let release!: () => void;
     const hold = new Promise<void>((resolve) => { release = resolve; });
@@ -133,7 +133,7 @@ describe("active-turn steering", () => {
 
     await coordinator.handleMessage(message(1, "parent"));
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
-    await coordinator.handleMessage(message(2, "/steer late steer"));
+    await coordinator.handleMessage(message(2, "/swarm steer late steer"));
     await vi.waitFor(() => expect(steering).toEqual(["late steer"]));
     await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = 'late steer'").get()).toEqual({ state: "rejected" }));
     // Never promoted to an ordinary turn, before or after the parent finishes.
@@ -146,7 +146,7 @@ describe("active-turn steering", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("rejects /steer on a local approval screen without injecting text", async () => {
+  it("rejects /swarm steer on a local approval screen without injecting text", async () => {
     let release!: () => void;
     const hold = new Promise<void>((resolve) => { release = resolve; });
     const steering = vi.fn();
@@ -172,7 +172,7 @@ describe("active-turn steering", () => {
 
     await send(1, "parent");
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
-    await send(2, "/steer continue");
+    await send(2, "/swarm steer continue");
     await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = 'continue'").get()).toEqual({ state: "rejected" }));
     expect(steering).not.toHaveBeenCalled();
 
@@ -218,14 +218,14 @@ describe("active-turn steering", () => {
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
     await send(2, "later turn");
     const pendingBeforeStop = store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id);
-    await send(3, "/stop");
-    await send(4, "/steer capacity queue status");
+    await send(3, "/swarm stop");
+    await send(4, "/swarm steer capacity queue status");
     await vi.waitFor(() => expect(steering).toEqual(["capacity queue status"]));
-    await send(5, "/stop");
+    await send(5, "/swarm stop");
     await vi.waitFor(() => expect(steering).toEqual(["capacity queue status"]));
     expect(escapes).toEqual(["w1:p1", "w1:p1"]); expect(turns).toEqual(["parent"]);
     expect(store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id)).toBe(pendingBeforeStop);
-    expect(store.listRunCards(store.findBindingByPane("w1:p1")!.id).some((view) => view.requestText === "/stop")).toBe(false);
+    expect(store.listRunCards(store.findBindingByPane("w1:p1")!.id).some((view) => view.requestText === "/swarm stop")).toBe(false);
     release();
     await vi.waitFor(() => expect(turns).toHaveLength(2));
     expect(turns[1]).toBe("later turn");

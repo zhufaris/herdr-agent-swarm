@@ -73,7 +73,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
         this.clearModelModeExpiry(operation.id);
         store.finishPaneControlOperation(operation.id, "rejected", expiredModelModeDetail(pending));
         const binding = store.getBinding(operation.bindingId);
-        if (binding) await this.updateModelModeFailure(binding, operation, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+        if (binding) await this.updateModelModeFailure(binding, operation, "模型模式选择已过期，请重新发送 `/swarm model`。", "expired");
         continue;
       }
       store.finishPaneControlOperation(operation.id, "uncertain", "Bridge restarted after pane input may have been sent; operation was not replayed");
@@ -89,9 +89,9 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   }
 
   async stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
-    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。"); return false; }
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/swarm stop` 未进入任务队列。"); return false; }
     const active = this.options.activeTurn(binding.id);
-    if (!active || active.paneId !== binding.paneId || !this.options.herdr.sendEscape) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/stop` 未进入任务队列。"); return false; }
+    if (!active || active.paneId !== binding.paneId || !this.options.herdr.sendEscape) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/swarm stop` 未进入任务队列。"); return false; }
     const accepted = this.acceptControl({ message, binding, kind: "stop", parentPromptId: active.promptId });
     if (accepted.inserted) {
       const claimed = this.options.store.claimPaneControlOperation(accepted.operation.id);
@@ -104,7 +104,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   async steer(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean> {
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
     const active = this.options.activeTurn(binding.id);
-    if (!active || active.paneId !== binding.paneId || !this.options.herdr.steerPrompt) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/steer` 未进入任务队列。"); return false; }
+    if (!active || active.paneId !== binding.paneId || !this.options.herdr.steerPrompt) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/swarm steer` 未进入任务队列。"); return false; }
     const accepted = this.acceptControl({ message, binding, kind: "steer", payload: text, parentPromptId: active.promptId });
     if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
     return true;
@@ -164,7 +164,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     const { store, lark, logger } = this.options; const binding = store.getBinding(bindingId);
     if (!binding || binding.chatId !== action.chatId) return; const target = binding.topicId ?? binding.rootMessageId; if (!target) return;
     try { await lark.shareThread(target, { messageId: action.messageId, chatId: action.chatId }); store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" }); }
-    catch (error) { logger.error({ event: "thread-entry-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share project thread entry"); await lark.replyText(action.messageId, "话题入口发送失败，请重新执行 `/herdr spaces` 后重试。"); store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "failed" }); }
+    catch (error) { logger.error({ event: "thread-entry-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share project thread entry"); await lark.replyText(action.messageId, "话题入口发送失败，请重新执行 `/swarm spaces` 后重试。"); store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "failed" }); }
   }
 
   async decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void> {
@@ -198,7 +198,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   async emitStatus(binding: Binding): Promise<void> { await this.publish(binding.id, "AgentStateChanged", "bridge", { state: binding.lastAgentState, queueDepth: this.options.store.countPendingPrompts(binding.id) }); }
 
   async rename(message: IncomingLarkMessage, binding: Binding | null, title: string): Promise<boolean> {
-    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "这个话题没有可重命名的活动 Pane。请进入活动项目话题，或发送 `/herdr new`。"); return false; }
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "这个话题没有可重命名的活动 Pane。请进入活动项目话题，或发送 `/swarm new`。"); return false; }
     const pane = await this.requireMatchingPane(binding, binding.paneId); const project = this.options.config.projects.find((candidate) => candidate.id === binding.projectId);
     const displayTitle = formatProjectPaneTitle(project ? projectSpaceName(project) : null, pane.cwd ?? this.options.config.herdr.workspaceCwd, title, binding.paneId);
     await this.options.herdr.renamePane(binding.paneId, title, { tabTitle: title }); this.options.store.updateBinding(binding.id, { title: displayTitle }); await this.publish(binding.id, "BindingRenamed", "lark", { title: displayTitle }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" }); return true;
@@ -250,14 +250,14 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     if (!binding?.paneId || binding.chatId !== action.chatId || !operation || operation.bindingId !== binding.id || operation.kind !== "model" || operation.state !== "applied") return;
     const pending = pendingModelMode(operation.detail);
     if (!pending || !pending.modes.includes(mode) || !herdr.completePaneModelMode) {
-      await this.updateModelModeFailure(binding, operation, "模型模式选择已失效，请重新发送 `/model`。", "stale");
+      await this.updateModelModeFailure(binding, operation, "模型模式选择已失效，请重新发送 `/swarm model`。", "stale");
       return;
     }
     if (Date.parse(pending.expiresAt) <= Date.now()) {
       const rejected = store.rejectAppliedPaneControlOperation(operation.id, expiredModelModeDetail(pending));
       if (!rejected) return;
       this.clearModelModeExpiry(rejected.id);
-      await this.updateModelModeFailure(binding, rejected, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+      await this.updateModelModeFailure(binding, rejected, "模型模式选择已过期，请重新发送 `/swarm model`。", "expired");
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
       return;
     }
@@ -266,7 +266,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
       if (!claimed) return;
       this.clearModelModeExpiry(claimed.id);
       store.finishPaneControlOperation(claimed.id, "rejected", "Binding identity changed before model mode selection");
-      await this.updateModelModeFailure(binding, claimed, "Pane identity 已变化，请重新发送 `/model`。", "stale-identity");
+      await this.updateModelModeFailure(binding, claimed, "Pane identity 已变化，请重新发送 `/swarm model`。", "stale-identity");
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
       return;
     }
@@ -292,7 +292,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
       if (current?.state === "applied") store.finishPaneControlOperation(operation.id, "rejected", stale ? "Binding identity changed before model mode input" : expired ? expiredModelModeDetail(pending) : "Model mode validation failed before input: " + errorMessage(error));
       else if (current?.state === "running") store.finishPaneControlOperation(operation.id, stale || expired ? "rejected" : "uncertain", stale ? "Binding identity changed before model mode input" : expired ? expiredModelModeDetail(pending) : "Model mode may have applied: " + errorMessage(error));
       const failed = store.getPaneControlOperation(operation.id) ?? operation;
-      await this.updateModelModeFailure(binding, failed, stale ? "Pane identity 已变化，请重新发送 `/model`。" : expired ? "模型模式选择已过期，请重新发送 `/model`。" : "模型模式选择无法确认：" + errorMessage(error), stale ? "stale-identity" : expired ? "expired" : current?.state === "running" ? "uncertain" : "failed-before-input");
+      await this.updateModelModeFailure(binding, failed, stale ? "Pane identity 已变化，请重新发送 `/swarm model`。" : expired ? "模型模式选择已过期，请重新发送 `/swarm model`。" : "模型模式选择无法确认：" + errorMessage(error), stale ? "stale-identity" : expired ? "expired" : current?.state === "running" ? "uncertain" : "failed-before-input");
     } finally { this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); }
   }
 
@@ -347,7 +347,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   async confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean> {
     const { store, herdr } = this.options; if (!binding?.paneId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached") { await this.reject(message, "这个话题没有可关闭的活动 Pane。"); return false; }
     const outcome = store.consumePaneCloseRequest({ bindingId: binding.id, paneId: binding.paneId, actorOpenId: message.actorOpenId, codeHash: paneCloseCodeHash(code), now: new Date().toISOString() });
-    if (outcome.outcome !== "consumed") { const reason = outcome.outcome === "unauthorized" ? "只有发起关闭请求的用户可以确认。" : outcome.outcome === "expired" ? "确认码已过期，请重新发送 `/herdr pane close`。" : outcome.outcome === "stale" ? "没有待确认的关闭请求，请重新发送 `/herdr pane close`。" : "确认码无效。"; await this.reject(message, reason); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: outcome.outcome }); return false; }
+    if (outcome.outcome !== "consumed") { const reason = outcome.outcome === "unauthorized" ? "只有发起关闭请求的用户可以确认。" : outcome.outcome === "expired" ? "确认码已过期，请重新发送 `/swarm pane close`。" : outcome.outcome === "stale" ? "没有待确认的关闭请求，请重新发送 `/swarm pane close`。" : "确认码无效。"; await this.reject(message, reason); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: outcome.outcome }); return false; }
     const checked = await this.checkPaneCloseSafety(message, store.getBinding(binding.id), outcome.paneId); if (!checked) { store.finishPaneCloseRequest(outcome.operationId, "rejected", "safety_recheck_failed"); return false; }
     try { await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: `Herdr pane ${checked.pane.paneId} 已由飞书确认关闭。` }); await this.reply(message.rootMessageId ?? message.messageId, renderPaneCloseResultCard({ paneId: checked.pane.paneId })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" }); return true; }
     catch (error) { store.finishPaneCloseRequest(outcome.operationId, "uncertain", errorMessage(error)); await this.reject(message, `Pane 关闭失败或无法验证：${errorMessage(error)}`); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" }); return false; }
@@ -401,7 +401,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     const rejected = this.options.store.rejectAppliedPaneControlOperation(operation.id, expiredModelModeDetail(pending));
     if (!rejected) return;
     const binding = this.options.store.getBinding(operation.bindingId);
-    if (binding) await this.updateModelModeFailure(binding, rejected, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+    if (binding) await this.updateModelModeFailure(binding, rejected, "模型模式选择已过期，请重新发送 `/swarm model`。", "expired");
     this.options.scheduler.wake({ kind: "prompt-ready", bindingId: operation.bindingId });
   }
 

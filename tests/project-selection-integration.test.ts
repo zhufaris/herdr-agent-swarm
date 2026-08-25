@@ -38,9 +38,9 @@ describe("project selection flow", () => {
 
     expect(cards.map(({ rootMessageId }) => rootMessageId)).toEqual(["archived-root", "archived-root", "unbound-root"]);
     expect(JSON.stringify(cards[0]!.card)).toContain("话题已归档");
-    expect(JSON.stringify(cards[0]!.card)).toContain("/herdr new");
+    expect(JSON.stringify(cards[0]!.card)).toContain("/swarm new");
     expect(JSON.stringify(cards[2]!.card)).toContain("话题未连接");
-    expect(JSON.stringify(cards[2]!.card)).toContain("/herdr new");
+    expect(JSON.stringify(cards[2]!.card)).toContain("/swarm new");
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
@@ -87,7 +87,7 @@ describe("project selection flow", () => {
     store.createPendingBinding({ id: "existing-binding", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", title: "bridge / Existing" });
     store.updateBinding("existing-binding", { paneId: "wH:p1", state: "active" });
 
-    await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", actorOpenId: "user-1", text: "/herdr new Fix login", mentionsBot: true, isRootMessage: false });
+    await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", actorOpenId: "user-1", text: "/swarm new Fix login", mentionsBot: true, isRootMessage: false });
     expect(created).toEqual([]);
     expect(cards).toHaveLength(1);
     const button = findProjectButton(cards[0]!, "datasage");
@@ -137,7 +137,7 @@ describe("project selection flow", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("uses a short random pane name when /herdr new has no title", async () => {
+  it("uses a short random pane name when /swarm new has no title", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
     const created: Array<{ title?: string }> = [];
     const groupCards: object[] = [];
@@ -165,7 +165,7 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/herdr new", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/swarm new", mentionsBot: true, isRootMessage: true });
     const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
 
@@ -239,7 +239,7 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/herdr new Broken", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/swarm new Broken", mentionsBot: true, isRootMessage: true });
     const value = findProjectButton(selectorCards[0]!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
 
@@ -273,7 +273,7 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/herdr new Not ready", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/swarm new Not ready", mentionsBot: true, isRootMessage: true });
     const value = findProjectButton(selectorCards[0]!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
 

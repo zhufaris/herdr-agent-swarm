@@ -241,7 +241,7 @@ describe("Herdr discovery", () => {
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "new", messageId: "root-2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", actorOpenId: "user", text: "/herdr new Initial pane", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "new", messageId: "root-2", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", actorOpenId: "user", text: "/swarm new Initial pane", mentionsBot: true, isRootMessage: true });
     await publisher.drain();
     const selection = (store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("root-2") as { id: string }).id;
     expect(selection).toBeTruthy();
@@ -249,7 +249,7 @@ describe("Herdr discovery", () => {
     expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: "Initial pane" }]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Initial pane" });
 
-    await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/herdr rename Better pane", mentionsBot: false, isRootMessage: false });
+    await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/swarm rename Better pane", mentionsBot: false, isRootMessage: false });
     expect(renamed).toEqual([["w1:p2", "Better pane", { tabTitle: "Better pane" }]]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Better pane" });
 

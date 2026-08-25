@@ -15,7 +15,7 @@ describe("model command", () => {
     const beginPaneModelSelection = vi.fn(async () => ({ kind: "composer_ready" as const }));
     const fixture = await setup(cards, runPaneCommand, { beginPaneModelSelection });
 
-    await fixture.coordinator.handleMessage(message("/model GPT-5.5"));
+    await fixture.coordinator.handleMessage(message("/swarm model GPT-5.5"));
 
     expect(beginPaneModelSelection).toHaveBeenCalledWith("w1:p1", "GPT-5.5", 1000);
     expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model", 1000);
@@ -32,7 +32,7 @@ describe("model command", () => {
     const queued = { id: "queued-turn", bindingId: fixture.bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "ordinary work" };
     fixture.store.enqueuePrompt(queued);
 
-    await fixture.coordinator.handleMessage(message("/model"));
+    await fixture.coordinator.handleMessage(message("/swarm model"));
 
     await vi.waitFor(() => expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model", 1000));
     expect(fixture.store.getPrompt(queued.id)?.state).toBe("queued");
@@ -54,7 +54,7 @@ describe("model command", () => {
       observeRuntime, beginPaneModelSelection
     });
 
-    await fixture.coordinator.handleMessage(message("/model GPT-5.5"));
+    await fixture.coordinator.handleMessage(message("/swarm model GPT-5.5"));
 
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
     expect(beginPaneModelSelection).toHaveBeenCalledWith("w1:p1", "GPT-5.5", 1000);
@@ -69,7 +69,7 @@ describe("model command", () => {
     const fixture = await setup(cards, runPaneCommand);
     fixture.store.updateBinding(fixture.bindingId, { lastAgentState: "working" });
 
-    await fixture.coordinator.handleMessage(message("/model"));
+    await fixture.coordinator.handleMessage(message("/swarm model"));
 
     expect(runPaneCommand).not.toHaveBeenCalled();
     expect(fixture.store.database.prepare("SELECT state FROM pane_control_operations WHERE kind = 'model'").get()).toEqual({ state: "rejected" });

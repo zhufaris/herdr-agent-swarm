@@ -8,7 +8,7 @@ export function renderPaneCloseConfirmationCard(input: { spaceName: string; pane
       `**Pane**  \`${input.paneId}\``,
       `**状态**  \`${input.agentState}\``, "",
       "此操作会关闭 Pane 并终止其中的 TraeX。确认码 60 秒内有效：",
-      `\`/herdr pane close confirm ${input.code}\``,
+      `\`/swarm pane close confirm ${input.code}\``,
       `有效期至：${input.expiresAt}`
     ].join("\n") }] }
   };

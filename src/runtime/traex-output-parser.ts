@@ -106,6 +106,7 @@ function normalizeTerminalForLark(source: string, promptEcho: string): string {
       continue;
     }
     const line = lines[index]!;
+    if (isSubagentConsoleLine(line)) { index += 1; continue; }
     if (isTerminalChrome(line)) { index += 1; continue; }
     if (/^\s*◆\s+/.test(line)) {
       if (index + 1 < lines.length && isToolHeadingContinuation(lines[index + 1]!)) {
@@ -125,6 +126,18 @@ function normalizeTerminalForLark(source: string, promptEcho: string): string {
     index += 1;
   }
   return output.join("\n");
+}
+
+/** Remove TraeX's orchestration UI; it is not part of the agent's answer. */
+function isSubagentConsoleLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^(?:\d+\s+agents?\s+running\b|[●○]\s+[^\n]+\b(?:running|idle|done|blocked)\b)/iu.test(trimmed)
+    || /^(?:↓\s+to\s+select\s+agents|…\s*\+\d+\s+completed)$/u.test(trimmed)
+    || /^\s*[●○]\s+[^\n]+\[(?:default|subagent|worker|explorer|reviewer|plan)\][^\n]*$/iu.test(line);
+}
+
+export function stripTraexConsoleStatus(source: string): string {
+  return source.replace(/\r\n?/g, "\n").split("\n").filter((line) => !isSubagentConsoleLine(line)).join("\n").trim();
 }
 
 function isToolHeadingContinuation(line: string): boolean {
@@ -150,7 +163,7 @@ function stripTraeCodeBanner(source: string): string {
 
 function isWrappedAnswerContinuation(line: string): boolean {
   const trimmed = line.trim();
-  return Boolean(trimmed) && !/^(?:[◆•✧✦◇◈⋄❯›>]|[│└├])\s*/u.test(trimmed) && !/^\s*[─━-]{3,}\s*$/.test(line) && !/^GPT-[^\n]*Auto Mode/i.test(trimmed);
+  return Boolean(trimmed) && !isSubagentConsoleLine(line) && !/^(?:[◆•✧✦◇◈⋄❯›>]|[│└├])\s*/u.test(trimmed) && !/^\s*[─━-]{3,}\s*$/.test(line) && !/^GPT-[^\n]*Auto Mode/i.test(trimmed);
 }
 
 function isTerminalChrome(line: string): boolean {
@@ -175,11 +188,11 @@ export function parseTraexOutput(previousRaw: string, currentRaw: string, _works
   const current = stripTerminalControl(currentRaw).trim();
   const rawDelta = current.startsWith(previous) ? current.slice(previous.length) : current;
   if (UNSAFE.test(rawDelta)) return { answerSnapshot: "", previousAnswerSnapshot: "", answerUpdate: "replace", progressEvents: [], hasProgressSnapshot: false };
-  const previousAnswer = safeAnswer(visibleAnswer(previous));
+  const previousAnswer = safeAnswer(stripTraexConsoleStatus(visibleAnswer(previous)));
   const currentAnswer = visibleAnswer(current);
   const progress = nativeProgress(currentAnswer);
   const unchangedPriorAnswer = current.startsWith(previous) && !/^\s*◆\s+/m.test(rawDelta) && currentAnswer === previousAnswer;
-  const answerSnapshot = unchangedPriorAnswer ? "" : safeAnswer(currentAnswer);
+  const answerSnapshot = unchangedPriorAnswer ? "" : safeAnswer(stripTraexConsoleStatus(currentAnswer));
   const appendedBlock = Boolean(previousAnswer) && current.startsWith(previous) && /^\s*◆\s+/m.test(rawDelta);
   return {
     answerSnapshot, previousAnswerSnapshot: previousAnswer,
@@ -188,7 +201,7 @@ export function parseTraexOutput(previousRaw: string, currentRaw: string, _works
   };
 }
 
-export function extractFinalTraexAnswer(output: string): string { return safeAnswer(visibleAnswer(stripTerminalControl(output))).trim(); }
+export function extractFinalTraexAnswer(output: string): string { return safeAnswer(stripTraexConsoleStatus(visibleAnswer(stripTerminalControl(output)))).trim(); }
 
 function visibleAnswer(output: string): string { return extractAnswer(output).trimEnd(); }
 

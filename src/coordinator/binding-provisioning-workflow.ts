@@ -90,7 +90,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${selectionId}:${projectId}`, outcome: claim.outcome });
     if (!claim.selection || claim.outcome === "missing" || claim.outcome === "invalid" || claim.outcome === "unauthorized" || claim.outcome === "processing") return;
     if (claim.outcome === "expired") {
-      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:expired`, renderProjectSelectionStatusCard({ status: "expired", message: "请重新发送 /herdr new。" }));
+      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:expired`, renderProjectSelectionStatusCard({ status: "expired", message: "请重新发送 /swarm new。" }));
       return;
     }
     const selection = claim.selection;
@@ -150,7 +150,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   async reset(message: IncomingLarkMessage, binding: Binding | null, requestedTitle: string | null): Promise<boolean> {
     const { store, config, herdr, scheduler, logger } = this.options;
     if (!binding || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || !binding.projectId || !binding.topicId || !binding.rootMessageId) {
-      await this.reject(message, "`/new` 只能在已连接且活动中的项目话题内使用。"); return false;
+      await this.reject(message, "`/swarm reset` 只能在已连接且活动中的项目话题内使用。"); return false;
     }
     const project = config.projects.find((candidate) => candidate.id === binding.projectId);
     if (!project) { await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。"); return false; }
@@ -218,7 +218,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (existing.chatId === config.lark.chatId && existing.projectId === project.id && existing.attachment === "orphaned" && existing.topicId && existing.rootMessageId) {
         const observedPane = await this.requireMatchingPane(existing, pane.paneId);
         const recovered = store.attachBindingPane(existing.id, observedPane, false);
-        await this.publish(recovered.id, "BindingArchived", "lark", { reason: "Pane 已验证并恢复连接；为避免重放不确定任务，请进入原话题发送 `/herdr resume` 后再继续队列。" });
+        await this.publish(recovered.id, "BindingArchived", "lark", { reason: "Pane 已验证并恢复连接；为避免重放不确定任务，请进入原话题发送 `/swarm resume` 后再继续队列。" });
         await this.publishAttachSuccess(message, recovered, spaceName, true, true);
         store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: recovered.id, outcome: "recovered_orphaned" });
         return true;
@@ -246,7 +246,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   async reattach(binding: Binding, paneId: string, actorOpenId: string): Promise<void> {
     const pane = await this.requireMatchingPane(binding, paneId);
     const next = this.options.store.attachBindingPane(binding.id, pane, false);
-    await this.publish(next.id, "BindingArchived", "lark", { reason: "Pane 已验证并连接；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });
+    await this.publish(next.id, "BindingArchived", "lark", { reason: "Pane 已验证并连接；为避免重放不确定任务，发送 `/swarm resume` 后才继续队列。" });
     this.options.store.audit({ actorOpenId, action: "binding.reattach", target: binding.id, outcome: "success" });
   }
 
@@ -260,7 +260,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     await herdr.startTraex(pane.paneId, config.traex.executable);
     const startedPane = await this.requireStartedPane(project, pane.paneId, pane.terminalId ?? null);
     const next = store.updateBinding(store.attachBindingPane(binding.id, startedPane, true).id, { lastAgentState: startedPane.agentState });
-    await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/herdr resume` 后才继续队列。" });
+    await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/swarm resume` 后才继续队列。" });
     store.audit({ actorOpenId, action: "binding.replace", target: binding.id, outcome: "success" });
   }
 
@@ -276,7 +276,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (binding.paneId && !pane) throw new Error(`Provisioned Herdr pane ${binding.paneId} no longer exists`);
       if (pane && binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${binding.paneId}`);
       if (binding.provisioningCheckpoint === "selected") {
-        if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /herdr attach <space> <pane>");
+        if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
         pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
         binding = store.updateBinding(binding.id, paneIdentityPatch(pane)); binding = store.transitionBinding(binding.id, { type: "pane_created" });
       }
@@ -383,4 +383,4 @@ function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSe
 
 function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function provisioningRecoveryMessage(error: unknown): string { const detail = errorMessage(error); return detail.includes("/herdr attach") ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/herdr attach <space> <pane>\`；若不存在，再发送 \`/herdr new\`。${detail}` : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`; }
+function provisioningRecoveryMessage(error: unknown): string { const detail = errorMessage(error); return detail.includes("/swarm attach") ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/swarm attach <space> <pane>\`；若不存在，再发送 \`/swarm new\`。${detail}` : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`; }

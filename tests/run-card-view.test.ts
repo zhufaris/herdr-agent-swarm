@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
+import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 
 describe("request run-card view", () => {
+  it("keeps complete current-turn progress for the main-card projection", () => {
+    const initial = { ...initialTopicView("b1"), activePromptId: "p1", phase: "running" as const };
+    const events = Array.from({ length: 10 }, (_, index) => ({ key: `step:${index}`, kind: "step" as const, label: `step ${index}`, state: "done" as const }));
+    const projected = reduceTopicView(initial, { eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "working", progressEvents: events, hasProgressSnapshot: true } });
+
+    expect(projected.recentProgress).toHaveLength(10);
+    expect(projected.recentProgress.at(-1)).toMatchObject({ key: "step:9" });
+  });
   it("accumulates safe output, deduplicates progress, and completes with the final answer", () => {
     const queued = createQueuedRunCard({
       promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1",

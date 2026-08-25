@@ -168,7 +168,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         const result = this.options.herdr.steerPrompt ? await this.options.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
         if (result === "not_working") {
-          const message = "TraeX 已不在可 steering 的状态，本次 `/steer` 未注入，也不会转为普通任务。";
+          const message = "TraeX 已不在可 steering 的状态，本次 `/swarm steer` 未注入，也不会转为普通任务。";
           this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
           await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
           this.options.logger.warn({ event: "steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "failed", reason: "not_working" }, "steering target was no longer steerable");
@@ -253,7 +253,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       } finally {
         const steeringWorker = this.steeringWorkers.get(bindingId);
         if (steeringWorker) await steeringWorker;
-        const notice = "父任务已结束，本次 `/steer` 未注入，也不会转为普通任务。";
+        const notice = "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。";
         const orphaned = this.options.store.failQueuedSteering(bindingId, prompt.id, notice);
         for (const steeringId of orphaned) await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: notice });
         if (orphaned.length > 0) await this.refreshQueuePositions(bindingId);

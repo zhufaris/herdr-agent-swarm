@@ -16,15 +16,14 @@ describe("run card", () => {
 
   it("documents how to attach an existing pane", () => {
     const help = JSON.stringify(renderHelpCard());
-    expect(help).toContain("/herdr attach <space> <pane>");
+    expect(help).toContain("/swarm attach <space> <pane>");
     expect(help).toContain("ID 或唯一名称");
-    expect(help).toContain("/herdr spaces");
+    expect(help).toContain("/swarm spaces");
   });
 
   it("documents and renders the model command result", () => {
     const help = JSON.stringify(renderHelpCard());
-    expect(help).toContain("/model [name]");
-    expect(help).toContain("/herdr model [name]");
+    expect(help).toContain("/swarm model [name]");
 
     const card = renderModelResultCard({
       bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G", switched: false,
@@ -39,9 +38,10 @@ describe("run card", () => {
 
   it("documents priority stop steering and its safety boundary", () => {
     const help = JSON.stringify(renderHelpCard());
-    expect(help).toContain("/stop");
+    expect(help).toContain("/swarm stop");
     expect(help).toContain("Herdr Esc");
-    expect(help).toContain("/steer <文本>");
+    expect(help).toContain("/swarm steer <文本>");
+    expect(help).toContain("其它 slash 命令会原样提交给 TraeX");
   });
 
   it("renders project buttons with opaque ids and no host routing details", () => {
@@ -95,8 +95,20 @@ describe("run card", () => {
     expect(serialized).toContain("最新消息");
     expect(serialized).toContain("newest conclusion");
     expect(serialized).not.toContain("old answer");
-    expect(serialized).toContain("🛠️ changed secret.ts");
-    expect(serialized).toContain("最近动态");
+    expect(serialized).toContain("✓ 🛠️ changed secret.ts");
+    expect(serialized).toContain("过程轨迹");
+  });
+
+  it("does not render subagent console status in the project card preview", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), title: "bridge task", phase: "running",
+      answer: "◆ Reviewing changes\n5 agents running… · /ps to manage\n● Main [default] running · 20m\n◆ Review complete"
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("Review complete");
+    expect(serialized).not.toContain("agents running");
+    expect(serialized).not.toContain("Main [default]");
   });
 
   it("renders progress labels as one bounded line", () => {
@@ -107,7 +119,7 @@ describe("run card", () => {
       ]
     });
     const progress = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**执行进度**"))?.content ?? "";
+      .find((element) => element.tag === "collapsible_panel")?.elements?.[0]?.content ?? "";
 
     expect(progress).toContain("🧪 Run tool with a narrow terminal then inspect the resulting card");
     expect(progress).not.toContain("terminal\n");
@@ -132,9 +144,10 @@ describe("run card", () => {
       .find((element) => element.content?.startsWith("**最新消息**"))?.content ?? "";
 
     expect(serialized).toContain("🛠️ 修改卡片渲染");
-    expect(serialized).toContain("🛠️ 运行聚焦测试");
-    expect(serialized).toContain("🛠️ 检查调用位置");
-    expect(serialized).not.toContain("读取旧配置");
+    expect(serialized).toContain("🧪 运行聚焦测试");
+    expect(serialized).toContain("🔎 检查调用位置");
+    expect(serialized).toContain("读取旧配置");
+    expect(serialized).toContain("查看完整过程（1）");
     expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-20));
     expect(serialized).not.toContain("**项目任务**");
   });
@@ -195,7 +208,7 @@ describe("run card", () => {
     expect(task).not.toContain("执行计划");
     expect(task).not.toContain("Fixed.");
     expect(answer).toContain("Fixed.");
-    expect(answer).not.toContain("实现双卡更新");
+    expect(answer).toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
     expect(panels).toEqual([]);
@@ -214,8 +227,8 @@ describe("run card", () => {
     const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
     const card = renderRequestAnswerCard(completed, { pageNumber: 7, initialContent: "Only page seven" }) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string; element_id?: string }> } };
 
-    expect(card.header).toMatchObject({ title: { content: "✨ TraeX 继续回复 · 7" }, subtitle: { content: "Explain rollout" } });
-    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s" });
+    expect(card.header).toMatchObject({ title: { content: "✨ TraeX 继续回复 · 第 7 页" }, subtitle: { content: "Explain rollout" } });
+    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
     expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });
     expect(JSON.stringify(card)).not.toContain("older page");

@@ -136,7 +136,7 @@ describe("attach existing pane command", () => {
     expect(createTopic).not.toHaveBeenCalled();
     expect(runPrompt).not.toHaveBeenCalled();
     expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
-    expect(JSON.stringify(replyCards.at(-1))).toContain("/herdr resume");
+    expect(JSON.stringify(replyCards.at(-1))).toContain("/swarm resume");
     expect(JSON.stringify(replyCards.at(-1))).not.toContain("已绑定到其他会话");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
@@ -186,7 +186,7 @@ describe("attach existing pane command", () => {
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
 
-    await coordinator.handleMessage({ ...command(1), text: "/herdr attach datasage_semantic_knowledge tidy" });
+    await coordinator.handleMessage({ ...command(1), text: "/swarm attach datasage_semantic_knowledge tidy" });
 
     expect(store.listBindings()).toEqual([]);
     expect(JSON.stringify(cards.at(-1))).toContain("w5:p1, w5:p2");
@@ -314,7 +314,7 @@ function config(): BridgeConfig {
 }
 
 function command(index: number, pane = "w5:p3G") {
-  return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId: "user", text: `/herdr attach datasage_semantic_knowledge ${pane}`, mentionsBot: true, isRootMessage: true };
+  return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId: "user", text: `/swarm attach datasage_semantic_knowledge ${pane}`, mentionsBot: true, isRootMessage: true };
 }
 
 function findActionButton(card: object, action: string): { value: unknown } {

@@ -34,10 +34,10 @@ describe("operational commands", () => {
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage(message(1, "/herdr sessions"));
+    await coordinator.handleMessage(message(1, "/swarm sessions"));
     expect(JSON.stringify(cards.at(-1))).toContain("Visible");
     expect(JSON.stringify(cards.at(-1))).not.toContain("Hidden");
-    await coordinator.handleMessage(message(2, "/herdr failures"));
+    await coordinator.handleMessage(message(2, "/swarm failures"));
     const failureCard = cards.at(-1)!;
     expect(JSON.stringify(failureCard)).toContain("retry_dead_letter");
     const value = findAction(failureCard, "retry_dead_letter");

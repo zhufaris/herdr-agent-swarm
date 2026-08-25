@@ -322,6 +322,29 @@ describe("Herdr adapter", () => {
     expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Esc"]);
   });
 
+  it("clears composer state before sending a standalone model command", async () => {
+    const calls: string[][] = [];
+    const selector = [
+      "Select Model and Effort",
+      " 1. GPT-5.6-Sol (current)  support reasoning",
+      "Press enter to confirm or esc to go back"
+    ].join("\n");
+    const outputs = ["7K context window\n❯", "7K context window\n❯ /model", selector, selector];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? selector, stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPaneCommand("w1:p1", "/model", 1000)).resolves.toContain("Select Model and Effort");
+    const clearIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "ctrl+u");
+    const modelIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-text" && args[3] === "/model");
+    expect(clearIndex).toBeGreaterThanOrEqual(0);
+    expect(clearIndex).toBeLessThan(modelIndex);
+  });
+
   it("returns a model selector that is visible for only one terminal snapshot", async () => {
     const calls: string[][] = [];
     const selector = [

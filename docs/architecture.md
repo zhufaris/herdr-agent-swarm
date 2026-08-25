@@ -214,10 +214,10 @@ change during the target decomposition without changing these steps.
    messages, then durably records the rest before attempting business handling.
 3. A command is handled as a binding or operational workflow. Ordinary text in
    an active bound topic always becomes a FIFO prompt job; it is never
-   auto-promoted to steering. Exact, case-insensitive `/stop` is a local Herdr
+   auto-promoted to steering. Exact, case-insensitive `/swarm stop` is a local Herdr
    `Esc` control while the bridge has a supervised active turn (`working` or
    `blocked`): it bypasses queued ordinary prompts and creates no prompt job.
-   Explicit `/steer <text>` is the separate priority steering command; it injects
+   Explicit `/swarm steer <text>` is the separate priority steering command; it injects
    into the same supervised active turn, bypasses queued ordinary prompts, and
    never falls back to the ordinary FIFO.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
@@ -355,9 +355,9 @@ and credentials.
 ## Safety rules
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
-- `/stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
-  `/steer <text>` is TraeX steering. Both work while the bridge has a supervised
-  active turn (`working` or `blocked`); while `blocked`, `/steer` sends text to
+- `/swarm stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
+  `/swarm steer <text>` is TraeX steering. Both work while the bridge has a supervised
+  active turn (`working` or `blocked`); while `blocked`, `/swarm steer` sends text to
   TraeX steering, not to the approval interface. Neither command can approve,
   reject, or bypass a high-risk approval.
 - A prompt is never automatically replayed after uncertain dispatch or restart.

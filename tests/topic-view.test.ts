@@ -38,7 +38,7 @@ describe("topic view reducer", () => {
     expect(reduceTopicView(first, duplicateEvent)).toBe(first);
   });
 
-  it("keeps only the latest eight progress entries and the latest 2500 answer characters", () => {
+  it("keeps complete current-turn progress and the latest 2500 answer characters", () => {
     let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     for (let index = 0; index < 9; index += 1) {
       view = reduceTopicView(view, event("TurnOutputObserved", {
@@ -47,8 +47,8 @@ describe("topic view reducer", () => {
       }));
     }
 
-    expect(view.recentProgress).toHaveLength(8);
-    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 8 }, (_, index) => `read:${index + 1}`));
+    expect(view.recentProgress).toHaveLength(9);
+    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 9 }, (_, index) => `read:${index}`));
     expect(view.answer).toHaveLength(2500);
     expect(view.answer).toBe(`${"0".repeat(100)}${"1".repeat(300)}${"2".repeat(300)}${"3".repeat(300)}${"4".repeat(300)}${"5".repeat(300)}${"6".repeat(300)}${"7".repeat(300)}${"8".repeat(300)}`);
   });
@@ -74,7 +74,7 @@ describe("topic view reducer", () => {
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "done", answer: "finished" });
 
     expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(2_600), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
-      phase: "done", answer: "x".repeat(2_500), activePromptId: null, recentProgress: Array.from({ length: 8 }, (_, index) => expect.objectContaining({ key: String(index + 2) }))
+      phase: "done", answer: "x".repeat(2_500), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) }))
     });
   });
 });

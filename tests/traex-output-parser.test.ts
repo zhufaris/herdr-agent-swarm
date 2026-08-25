@@ -45,6 +45,26 @@ describe("TraeX output parser", () => {
     });
   });
 
+  it("removes the native subagent console from live answer output", () => {
+    const current = [
+      "◆ 汇总并复核并行审查发现",
+      "5 agents running… · /ps to manage",
+      "● Main [default] running · 20m4s",
+      "● Helmholtz [default] running · 10m21s",
+      "↓ to select agents",
+      "… +1 completed",
+      "◆ 已完成复核并整理修复建议"
+    ].join("\n");
+
+    const { delta } = parseTerminalStreamDelta("", current, "review");
+    expect(delta).toContain("◆ 汇总并复核并行审查发现");
+    expect(delta).toContain("◆ 已完成复核并整理修复建议");
+    expect(delta).not.toContain("agents running");
+    expect(delta).not.toContain("Main [default]");
+    expect(delta).not.toContain("Helmholtz [default]");
+    expect(delta).not.toContain("to select agents");
+  });
+
   it("keeps status, tools, shell output, and approval choices", () => {
     const current = [
       "\u001b[32m✧ Working\u001b[0m",
@@ -123,6 +143,15 @@ describe("TraeX output parser", () => {
 
   it("uses the latest answer block for a later turn", () => {
     expect(extractFinalTraexAnswer("◆ answer 1\n────────\n◆ answer 2\n────────")).toBe("answer 2");
+  });
+
+  it("filters subagent console status from the final answer", () => {
+    expect(extractFinalTraexAnswer([
+      "◆ Review complete",
+      "5 agents running… · /ps to manage",
+      "● Main [default] running · 20m",
+      "────────"
+    ].join("\n"))).toBe("Review complete");
   });
 
   it("marks a newly appended answer block separately from growth of the current block", () => {

@@ -54,7 +54,7 @@ describe("space directory command", () => {
     await coordinator.start();
     listPanes.mockClear();
 
-    await coordinator.handleMessage({ eventId: "spaces-1", messageId: "message-1", chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "user", text: "/herdr spaces", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "spaces-1", messageId: "message-1", chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
 
     const rendered = JSON.stringify(cards);
     expect(store.listBindings()).toEqual([]);
@@ -114,13 +114,13 @@ describe("space directory command", () => {
     }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     expose = true;
-    await coordinator.handleMessage({ eventId: "spaces-action", messageId: "spaces-message", chatId: "chat", topicId: null, rootMessageId: "spaces-message", actorOpenId: "user", text: "/herdr spaces", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "spaces-action", messageId: "spaces-message", chatId: "chat", topicId: null, rootMessageId: "spaces-message", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
     const claim = findAction(cards.at(-1)!, "claim_pane");
     await onAction!({ messageId: "spaces-card", chatId: "chat", operatorOpenId: "user", value: claim });
     expect(listPanes.mock.calls.some(([, options]) => options?.forceRefresh === true)).toBe(true);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ projectId: "alpha", chatId: "chat" });
 
-    await coordinator.handleMessage({ eventId: "spaces-bound", messageId: "spaces-bound-message", chatId: "chat", topicId: null, rootMessageId: "spaces-bound-message", actorOpenId: "user", text: "/herdr spaces", mentionsBot: true, isRootMessage: true });
+    await coordinator.handleMessage({ eventId: "spaces-bound", messageId: "spaces-bound-message", chatId: "chat", topicId: null, rootMessageId: "spaces-bound-message", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
     const open = findAction(cards.at(-1)!, "open_project_thread");
     await onAction!({ messageId: "spaces-bound-card", chatId: "chat", operatorOpenId: "user", value: open });
     expect(shareThread).toHaveBeenCalledWith("omt-new", { messageId: "spaces-bound-card", chatId: "chat" });
@@ -151,7 +151,7 @@ describe("space directory command", () => {
 
     await onAction!({ messageId: "spaces-card", chatId: "chat", operatorOpenId: "user", value: { action: "open_project_thread", bindingId: "b1" } });
 
-    expect(notices).toEqual([{ root: "spaces-card", text: "话题入口发送失败，请重新执行 `/herdr spaces` 后重试。" }]);
+    expect(notices).toEqual([{ root: "spaces-card", text: "话题入口发送失败，请重新执行 `/swarm spaces` 后重试。" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 });

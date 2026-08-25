@@ -103,7 +103,7 @@ link and enable the checkout. Local `plugin link` intentionally skips the
 manifest build step; packaged `plugin install` runs it.
 
 ```bash
-cd /absolute/path/to/herdr-lark-bridge
+cd /absolute/path/to/swarm-lark-bridge
 ./install.sh
 ```
 
@@ -166,7 +166,7 @@ MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
 
-`projects.json` is the project allowlist shown by `/herdr new`. Every
+`projects.json` is the project allowlist shown by `/swarm new`. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
 and absolute `cwd`; `defaultProjectId` must reference one entry. The registry is
 required; a missing or invalid file prevents startup. Copy
@@ -202,12 +202,12 @@ set +a
 npm run dev
 ```
 
-After startup, send `/herdr help` in the configured Lark group. A successful
+After startup, send `/swarm help` in the configured Lark group. A successful
 long-connection startup logs `bridge started`.
-Use `/herdr spaces` to list every configured space and all of its live Herdr
+Use `/swarm spaces` to list every configured space and all of its live Herdr
 panes, including panes that are not running TraeX. Eligible unbound TraeX panes
 can be claimed from the card, while a same-group bound pane can open its topic.
-Use `/herdr sessions` for the current group's session inventory and `/herdr
+Use `/swarm sessions` for the current group's session inventory and `/swarm
 failures` for actionable failures. Only failed Lark delivery can be retried; an
 already-dispatched TraeX prompt is never replayed automatically.
 
@@ -303,27 +303,26 @@ safety boundaries, see [Feishu group usage](docs/feishu-group-usage.md).
 Available commands:
 
 ```text
-/herdr new <title>
-/herdr new
-/herdr projects
-/herdr spaces
-/herdr attach <space> <pane>
-/model [name]
-/herdr model [name]
-/herdr status
-/herdr rename <title>
-/herdr close
-/herdr pane close
-/herdr pane close confirm <code>
-/herdr reattach <pane-id>
-/herdr replace
-/herdr resume
-/herdr help
+/swarm new <title>
+/swarm new
+/swarm projects
+/swarm spaces
+/swarm attach <space> <pane>
+/swarm model [name]
+/swarm status
+/swarm rename <title>
+/swarm close
+/swarm pane close
+/swarm pane close confirm <code>
+/swarm reattach <pane-id>
+/swarm replace
+/swarm resume
+/swarm help
 ```
 
 The `new` and `projects` commands open a project selector. Only the command
 initiator can use it, and each resulting topic remains bound to that project.
-If `/herdr new` has no title, the bridge uses a short random pane name such as
+If `/swarm new` has no title, the bridge uses a short random pane name such as
 `task-7kq2`; cards display it as `space / pane_name`.
 The read-only `spaces` command lists every configured Space and its current
 panes, including empty Spaces and unregistered panes, without creating a
@@ -337,10 +336,11 @@ button when the binding has a Feishu root message. Clicking it makes the bridge
 send Feishu's native forwarded-topic card into the current group; open that card
 to enter the project thread. This avoids unsupported `openMessageId` chat links.
 Bindings owned by another group remain rejected without exposing their topic.
-In an idle bound topic, `/model` lists the current and available TraeX models;
-`/model <name>` switches to a uniquely matching model. `/herdr model [name]` is
-an equivalent alias. Model commands do not create an agent turn or enter the
+In an idle bound topic, `/swarm model` lists the current and available TraeX models;
+`/swarm model <name>` switches to a uniquely matching model. Model commands do not create an agent turn or enter the
 prompt queue, and are rejected while work is running or queued.
+Only `/swarm …` is reserved for the bridge. Other slash commands, including
+`/herdr` and TraeX skill commands, are passed to the bound pane as ordinary prompts.
 An `@Bot` root message creates a topic in the default project and uses the
 message body as its first prompt. A reply received while a bridge-owned turn is actively `working`
 steers that turn; replies received while idle, blocked, or in an unknown state
@@ -349,10 +349,10 @@ results remain visible.
 
 When TraeX needs high-risk approval, the card changes to orange and directs the
 operator to the associated Herdr pane. Approve or reject the operation in Herdr;
-the Lark card cannot bypass that boundary. `/herdr close` archives the binding
+the Lark card cannot bypass that boundary. `/swarm close` archives the binding
 but does not kill TraeX or delete Lark history.
-To close the actual pane, send `/herdr pane close` from its bound topic, then
-send the generated `/herdr pane close confirm <code>` command within 60
+To close the actual pane, send `/swarm pane close` from its bound topic, then
+send the generated `/swarm pane close confirm <code>` command within 60
 seconds as the same Lark user. The bridge rechecks the binding identity, queue,
 active workers, and current Herdr agent state immediately before closing. Only
 an explicit `idle` or `done` state is accepted; `working`, `blocked`, and
@@ -363,8 +363,8 @@ If a pane becomes orphaned, `reattach` verifies the original pane identity and
 explicit `resume`, so uncertain work is never replayed automatically.
 If project creation is interrupted before the new pane identity is persisted,
 the bridge pauses instead of creating another pane. Inspect the configured
-Space; use `/herdr attach <space> <pane>` if the pane survived, otherwise
-start again with `/herdr new`. Lark topic creation retries use the binding ID as
+Space; use `/swarm attach <space> <pane>` if the pane survived, otherwise
+start again with `/swarm new`. Lark topic creation retries use the binding ID as
 a stable platform idempotency key.
 
 ## Health checks

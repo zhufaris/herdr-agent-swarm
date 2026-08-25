@@ -41,7 +41,7 @@ export class ConversationViewProjector {
             break;
           }
 
-          await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, `Continued on part ${view.answerPageIndex + 2}`, sequence + 1);
+          await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, `回答将在第 ${view.answerPageIndex + 2} 页继续`, sequence + 1);
           const pageStart = nextPageStart;
           const pageIndex = view.answerPageIndex + 1;
           const nextElementId = answerElementId(promptId, pageIndex);

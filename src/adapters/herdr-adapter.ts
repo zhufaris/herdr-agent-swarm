@@ -177,6 +177,7 @@ export class HerdrCliAdapter implements HerdrPort {
 
   async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
     const before = await this.readOutput(paneId, 240);
+    if (normalizePromptEcho(command) === normalizePromptEcho("/model")) await this.clearComposerInput(paneId);
     await this.submitPromptText(paneId, command, before);
     const deadline = Date.now() + timeoutMs;
     let previous = "";

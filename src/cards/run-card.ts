@@ -3,6 +3,8 @@ import type { RunCardView } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
+import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
+import { renderProgressTimeline } from "./progress-timeline.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -57,7 +59,7 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
 export function renderAttachStatusCard(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object {
   const title = input.resumeRequired ? "Pane 已恢复连接" : input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
   const message = input.resumeRequired
-    ? "已安全恢复原会话连接，未重放任何任务。点击“发送话题入口”进入原话题，再发送 `/herdr resume` 恢复队列。"
+    ? "已安全恢复原会话连接，未重放任何任务。点击“发送话题入口”进入原话题，再发送 `/swarm resume` 恢复队列。"
     : input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。";
   const elements: object[] = [{
     tag: "markdown",
@@ -88,7 +90,7 @@ export function renderRunCard(input: TopicViewState): object {
   ];
 
   const recentProgress = input.recentProgress ?? [];
-  if (recentProgress.length) elements.push({ tag: "markdown", content: `**执行进度**\n${recentProgress.slice(-8).map(progressLine).join("\n")}` });
+  if (recentProgress.length) elements.push(...renderProgressTimeline(recentProgress, input.phase));
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**执行进度**\n🧠 正在分析请求" });
 
   if (input.answer?.trim()) {
@@ -119,12 +121,12 @@ export function renderRunCard(input: TopicViewState): object {
 
 export function renderProjectEntryCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
-  const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned";
-  const recentProgress = (input.recentProgress ?? []).slice(-3);
+  const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
+  const progress = input.recentProgress ?? [];
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable
-    ? input.notice
-    : latestLines(visibleAnswer, 20) ?? (recentProgress.at(-1) ? projectProgressLine(recentProgress.at(-1)!) : null);
+    ? null
+    : latestLines(visibleAnswer, 20) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
   const elements: object[] = [
     {
       tag: "column_set",
@@ -137,9 +139,9 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     },
     { tag: "hr" }
   ];
-  if (recentProgress.length) {
-    elements.push({ tag: "markdown", content: `**最近动态**\n${recentProgress.map(projectProgressLine).join("\n")}` });
-  }
+  elements.push({ tag: "markdown", content: projectWorkSummary(input) });
+  if (progress.length) elements.push(...renderProgressTimeline(progress, input.phase));
+  if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(preview, 2_500)}` });
   elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
   return {
@@ -185,54 +187,56 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
       ? `TraeX 正在执行 · ${input.progressEvents.filter((event) => event.kind === "step" && event.state === "done").length}/${input.progressEvents.filter((event) => event.kind === "step").length}`
     : input.phase === "running" ? "⏳ 已接收请求"
       : input.phase === "queued" ? "⏳ 已接收请求"
-        : input.phase === "failed" ? "本次执行未产生回答。"
-          : "暂无回答。";
-  const content = options.initialContent ?? (input.phase === "blocked" ? `${baseContent}\n\n⚠️ ${input.notice ?? "等待用户处理"}`
-    : input.phase === "failed" ? `${baseContent}\n\n❌ ${input.notice ?? "执行失败"}` : baseContent);
+        : input.phase === "completed" ? "本次未产生可展示的回答。"
+          : input.phase === "failed" ? "本次未产生可展示的回答。"
+            : "暂无回答。";
+  const content = options.initialContent ?? baseContent;
+  const elements: object[] = [
+    { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
+    ...renderProgressTimeline(input.progressEvents, input.phase)
+  ];
+  if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr pane 并完成所需交互。"));
+  if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
+  elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: { update_multi: true, streaming_mode: true, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
-      title: { tag: "plain_text", content: pageNumber > 1 ? `✨ TraeX 继续回复 · ${pageNumber}` : "✨ TraeX 回复" },
+      title: { tag: "plain_text", content: pageNumber > 1 ? `✨ TraeX 继续回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复" },
       subtitle: { tag: "plain_text", content: boundedTitle(input.title) },
       template: state.color
     },
-    body: { elements: [
-      { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input)) },
-      { tag: "hr" },
-      { tag: "markdown", element_id: input.answerElementId, content }
-    ] }
+    body: { elements }
   };
 }
 
 export function renderHelpCard(): object {
   return {
     schema: "2.0",
-    config: { update_multi: true, summary: { content: "Herdr Bridge 帮助" } },
-    header: { title: { tag: "plain_text", content: "Herdr Bridge" }, template: "blue" },
+    config: { update_multi: true, summary: { content: "HerdrSwarm 帮助" } },
+    header: { title: { tag: "plain_text", content: "HerdrSwarm" }, template: "blue" },
     body: { elements: [
       { tag: "markdown", content: [
-        "**从飞书控制 Herdr 中的 TraeX pane**", "",
-        "`/herdr new [标题]`  选择项目并创建 TraeX pane",
-        "`/new [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
-        "`/stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
-        "`/steer <文本>`  将文本注入当前活动 turn，不降级为普通任务",
-        "`/herdr projects`  打开项目选择卡片",
-        "`/herdr spaces`  按 Space 查看全部 Pane",
-        "`/herdr sessions`  查看当前群的会话",
-        "`/herdr failures`  查看并处理发送失败",
-        "`/herdr attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",
-        "`/herdr status`  查看当前绑定",
-        "`/model [name]`  查看或切换当前 Pane 的 TraeX 模型",
-        "`/herdr model [name]`  `/model` 的等价别名",
-        "`/herdr rename <标题>`  重命名当前 pane",
-        "`/herdr close`  归档映射（不会强杀 TraeX）",
-        "`/herdr pane close`  请求关闭空闲 Pane（需要 60 秒内二次确认）",
-        "`/herdr pane close confirm <code>`  确认关闭当前话题绑定的 Pane",
-        "`/herdr reattach <pane>`  重新连接已验证的原 Pane",
-        "`/herdr replace`  创建新的 Pane generation（不会重放任务）",
-        "`/herdr resume`  验证后恢复已归档会话",
-        "`/herdr help`  显示本卡片", "",
-        "在已绑定话题中发送普通文本，即会按顺序提交给 TraeX。"
+        "**HerdrSwarm：从飞书协调 Herdr 中的 TraeX pane**", "",
+        "`/swarm new [标题]`  选择项目并创建 TraeX pane",
+        "`/swarm reset [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
+        "`/swarm stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
+        "`/swarm steer <文本>`  将文本注入当前活动 turn，不降级为普通任务",
+        "`/swarm projects`  打开项目选择卡片",
+        "`/swarm spaces`  按 Space 查看全部 Pane",
+        "`/swarm sessions`  查看当前群的会话",
+        "`/swarm failures`  查看并处理发送失败",
+        "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",
+        "`/swarm status`  查看当前绑定",
+        "`/swarm model [name]`  查看或切换当前 Pane 的 TraeX 模型",
+        "`/swarm rename <标题>`  重命名当前 pane",
+        "`/swarm close`  归档映射（不会强杀 TraeX）",
+        "`/swarm pane close`  请求关闭空闲 Pane（需要 60 秒内二次确认）",
+        "`/swarm pane close confirm <code>`  确认关闭当前话题绑定的 Pane",
+        "`/swarm reattach <pane>`  重新连接已验证的原 Pane",
+        "`/swarm replace`  创建新的 Pane generation（不会重放任务）",
+        "`/swarm resume`  验证后恢复已归档会话",
+        "`/swarm help`  显示本卡片", "",
+        "只有 `/swarm …` 会由 HerdrSwarm 处理；其它 slash 命令会原样提交给 TraeX。"
       ].join("\n") },
       { tag: "markdown", content: "高风险审批必须在 Herdr 终端完成" }
     ] }
@@ -243,8 +247,8 @@ export function renderDisconnectedTopicCard(reason: "archived" | "unbound"): obj
   const archived = reason === "archived";
   const title = archived ? "话题已归档" : "话题未连接";
   const message = archived
-    ? "这个话题对应的 Herdr 项目已归档，消息没有提交给 TraeX。请打开群里的新项目卡片继续，或发送 `/herdr new` 新建项目。"
-    : "这个话题没有连接到 Herdr，消息没有提交给 TraeX。请在已创建的项目卡片话题中继续，或发送 `/herdr new` 新建项目。";
+    ? "这个话题对应的 Herdr 项目已归档，消息没有提交给 TraeX。请打开群里的新项目卡片继续，或发送 `/swarm new` 新建项目。"
+    : "这个话题没有连接到 Herdr，消息没有提交给 TraeX。请在已创建的项目卡片话题中继续，或发送 `/swarm new` 新建项目。";
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: title } },
@@ -289,12 +293,12 @@ function requestStatusLabel(phase: RunCardView["phase"]): string {
 function requestSummaryLabel(phase: RunCardView["phase"]): string {
   return { queued: "排队中", running: "执行中", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
 }
-function conversationalMetadata(input: RunCardView, duration: string | null): string {
+function conversationalMetadata(input: RunCardView, duration: string | null, pageNumber?: number): string {
   const state = RUN_STATE_VIEW[input.phase];
   const details = input.phase === "queued"
     ? `队列第 ${input.queuePosition} 位`
     : duration ? `用时 ${duration}` : null;
-  return [`${state.icon} ${state.label}`, `Pane \`${escapeCode(input.paneId ?? "provisioning")}\``, details].filter(Boolean).join("  ·  " );
+  return [`${state.icon} ${state.label}`, `Pane \`${escapeCode(input.paneId ?? "provisioning")}\``, details, pageNumber && pageNumber > 1 ? `第 ${pageNumber} 页` : null].filter(Boolean).join("  ·  " );
 }
 function formatRunDuration(input: RunCardView): string | null {
   if (!input.startedAt || !input.finishedAt) return null;
@@ -307,7 +311,7 @@ function formatRunDuration(input: RunCardView): string | null {
   return [hours ? `${hours}h` : null, minutes ? `${minutes}m` : null, `${remainder}s`].filter(Boolean).join(" " );
 }
 function stripNativeTraexStatus(source: string): string {
-  return stripNativeTaskFrame(source);
+  return stripTraexConsoleStatus(stripNativeTaskFrame(source));
 }
 function latestLines(source: string, limit: number): string | null {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
@@ -317,6 +321,12 @@ function latestLines(source: string, limit: number): string | null {
 }
 function projectProgressLine(event: RunCardView["progressEvents"][number]): string {
   return event.kind === "step" ? progressLine(event) : `🛠️ ${progressLabel(event.label)}`;
+}
+function projectWorkSummary(input: TopicViewState): string {
+  if (input.phase === "running") return `**当前工作**\nTraeX 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
+  if (input.phase === "queued") return `**队列状态**\n当前请求正在 FIFO 队列中等待${input.queueDepth > 0 ? `（队列共 ${input.queueDepth} 条）。` : "。"}`;
+  if (input.phase === "done") return `**最近完成**\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
+  return `**会话状态**\n${STATE_VIEW[input.phase].label}`;
 }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   const label = progressLabel(event.label);

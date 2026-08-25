@@ -112,7 +112,7 @@ export class InboundRouter implements InboundRouterPort {
     if (paneClaim) {
       const project = this.options.config.projects.find((candidate) => candidate.id === paneClaim.projectId && candidate.workspaceId === paneClaim.workspaceId);
       if (!project) return;
-      const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/herdr attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
+      const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
       const attached = await this.options.provisioning.attach(synthetic, projectSpaceName(project), paneClaim.paneId);
       this.options.logger.info({ event: "space-pane-claim-decided", projectId: project.id, workspaceId: project.workspaceId, paneId: paneClaim.paneId, outcome: attached ? "attached" : "rejected" }, "processed Space pane claim");
       return;
@@ -149,7 +149,7 @@ export class InboundRouter implements InboundRouterPort {
       else if (command?.kind === "sessions") await this.options.operations.listSessions(message);
       else if (command?.kind === "failures") await this.options.operations.listFailures(message);
       else if (command?.kind === "attach") disposition = await this.options.provisioning.attach(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
-      else if (command?.kind === "status") { if (!binding) { await this.reject(message, "这个话题尚未连接 Herdr。请发送 `/herdr new` 创建项目。"); disposition = "rejected"; } else await this.options.operations.emitStatus(binding); }
+      else if (command?.kind === "status") { if (!binding) { await this.reject(message, "这个话题尚未连接 Herdr。请发送 `/swarm new` 创建项目。"); disposition = "rejected"; } else await this.options.operations.emitStatus(binding); }
       else if (command?.kind === "rename") disposition = await this.options.operations.rename(message, binding, command.title) ? "command_completed" : "rejected";
       else if (command?.kind === "close") disposition = await this.options.operations.archive(message, binding) ? "command_completed" : "rejected";
       else if (command?.kind === "pane_close_request") disposition = await this.options.operations.requestPaneClose(message, binding) ? "command_completed" : "rejected";

@@ -36,7 +36,7 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       const answer = keepAnswerTail(event.payload.answerSnapshot);
       const recentProgress = event.payload.hasProgressSnapshot
-        ? stampProgress(event.payload.progressEvents, event.occurredAt).slice(-8)
+        ? stampProgress(event.payload.progressEvents, event.occurredAt)
         : mergeProgress(base.recentProgress ?? [], event.payload.progressEvents, event.occurredAt);
       if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && state.activePromptId === event.payload.promptId) return state;
       return { ...base, activePromptId: event.payload.promptId, answer, recentProgress };
@@ -59,7 +59,7 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
     ...state, phase, queueDepth: run.queuePosition, answer: run.answer ? keepAnswerTail(run.answer) : null, notice: run.notice,
     activePromptId: run.phase === "running" || run.phase === "blocked" ? run.promptId : null,
     agentState: run.phase === "running" ? "working" : run.phase === "blocked" ? "blocked" : run.phase === "completed" ? "done" : state.agentState,
-    recentProgress: run.progressEvents.slice(-8)
+    recentProgress: run.progressEvents
   };
 }
 
@@ -71,7 +71,7 @@ function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEve
     if (existing >= 0) result[existing] = event;
     else result.push(event);
   }
-  return result.slice(-8);
+  return result;
 }
 
 function stampProgress(updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {

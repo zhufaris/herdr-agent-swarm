@@ -22,7 +22,7 @@ describe("project provisioning recovery", () => {
     expect(harness.topics).toBe(0);
     expect(harness.store.getProjectSelection(selection.id)).toMatchObject({
       state: "processing",
-      error: expect.stringContaining("/herdr attach")
+      error: expect.stringContaining("/swarm attach")
     });
     await harness.close();
   });

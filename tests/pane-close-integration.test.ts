@@ -13,14 +13,14 @@ describe("Lark pane close", () => {
   it("requires confirmation before closing the bound idle pane", async () => {
     const fixture = await setup("idle");
 
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     const cardText = JSON.stringify(fixture.cards.at(-1));
-    const confirmation = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(cardText);
+    const confirmation = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(cardText);
     expect(confirmation?.[1]).toBeTruthy();
 
-    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${confirmation![1]}`));
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${confirmation![1]}`));
 
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     expect(fixture.closePane).toHaveBeenCalledWith("w1:p1");
@@ -32,10 +32,10 @@ describe("Lark pane close", () => {
 
   it("allows a done pane to close after confirmation", async () => {
     const fixture = await setup("done");
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
-    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
 
-    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
     expect(fixture.closePane).toHaveBeenCalledWith("w1:p1");
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed", state: "archived" });
@@ -44,7 +44,7 @@ describe("Lark pane close", () => {
 
   it.each(["working", "blocked", "unknown"] as const)("rejects a close request while pane state is %s", async (state) => {
     const fixture = await setup(state);
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("不能关闭");
     await fixture.close();
@@ -52,31 +52,31 @@ describe("Lark pane close", () => {
 
   it("rejects the wrong actor and code without consuming a valid confirmation", async () => {
     const fixture = await setup("idle");
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
-    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
 
-    await fixture.coordinator.handleMessage({ ...message(2, `/herdr pane close confirm ${code}`), actorOpenId: "other" });
-    await fixture.coordinator.handleMessage(message(3, "/herdr pane close confirm WRONG1"));
+    await fixture.coordinator.handleMessage({ ...message(2, `/swarm pane close confirm ${code}`), actorOpenId: "other" });
+    await fixture.coordinator.handleMessage(message(3, "/swarm pane close confirm WRONG1"));
     expect(fixture.closePane).not.toHaveBeenCalled();
 
-    await fixture.coordinator.handleMessage(message(4, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(4, `/swarm pane close confirm ${code}`));
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     await fixture.close();
   });
 
   it("rechecks pane state at confirmation time", async () => {
     const fixture = await setup("idle");
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
-    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
     fixture.setAgentState("working");
 
-    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "active", state: "active" });
 
     fixture.setAgentState("idle");
-    await fixture.coordinator.handleMessage(message(3, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(3, `/swarm pane close confirm ${code}`));
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("没有待确认");
     await fixture.close();
@@ -86,7 +86,7 @@ describe("Lark pane close", () => {
     const fixture = await setup("idle");
     fixture.setTerminalId(null);
 
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("identity");
@@ -95,8 +95,8 @@ describe("Lark pane close", () => {
 
   it("does not close the captured pane when the binding changes after confirmation is consumed", async () => {
     const fixture = await setup("idle");
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
-    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
     const consume = fixture.store.consumePaneCloseRequest.bind(fixture.store);
     fixture.store.consumePaneCloseRequest = (input) => {
       const result = consume(input);
@@ -104,7 +104,7 @@ describe("Lark pane close", () => {
       return result;
     };
 
-    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("identity");
@@ -113,11 +113,11 @@ describe("Lark pane close", () => {
 
   it("marks the binding orphaned when the pane disappears before confirmation", async () => {
     const fixture = await setup("idle");
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
-    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
     fixture.setPanePresent(false);
 
-    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ attachment: "orphaned", state: "orphaned" });
@@ -127,10 +127,10 @@ describe("Lark pane close", () => {
 
   it("leaves the binding active when pane closure cannot be verified", async () => {
     const fixture = await setup("idle", true);
-    await fixture.coordinator.handleMessage(message(1, "/herdr pane close"));
-    const code = /\/herdr pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
 
-    await fixture.coordinator.handleMessage(message(2, `/herdr pane close confirm ${code}`));
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "active", state: "active" });

@@ -149,6 +149,15 @@ not alter:
 - the rule that only the newest answer page is mutable;
 - authority boundaries: Lark output never establishes workflow state.
 
+The current topic reducer intentionally retains only eight `recentProgress`
+entries. To meet the complete-history requirement, it must instead retain the
+full process-event sequence for the current/latest projected prompt (replacing
+events by key when snapshots arrive). This is a projection-reducer change, not
+a schema or workflow-protocol change: the renderer still decides that only the
+newest three are open by default. Starting a distinct turn continues to reset
+the binding-level sequence, so the main card represents the active or latest
+turn rather than an unbounded lifetime log for the entire pane.
+
 Process changes update the active projected cards through the existing normal
 outbox paths. They never resubmit a prompt to TraeX.
 

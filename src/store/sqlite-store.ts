@@ -650,11 +650,11 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE state = 'queued' AND dispatch_kind = 'steering'")
-        .run("Bridge 重启，本次 `/steer` 未注入，也不会转为普通任务。", timestamp);
+        .run("Bridge 重启，本次 `/swarm steer` 未注入，也不会转为普通任务。", timestamp);
       const orphanedSteering = this.database.prepare("SELECT prompt_id FROM run_cards c JOIN prompt_jobs p ON p.id = c.prompt_id WHERE p.dispatch_kind = 'steering' AND p.state = 'failed' AND c.phase = 'queued'").all() as Array<{ prompt_id: string }>;
       for (const card of orphanedSteering) {
         this.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
-          .run("Bridge 重启，本次 `/steer` 未注入，也不会转为普通任务。", timestamp, timestamp, card.prompt_id);
+          .run("Bridge 重启，本次 `/swarm steer` 未注入，也不会转为普通任务。", timestamp, timestamp, card.prompt_id);
       }
       const undispatched = this.database.prepare("SELECT id FROM prompt_jobs WHERE state = 'running' AND observation_state = 'not_started'").all() as Array<{ id: string }>;
       this.database.prepare("UPDATE prompt_jobs SET state = 'queued', observation_state = 'not_started', error = NULL, updated_at = ? WHERE state = 'running' AND observation_state = 'not_started'").run(timestamp);

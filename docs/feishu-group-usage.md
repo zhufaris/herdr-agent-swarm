@@ -9,7 +9,7 @@ Herdr Lark Bridge 将飞书话题绑定到 Herdr pane 中运行的 TraeX。用�
 在已经配置 Bridge Bot 的飞书群中发送顶层消息，并 `@Bot`：
 
 ```text
-@Bot /herdr new 修复登录问题
+@Bot /swarm new 修复登录问题
 ```
 
 Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane、启动 TraeX，
@@ -34,7 +34,7 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 
 ## 当前可用指令
 
-### `/new [标题]`
+### `/swarm reset [标题]`
 
 在当前已绑定话题中先创建并确认新的 TraeX 会话可用，再原子切换同一个飞书话题。
 如果新 pane 创建或 TraeX 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
@@ -42,47 +42,47 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 Herdr 本地检查。
 
 ```text
-/new 重新排查登录问题
+/swarm reset 重新排查登录问题
 ```
 
-`/new` 与 `/herdr new` 不同：后者会选择项目并创建一个新的飞书话题。
+`/swarm reset` 与 `/swarm new` 不同：后者会选择项目并创建一个新的飞书话题。
 
-### `/stop`
+### `/swarm stop`
 
-当当前话题有活动 TraeX turn 时，字面量 `/stop` 会直接向 Herdr pane 发送 `Esc`，
+当当前话题有活动 TraeX turn 时，字面量 `/swarm stop` 会直接向 Herdr pane 发送 `Esc`，
 无论 TraeX 当前是 `working`、`blocked` 还是 `unknown`。它绕过普通 FIFO，不创建
 prompt，也不依赖 Herdr 是否识别出 named agent。
 
-只有不带参数的 `/stop`（大小写不敏感）具有这个含义。`/stop now` 等带参数形式
+只有不带参数的 `/swarm stop`（大小写不敏感）具有这个含义。`/swarm stop now` 等带参数形式
 不会作为停止命令。若没有 active binding 或当前没有受 bridge 监督的活动 turn，Bridge
-会拒绝 `/stop`，不会加入普通队列。
+会拒绝 `/swarm stop`，不会加入普通队列。
 
-`/stop` 是 Herdr 本地 Esc 控制，不是 Bridge 对进程或 Herdr pane 的远程强杀，
+`/swarm stop` 是 Herdr 本地 Esc 控制，不是 Bridge 对进程或 Herdr pane 的远程强杀，
 也不能批准、拒绝或绕过高风险操作。
 
-### `/steer <文本>`
+### `/swarm steer <文本>`
 
 将文本作为当前活动 TraeX turn 的 steering 立即注入，绕过普通 FIFO。只要有受
 bridge 监督的活动 turn（`working` 或 `blocked`）即可注入；`blocked` 时文本会进入
 TraeX 的 steering 输入，而不是审批界面。没有活动 turn 时会拒绝，不会降级为普通任务。
 
-### `/herdr new <标题>`
+### `/swarm new <标题>`
 
 打开项目选择卡片；选择后创建新的 Herdr pane、启动 TraeX，并建立飞书话题绑定。
 
 ```text
-/herdr new 修复登录超时
+/swarm new 修复登录超时
 ```
 
 如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
-不带标题的 `/herdr new` 会在选择后使用短随机 Pane 名，例如 `task-7kq2`；
+不带标题的 `/swarm new` 会在选择后使用短随机 Pane 名，例如 `task-7kq2`；
 卡片标题展示为 `space / pane_name`。
 
-### `/herdr projects`
+### `/swarm projects`
 
 打开同一个项目选择卡片。只有发起命令的人可以点击，选择结果在当前话题绑定后不可切换。
 
-### `/herdr spaces`
+### `/swarm spaces`
 
 只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、非 TraeX Pane
 以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
@@ -90,24 +90,24 @@ TraeX 的 steering 输入，而不是审批界面。没有活动 turn 时会拒�
 TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
 校验。卡片不会提供关闭或删除动作。
 
-### `/herdr sessions`
+### `/swarm sessions`
 
 列出当前群的会话，包括 Space、Pane ID、lifecycle、attachment、TraeX 状态、
 generation、队列长度和最近活动时间。不会显示其他群的话题链接、prompt 正文或终端输出。
 
-### `/herdr failures`
+### `/swarm failures`
 
 列出当前群需要处理的发送失败、失败任务和异常会话。只有 Lark outbox dead letter
 提供“重试发送”和“忽略”；重试复用原幂等键且只发送卡片或文本，绝不会重放 TraeX
 prompt。失败任务只用于诊断。
 
-### `/herdr attach <space> <pane>`
+### `/swarm attach <space> <pane>`
 
 把已经运行 TraeX 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。
 这个命令不会创建、重命名或重启 pane，也不会向 pane 发送文字。
 
 ```text
-/herdr attach datasage_semantic_knowledge w5:p3G
+/swarm attach datasage_semantic_knowledge w5:p3G
 ```
 
 `space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID，
@@ -121,42 +121,46 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。
 如果 pane 属于当前群、当前项目中因观测失败变为 `orphaned` 的原会话，`attach` 会在
 重新验证 workspace、项目目录、TraeX 和 terminal identity 后恢复原绑定。恢复过程不会
-创建新绑定或重放任务；请通过返回的话题入口进入原话题，再发送 `/herdr resume`。
+创建新绑定或重放任务；请通过返回的话题入口进入原话题，再发送 `/swarm resume`。
 
-### `/herdr status`
+### `/swarm status`
 
 刷新当前话题的绑定状态，包括 workspace、pane、TraeX 状态和队列深度。
 该命令必须在已绑定话题中使用。
 
 ```text
-/herdr status
+/swarm status
 ```
 
-### `/model [name]`
+### `/swarm model [name]`
 
-在已绑定且空闲的项目话题中查看或切换当前 Pane 的 TraeX 模型。`/herdr model
-[name]` 是等价别名。
+在已绑定且空闲的项目话题中查看或切换当前 Pane 的 TraeX 模型。
 
 ```text
-/model
-/model GPT-5.5
-/herdr model GPT-5.5
+/swarm model
+/swarm model GPT-5.5
 ```
 
 不带名称时显示当前模型和可用模型；带名称时由 TraeX 匹配并切换。名称未知或
 不唯一时，Bridge 会原样展示 TraeX 的候选或错误信息。该命令不创建 Request/Answer
 卡片、不进入任务队列；当前有任务运行或排队时会拒绝，请等待队列完成后重试。
 
-### `/herdr rename <标题>`
+### 命令边界
+
+只有以 `/swarm` 开头的消息由 HerdrSwarm 处理。`/herdr`、`/model`、`/new`、
+`/stop`、`/steer` 以及其它 slash 命令都会作为普通任务原样提交给绑定 pane 中的
+TraeX，使其可使用自身命令与已安装 skills。
+
+### `/swarm rename <标题>`
 
 修改当前任务和 Herdr pane 的显示名称。该命令不会重启 TraeX，也不会创建
 新 pane。
 
 ```text
-/herdr rename 登录超时根因排查
+/swarm rename 登录超时根因排查
 ```
 
-### `/herdr close`
+### `/swarm close`
 
 归档当前飞书话题与 pane 的绑定。这个命令是非破坏性的：
 
@@ -166,7 +170,7 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 - 归档后不再接受该话题中的新任务。
 
 ```text
-/herdr close
+/swarm close
 ```
 
 ### Pane 恢复命令
@@ -174,8 +178,8 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 当状态显示 `orphaned` 时，可以使用：
 
 ```text
-/herdr reattach wA:p3
-/herdr replace
+/swarm reattach wA:p3
+/swarm replace
 ```
 
 `reattach` 只接受同一 Space、同一项目目录且 terminal identity 匹配、TraeX
@@ -183,35 +187,35 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 结果不确定的任务；验证或替换后会保持归档，确认后再发送：
 
 ```text
-/herdr resume
+/swarm resume
 ```
 
 如果项目创建在 Pane ID 落库前中断，Bridge 不会在重启后自动新建第二个
 Pane。请先检查对应 Space；已有 Pane 时发送
-`/herdr attach <space> <pane>`，确认不存在时再发送 `/herdr new`。
+`/swarm attach <space> <pane>`，确认不存在时再发送 `/swarm new`。
 
-### `/herdr help`
+### `/swarm help`
 
 显示 Bridge 帮助卡片。
 
 ```text
-/herdr help
+/swarm help
 ```
 
 ## 在话题中发送普通消息
 
 已绑定话题中的普通回复（不带命令前缀）总是进入 FIFO，按顺序作为下一个 turn 执行，
-不会自动注入当前 turn。要插入正在执行的 turn，请显式使用 `/steer <文本>`：
+不会自动注入当前 turn。要插入正在执行的 turn，请显式使用 `/swarm steer <文本>`：
 
 | TraeX 状态 | 普通消息的 Bridge 行为 |
 | --- | --- |
-| `working` 或 `blocked` | 加入 FIFO 排队；当前 turn 结束后按顺序执行。需要立即插入请用 `/steer` |
+| `working` 或 `blocked` | 加入 FIFO 排队；当前 turn 结束后按顺序执行。需要立即插入请用 `/swarm steer` |
 | `idle` 或 `done` | 加入 FIFO，作为下一个 turn 执行 |
 | `unknown` | 保守地进入 FIFO，不尝试 steering |
 
-每条消息都有独立状态卡。`/steer` 卡显示“已加入当前执行”，当前 turn 的最终
+每条消息都有独立状态卡。`/swarm steer` 卡显示“已加入当前执行”，当前 turn 的最终
 回答仍只显示在主任务卡中。重复的飞书事件不会导致同一条消息重复注入。
-`/stop` 与 `/steer` 是显式的优先级命令：只要有受 bridge 监督的活动 turn
+`/swarm stop` 与 `/swarm steer` 是显式的优先级命令：只要有受 bridge 监督的活动 turn
 （`working` 或 `blocked`）即可生效，越过普通 FIFO，但不改变已排队的普通消息。
 
 ## 权限与审批
@@ -223,9 +227,9 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 
 - 批准或绕过 TraeX 高风险操作审批（批准/拒绝仍必须回到 Herdr 完成）；
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
-- 通过 `/stop` 强制终止 TraeX 进程或 Herdr pane。
+- 通过 `/swarm stop` 强制终止 TraeX 进程或 Herdr pane。
 
-`blocked` 时的 `/steer` 会把文本作为 steering 送入 TraeX，而不是替你点击审批
+`blocked` 时的 `/swarm steer` 会把文本作为 steering 送入 TraeX，而不是替你点击审批
 按钮；是否放行高风险操作仍由 Herdr 终端决定。
 
 ## 从飞书关闭 Pane
@@ -233,8 +237,8 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 真正关闭当前话题绑定的 Pane 使用两步确认：
 
 ```text
-/herdr pane close
-/herdr pane close confirm <code>
+/swarm pane close
+/swarm pane close confirm <code>
 ```
 
 第一条命令生成 60 秒一次性确认码，第二条必须由同一飞书用户在同一话题中
@@ -247,14 +251,14 @@ Herdr 明确报告为 `idle` 或 `done` 的 Pane；`working`、`blocked` 和 `un
 
 ### 消息没有立即执行
 
-先发送 `/herdr status`。普通消息始终进入 FIFO：如果当前 turn 处于 `working`
+先发送 `/swarm status`。普通消息始终进入 FIFO：如果当前 turn 处于 `working`
 或 `blocked`，你的消息会在其结束后按顺序执行。要立即插入当前 turn，请用
-`/steer <文本>`；如果 TraeX 是 `blocked`，也可以到 Herdr 处理审批。
+`/swarm steer <文本>`；如果 TraeX 是 `blocked`，也可以到 Herdr 处理审批。
 
-### `/herdr close` 后 pane 还在
+### `/swarm close` 后 pane 还在
 
-这是预期行为。`/herdr close` 只归档绑定，不会关闭 pane。需要真正关闭时，
-请在仍处于 active 的绑定话题中发送 `/herdr pane close` 并按卡片提示确认。
+这是预期行为。`/swarm close` 只归档绑定，不会关闭 pane。需要真正关闭时，
+请在仍处于 active 的绑定话题中发送 `/swarm pane close` 并按卡片提示确认。
 
 ### 可以从飞书批准权限吗
 

@@ -4,18 +4,9 @@ const MAX_TOPIC_TITLE_LENGTH = 80;
 
 export function parseCommand(text: string): BridgeCommand | null {
   const trimmed = text.trim();
-  if (/^\/stop$/i.test(trimmed)) return { kind: "stop" };
-  if (/^\/stop\s+/i.test(trimmed)) return { kind: "help" };
-  const steerMatch = /^\/steer\s+([\s\S]+)$/i.exec(trimmed);
-  if (steerMatch) return { kind: "steer", text: steerMatch[1]!.trim() };
-  if (/^\/steer$/i.test(trimmed)) return { kind: "help" };
-  const modelMatch = /^\/model(?:\s+([\s\S]*))?$/i.exec(trimmed);
-  if (modelMatch) return { kind: "model", name: (modelMatch[1] ?? "").trim() || null };
-  const resetMatch = /^\/new(?:\s+([\s\S]*))?$/i.exec(trimmed);
-  if (resetMatch) return { kind: "reset", title: (resetMatch[1] ?? "").trim() || null };
-  if (!trimmed.startsWith("/herdr")) return null;
+  if (!/^\/swarm(?:\s|$)/i.test(trimmed)) return null;
 
-  const match = /^\/herdr(?:\s+([a-z]+))?(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  const match = /^\/swarm(?:\s+([a-z]+))?(?:\s+([\s\S]*))?$/i.exec(trimmed);
   if (!match) return { kind: "help" };
 
   const action = (match[1] ?? "help").toLowerCase();
@@ -23,8 +14,14 @@ export function parseCommand(text: string): BridgeCommand | null {
   switch (action) {
     case "model":
       return { kind: "model", name: argument || null };
+    case "stop":
+      return argument ? { kind: "help" } : { kind: "stop" };
+    case "steer":
+      return argument ? { kind: "steer", text: argument } : { kind: "help" };
     case "new":
       return { kind: "new", title: argument || null };
+    case "reset":
+      return { kind: "reset", title: argument || null };
     case "projects":
       return { kind: "projects" };
     case "spaces":

@@ -35,7 +35,7 @@ describe("pane/thread lifecycle integration", () => {
     const active = runtime(store, herdr, lark);
     await active.coordinator.start();
 
-    await active.coordinator.handleMessage({ ...message(0, "/herdr replace"), mentionsBot: true });
+    await active.coordinator.handleMessage({ ...message(0, "/swarm replace"), mentionsBot: true });
 
     expect(store.getBinding("orphaned")).toMatchObject({
       paneId: "w1:new", traexSessionId: "new-terminal", generation: 2, attachment: "attached",
@@ -44,7 +44,7 @@ describe("pane/thread lifecycle integration", () => {
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
-  it("closes an idle retired pane only after /new activates its replacement", async () => {
+  it("closes an idle retired pane only after /swarm reset activates its replacement", async () => {
     const oldPane = { paneId: "w1:old", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "old", agentState: "done" as const, foregroundExecutables: ["traex"] };
     const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     let oldClosed = false;
@@ -65,7 +65,7 @@ describe("pane/thread lifecycle integration", () => {
     const active = runtime(store, herdr, lark);
     await active.coordinator.start();
 
-    await active.coordinator.handleMessage({ ...message(1, "/new fresh"), mentionsBot: true });
+    await active.coordinator.handleMessage({ ...message(1, "/swarm reset fresh"), mentionsBot: true });
 
     await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
     await vi.waitFor(() => expect(store.getBinding("old")?.lifecycle).toBe("closed"));
@@ -92,7 +92,7 @@ describe("pane/thread lifecycle integration", () => {
     const active = runtime(store, herdr, lark);
     await active.coordinator.start();
 
-    await active.coordinator.handleMessage({ ...message(1, "/new fresh"), mentionsBot: true });
+    await active.coordinator.handleMessage({ ...message(1, "/swarm reset fresh"), mentionsBot: true });
 
     expect(closePane).not.toHaveBeenCalled();
     expect(store.getBinding("old")).toMatchObject({ lifecycle: "active", state: "active", paneId: oldPane.paneId });
@@ -108,7 +108,7 @@ describe("pane/thread lifecycle integration", () => {
     const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
-      async createTopic() { throw new Error("/new must not create another Lark topic"); },
+      async createTopic() { throw new Error("/swarm reset must not create another Lark topic"); },
       async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async replyStreamingCard() { return { messageId: `card-${Math.random()}`, cardId: `cardkit-${Math.random()}` }; }, async updateCard() {}
     };
     const herdr: HerdrPort = {
@@ -131,7 +131,7 @@ describe("pane/thread lifecycle integration", () => {
     await activeRuntime.coordinator.handleMessage({ ...message(1, "old request"), mentionsBot: true });
     await vi.waitFor(() => expect(submitted).toEqual(["old request"]));
     await activeRuntime.coordinator.handleMessage({ ...message(2, "queued old request") });
-    await activeRuntime.coordinator.handleMessage({ ...message(3, "/new fresh session"), mentionsBot: true });
+    await activeRuntime.coordinator.handleMessage({ ...message(3, "/swarm reset fresh session"), mentionsBot: true });
 
     await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
     const retired = store.getBinding("old")!;
@@ -159,7 +159,7 @@ describe("pane/thread lifecycle integration", () => {
     const activeRuntime = runtime(store, herdr, lark);
     await activeRuntime.coordinator.start();
 
-    await activeRuntime.coordinator.handleMessage({ ...message(4, "/herdr attach repo w1:survived"), mentionsBot: true });
+    await activeRuntime.coordinator.handleMessage({ ...message(4, "/swarm attach repo w1:survived"), mentionsBot: true });
 
     expect(store.getBinding("failed-reset")).toMatchObject({ state: "active", lifecycle: "active", attachment: "attached", paneId: pane.paneId, traexSessionId: pane.terminalId });
     await activeRuntime.coordinator.stop(); await activeRuntime.projector.stop(); await activeRuntime.publisher.stop(); store.close();
@@ -191,7 +191,7 @@ describe("pane/thread lifecycle integration", () => {
     await coordinator.handleMessage(message(1, "first"));
     await vi.waitFor(() => expect(submitted).toHaveLength(1));
     await coordinator.handleMessage(message(2, "second"));
-    await coordinator.handleMessage({ ...message(3, "/herdr close"), mentionsBot: true });
+    await coordinator.handleMessage({ ...message(3, "/swarm close"), mentionsBot: true });
 
     expect(store.listBindings()[0]).toMatchObject({ lifecycle: "draining", state: "active" });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, cancelled: 1 });
@@ -346,11 +346,11 @@ describe("pane/thread lifecycle integration", () => {
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ ...message(10, "/herdr reattach w1:p1"), mentionsBot: true });
+    await coordinator.handleMessage({ ...message(10, "/swarm reattach w1:p1"), mentionsBot: true });
     expect(store.listBindings()[0]).toMatchObject({ lifecycle: "archived", attachment: "attached", generation: 1 });
     expect(submitted).toEqual([]);
 
-    await coordinator.handleMessage({ ...message(11, "/herdr resume"), mentionsBot: true });
+    await coordinator.handleMessage({ ...message(11, "/swarm resume"), mentionsBot: true });
     expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", attachment: "attached", lastAgentState: "idle", generation: 1 });
     // The queued job has no delivered cards, so it remains visible/non-runnable instead of being replayed.
     expect(submitted).toEqual([]);
