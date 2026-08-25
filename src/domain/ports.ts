@@ -132,6 +132,8 @@ export interface BindingStorePort {
   failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
+  hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean;
+  dismissSupersededAnswerStream(replyId: string): boolean;
   listPendingOutboundReplies(): OutboundReply[];
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[]): OutboundReply[];
   getNextOutboundLaneHeadAttemptAt(): string | null;
@@ -224,12 +226,12 @@ export type OperationsStore = Pick<BindingStorePort,
   | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBinding"
 >;
 
-export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
+export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "hasPendingAnswerContinuation" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
 
 export type OutboxStore = Pick<BindingStorePort,
   | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
   | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDeadLetter" | "markOutboundReplyDelivered"
-  | "markOutboundReplyFailed" | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "updateBinding"
+  | "markOutboundReplyFailed" | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream" | "updateBinding"
 >;
 export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getBinding" | "loadRunCard">;
 

@@ -171,6 +171,37 @@ describe("event-driven card projection", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("does not append stale old-page events while a continuation card is pending", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    store.enqueueOutboundReply({
+      id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create",
+      payload: JSON.stringify({ card: { body: { elements: [{ element_id: "answer_content_p1_1" }] } }, stream: { pageIndex: 1, pageStart: 3_500, elementId: "answer_content_p1_1" } })
+    });
+    const bus = new BridgeEventBus();
+    const pendingWrites: string[] = [];
+    const publisher = {
+      onStreamCardCreated: () => () => {},
+      async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {},
+      async enqueueStreamCardCreate() { pendingWrites.push("stream_card_create"); },
+      async enqueueStreamFinish() { pendingWrites.push("stream_finish"); },
+      async enqueueStreamContent() { pendingWrites.push("stream_content"); }
+    };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+
+    await bus.publish({ eventId: "output-after-rollover", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: "new live output", answerUpdate: "replace", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(store.listPendingOutboundReplies()[0]).toMatchObject({ id: "page-2", kind: "stream_card_create" });
+    expect(pendingWrites).toEqual([]);
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
   it("streams a render-safe Bash fence while preserving the canonical answer", async () => {
     const streamed: string[] = [];
     const lark: LarkPort = {

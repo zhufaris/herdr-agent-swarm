@@ -976,6 +976,34 @@ export class SqliteBindingStore implements BindingStorePort {
     return (this.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' ORDER BY delivery_order").all() as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
+  hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean {
+    const row = this.database.prepare(`
+      SELECT 1
+      FROM outbound_replies
+      WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending'
+        AND json_extract(payload, '$.stream.pageIndex') = ?
+      LIMIT 1
+    `).get(promptId, pageIndex) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  dismissSupersededAnswerStream(replyId: string): boolean {
+    const updated = this.database.prepare(`
+      UPDATE outbound_replies
+      SET state = 'dismissed', error = 'Answer stream superseded by a continuation page', updated_at = ?
+      WHERE id = ? AND state = 'pending' AND kind IN ('stream_content', 'stream_finish')
+        AND prompt_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM run_cards
+          WHERE run_cards.prompt_id = outbound_replies.prompt_id
+            AND run_cards.answer_page_index > 0
+            AND run_cards.answer_card_id IS NOT NULL
+            AND run_cards.answer_card_id != outbound_replies.root_message_id
+        )
+    `).run(now(), replyId);
+    return Number(updated.changes) === 1;
+  }
+
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = []): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     const exclusions = excludedLaneKeys.length > 0 ? `AND lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";

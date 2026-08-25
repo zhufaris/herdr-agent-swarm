@@ -260,6 +260,19 @@ describe("run card", () => {
     expect(JSON.stringify(card)).not.toContain("older page");
   });
 
+  it("enables CardKit native typewriter rendering for a streaming answer", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stream", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "start" });
+
+    expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
+      config: {
+        streaming_mode: true,
+        streaming_config: { print_frequency_ms: { default: 70 }, print_step: { default: 1 }, print_strategy: "fast" }
+      }
+    });
+    expect(renderRequestAnswerCard({ ...view, phase: "completed" })).toMatchObject({ config: { streaming_mode: false } });
+    expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed" }))).not.toContain("streaming_config");
+  });
+
   it("keeps native TraeX task status out of the answer card", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Replay Query Log", workspaceId: "w1", spaceName: "datasage", paneId: "w1:p1", requestText: "Replay", queuePosition: 0, occurredAt: "start" });
     const running = { ...view, phase: "running" as const, answer: "重新构建部署… (35m 10s • ↓ 30.8K tokens)\n9 tasks (7 done, 1 in progress, 1 open)\n■ 重放 Query Log\n◻ 更新 PROGRESS.md", progressEvents: [

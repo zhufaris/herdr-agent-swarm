@@ -185,7 +185,11 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
-    schema: "2.0", config: { update_multi: true, streaming_mode: streaming, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
+    schema: "2.0", config: {
+      update_multi: true, streaming_mode: streaming,
+      ...(streaming ? { streaming_config: { print_frequency_ms: { default: 70 }, print_step: { default: 1 }, print_strategy: "fast" } } : {}),
+      summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` }
+    },
     header: {
       title: { tag: "plain_text", content: input.phase === "completed" && !streaming ? (pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成") : (pageNumber > 1 ? `✨ TraeX 继续回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复") },
       subtitle: { tag: "plain_text", content: boundedTitle(input.title) },

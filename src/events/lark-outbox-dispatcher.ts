@@ -159,6 +159,10 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 
   private async deliverReply(reply: OutboundReply, blockedTargets: Set<string>): Promise<"delivered" | "failed"> {
     try {
+      if ((reply.kind === "stream_content" || reply.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(reply.id)) {
+        this.logger.info({ event: "lark-outbox-answer-stream-dismissed", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, replyKind: reply.kind, outcome: "dismissed" }, "dismissed an Answer stream event superseded by a continuation page");
+        return "delivered";
+      }
       if (reply.kind === "card_update") {
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         await this.lark.updateCard(reply.rootMessageId, JSON.parse(reply.payload) as object);

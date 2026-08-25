@@ -68,6 +68,25 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("dismisses a stale old-page stream event so the continuation lane can advance", async () => {
+    const stream = vi.fn(async () => {});
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answerMessageId: "answer-2", answerCardId: "cardkit-2", answerElementId: answerElementId("p1", 1), answerPageIndex: 1, answerPageStart: 3_500 });
+    store.enqueueOutboundReply({ id: "stale-content", idempotencyKey: "stream:p1:cardkit-1:2", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ elementId: answerElementId("p1", 0), content: "stale", sequence: 2 }) });
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = 'stale-content'").get()).toEqual({ state: "dismissed", error: "Answer stream superseded by a continuation page" });
+    expect(store.getOperationalSummary().deadLetters).toBe(0);
+    store.close();
+  });
+
   it("keeps a failed card pending and delivers it during a later drain", async () => {
     let fail = true;
     const cards: object[] = [];

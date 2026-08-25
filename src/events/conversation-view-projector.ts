@@ -30,6 +30,11 @@ export class ConversationViewProjector {
       let view = this.store.loadRunCard(promptId);
       if (!view?.answerMessageId) return;
       if (view.answerCardId) {
+        // A continuation is a durable hand-off. Until Lark has created that
+        // card and checkpointed the new page, do not enqueue more writes for
+        // the old card: those writes would be stale as soon as the checkpoint
+        // advances and could block the prompt's ordered outbox lane.
+        if (this.store.hasPendingAnswerContinuation(promptId, view.answerPageIndex + 1)) return;
         const fullContent = answerContent(view);
         while (view.answerCardId) {
           const { page, nextPageStart } = renderAnswerStreamPage(fullContent, view.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
