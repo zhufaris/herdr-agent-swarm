@@ -52,7 +52,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
     try {
       const pane = await herdr.createPane(binding.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
-      binding = store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
+      binding = store.updateBinding(binding.id, paneIdentityPatch(pane));
       binding = store.transitionBinding(binding.id, { type: "pane_created" });
       await herdr.startTraex(pane.paneId, config.traex.executable);
       binding = store.updateBinding(binding.id, { lastAgentState: "idle" });
@@ -130,7 +130,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const id = randomUUID();
     const title = formatProjectPaneTitle(projectSpaceName(project), pane.cwd, pane.label, pane.paneId);
     let binding = store.createPendingBinding({ id, projectId: project.id, workspaceId: pane.workspaceId, chatId: config.lark.chatId, topicId: null, rootMessageId: null, title });
-    binding = store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
+    binding = store.updateBinding(binding.id, paneIdentityPatch(pane));
     binding = store.transitionBinding(binding.id, { type: "pane_created" });
     binding = store.transitionBinding(binding.id, { type: "runtime_started" });
     const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId });
@@ -162,7 +162,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       let pane = replacement.paneId ? await herdr.getPane(replacement.paneId) : null;
       if (replacement.provisioningCheckpoint === "selected") {
         pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: replacement.id, generation: replacement.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
-        replacement = store.updateBinding(replacement.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
+        replacement = store.updateBinding(replacement.id, paneIdentityPatch(pane));
         replacement = store.transitionBinding(replacement.id, { type: "pane_created" });
       }
       if (!pane) throw new Error(`Provisioned Herdr pane ${replacement.paneId ?? "unknown"} no longer exists`);
@@ -228,7 +228,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const interrupted = store.listProcessingProjectSelections().filter((selection) => selection.bindingId && selection.selectedProjectId === project.id && store.getBinding(selection.bindingId)?.provisioningCheckpoint === "selected");
     if (interrupted.length === 1) {
       const selection = interrupted[0]!;
-      let binding = store.updateBinding(selection.bindingId!, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null });
+      let binding = store.updateBinding(selection.bindingId!, paneIdentityPatch(pane));
       binding = store.transitionBinding(binding.id, { type: "pane_created" });
       binding = await this.createSelectedProject(selection, project, false);
       store.completeProjectSelection(selection.id, binding.id);
@@ -273,7 +273,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (binding.provisioningCheckpoint === "selected") {
         if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /herdr attach <space> <pane>");
         pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
-        binding = store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null }); binding = store.transitionBinding(binding.id, { type: "pane_created" });
+        binding = store.updateBinding(binding.id, paneIdentityPatch(pane)); binding = store.transitionBinding(binding.id, { type: "pane_created" });
       }
       if (!pane && binding.paneId) pane = await herdr.getPane(binding.paneId);
       if (!pane) throw new Error(`Provisioning checkpoint ${binding.provisioningCheckpoint} has no Herdr pane`);
@@ -321,14 +321,14 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async recoverFailedResetBinding(binding: Binding, pane: HerdrPane, actorOpenId: string): Promise<Binding> {
     if (!binding.replacesBindingId || !binding.reservedTopicId || !binding.reservedRootMessageId) {
       if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${pane.paneId}`);
-      const recovered = this.options.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: pane.terminalId ?? null, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: pane.agentState, statusMessageId: binding.rootMessageId });
+      const recovered = this.options.store.updateBinding(binding.id, { ...paneIdentityPatch(pane), state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: pane.agentState, statusMessageId: binding.rootMessageId });
       await this.publish(recovered.id, "BindingActivated", "lark", { paneId: pane.paneId, topicId: recovered.topicId! });
       return recovered;
     }
     const project = this.options.config.projects.find((item) => item.id === binding.projectId);
     const observation = await this.options.herdr.observeRuntime(pane.paneId);
     if (!project || !observation.pane || !observation.traexProcess || !observation.composerReady || observation.pane.workspaceId !== project.workspaceId || observation.pane.cwd !== project.cwd || !observation.pane.terminalId) throw new Error(`Replacement pane ${pane.paneId} is not ready for reset recovery`);
-    this.options.store.updateBinding(binding.id, { paneId: pane.paneId, traexSessionId: observation.pane.terminalId, state: "pending", lifecycle: "provisioning", attachment: "unattached", provisioningCheckpoint: "runtime_started", lastAgentState: observation.pane.agentState });
+    this.options.store.updateBinding(binding.id, { ...paneIdentityPatch(observation.pane), state: "pending", lifecycle: "provisioning", attachment: "unattached", provisioningCheckpoint: "runtime_started", lastAgentState: observation.pane.agentState });
     const handoff = this.options.store.cutoverResetCandidate({ oldBindingId: binding.replacesBindingId, newBindingId: binding.id, cleanupOperationId: randomUUID(), actorOpenId, expectedCwd: project.cwd });
     this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: handoff.previous.id });
     this.options.wakeRetiredPaneCleanup?.();
@@ -340,6 +340,14 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }
   private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
+}
+
+function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSessionId" | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"> {
+  return {
+    paneId: pane.paneId, traexSessionId: pane.terminalId ?? null,
+    agentSessionSource: pane.agentSession?.source ?? null, agentSessionAgent: pane.agentSession?.agent ?? null,
+    agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
+  };
 }
 
 function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }

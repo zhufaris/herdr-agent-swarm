@@ -22,7 +22,7 @@ transaction by itself.
 
 | Concern | Authority | Why |
 | --- | --- | --- |
-| Pane identity, terminal identity, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
+| Pane identity, terminal identity, native Agent session reference, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
 | Process lifecycle | user systemd service | The plugin controls the service; the application does not manage PID files. |
@@ -47,8 +47,8 @@ the source of workflow policy.
                │ SDK / HTTP           │ CLI / snapshot            │ lifecycle
                v                      v                           v
 ┌──────────────────────── Infrastructure and adapters ─────────────────────┐
-│ Lark adapter · Herdr adapter · command runner · UDP event inbox           │
-│ SQLite store · in-process event dispatch · health server · lease runtime  │
+│ Lark adapter · Herdr adapter · command runner · Socket subscriber         │
+│ UDP event inbox · SQLite store · health server · lease runtime            │
 └───────────────────────┬──────────────────────────────────────────────────┘
                         │ implements ports
                         v
@@ -179,12 +179,12 @@ remain best effort because workers always reload durable state.
 ### Target runtime shape
 
 ```text
-Lark message or card action                  Herdr plugin event
-             |                                       |
-             v                                       v
-   InboundRouter and durable acceptance         UDP wake-up hint
-             |                                       |
-             +----------> application workflows <---+
+Lark message or card action            Herdr Socket / plugin event
+             |                                |
+             v                                v
+   InboundRouter and durable acceptance   bounded wake-up hint
+             |                                |
+             +-------> application workflows <+
                               |             |
                               |             +--> HerdrRuntimeReconciler
                               |                    -> authoritative snapshot
@@ -221,7 +221,9 @@ change during the target decomposition without changing these steps.
    into the same supervised active turn, bypasses queued ordinary prompts, and
    never falls back to the ordinary FIFO.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
-   Herdr unchanged; the bridge adds no hidden prompt suffix.
+   Herdr unchanged through the native Agent prompt command when available; the
+   bridge adds no hidden prompt suffix. If Herdr reports `agent_prompt_stalled`,
+   dispatch is treated as uncertain and is never replayed automatically.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
    process evidence provide bounded fallbacks where Herdr reports `unknown`.
 6. The coordinator publishes process-local lifecycle events. Card projection
@@ -236,19 +238,31 @@ explicitly uncertain. Jobs that never started remain queued.
 
 ## Reconciliation and events
 
-Herdr plugin hooks send a small loopback datagram containing only bounded event
-metadata. The event receiver coalesces bursts and requests reconciliation for
-the affected workspaces. It does not mutate bindings from the hook payload.
+The process subscribes to supported Pane and Agent events on the Herdr Unix
+socket. Herdr 0.7.5 requires `pane.agent_status_changed` subscriptions to name
+each Pane, so the subscriber reconnects and refreshes that set after Pane create
+or move events. It validates newline-delimited frames, reconnects with bounded
+backoff, and requests convergence after reconnect. Socket health is not a
+readiness gate.
 
-`SessionReconciler` is the sole convergence path for event-driven and periodic
+Herdr 0.7.5 does not allow `pane.output_changed` in a Socket subscription. The
+plugin hook continues to send that event as a small loopback UDP datagram. Both
+inputs carry only bounded identity metadata and request the same reconciler;
+neither mutates bindings from event payloads.
+
+`HerdrRuntimeReconciler` is the sole convergence path for event-driven and periodic
 recovery:
 
 1. Read one current Herdr snapshot when available, with a compatibility fallback
    for older Herdr installations.
 2. Restrict the result to configured workspaces.
-3. Detect missing panes, terminal identity changes, unknown agent states, and
-   eligible unbound TraeX panes.
-4. Read bounded terminal output only where it is needed.
+3. Detect missing panes, terminal identity changes, optional native Agent session
+   references, unknown agent states, and eligible unbound TraeX panes. A new
+   terminal identity is accepted only when the persisted native session reference
+   exactly matches; a conflicting persisted reference is never overwritten.
+4. Use native Agent identity and structured state first. Read bounded terminal
+   output for changed revisions, final answers, interactive TraeX selectors, or
+   the `unknown` fallback.
 5. Update binding state, publish lifecycle events, and wake eligible queues.
 
 The event-driven reconciliation request is scoped to affected workspaces, but
@@ -257,8 +271,8 @@ active binding at the end of each reconciliation pass. Eligible-only wake-up
 through `PromptWorkScheduler` remains a target boundary, not a completed
 implementation detail.
 
-Periodic reconciliation remains required. A missed UDP datagram may delay an
-update, but must not change the final converged state.
+Periodic reconciliation remains required. A missed Socket event or UDP datagram
+may delay an update, but must not change the final converged state.
 
 ## Answer streaming and pagination
 
@@ -348,7 +362,7 @@ boundary change to fix.
   publish call. This is safe with a single subscriber today, but additional
   subscribers (metrics, audit) need per-listener error isolation before they can
   be added safely.
-- **Synthetic local-detection prompt IDs**: when `SessionReconciler` detects a
+- **Synthetic local-detection prompt IDs**: when `HerdrRuntimeReconciler` detects a
   locally-completed turn through output diffing, it synthesizes a
   `` `local:${fingerprint}` `` prompt ID that does not correspond to a real
   `prompt_jobs` row. Downstream code that loads prompts or run cards by that ID

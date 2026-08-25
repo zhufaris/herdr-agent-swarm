@@ -90,11 +90,15 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (!this.delegate.runPaneCommand) throw new Error("Herdr adapter does not support Pane commands");
     return this.delegate.runPaneCommand(paneId, command, timeoutMs);
   }
-
-  async selectPaneModel(paneId: string, model: string, timeoutMs: number): Promise<void> {
-    if (!this.delegate.selectPaneModel) throw new Error("Herdr adapter does not support model selection");
-    await this.delegate.selectPaneModel(paneId, model, timeoutMs);
+  async beginPaneModelSelection(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }> {
+    if (!this.delegate.beginPaneModelSelection) throw new Error("Herdr adapter does not support model selection");
+    return this.delegate.beginPaneModelSelection(paneId, model, timeoutMs);
   }
+  async completePaneModelMode(paneId: string, mode: string, timeoutMs: number): Promise<void> {
+    if (!this.delegate.completePaneModelMode) throw new Error("Herdr adapter does not support model mode selection");
+    await this.delegate.completePaneModelMode(paneId, mode, timeoutMs);
+  }
+
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
     return this.delegate.steerPrompt ? this.delegate.steerPrompt(paneId, text) : "not_working";
   }
@@ -127,5 +131,5 @@ export class WorkspaceSnapshotCache implements HerdrPort {
 }
 
 function clonePanes(panes: readonly HerdrPane[]): HerdrPane[] {
-  return panes.map((pane) => ({ ...pane, foregroundExecutables: [...pane.foregroundExecutables] }));
+  return panes.map((pane) => ({ ...pane, ...(pane.agentSession ? { agentSession: { ...pane.agentSession } } : {}), foregroundExecutables: [...pane.foregroundExecutables] }));
 }

@@ -202,6 +202,20 @@ describe("SQLite store", () => {
     expect(() => store.transitionBinding("b1", { type: "pane_created" })).toThrow(/pane_created.*archived/i);
   });
 
+  it("persists native Agent session identity separately from terminal identity", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "native-session", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const binding = store.updateBinding("native-session", {
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "codex-hook",
+      agentSessionAgent: "codex", agentSessionKind: "id", agentSessionValue: "conversation-1"
+    });
+
+    expect(binding).toMatchObject({
+      traexSessionId: "term-1", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      agentSessionKind: "id", agentSessionValue: "conversation-1"
+    });
+  });
+
   it("cancels queued turns and steering when a session archives", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

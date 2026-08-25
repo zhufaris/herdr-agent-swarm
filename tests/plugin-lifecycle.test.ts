@@ -15,6 +15,7 @@ describe("plugin lifecycle", () => {
     expect(unit).toContain(`EnvironmentFile=${fixture.config}/.env`);
     expect(unit).toContain(`ExecStart=${process.execPath} ${fixture.root}/dist/main.js`);
     expect(unit).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:test-build");
+    expect(unit).toContain("Environment=HERDR_SOCKET_PATH=/tmp/test-herdr.sock");
     expect(unit).toContain("Restart=on-failure");
     await expect(runPluginLifecycle("stop", fixture.environment)).resolves.toBe(0);
     expect(readFileSync(fixture.calls, "utf8").trim().split(/\n/)).toEqual([
@@ -126,6 +127,6 @@ function createFixture(options: { active?: boolean; port?: number } = {}) {
   return { root, config, state, units, calls, environment: {
     PATH: `${bin}:${process.env.PATH}`,
     HERDR_PLUGIN_ROOT: root, HERDR_PLUGIN_CONFIG_DIR: config, HERDR_PLUGIN_STATE_DIR: state,
-    BRIDGE_SYSTEMD_UNIT_DIR: units, BRIDGE_SYSTEMD_SERVICE_NAME: "test-bridge.service"
+    BRIDGE_SYSTEMD_UNIT_DIR: units, BRIDGE_SYSTEMD_SERVICE_NAME: "test-bridge.service", HERDR_SOCKET_PATH: "/tmp/test-herdr.sock"
   } };
 }

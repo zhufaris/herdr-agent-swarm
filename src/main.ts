@@ -24,6 +24,7 @@ import { InstanceLeaseController } from "./runtime/instance-lease.js";
 import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
+import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
@@ -64,6 +65,17 @@ let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)
   : null;
+const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
+  ? new HerdrSocketSubscriber(
+      process.env.HERDR_SOCKET_PATH,
+      async () => {
+        const configuredWorkspaceIds = new Set(config.projects.map((project) => project.workspaceId));
+        return (await rawHerdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
+      },
+      ({ workspaceIds }) => coordinator.reconcileHerdrWorkspaces(workspaceIds.length > 0 ? workspaceIds : undefined),
+      logger
+    )
+  : null;
 
 try {
   await herdrEventInbox?.start();
@@ -71,7 +83,7 @@ try {
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   lease.start(() => shutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; }));
   channelPublisher.start();
@@ -81,10 +93,11 @@ try {
   logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
   herdrEventInbox?.activate();
+  herdrSocketSubscriber?.start();
   logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");
 } catch (error) {
   logger.fatal({ event: "bridge-startup-failed", err: safeLogError(error), durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
-  else { await herdrEventInbox?.stop(); lease.release(); store.close(); }
+  else { await Promise.all([herdrEventInbox?.stop(), herdrSocketSubscriber?.stop()]); lease.release(); store.close(); }
   process.exitCode = 1;
 }

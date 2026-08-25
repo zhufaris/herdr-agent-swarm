@@ -158,6 +158,87 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("accepts a restored terminal identity only when the native Agent session matches", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      agentSessionKind: "id", agentSessionValue: "conversation-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
+    });
+    const pane = {
+      paneId: "w1:p1", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "new-terminal", attachment: "attached", state: "active" });
+    store.close();
+  });
+
+  it("learns a newly reported native Agent session without changing terminal identity", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
+    });
+    const pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({
+      traexSessionId: "term-1", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      agentSessionKind: "id", agentSessionValue: "conversation-1", attachment: "attached"
+    });
+    store.close();
+  });
+
+  it("preserves a persisted native Agent session when the same terminal reports a different one", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      agentSessionKind: "id", agentSessionValue: "conversation-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
+    });
+    const pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-2" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const logger = pino({ enabled: false });
+    const warning = vi.spyOn(logger, "warn");
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, logger);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ agentSessionValue: "conversation-1", attachment: "attached" });
+    expect(warning).toHaveBeenCalledWith(expect.objectContaining({ event: "binding-agent-session-mismatch" }), expect.any(String));
+    store.close();
+  });
+
+  it("orphans a changed terminal when the native Agent session differs", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      agentSessionKind: "id", agentSessionValue: "conversation-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
+    });
+    const pane = {
+      paneId: "w1:p1", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "another-conversation" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "old-terminal", attachment: "orphaned", state: "orphaned" });
+    store.close();
+  });
+
   it("does not orphan panes when the authoritative snapshot is unavailable", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -220,12 +301,13 @@ describe("HerdrRuntimeReconciler", () => {
 function fixture(
   store: SqliteBindingStore,
   herdr: HerdrPort,
-  discoverPane: ConstructorParameters<typeof HerdrRuntimeReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); }
+  discoverPane: ConstructorParameters<typeof HerdrRuntimeReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); },
+  logger = pino({ enabled: false })
 ) {
   return new HerdrRuntimeReconciler({
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     store, herdr, lifecycleEvents: new BridgeEventBus(),
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
-    logger: pino({ enabled: false }), discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
   });
 }

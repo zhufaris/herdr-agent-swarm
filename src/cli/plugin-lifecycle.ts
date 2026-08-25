@@ -33,7 +33,7 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   requireInstalled(paths);
   if (action === "start" || action === "restart") {
     loadRuntimeEnvironment(paths, environment);
-    atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo)), 0o600);
+    atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), environment), 0o600);
     const reload = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (reload !== 0) return reload;
   }
@@ -83,7 +83,7 @@ function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
   const identity = loadBuildIdentity(paths.buildInfo);
   loadRuntimeEnvironment(paths, environment);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
-  atomicWrite(paths.unitFile, renderUnit(paths, identity), 0o600);
+  atomicWrite(paths.unitFile, renderUnit(paths, identity, environment), 0o600);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) result = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
   if (result === 0) process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}\n`);
@@ -98,7 +98,7 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
   return result;
 }
 
-function renderUnit(paths: RuntimePaths, identity: BuildIdentity): string {
+function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): string {
   return [
     "[Unit]",
     "Description=Herdr Lark Bridge",
@@ -112,6 +112,7 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity): string {
     `Environment=HERDR_PLUGIN_ROOT=${systemdEscape(paths.root)}`,
     `Environment=HERDR_PLUGIN_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,
     `Environment=HERDR_PLUGIN_STATE_DIR=${systemdEscape(paths.stateDirectory)}`,
+    ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
     `ExecStart=${systemdEscape(paths.nodeExecutable)} ${systemdEscape(paths.entrypoint)}`,
     "Restart=on-failure",

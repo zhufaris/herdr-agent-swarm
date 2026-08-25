@@ -17,7 +17,7 @@ type BindingRow = Record<string, SqlValue> & {
   id: string; project_id: string | null; workspace_id: string; chat_id: string; topic_id: string | null; root_message_id: string | null;
   retired_topic_id: string | null; retired_root_message_id: string | null;
   replaces_binding_id: string | null; reserved_topic_id: string | null; reserved_root_message_id: string | null; reset_message_id: string | null;
-  pane_id: string | null; traex_session_id: string | null; title: string; runtime: string; state: string;
+  pane_id: string | null; traex_session_id: string | null; agent_session_source: string | null; agent_session_agent: string | null; agent_session_kind: string | null; agent_session_value: string | null; title: string; runtime: string; state: string;
   status_message_id: string | null; last_agent_state: string; last_output_fingerprint: string | null;
   lifecycle: string; attachment: string; generation: number; provisioning_checkpoint: string; degradation_count: number;
   has_completed_turn: number; last_observed_at: string | null; archived_at: string | null; last_activity_at: string;
@@ -58,6 +58,7 @@ const FENCED_TABLES = [
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
     rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
+  agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value",
   title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
   lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
   lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint",
@@ -473,8 +474,8 @@ export class SqliteBindingStore implements BindingStorePort {
     const suspended = transitionSession(next, { type: "archive_requested", hasActiveTurn: false });
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
-        .run(pane.paneId, pane.terminalId ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
+      this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
+        .run(pane.paneId, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
       this.database.exec("COMMIT");
       return this.requireBinding(id);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
@@ -606,6 +607,19 @@ export class SqliteBindingStore implements BindingStorePort {
       const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ? AND state = 'accepted'").get(id) as PaneControlOperationRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
       const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), id);
+      if (result.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow;
+      this.database.exec("COMMIT");
+      return mapPaneControlOperation(claimed);
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  claimAppliedPaneControlOperation(id: string): PaneControlOperation | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ? AND state = 'applied'").get(id) as PaneControlOperationRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'applied'").run(now(), id);
       if (result.changes !== 1) { this.database.exec("COMMIT"); return null; }
       const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow;
       this.database.exec("COMMIT");
@@ -807,7 +821,7 @@ export class SqliteBindingStore implements BindingStorePort {
         WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
           AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
           AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
-          AND NOT EXISTS (SELECT 1 FROM pane_control_operations control WHERE control.binding_id = p.binding_id AND control.kind = 'model' AND control.state IN ('accepted','running'))
+          AND NOT EXISTS (SELECT 1 FROM pane_control_operations control WHERE control.binding_id = p.binding_id AND control.kind = 'model' AND control.state IN ('accepted','running','applied'))
         ORDER BY p.created_at, p.rowid LIMIT 1
       `).get(bindingId) as PromptRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
@@ -1218,7 +1232,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS bindings(
         id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
-        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, title TEXT NOT NULL,
+        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
         status_message_id TEXT,
@@ -1304,6 +1318,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
+    this.ensureAgentSessionColumns();
     this.ensureBindingResetColumns();
     this.ensureTwoPhaseResetState();
     this.ensurePromptCancelledState();
@@ -1458,6 +1473,14 @@ export class SqliteBindingStore implements BindingStorePort {
         archived_at = CASE WHEN state = 'archived' THEN COALESCE(archived_at, updated_at) ELSE archived_at END,
         last_activity_at = COALESCE(last_activity_at, updated_at);
     `);
+  }
+
+  private ensureAgentSessionColumns(): void {
+    const names = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!names.has("agent_session_source")) this.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_source TEXT");
+    if (!names.has("agent_session_agent")) this.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_agent TEXT");
+    if (!names.has("agent_session_kind")) this.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path'))");
+    if (!names.has("agent_session_value")) this.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_value TEXT");
   }
 
   private ensureProjectSelectionColumns(): void {
@@ -1705,7 +1728,8 @@ function mapBinding(row: BindingRow): Binding {
     id: row.id, projectId: row.project_id, workspaceId: row.workspace_id, chatId: row.chat_id, topicId: row.topic_id,
     rootMessageId: row.root_message_id, retiredTopicId: row.retired_topic_id ?? null, retiredRootMessageId: row.retired_root_message_id ?? null,
     replacesBindingId: row.replaces_binding_id ?? null, reservedTopicId: row.reserved_topic_id ?? null, reservedRootMessageId: row.reserved_root_message_id ?? null, resetMessageId: row.reset_message_id ?? null,
-    paneId: row.pane_id, traexSessionId: row.traex_session_id,
+    paneId: row.pane_id, traexSessionId: row.traex_session_id, agentSessionSource: row.agent_session_source ?? null, agentSessionAgent: row.agent_session_agent ?? null,
+    agentSessionKind: row.agent_session_kind as "id" | "path" | null, agentSessionValue: row.agent_session_value ?? null,
     title: row.title, runtime: "traex", state: row.state as BindingState, statusMessageId: row.status_message_id,
     lastAgentState: row.last_agent_state as AgentState, lastOutputFingerprint: row.last_output_fingerprint,
     lifecycle: row.lifecycle as SessionLifecycle, attachment: row.attachment as AttachmentState, generation: Number(row.generation),

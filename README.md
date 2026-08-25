@@ -235,13 +235,17 @@ degraded `/ready` state without killing the service. systemd applies restart and
 bounded stop policy. Structured logs are available from the logs action and the
 user journal. Durable bridge state remains under `$HERDR_PLUGIN_STATE_DIR`.
 
-Native Herdr pane lifecycle and agent-status events wake the bridge through a
-bounded loopback UDP hint. Event bursts are coalesced and only affected
-workspaces are reconciled when the event context identifies them. One fresh
-`herdr api snapshot` is authoritative for pane and agent state; terminal parsing
-still supplies TraeX answer and task content. `RECONCILE_INTERVAL_MS` is a
-full-scan recovery fallback for missed events and defaults to five minutes in
-the plugin template.
+Supported native Herdr Pane and Agent events wake the bridge through the Unix
+Socket API. The managed unit receives the invocation-time `HERDR_SOCKET_PATH`;
+if it is absent or disconnected, periodic snapshot reconciliation continues.
+Herdr 0.7.5 does not permit `pane.output_changed` as a Socket subscription, so
+that plugin hook continues through the bounded loopback UDP path. Both event
+paths only request reconciliation. One fresh `herdr api snapshot` is
+authoritative for Pane identity, terminal identity, optional native Agent
+session reference, and Agent state. Terminal parsing still supplies answer
+content, Model/Mode selectors, and the bounded `unknown` fallback.
+`RECONCILE_INTERVAL_MS` is the full-scan recovery fallback and defaults to five
+minutes in the plugin template.
 
 Disabling or exiting Herdr does not stop the user service. Invoke
 `uninstall-service` before unlinking the plugin so the unit never points at a

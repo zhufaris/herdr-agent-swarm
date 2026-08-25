@@ -46,14 +46,14 @@ describe("Herdr adapter", () => {
       calls.push(args);
       return json({ snapshot: {
         panes: [
-          { pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent: "traex", agent_status: "working", terminal_id: "term-1" },
+          { pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo", agent: "traex", agent_status: "working", terminal_id: "term-1", agent_session: { source: "codex-hook", agent: "codex", kind: "id", value: "session-1" } },
           { pane_id: "w2:p1", workspace_id: "w2", cwd: "/other", agent_status: "idle" }
         ],
         agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "blocked", state_change_seq: 42 }]
       } });
     } };
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).listPanes("w1")).resolves.toEqual([{
-      paneId: "w1:p1", tabId: null, terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", outputRevision: null, stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
+      paneId: "w1:p1", tabId: null, terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentKind: "traex", agentSession: { source: "codex-hook", agent: "codex", kind: "id", value: "session-1" }, outputRevision: null, stateChangeSeq: 42, agentState: "blocked", foregroundExecutables: ["traex"]
     }]);
     expect(calls).toEqual([["api", "snapshot"]]);
   });
@@ -346,47 +346,30 @@ describe("Herdr adapter", () => {
     expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Esc"]);
   });
 
-  it("selects a model through the native interactive selector instead of prompting the agent", async () => {
-    const calls: string[][] = [];
-    const outputs = [
-      "answer\n❯", "answer\n❯ /model",
-      "answer\n❯ /model\nSelect Model and Effort\nType to search models\n1. GPT-5.6-Sol (current)\n2. GPT-5.6-Terra\nPress enter to confirm or esc to go back",
-      "answer\nModel switched to GPT-5.6-Terra\n❯ Use /skills to list available skills"
-    ];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).selectPaneModel("w1:p1", "GPT-5.6-Terra", 1000))
-      .resolves.toBeUndefined();
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "/model"]);
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "GPT-5.6-Terra"]);
-    expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(2);
-    expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.6-Terra"]);
-  });
-
-  it("confirms the default mode after TraeX selects a model", async () => {
+  it("returns native modes without confirming a default and completes only the requested mode", async () => {
     const calls: string[][] = [];
     const outputs = [
       "answer\n❯", "answer\n❯ /model",
       "Select Model and Effort\n1. GPT-5.6-Terra\nPress enter to confirm or esc to go back",
       "Select Model and Mode\n❯ 1. GPT-5.6-Terra / Standard\n  2. GPT-5.6-Terra / Max\nPress enter to confirm or esc to go back",
-      "Model switched to GPT-5.6-Terra / Standard\n❯ Use /skills to list available skills"
+      "Select Model and Mode\n❯ 1. GPT-5.6-Terra / Standard\n  2. GPT-5.6-Terra / Max\nPress enter to confirm or esc to go back",
+      "Model switched to GPT-5.6-Terra / Max\n❯ Use /skills to list available skills"
     ];
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "Model switched to GPT-5.6-Terra / Max\n❯", stderr: "" };
         return { stdout: "", stderr: "" };
       }
     };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000);
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).selectPaneModel("w1:p1", "GPT-5.6-Terra", 1000))
-      .resolves.toBeUndefined();
+    await expect(adapter.beginPaneModelSelection("w1:p1", "GPT-5.6-Terra", 1000)).resolves.toEqual({ kind: "mode_required", modes: ["Standard", "Max"] });
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(2);
+    expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "Standard"]);
+
+    await expect(adapter.completePaneModelMode("w1:p1", "Max", 1000)).resolves.toBeUndefined();
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "Max"]);
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(3);
   });
 
@@ -815,6 +798,21 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1_000).runPrompt("w1:p1", "hello", 1_000, undefined, undefined, () => { dispatched += 1; }))
       .rejects.toThrow("transport failed");
     expect(dispatched).toBe(0);
+  });
+
+  it("reports a stalled native agent prompt as possibly dispatched to prevent replay", async () => {
+    let dispatched = 0;
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "before", stderr: "" };
+        if (args[0] === "agent" && args[1] === "prompt") throw new Error('{"error":{"code":"agent_prompt_stalled"}}');
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1_000).runPrompt("w1:p1", "hello", 1_000, undefined, undefined, () => { dispatched += 1; }))
+      .rejects.toThrow("agent_prompt_stalled");
+    expect(dispatched).toBe(1);
   });
 });
 

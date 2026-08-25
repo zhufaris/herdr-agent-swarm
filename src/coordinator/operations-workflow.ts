@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderModelResultCard } from "../cards/model-card.js";
+import { renderModelModeCard, renderModelResultCard } from "../cards/model-card.js";
 import { renderFailureCards, renderSessionCards } from "../cards/operations-card.js";
 import { renderPaneCloseConfirmationCard, renderPaneCloseResultCard } from "../cards/pane-close-card.js";
 import { renderMessageRejectedCard, renderProjectEntryCard } from "../cards/run-card.js";
@@ -18,8 +18,11 @@ import { safeLogError } from "../runtime/safe-error.js";
 
 interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; lark: LarkPort; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; isBindingBusy(bindingId: string): boolean; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
+const MODEL_MODE_SELECTION_TTL_MS = 5 * 60_000;
+
 export interface OperationsWorkflowPort {
   recover(): Promise<void>;
+  shutdown(): void;
   drainPaneControls(bindingId: string): Promise<void>;
   openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void>;
   decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void>;
@@ -34,13 +37,20 @@ export interface OperationsWorkflowPort {
   steer(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean>;
   runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean>;
   selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void>;
+  selectModelMode(action: IncomingLarkCardAction, bindingId: string, operationId: string, mode: string): Promise<void>;
   requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
   confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>;
 }
 
 export class OperationsWorkflow implements OperationsWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
+  private readonly modelModeExpiryTimers = new Map<string, NodeJS.Timeout>();
   constructor(private readonly options: Options) {}
+
+  shutdown(): void {
+    for (const timer of this.modelModeExpiryTimers.values()) clearTimeout(timer);
+    this.modelModeExpiryTimers.clear();
+  }
 
   async recover(): Promise<void> {
     const { store, herdr } = this.options;
@@ -57,6 +67,15 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
       } catch (error) { store.finishPaneCloseRequest(operation.id, "uncertain", `restart verification failed: ${errorMessage(error)}`); }
     }
     for (const operation of store.listRecoverablePaneControlOperations()) {
+      const pending = operation.kind === "model" ? pendingModelMode(operation.detail) : null;
+      if (pending && Date.parse(pending.expiresAt) > Date.now()) { this.scheduleModelModeExpiry(operation, pending); continue; }
+      if (pending) {
+        this.clearModelModeExpiry(operation.id);
+        store.finishPaneControlOperation(operation.id, "rejected", expiredModelModeDetail(pending));
+        const binding = store.getBinding(operation.bindingId);
+        if (binding) await this.updateModelModeFailure(binding, operation, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+        continue;
+      }
       store.finishPaneControlOperation(operation.id, "uncertain", "Bridge restarted after pane input may have been sent; operation was not replayed");
     }
     for (const binding of store.listBindings()) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
@@ -213,15 +232,66 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   async selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void> {
     const { store, herdr, config, outbound, logger } = this.options; const binding = store.getBinding(bindingId);
     if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
-    if (!herdr.selectPaneModel || !herdr.runPaneCommand) {
+    if (!herdr.beginPaneModelSelection || !herdr.runPaneCommand) {
       await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}:unsupported`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: "当前 Herdr adapter 不支持模型切换。", switched: false }));
       return;
     }
     const accepted = store.acceptPaneControlOperation({
-      id: randomUUID(), idempotencyKey: `card:${action.messageId}:${binding.id}:model:${model}`, bindingId: binding.id, paneId: binding.paneId, terminalId: null, bindingGeneration: binding.generation,
+      id: randomUUID(), idempotencyKey: `card:${action.messageId}:${binding.id}:model:${model}`, bindingId: binding.id, paneId: binding.paneId, terminalId: binding.traexSessionId, bindingGeneration: binding.generation,
       kind: "model", payload: model, actorOpenId: action.operatorOpenId, sourceMessageId: action.messageId
     });
     if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
+  }
+
+  async selectModelMode(action: IncomingLarkCardAction, bindingId: string, operationId: string, mode: string): Promise<void> {
+    const { store, herdr, config, outbound } = this.options;
+    const binding = store.getBinding(bindingId);
+    const operation = store.getPaneControlOperation(operationId);
+    if (!binding?.paneId || binding.chatId !== action.chatId || !operation || operation.bindingId !== binding.id || operation.kind !== "model" || operation.state !== "applied") return;
+    const pending = pendingModelMode(operation.detail);
+    if (!pending || !pending.modes.includes(mode) || !herdr.completePaneModelMode) {
+      await this.updateModelModeFailure(binding, operation, "模型模式选择已失效，请重新发送 `/model`。", "stale");
+      return;
+    }
+    if (Date.parse(pending.expiresAt) <= Date.now()) {
+      const claimed = store.claimAppliedPaneControlOperation(operation.id);
+      if (!claimed) return;
+      this.clearModelModeExpiry(claimed.id);
+      store.finishPaneControlOperation(claimed.id, "rejected", expiredModelModeDetail(pending));
+      await this.updateModelModeFailure(binding, claimed, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+      return;
+    }
+    if (!modelOperationMatchesBinding(operation, binding)) {
+      const claimed = store.claimAppliedPaneControlOperation(operation.id);
+      if (!claimed) return;
+      this.clearModelModeExpiry(claimed.id);
+      store.finishPaneControlOperation(claimed.id, "rejected", "Binding identity changed before model mode selection");
+      await this.updateModelModeFailure(binding, claimed, "Pane identity 已变化，请重新发送 `/model`。", "stale-identity");
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+      return;
+    }
+    const claimed = store.claimAppliedPaneControlOperation(operation.id);
+    if (!claimed) return;
+    this.clearModelModeExpiry(claimed.id);
+    try {
+      let currentBinding = store.getBinding(binding.id);
+      if (!currentBinding || !modelOperationMatchesBinding(claimed, currentBinding)) throw new StaleModelModeError();
+      const pane = await this.requireMatchingPane(currentBinding, claimed.paneId);
+      currentBinding = store.getBinding(binding.id);
+      if (!currentBinding || !modelOperationMatchesBinding(claimed, currentBinding)) throw new StaleModelModeError();
+      if (Date.parse(pending.expiresAt) <= Date.now()) throw new ExpiredModelModeError();
+      await herdr.completePaneModelMode(pane.paneId, mode, config.commandTimeoutMs);
+      const output = await herdr.runPaneCommand!(pane.paneId, "/model", config.commandTimeoutMs);
+      store.finishPaneControlOperation(claimed.id, "confirmed", "Model selection confirmed: " + pending.model + " / " + mode);
+      await outbound.enqueueCardUpdate(binding.id, claimed.sourceMessageId, "model:" + claimed.id + ":confirmed", renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: true }));
+      store.audit({ actorOpenId: action.operatorOpenId, action: "model.mode", target: pending.model + "/" + mode, outcome: "switch_completed" });
+    } catch (error) {
+      const stale = error instanceof StaleModelModeError;
+      const expired = error instanceof ExpiredModelModeError;
+      store.finishPaneControlOperation(claimed.id, stale || expired ? "rejected" : "uncertain", stale ? "Binding identity changed before model mode input" : expired ? expiredModelModeDetail(pending) : "Model mode may have applied: " + errorMessage(error));
+      await this.updateModelModeFailure(binding, claimed, stale ? "Pane identity 已变化，请重新发送 `/model`。" : expired ? "模型模式选择已过期，请重新发送 `/model`。" : "模型模式选择无法确认：" + errorMessage(error), stale ? "stale-identity" : expired ? "expired" : "uncertain");
+    } finally { this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); }
   }
 
   private async runAcceptedModel(operation: PaneControlOperation, rootMessageId: string, name: string | null): Promise<boolean> {
@@ -233,7 +303,20 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     }
     try {
       const pane = await this.requireMatchingPane(binding, operation.paneId);
-      if (name) { if (!herdr.selectPaneModel) throw new Error("当前 Herdr adapter 不支持交互式模型选择。"); await herdr.selectPaneModel(pane.paneId, name, config.commandTimeoutMs); }
+      if (name) {
+        if (!herdr.beginPaneModelSelection) throw new Error("当前 Herdr adapter 不支持交互式模型选择。");
+        const selection = await herdr.beginPaneModelSelection(pane.paneId, name, config.commandTimeoutMs);
+        if (selection.kind === "mode_required") {
+          const expiresAt = new Date(Date.now() + MODEL_MODE_SELECTION_TTL_MS).toISOString();
+          store.finishPaneControlOperation(operation.id, "applied", JSON.stringify({ phase: "waiting_for_mode", model: name, modes: selection.modes, expiresAt }));
+          this.scheduleModelModeExpiry(operation, { model: name, modes: selection.modes, expiresAt });
+          const card = renderModelModeCard({ bindingId: binding.id, operationId: operation.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, model: name, modes: selection.modes });
+          if (operation.idempotencyKey.startsWith("card:")) await this.options.outbound.enqueueCardUpdate(binding.id, operation.sourceMessageId, "model:" + operation.id + ":mode-required", card);
+          else await this.reply(rootMessageId, card);
+          store.audit({ actorOpenId: operation.actorOpenId, action: "model.run", target: name, outcome: "mode_required" });
+          return true;
+        }
+      }
       const output = await herdr.runPaneCommand!(pane.paneId, "/model", config.commandTimeoutMs);
       store.finishPaneControlOperation(operation.id, "confirmed", name ? "Model selection confirmed" : "Model selector listed");
       const card = renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: name !== null });
@@ -269,7 +352,7 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
   }
 
   private acceptControl(input: { message: IncomingLarkMessage; binding: Binding; kind: PaneControlOperation["kind"]; payload?: string; parentPromptId?: string }): { operation: PaneControlOperation; inserted: boolean } {
-    const terminalId = null;
+    const terminalId = input.binding.traexSessionId;
     return this.options.store.acceptPaneControlOperation({
       id: randomUUID(), idempotencyKey: `message:${input.message.messageId}:${input.kind}`, bindingId: input.binding.id, paneId: input.binding.paneId!, terminalId,
       bindingGeneration: input.binding.generation, kind: input.kind, payload: input.payload ?? null, parentPromptId: input.parentPromptId ?? null,
@@ -284,6 +367,41 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     const pane = await herdr.getPane(binding.paneId); if (!pane) { const orphaned = store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 1 }); await this.publish(orphaned.id, "BindingOrphaned", "herdr", { reason: `Herdr pane ${binding.paneId} no longer exists` }); await this.reject(message, `Pane ${binding.paneId} 已不存在，绑定已标记为 orphaned。`); return null; }
     if (pane.workspaceId !== binding.workspaceId || binding.traexSessionId === null || pane.terminalId !== binding.traexSessionId) { await this.reject(message, "Pane identity 已变化，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" }); return null; }
     if (pane.agentState !== "idle" && pane.agentState !== "done") { await this.reject(message, `Pane 当前状态为 ${pane.agentState}，不能关闭；仅 idle/done 状态允许关闭。`); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: pane.agentState }); return null; } return { binding, pane };
+  }
+
+  private async updateModelModeFailure(binding: Binding, operation: PaneControlOperation, output: string, suffix: string): Promise<void> {
+    await this.options.outbound.enqueueCardUpdate(binding.id, operation.sourceMessageId, `model:${operation.id}:${suffix}`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: operation.paneId, output, switched: false }));
+  }
+
+  private scheduleModelModeExpiry(operation: PaneControlOperation, pending: { model: string; modes: string[]; expiresAt: string }): void {
+    this.clearModelModeExpiry(operation.id);
+    const delay = Math.max(0, Date.parse(pending.expiresAt) - Date.now());
+    const timer = setTimeout(() => {
+      this.modelModeExpiryTimers.delete(operation.id);
+      void this.expireModelMode(operation.id).catch((error) => this.options.logger.warn({ operationId: operation.id, error: safeLogError(error) }, "failed to expire model mode selection"));
+    }, delay);
+    timer.unref();
+    this.modelModeExpiryTimers.set(operation.id, timer);
+  }
+
+  private clearModelModeExpiry(operationId: string): void {
+    const timer = this.modelModeExpiryTimers.get(operationId);
+    if (timer) clearTimeout(timer);
+    this.modelModeExpiryTimers.delete(operationId);
+  }
+
+  private async expireModelMode(operationId: string): Promise<void> {
+    const operation = this.options.store.getPaneControlOperation(operationId);
+    if (!operation || operation.state !== "applied" || operation.kind !== "model") return;
+    const pending = pendingModelMode(operation.detail);
+    if (!pending) return;
+    if (Date.parse(pending.expiresAt) > Date.now()) { this.scheduleModelModeExpiry(operation, pending); return; }
+    const claimed = this.options.store.claimAppliedPaneControlOperation(operation.id);
+    if (!claimed) return;
+    this.options.store.finishPaneControlOperation(claimed.id, "rejected", expiredModelModeDetail(pending));
+    const binding = this.options.store.getBinding(operation.bindingId);
+    if (binding) await this.updateModelModeFailure(binding, claimed, "模型模式选择已过期，请重新发送 `/model`。", "expired");
+    this.options.scheduler.wake({ kind: "prompt-ready", bindingId: operation.bindingId });
   }
 
   private async requireMatchingPane(binding: Binding, paneId: string): Promise<HerdrPane> { const pane = (await this.options.herdr.observeRuntime(paneId)).pane; if (!pane) throw new Error(`Herdr pane ${paneId} not found`); if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`); const project = this.options.config.projects.find((item) => item.id === binding.projectId); if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`); if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${paneId}`); if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`); return pane; }
@@ -303,4 +421,9 @@ type SpaceDirectoryBindingCandidate = Pick<Binding, "id" | "paneId" | "chatId" |
 export function selectSpaceDirectoryBinding(bindings: readonly SpaceDirectoryBindingCandidate[], paneId: string, chatId: string): SpaceDirectoryBindingCandidate | null { const rank: Partial<Record<Binding["lifecycle"], number>> = { active: 0, draining: 1, archived: 2 }; return bindings.filter((binding) => binding.paneId === paneId && binding.chatId === chatId && Boolean(binding.topicId ?? binding.rootMessageId) && rank[binding.lifecycle] !== undefined).sort((left, right) => rank[left.lifecycle]! - rank[right.lifecycle]! || right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id))[0] ?? null; }
 function paneCloseCodeHash(code: string): string { return createHash("sha256").update(code.trim().toUpperCase()).digest("hex"); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function pendingModelMode(detail: string | null): { model: string; modes: string[]; expiresAt: string } | null { try { const value = JSON.parse(detail ?? "") as unknown; if (!value || typeof value !== "object") return null; const item = value as { phase?: unknown; model?: unknown; modes?: unknown; expiresAt?: unknown }; return item.phase === "waiting_for_mode" && typeof item.model === "string" && Array.isArray(item.modes) && item.modes.every((mode) => typeof mode === "string") && typeof item.expiresAt === "string" && Number.isFinite(Date.parse(item.expiresAt)) ? { model: item.model, modes: item.modes as string[], expiresAt: item.expiresAt } : null; } catch { return null; } }
+function modelOperationMatchesBinding(operation: PaneControlOperation, binding: Binding): boolean { return binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.paneId === operation.paneId && binding.generation === operation.bindingGeneration && binding.traexSessionId === operation.terminalId; }
+function expiredModelModeDetail(pending: { model: string; modes: string[]; expiresAt: string }): string { return JSON.stringify({ phase: "expired", model: pending.model, modes: pending.modes, expiresAt: pending.expiresAt }); }
+class StaleModelModeError extends Error { constructor() { super("Binding identity changed before model mode input"); } }
+class ExpiredModelModeError extends Error { constructor() { super("Model mode selection expired before input"); } }
 function isApprovalPrompt(output: string): boolean { return /\b(?:approve|approval|required|allow this|waiting for user)\b|等待.*(?:批准|确认|用户)/iu.test(output); }

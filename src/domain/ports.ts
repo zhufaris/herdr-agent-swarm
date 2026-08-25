@@ -37,7 +37,8 @@ export interface HerdrPort {
     onDispatched?: () => void | Promise<void>
   ): Promise<AgentState>;
   runPaneCommand?(paneId: string, command: string, timeoutMs: number): Promise<string>;
-  selectPaneModel?(paneId: string, model: string, timeoutMs: number): Promise<void>;
+  beginPaneModelSelection?(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }>;
+  completePaneModelMode?(paneId: string, mode: string, timeoutMs: number): Promise<void>;
   sendEscape?(paneId: string): Promise<void>;
   steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
@@ -107,6 +108,7 @@ export interface BindingStorePort {
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean };
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null;
   claimPaneControlOperation(id: string): PaneControlOperation | null;
+  claimAppliedPaneControlOperation(id: string): PaneControlOperation | null;
   getPaneControlOperation(id: string): PaneControlOperation | null;
   listRecoverablePaneControlOperations(): PaneControlOperation[];
   finishPaneControlOperation(id: string, state: Extract<PaneControlOperation["state"], "applied" | "confirmed" | "rejected" | "failed" | "uncertain">, detail?: string | null): void;
@@ -214,6 +216,7 @@ export type RetiredPaneCleanupStore = Pick<BindingStorePort,
 export type OperationsStore = Pick<BindingStorePort,
   | "audit" | "cancelQueuedPrompts" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
   | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
+  | "claimAppliedPaneControlOperation"
   | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"
   | "listFailures" | "listRunCards" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
   | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBinding"

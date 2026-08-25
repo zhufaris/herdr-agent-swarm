@@ -14,8 +14,12 @@ const tabSchema = z.object({ tab_id: z.string(), label: z.string() }).passthroug
 const processSchema = z.object({
   foreground_processes: z.array(z.object({ name: z.string().optional(), argv: z.array(z.string()).optional() }).passthrough()).default([])
 }).passthrough();
+const agentSessionSchema = z.object({
+  source: z.string(), agent: z.string(), kind: z.enum(["id", "path"]), value: z.string()
+});
 const snapshotPaneSchema = paneSchema.extend({
   agent: z.string().nullish(),
+  agent_session: agentSessionSchema.nullish(),
   revision: z.number().int().nullish(),
   state_change_seq: z.number().int().nullish()
 });
@@ -68,8 +72,9 @@ export class HerdrCliAdapter implements HerdrPort {
   async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const pane = await this.getPane(paneId);
     if (!pane) return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" };
-    const foregroundExecutables = await this.foregroundExecutables(paneId);
-    const traexProcess = foregroundExecutables.includes("traex");
+    const nativeTraex = pane.agentKind === "traex" || pane.agentKind === "codex";
+    const foregroundExecutables = nativeTraex ? pane.foregroundExecutables : await this.foregroundExecutables(paneId);
+    const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
     if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
     if (pane.agentState !== "unknown") return { pane: observed, traexProcess, composerReady: pane.agentState === "idle", evidenceSource: "structured" };
@@ -134,6 +139,7 @@ export class HerdrCliAdapter implements HerdrPort {
       await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
       await onDispatched?.();
     } catch (error) {
+      if (isPossiblyDispatchedAgentPromptError(error)) await onDispatched?.();
       if (!isUnsupportedAgentPromptError(error)) throw error;
       await this.submitPromptText(paneId, text, before, signal, onDispatched);
     }
@@ -180,7 +186,7 @@ export class HerdrCliAdapter implements HerdrPort {
     throw new Error(`Timed out waiting for Pane command output in ${paneId}`);
   }
 
-  async selectPaneModel(paneId: string, model: string, timeoutMs: number): Promise<void> {
+  async beginPaneModelSelection(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }> {
     const before = await this.readOutput(paneId, 240);
     await this.submitPromptText(paneId, "/model", before);
     const deadline = Date.now() + timeoutMs;
@@ -189,15 +195,11 @@ export class HerdrCliAdapter implements HerdrPort {
       if (/Select Model and Effort/i.test(output) && /esc to go back/i.test(output)) {
         await this.runner.run(this.executable, ["pane", "send-text", paneId, model], this.commandTimeoutMs);
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
-        let modeConfirmed = false;
         while (Date.now() < deadline) {
           const selected = await this.readOutput(paneId, 240);
-          if (!modeConfirmed && isInteractiveModelModeSelector(selected)) {
-            await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
-            modeConfirmed = true;
-            continue;
-          }
-          if (isTraexComposerReady(selected)) return;
+          const modes = interactiveModelModes(selected);
+          if (modes) return { kind: "mode_required", modes };
+          if (isTraexComposerReady(selected)) return { kind: "composer_ready" };
           await abortableDelay(50);
         }
         throw new Error(`Timed out waiting for TraeX model selection in pane ${paneId}`);
@@ -205,6 +207,19 @@ export class HerdrCliAdapter implements HerdrPort {
       await abortableDelay(50);
     }
     throw new Error(`Timed out waiting for TraeX model selector in pane ${paneId}`);
+  }
+
+  async completePaneModelMode(paneId: string, mode: string, timeoutMs: number): Promise<void> {
+    const before = await this.readOutput(paneId, 240);
+    if (!interactiveModelModes(before)?.includes(mode)) throw new Error(`TraeX mode selector is no longer active in pane ${paneId}`);
+    await this.runner.run(this.executable, ["pane", "send-text", paneId, mode], this.commandTimeoutMs);
+    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (isTraexComposerReady(await this.readOutput(paneId, 240))) return;
+      await abortableDelay(50);
+    }
+    throw new Error(`Timed out waiting for TraeX mode selection in pane ${paneId}`);
   }
 
   async readOutput(paneId: string, lines: number): Promise<string> {
@@ -273,7 +288,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const foregroundExecutables = kind === "codex" || kind === "traex" ? ["traex"] : kind ? [kind] : [];
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null, label: raw.label ?? null,
-      agentKind: kind, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
+      agentKind: kind, agentSession: agent?.agent_session ?? raw.agent_session ?? null, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       agentState: agent?.agent_status ?? raw.agent_status, foregroundExecutables
     };
   }
@@ -319,47 +334,66 @@ export class HerdrCliAdapter implements HerdrPort {
     let observedWorking = false;
     let lastAgentState: AgentState = "unknown";
     let lastOutput = before;
+    let lastOutputRevision: number | null | undefined;
     let stableIdlePolls = 0;
     let outputChangedAfterSubmission = false;
+    let outputStable = false;
 
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       let agentState: AgentState = "unknown";
       let foregroundExecutables: string[] = [];
+      let outputRead = false;
       try {
         const pane = await this.getPane(paneId);
         if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
         agentState = pane.agentState;
         foregroundExecutables = pane.foregroundExecutables;
+        const revisionChanged = pane.outputRevision === null || pane.outputRevision === undefined || pane.outputRevision !== lastOutputRevision;
+        if (agentState === "unknown" || revisionChanged) {
+          const output = await this.readOutput(paneId, 240);
+          outputRead = true;
+          outputStable = output === lastOutput;
+          if (output !== before) outputChangedAfterSubmission = true;
+          if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
+            if (agentState !== "unknown") lastAgentState = agentState;
+            await onObservation?.({ state: agentState, stateSource: agentState === "unknown" ? "unknown" : "structured", output });
+          }
+          lastOutput = output;
+        } else if (agentState !== lastAgentState) {
+          lastAgentState = agentState;
+          await onObservation?.({ state: agentState, stateSource: "structured", output: lastOutput });
+        }
+        lastOutputRevision = pane.outputRevision;
       } catch (error) {
         if (String(error).includes("pane not found")) throw error;
       }
-      if (agentState === "working" || agentState === "blocked") observedWorking = true;
-      const output = await this.readOutput(paneId, 240);
-      if (output !== before) outputChangedAfterSubmission = true;
-      if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
-        if (agentState !== "unknown") lastAgentState = agentState;
-        await onObservation?.({ state: agentState, stateSource: agentState === "unknown" ? "unknown" : "structured", output });
+      if (!outputRead && agentState === "unknown") {
+        const output = await this.readOutput(paneId, 240);
+        outputStable = output === lastOutput;
+        if (output !== before) outputChangedAfterSubmission = true;
+        if (output !== lastOutput) await onObservation?.({ state: "unknown", stateSource: "unknown", output });
+        lastOutput = output;
       }
+      if (agentState === "working" || agentState === "blocked") observedWorking = true;
       if (observedWorking && (agentState === "done" || agentState === "idle")) return "done";
-      const safelyIdle = agentState === "unknown" && outputChangedAfterSubmission && isTraexIdle(output) && !hasActiveTurnHelper(foregroundExecutables);
+      const safelyIdle = agentState === "unknown" && outputChangedAfterSubmission && isTraexIdle(lastOutput) && !hasActiveTurnHelper(foregroundExecutables);
       if (safelyIdle) {
-        stableIdlePolls = output === lastOutput ? stableIdlePolls + 1 : 0;
+        stableIdlePolls = outputStable ? stableIdlePolls + 1 : 0;
         if (stableIdlePolls >= 2) return "done";
-      } else if (agentState === "unknown" && isTraexWorking(output)) {
+      } else if (agentState === "unknown" && isTraexWorking(lastOutput)) {
         observedWorking = true;
         if (lastAgentState !== "working") {
           lastAgentState = "working";
-          await onObservation?.({ state: "working", stateSource: "terminal", output });
+          await onObservation?.({ state: "working", stateSource: "terminal", output: lastOutput });
         }
         stableIdlePolls = 0;
       } else if (agentState === "unknown" && observedWorking) {
-        stableIdlePolls = output === lastOutput ? stableIdlePolls + 1 : 0;
+        stableIdlePolls = outputStable ? stableIdlePolls + 1 : 0;
         if (stableIdlePolls >= 1) return "done";
       } else {
         stableIdlePolls = 0;
       }
-      lastOutput = output;
       await abortableDelay(250, signal);
     }
 
@@ -385,6 +419,10 @@ function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
 
 function isUnsupportedAgentPromptError(error: unknown): boolean {
   return /"code"\s*:\s*"agent_(?:not_ready|not_found)"/.test(error instanceof Error ? error.message : String(error));
+}
+
+function isPossiblyDispatchedAgentPromptError(error: unknown): boolean {
+  return /"code"\s*:\s*"agent_prompt_stalled"/.test(error instanceof Error ? error.message : String(error));
 }
 
 function larkTabTitle(title: string | undefined): string {
@@ -470,6 +508,12 @@ function isInteractiveModelSelector(command: string, output: string): boolean {
 
 function isInteractiveModelModeSelector(output: string): boolean {
   return /Select Model and Mode/i.test(output) && /esc to go back/i.test(output);
+}
+
+function interactiveModelModes(output: string): string[] | null {
+  if (!isInteractiveModelModeSelector(output)) return null;
+  const modes = output.split("\n").map((line) => /^\s*(?:❯\s*)?\d+\.\s+.+?\/\s+(.+?)\s*$/u.exec(line)?.[1]?.trim() ?? null).filter((mode): mode is string => Boolean(mode));
+  return modes.length ? [...new Set(modes)] : null;
 }
 
 function interactiveModelSelectorOutput(command: string, output: string): string | null {

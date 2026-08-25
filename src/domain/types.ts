@@ -2,6 +2,7 @@ import type { AttachmentState, ProvisioningCheckpoint, SessionLifecycle } from "
 
 export type BindingState = "pending" | "active" | "archived" | "orphaned" | "failed";
 export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
+export interface HerdrAgentSession { source: string; agent: string; kind: "id" | "path"; value: string }
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
@@ -118,6 +119,10 @@ export interface Binding {
   resetMessageId: string | null;
   paneId: string | null;
   traexSessionId: string | null;
+  agentSessionSource?: string | null;
+  agentSessionAgent?: string | null;
+  agentSessionKind?: "id" | "path" | null;
+  agentSessionValue?: string | null;
   title: string;
   runtime: "traex";
   state: BindingState;
@@ -279,6 +284,7 @@ export interface HerdrPane {
   paneId: string;
   tabId?: string | null;
   terminalId?: string | null;
+  agentSession?: HerdrAgentSession | null;
   agentKind?: string | null;
   outputRevision?: number | null;
   stateChangeSeq?: number | null;

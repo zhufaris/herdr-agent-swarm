@@ -196,9 +196,21 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       if (existing.lifecycle === "provisioning") continue;
       const previous = existing.lastAgentState;
       if (existing.traexSessionId && pane.terminalId && existing.traexSessionId !== pane.terminalId) {
-        this.options.store.transitionBinding(existing.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
-        await this.publish(existing.id, "BindingOrphaned", { reason: `Herdr pane ${pane.paneId} terminal identity changed` });
-        continue;
+        if (sameNativeAgentSession(existing, pane)) {
+          existing = this.options.store.updateBinding(existing.id, { traexSessionId: pane.terminalId, ...nativeAgentSessionPatch(pane) });
+          this.options.logger.info({ event: "binding-terminal-identity-refreshed", bindingId: existing.id, paneId: pane.paneId, outcome: "native_session_matched" }, "accepted new terminal identity for restored native Agent session");
+        } else {
+          this.options.store.transitionBinding(existing.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
+          await this.publish(existing.id, "BindingOrphaned", { reason: `Herdr pane ${pane.paneId} terminal identity changed` });
+          continue;
+        }
+      }
+      if (pane.agentSession && !hasNativeAgentSession(existing)) {
+        existing = this.options.store.updateBinding(existing.id, nativeAgentSessionPatch(pane));
+      } else if (pane.agentSession && !sameNativeAgentSession(existing, pane)) {
+        this.options.logger.warn({
+          event: "binding-agent-session-mismatch", bindingId: existing.id, paneId: pane.paneId, outcome: "preserved_persisted_identity"
+        }, "Herdr reported a different native Agent session for the existing terminal identity");
       }
       if (existing.attachment !== "orphaned" && (existing.lifecycle === "active" || existing.lifecycle === "draining")) this.options.store.transitionBinding(existing.id, { type: "pane_observed", runtime: pane.agentState });
       if (existing.state !== "active" || this.options.isBindingBusy(existing.id)) continue;
@@ -254,6 +266,23 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
   }
+}
+
+function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {
+  return Boolean(
+    binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue && pane.agentSession &&
+    binding.agentSessionSource === pane.agentSession.source && binding.agentSessionAgent === pane.agentSession.agent &&
+    binding.agentSessionKind === pane.agentSession.kind && binding.agentSessionValue === pane.agentSession.value
+  );
+}
+function hasNativeAgentSession(binding: Binding): boolean {
+  return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue);
+}
+function nativeAgentSessionPatch(pane: HerdrPane): Pick<Binding, "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"> {
+  return {
+    agentSessionSource: pane.agentSession?.source ?? null, agentSessionAgent: pane.agentSession?.agent ?? null,
+    agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
+  };
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

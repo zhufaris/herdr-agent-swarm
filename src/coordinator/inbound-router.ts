@@ -83,6 +83,7 @@ export class InboundRouter implements InboundRouterPort {
     await this.options.lark.stop();
     this.stopInboundSubscription?.();
     this.stopControlSubscription?.();
+    this.options.operations.shutdown();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(), ...(this.inboundDrain ? [this.inboundDrain] : [])]);
   }
 
@@ -101,6 +102,8 @@ export class InboundRouter implements InboundRouterPort {
     if (action.chatId !== this.options.config.lark.chatId) return;
     const model = parseModelSelectionAction(action.value, action.option);
     if (model) return this.options.operations.selectModel(action, model.bindingId, model.model);
+    const mode = parseModelModeSelectionAction(action.value, action.option);
+    if (mode) return this.options.operations.selectModelMode(action, mode.bindingId, mode.operationId, mode.mode);
     const open = parseOpenThreadAction(action.value);
     if (open) return this.options.operations.openThread(action, open.bindingId);
     const deadLetter = parseDeadLetterAction(action.value);
@@ -186,6 +189,7 @@ function errorMessage(error: unknown): string { return error instanceof Error ? 
 function requestTitle(body: string): string { const normalized = body.replace(/\s+/g, " " ).trim(); return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request"; }
 function parseOpenThreadAction(value: unknown): { bindingId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return item.action === "open_project_thread" && typeof item.bindingId === "string" ? { bindingId: item.bindingId } : null; }
 function parseModelSelectionAction(value: unknown, option?: string | null): { bindingId: string; model: string } | null { if (!value || typeof value !== "object" || !option) return null; const item = value as Record<string, unknown>; return item.action === "select_model" && typeof item.bindingId === "string" && /^[a-z0-9][a-z0-9._:+/-]{0,127}$/i.test(option) ? { bindingId: item.bindingId, model: option } : null; }
+function parseModelModeSelectionAction(value: unknown, option?: string | null): { bindingId: string; operationId: string; mode: string } | null { if (!value || typeof value !== "object" || !option) return null; const item = value as Record<string, unknown>; return item.action === "select_model_mode" && typeof item.bindingId === "string" && typeof item.operationId === "string" && option.length <= 128 ? { bindingId: item.bindingId, operationId: item.operationId, mode: option } : null; }
 function parseDeadLetterAction(value: unknown): { action: "retry_dead_letter" | "dismiss_dead_letter"; replyId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return (item.action === "retry_dead_letter" || item.action === "dismiss_dead_letter") && typeof item.replyId === "string" ? { action: item.action, replyId: item.replyId } : null; }
 function parsePaneClaimAction(value: unknown): { projectId: string; workspaceId: string; paneId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return item.action === "claim_pane" && typeof item.projectId === "string" && typeof item.workspaceId === "string" && typeof item.paneId === "string" ? { projectId: item.projectId, workspaceId: item.workspaceId, paneId: item.paneId } : null; }
 function parseProjectAction(value: unknown): { selectionId: string; projectId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return item.action === "select_project" && typeof item.selectionId === "string" && typeof item.projectId === "string" ? { selectionId: item.selectionId, projectId: item.projectId } : null; }
