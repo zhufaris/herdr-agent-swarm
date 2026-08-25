@@ -102,6 +102,14 @@ most one non-stop pane writer may be `running` for a binding. A `/stop` operatio
 may preempt the lane because Esc is the interruption mechanism, but it still has a
 durable record and idempotency key.
 
+The non-stop lane has priority over *queued* ordinary prompt work. A `/model`
+operation may claim an idle pane before the next FIFO prompt begins, even when
+ordinary prompts are queued. It never preempts a prompt whose turn has already
+started: if a supervised active turn exists, `/model` remains accepted until that
+turn reaches a fresh idle/done observation or the operation is rejected/expired.
+`/steer` is eligible only for that active parent turn and never becomes ordinary
+queued work.
+
 Once terminal input may have been sent, the operation cannot return to `accepted`.
 A crash or timeout yields `uncertain`; startup recovery observes current pane state
 and updates projections but never repeats the input automatically.
@@ -141,8 +149,10 @@ operation and resolves it to `confirmed` or `uncertain`.
 ### `/model [name]` and model CardKit actions
 
 1. Atomically accept the operation and acquire the non-stop pane-input lane.
-2. Refresh the pane and require `idle` with a ready TraeX composer and no queued or
-   running prompt work.
+2. Refresh the pane and require `idle` with a ready TraeX composer and no running
+   prompt work. Queued ordinary prompts do not block `/model`: the control lane
+   claims the pane before ordinary FIFO dispatch, then ordinary dispatch resumes
+   after the operation reaches a terminal state.
 3. For listing, drive `/model`, capture the current selector, exit it, and confirm
    return to the composer.
 4. For switching, use an explicit selector state machine: model selector, optional
@@ -190,7 +200,8 @@ Tests must prove:
 - duplicate `/stop` delivery sends exactly one Esc; restart after the Esc checkpoint
   observes without replay; successful and uncertain outcomes are visible;
 - prompt dispatch and model selection cannot own pane input concurrently; duplicate
-  model card actions execute once; busy and stale actions update the card;
+  model card actions execute once; a queued ordinary prompt cannot starve an idle
+  model operation; busy and stale actions update the card;
 - model selection distinguishes not-applied, possibly-applied, and confirmed states,
   including selector layout changes and verification timeout;
 - migration, write-fence, shutdown, safety scan, outbox, and complete integration
