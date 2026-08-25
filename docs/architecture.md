@@ -316,9 +316,22 @@ failures become dead letters that an operator can retry or dismiss.
 It performs an initial scan and a periodic safety scan, so lost or duplicate
 wake-ups cannot change the converged result.
 
+Binding-level status-card updates are replaceable snapshots. Enqueue preserves
+the oldest pending lane head as an in-flight-safe barrier and atomically replaces
+all later snapshots with the newest state. Answer cards, streams, creates, and
+replies are never coalesced this way.
+
+Delivery failures persist a bounded class (`transient`, `permanent`, or
+`unknown`) plus sanitized HTTP/Lark codes. A cooled transient dead letter may be
+automatically reopened once; its per-round attempt count resets, while the
+durable automatic-recovery budget does not. Permanent, unknown, and legacy
+unclassified failures remain operator-controlled. Recovery changes only outbox
+state and can never replay a TraeX prompt.
+
 The sanitized `/status` view combines two deliberately different signals.
 SQLite reports durable lane-head counts, currently eligible heads, the earliest
-future retry, and oldest-head age. The dispatcher reports only bounded
+future retry, oldest-head age, dead-letter counts by failure class, and eligible
+automatic recoveries. The dispatcher reports only bounded
 process-local scan and delivery timestamps, outcome, active delivery count, and
 whether a scan is pending. These diagnostics contain no lane or message
 identifiers and reset when the process restarts; they never become workflow

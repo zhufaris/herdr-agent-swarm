@@ -7,6 +7,8 @@ export type PromptState = "queued" | "running" | "delivered" | "failed" | "cance
 export type PromptDispatchKind = "turn" | "steering";
 export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
+export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
+export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
@@ -169,6 +171,11 @@ export interface OutboundReply {
   error: string | null;
   deliveredMessageId: string | null;
   cardIdCheckpoint: string | null;
+  failureClass: DeliveryFailureClass | null;
+  httpStatus: number | null;
+  larkErrorCode: string | null;
+  autoRecoveryCount: number;
+  deadLetteredAt: string | null;
   nextAttemptAt: string;
   createdAt: string;
   updatedAt: string;
@@ -181,6 +188,8 @@ export interface OperationalSummary {
   outbound: Record<OutboundReplyState, number>;
   pendingOutbox: number;
   deadLetters: number;
+  deadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
+  eligibleDeadLetterRecoveries: number;
   oldestPendingAt: string | null;
   outboxLanes: {
     pending: number; eligible: number; blocked: number; nextAttemptAt: string | null;

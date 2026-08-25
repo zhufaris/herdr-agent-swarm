@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, SessionSummary } from "../domain/types.js";
+import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -35,6 +35,7 @@ type OutboundReplyRow = Record<string, SqlValue> & {
   card_id_checkpoint: string | null;
   delivery_order: number;
   lane_key: string;
+  failure_class: string | null; http_status: number | null; lark_error_code: string | null; auto_recovery_count: number; dead_lettered_at: string | null;
 };
 type ProjectSelectionRow = Record<string, SqlValue> & {
   id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
@@ -814,7 +815,7 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply {
     const timestamp = now();
     const laneKey = outboundLaneKey(input);
     const ownsTransaction = !this.database.isTransaction;
@@ -893,7 +894,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const row = this.database.prepare("SELECT prompt_id, view_version, selection_id, card_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; kind: string; payload: string } | undefined;
-      this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
+      this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
           if (row.kind === "card_reply" || row.kind === "stream_card_create") {
@@ -917,24 +918,42 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.getOutboundReply(id);
   }
 
-  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number): OutboundReply | null {
-    const row = this.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
-    if (!row) return null;
-    const attempts = Number(row.attempt_count) + 1;
+  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const attempts = Number(row.attempt_count) + 1;
+      const timestamp = now();
+      const deadLetteredAt = attempts >= 5 ? timestamp : null;
+      this.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ?`)
+        .run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
+      const result = this.getOutboundReply(id);
+      this.database.exec("COMMIT");
+      return result;
+    } catch (cause) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw cause; }
+  }
+
+  markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null {
     const timestamp = now();
-    if (attempts >= 5) {
-      this.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, attempt_count = ?, updated_at = ? WHERE id = ?").run(error, attempts, timestamp, id);
-      return this.getOutboundReply(id);
-    }
-    this.database.prepare("UPDATE outbound_replies SET error = ?, attempt_count = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?")
-      .run(error, attempts, retryAt(attempts, retryDelayMs), timestamp, id);
+    this.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
+      .run(boundedError(error), metadata?.failureClass ?? "permanent", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
     return this.getOutboundReply(id);
   }
 
-  markOutboundReplyDeadLetter(id: string, error: string): OutboundReply | null {
-    this.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
-      .run(error, now(), id);
-    return this.getOutboundReply(id);
+  recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] {
+    if (!Number.isInteger(limit) || limit <= 0) return [];
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.database.prepare(`SELECT id FROM outbound_replies WHERE state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at IS NOT NULL AND dead_lettered_at <= ? ORDER BY dead_lettered_at, delivery_order LIMIT ?`).all(cutoff, limit) as Array<{ id: string }>;
+      const recovered: OutboundReply[] = [];
+      for (const row of rows) {
+        const updated = this.database.prepare(`UPDATE outbound_replies SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, auto_recovery_count = 1, updated_at = ? WHERE id = ? AND state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at <= ?`).run(now(), now(), row.id, cutoff);
+        if (updated.changes === 1) { const reply = this.getOutboundReply(row.id); if (reply) recovered.push(reply); }
+      }
+      this.database.exec("COMMIT");
+      return recovered;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome {
@@ -955,7 +974,7 @@ export class SqliteBindingStore implements BindingStorePort {
       else if (row.state !== "dead_letter") outcome = "stale";
       else {
         const nextState = action === "retry" ? "pending" : "dismissed";
-        this.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, now(), now(), id);
+        this.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, attempt_count = CASE WHEN ? = 'pending' THEN 0 ELSE attempt_count END, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, nextState, now(), now(), id);
         outcome = action === "retry" ? "retried" : "dismissed";
       }
       this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(actorOpenId, `outbound.${action}`, id, outcome, now());
@@ -988,6 +1007,10 @@ export class SqliteBindingStore implements BindingStorePort {
       FROM heads WHERE position = 1
     `).get(observedAt, observedAt, observedAt) as { pending: number; eligible: number | null; blocked: number | null; next_attempt_at: string | null; oldest_head_at: string | null };
     const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
+    const deadLettersByClass = { transient: 0, permanent: 0, unknown: 0, legacy: 0 };
+    const failureRows = this.database.prepare("SELECT failure_class, COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' GROUP BY failure_class").all() as Array<{ failure_class: DeliveryFailureClass | null; count: number }>;
+    for (const row of failureRows) deadLettersByClass[row.failure_class ?? "legacy"] = Number(row.count);
+    const eligibleRecoveries = this.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at IS NOT NULL AND dead_lettered_at <= ?").get(new Date(Date.parse(observedAt) - 300_000).toISOString()) as { count: number };
     const oldestInactive = this.database.prepare("SELECT MIN(last_activity_at) AS value FROM bindings WHERE lifecycle != 'active' OR attachment != 'attached'").get() as { value: string | null };
     const recoverableProvisioning = this.database.prepare("SELECT COUNT(*) AS count FROM project_selections WHERE state = 'processing' AND binding_id IS NOT NULL").get() as { count: number };
     const archivedPanesPresent = this.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL").get() as { count: number };
@@ -998,7 +1021,7 @@ export class SqliteBindingStore implements BindingStorePort {
       bindings: groupedCounts<BindingState>("bindings", "state", ["pending", "active", "archived", "orphaned", "failed"]),
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
       promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
-      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, oldestPendingAt: oldestPending.value,
+      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),
         nextAttemptAt: laneHealth.next_attempt_at, oldestHeadAt: laneHealth.oldest_head_at,
@@ -1125,7 +1148,8 @@ export class SqliteBindingStore implements BindingStorePort {
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
-        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT
       );
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
       CREATE TABLE IF NOT EXISTS project_selections(
@@ -1183,6 +1207,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
     this.ensureOutboundLaneKey();
+    this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
     this.ensureRunCardsView();
     this.ensureQueryIndexes();
@@ -1405,6 +1430,16 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
   }
 
+  private ensureOutboundFailureMetadata(): void {
+    const names = new Set((this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!names.has("failure_class")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown'))");
+    if (!names.has("http_status")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN http_status INTEGER");
+    if (!names.has("lark_error_code")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN lark_error_code TEXT");
+    if (!names.has("auto_recovery_count")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN auto_recovery_count INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("dead_lettered_at")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN dead_lettered_at TEXT");
+    this.database.exec("CREATE INDEX IF NOT EXISTS outbound_replies_auto_recovery ON outbound_replies(state, failure_class, auto_recovery_count, dead_lettered_at)");
+  }
+
   private ensureDualRequestCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
@@ -1570,7 +1605,8 @@ function mapOutboundReply(row: OutboundReplyRow): OutboundReply {
   return {
     id: row.id, idempotencyKey: row.idempotency_key, bindingId: row.binding_id, rootMessageId: row.root_message_id,
     promptId: row.prompt_id, viewVersion: row.view_version === null ? null : Number(row.view_version), selectionId: row.selection_id, cardRole: row.card_role as RequestCardRole | null, kind: row.kind as OutboundReplyKind, payload: row.payload, state: row.state as OutboundReplyState,
-    attemptCount: Number(row.attempt_count), error: row.error, deliveredMessageId: row.delivered_message_id, cardIdCheckpoint: row.card_id_checkpoint ?? null, nextAttemptAt: row.next_attempt_at,
+    attemptCount: Number(row.attempt_count), error: row.error, deliveredMessageId: row.delivered_message_id, cardIdCheckpoint: row.card_id_checkpoint ?? null,
+    failureClass: row.failure_class as DeliveryFailureClass | null, httpStatus: row.http_status === null ? null : Number(row.http_status), larkErrorCode: row.lark_error_code, autoRecoveryCount: Number(row.auto_recovery_count ?? 0), deadLetteredAt: row.dead_lettered_at, nextAttemptAt: row.next_attempt_at,
     createdAt: row.created_at, updatedAt: row.updated_at
   };
 }

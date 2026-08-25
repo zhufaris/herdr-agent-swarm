@@ -4,7 +4,8 @@ import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types
 import { safeLogError } from "../runtime/safe-error.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, PermanentDeliveryError } from "./outbound-target-validation.js";
+import { classifyDeliveryError } from "./delivery-error-classifier.js";
+import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget } from "./outbound-target-validation.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
@@ -93,6 +94,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       this.scanRequested = false;
       this.forceRequested = false;
       try {
+        this.recoverTransientDeadLetters();
         this.lastScanOutcome = await this.drainPending(force);
       } catch (error) {
         this.lastScanOutcome = "failed";
@@ -100,6 +102,13 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       } finally {
         this.lastScanAt = new Date().toISOString();
       }
+    }
+  }
+
+  private recoverTransientDeadLetters(): void {
+    const cutoff = new Date(Date.now() - 300_000).toISOString();
+    for (const reply of this.store.recoverEligibleDeadLetters(cutoff, 100)) {
+      this.logger.info({ event: "lark-outbox-auto-recovered", replyId: reply.id, replyKind: reply.kind, laneKey: deliveryTargetKey(reply), failureClass: reply.failureClass, autoRecoveryCount: reply.autoRecoveryCount, deadLetteredAt: reply.deadLetteredAt, outcome: "pending" }, "transient Lark outbox dead letter reopened for one recovery round");
     }
   }
 
@@ -198,15 +207,17 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       this.lastDeliveryAt = new Date().toISOString();
       return "delivered";
     } catch (error) {
-      const permanent = error instanceof PermanentDeliveryError;
-      const retryDelayMs = permanent ? undefined : retryAfterDelayMs(error);
+      const classified = classifyDeliveryError(error);
+      const permanent = classified.failureClass === "permanent";
+      const metadata = { failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode };
       const failed = permanent
-        ? this.store.markOutboundReplyDeadLetter(reply.id, errorMessage(error))
-        : this.store.markOutboundReplyFailed(reply.id, errorMessage(error), retryDelayMs);
+        ? this.store.markOutboundReplyDeadLetter(reply.id, classified.message, metadata)
+        : this.store.markOutboundReplyFailed(reply.id, classified.message, classified.retryDelayMs, metadata);
       const context = {
         event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled",
         err: safeLogError(error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
         attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt,
+        failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, autoRecoveryCount: failed?.autoRecoveryCount ?? reply.autoRecoveryCount,
         outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry"
       };
       if (failed?.state === "dead_letter") this.logger.error(context, permanent ? "Lark outbox reply rejected by durable target validation" : "Lark outbox reply exhausted retries");
@@ -225,22 +236,6 @@ function deliveryTargetKey(reply: OutboundReply): string {
     : `message:${reply.rootMessageId}`;
 }
 
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function retryAfterDelayMs(error: unknown): number | undefined {
-  if (!isRecord(error)) return undefined;
-  const response = isRecord(error.response) ? error.response : null;
-  if (response?.status !== 429 || !isRecord(response.headers)) return undefined;
-  const get = typeof response.headers.get === "function" ? response.headers.get as (name: string) => unknown : null;
-  const header = get?.call(response.headers, "retry-after")
-    ?? Object.entries(response.headers).find(([key]) => key.toLowerCase() === "retry-after")?.[1];
-  if (typeof header !== "string" && typeof header !== "number") return undefined;
-  const value = String(header).trim();
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
-}
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string } } {
   const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };
   return decoded.card && decoded.stream

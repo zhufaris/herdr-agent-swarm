@@ -667,6 +667,47 @@ describe("SQLite store", () => {
     vi.useRealTimers();
   });
 
+  it("persists classified failures and reopens one cooled transient round only", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "transient", idempotencyKey: "transient", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("transient", "upstream unavailable", undefined, { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+    expect(store.database.prepare("SELECT state, failure_class, http_status, auto_recovery_count, dead_lettered_at FROM outbound_replies WHERE id = 'transient'").get()).toEqual({
+      state: "dead_letter", failure_class: "transient", http_status: 503, auto_recovery_count: 0, dead_lettered_at: "2026-08-25T00:00:00.000Z"
+    });
+    expect(store.recoverEligibleDeadLetters("2026-08-24T23:59:59.999Z", 10)).toEqual([]);
+    expect(store.recoverEligibleDeadLetters("2026-08-25T00:00:00.000Z", 10)).toMatchObject([{ id: "transient", state: "pending", attemptCount: 0, autoRecoveryCount: 1 }]);
+    expect(store.recoverEligibleDeadLetters("2026-08-25T00:00:00.000Z", 10)).toEqual([]);
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("transient", "still unavailable", undefined, { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+    expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toEqual([]);
+    expect(store!.getOperationalSummary()).toMatchObject({ deadLettersByClass: { transient: 1, permanent: 0, unknown: 0, legacy: 0 }, eligibleDeadLetterRecoveries: 0 });
+    vi.useRealTimers();
+  });
+
+  it("never automatically reopens legacy or unknown dead letters", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "legacy", idempotencyKey: "legacy", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "unknown", idempotencyKey: "unknown", rootMessageId: "card-2", kind: "card_update", payload: "{}" });
+    store.database.exec("UPDATE outbound_replies SET state = 'dead_letter', attempt_count = 5, dead_lettered_at = '2020-01-01T00:00:00.000Z' WHERE id = 'legacy'");
+    store.markOutboundReplyDeadLetter("unknown", "generic 400", { failureClass: "unknown", httpStatus: 400, larkErrorCode: null });
+    store.database.exec("UPDATE outbound_replies SET dead_lettered_at = '2020-01-01T00:00:00.000Z' WHERE id = 'unknown'");
+
+    expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toEqual([]);
+    expect(store.getOperationalSummary()).toMatchObject({ deadLettersByClass: { transient: 0, permanent: 0, unknown: 1, legacy: 1 } });
+  });
+
+  it("does not reset the automatic recovery budget during a manual retry", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "manual", idempotencyKey: "manual", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyDeadLetter("manual", "unavailable", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+    store.database.exec("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = 'manual'");
+
+    expect(store.retryDeadLetter("manual", "c1", "u1")).toBe("retried");
+    expect(store.database.prepare("SELECT state, attempt_count, auto_recovery_count FROM outbound_replies WHERE id = 'manual'").get()).toEqual({ state: "pending", attempt_count: 0, auto_recovery_count: 1 });
+  });
+
   it("atomically claims a prompt only while its binding is dispatchable", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

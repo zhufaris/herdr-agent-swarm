@@ -1,4 +1,4 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -121,14 +121,15 @@ export interface BindingStorePort {
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
   failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
   listPendingOutboundReplies(): OutboundReply[];
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[]): OutboundReply[];
   getNextOutboundLaneHeadAttemptAt(): string | null;
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void;
   checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null;
-  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number): OutboundReply | null;
-  markOutboundReplyDeadLetter(id: string, error: string): OutboundReply | null;
+  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null;
+  markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null;
+  recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   getOperationalSummary(): OperationalSummary;
@@ -217,7 +218,7 @@ export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard
 export type OutboxStore = Pick<BindingStorePort,
   | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
   | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDeadLetter" | "markOutboundReplyDelivered"
-  | "markOutboundReplyFailed" | "recordBridgeMessage" | "updateBinding"
+  | "markOutboundReplyFailed" | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "updateBinding"
 >;
 export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getBinding" | "loadRunCard">;
 
