@@ -366,10 +366,15 @@ describe("Herdr adapter", () => {
 
     await expect(adapter.beginPaneModelSelection("w1:p1", "GPT-5.6-Terra", 1000)).resolves.toEqual({ kind: "mode_required", modes: ["Standard", "Max"] });
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(2);
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "ctrl+u")).toHaveLength(2);
     expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "Standard"]);
 
     await expect(adapter.completePaneModelMode("w1:p1", "Max", 1000)).resolves.toBeUndefined();
     expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "Max"]);
+    const clearIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "ctrl+u");
+    const modeIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-text" && args[3] === "Max");
+    expect(clearIndex).toBeGreaterThanOrEqual(0);
+    expect(clearIndex).toBeLessThan(modeIndex);
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(3);
   });
 

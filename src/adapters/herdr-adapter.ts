@@ -205,12 +205,14 @@ export class HerdrCliAdapter implements HerdrPort {
 
   async beginPaneModelSelection(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }> {
     const before = await this.readOutput(paneId, 240);
+    await this.clearComposerInput(paneId);
     await this.submitPromptText(paneId, "/model", before);
     const deadline = Date.now() + timeoutMs;
     await this.waitForOutputMarker(paneId, "Select Model and Effort", deadline);
     while (Date.now() < deadline) {
       const output = await this.readOutput(paneId, 240);
       if (/Select Model and Effort/i.test(output) && /esc to go back/i.test(output)) {
+        await this.clearComposerInput(paneId);
         await this.runner.run(this.executable, ["pane", "send-text", paneId, model], this.commandTimeoutMs);
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
         await this.waitForOutputMarker(paneId, "Select Model and Mode", deadline);
@@ -231,6 +233,7 @@ export class HerdrCliAdapter implements HerdrPort {
   async completePaneModelMode(paneId: string, mode: string, timeoutMs: number): Promise<void> {
     const before = await this.readOutput(paneId, 240);
     if (!interactiveModelModes(before)?.includes(mode)) throw new Error(`TraeX mode selector is no longer active in pane ${paneId}`);
+    await this.clearComposerInput(paneId);
     await this.runner.run(this.executable, ["pane", "send-text", paneId, mode], this.commandTimeoutMs);
     await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
     const deadline = Date.now() + timeoutMs;
@@ -367,6 +370,10 @@ export class HerdrCliAdapter implements HerdrPort {
       await abortableDelay(25, signal);
     }
     throw new Error(`Timed out waiting for prompt text in pane ${paneId}`);
+  }
+
+  private async clearComposerInput(paneId: string): Promise<void> {
+    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "ctrl+u"], this.commandTimeoutMs);
   }
 
   private async waitForTraexTurn(
