@@ -49,8 +49,9 @@ blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 H
 
 ### `/stop`
 
-当当前话题有活动 TraeX turn 时，字面量 `/stop` 会直接向 Herdr pane 发送 `Esc`。
-它绕过普通 FIFO，不创建 prompt，也不依赖 Herdr 是否识别出 named agent。
+当当前话题有活动 TraeX turn 时，字面量 `/stop` 会直接向 Herdr pane 发送 `Esc`，
+无论 TraeX 当前是 `working`、`blocked` 还是 `unknown`。它绕过普通 FIFO，不创建
+prompt，也不依赖 Herdr 是否识别出 named agent。
 
 只有不带参数的 `/stop`（大小写不敏感）具有这个含义。`/stop now` 等带参数形式
 不会作为停止命令。若没有 active binding 或当前没有受 bridge 监督的活动 turn，Bridge
@@ -61,8 +62,9 @@ blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 H
 
 ### `/steer <文本>`
 
-将文本作为当前活动 TraeX turn 的 steering 立即注入，绕过普通 FIFO。没有活动 turn
-时会拒绝，不会降级为普通任务。
+将文本作为当前活动 TraeX turn 的 steering 立即注入，绕过普通 FIFO。只要有受
+bridge 监督的活动 turn（`working` 或 `blocked`）即可注入；`blocked` 时文本会进入
+TraeX 的 steering 输入，而不是审批界面。没有活动 turn 时会拒绝，不会降级为普通任务。
 
 ### `/herdr new <标题>`
 
@@ -198,19 +200,19 @@ Pane。请先检查对应 Space；已有 Pane 时发送
 
 ## 在话题中发送普通消息
 
-已绑定话题中的普通回复会根据 TraeX 当前状态处理：
+已绑定话题中的普通回复（不带命令前缀）总是进入 FIFO，按顺序作为下一个 turn 执行，
+不会自动注入当前 turn。要插入正在执行的 turn，请显式使用 `/steer <文本>`：
 
-| TraeX 状态 | Bridge 行为 |
+| TraeX 状态 | 普通消息的 Bridge 行为 |
 | --- | --- |
-| `working` | 将消息作为 steering 注入当前 turn，不创建第二个并发 waiter |
-| `idle` 或 `done` | 将消息加入 FIFO，作为下一个 turn 执行 |
-| `blocked` | 保持排队，不把文字输入审批界面 |
+| `working` 或 `blocked` | 加入 FIFO 排队；当前 turn 结束后按顺序执行。需要立即插入请用 `/steer` |
+| `idle` 或 `done` | 加入 FIFO，作为下一个 turn 执行 |
 | `unknown` | 保守地进入 FIFO，不尝试 steering |
 
-每条消息都有独立状态卡。Steering 卡显示“已加入当前执行”，当前 turn 的最终
+每条消息都有独立状态卡。`/steer` 卡显示“已加入当前执行”，当前 turn 的最终
 回答仍只显示在主任务卡中。重复的飞书事件不会导致同一条消息重复注入。
-`/stop` 是这一规则的显式优先级例外：仅在 `working` 时越过普通 FIFO 注入，
-但队列内容保持不变。
+`/stop` 与 `/steer` 是显式的优先级命令：只要有受 bridge 监督的活动 turn
+（`working` 或 `blocked`）即可生效，越过普通 FIFO，但不改变已排队的普通消息。
 
 ## 权限与审批
 
@@ -219,10 +221,12 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 
 飞书端不能：
 
-- 批准或绕过 TraeX 权限；
-- 向审批界面发送 steering；
+- 批准或绕过 TraeX 高风险操作审批（批准/拒绝仍必须回到 Herdr 完成）；
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
 - 通过 `/stop` 强制终止 TraeX 进程或 Herdr pane。
+
+`blocked` 时的 `/steer` 会把文本作为 steering 送入 TraeX，而不是替你点击审批
+按钮；是否放行高风险操作仍由 Herdr 终端决定。
 
 ## 从飞书关闭 Pane
 
@@ -243,8 +247,9 @@ Herdr 明确报告为 `idle` 或 `done` 的 Pane；`working`、`blocked` 和 `un
 
 ### 消息没有立即执行
 
-先发送 `/herdr status`。如果 TraeX 是 `blocked`，请到 Herdr 处理审批；如果是
-非 `working` 状态，消息可能正在 FIFO 中等待。
+先发送 `/herdr status`。普通消息始终进入 FIFO：如果当前 turn 处于 `working`
+或 `blocked`，你的消息会在其结束后按顺序执行。要立即插入当前 turn，请用
+`/steer <文本>`；如果 TraeX 是 `blocked`，也可以到 Herdr 处理审批。
 
 ### `/herdr close` 后 pane 还在
 

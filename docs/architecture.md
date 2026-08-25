@@ -213,13 +213,13 @@ change during the target decomposition without changing these steps.
 2. The coordinator rejects messages outside the configured chat and bridge-owned
    messages, then durably records the rest before attempting business handling.
 3. A command is handled as a binding or operational workflow. Ordinary text in
-   an active bound topic becomes a prompt job. A message received during an
-   active turn may become steering when the runtime confirms that steering is
-   safe. Exact, case-insensitive `/stop` is a local Herdr `Esc` control only
-   while the bridge has a supervised active turn: it bypasses queued ordinary
-   prompts and creates no prompt job. Explicit `/steer <text>` is the separate
-   priority steering command; it bypasses queued ordinary prompts and never
-   falls back to the ordinary FIFO.
+   an active bound topic always becomes a FIFO prompt job; it is never
+   auto-promoted to steering. Exact, case-insensitive `/stop` is a local Herdr
+   `Esc` control while the bridge has a supervised active turn (`working` or
+   `blocked`): it bypasses queued ordinary prompts and creates no prompt job.
+   Explicit `/steer <text>` is the separate priority steering command; it injects
+   into the same supervised active turn, bypasses queued ordinary prompts, and
+   never falls back to the ordinary FIFO.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
    Herdr unchanged; the bridge adds no hidden prompt suffix.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
@@ -327,8 +327,10 @@ and credentials.
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
 - `/stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
-  `/steer <text>` is TraeX steering. Neither command can bypass approval, and
-  both require a supervised active turn.
+  `/steer <text>` is TraeX steering. Both work while the bridge has a supervised
+  active turn (`working` or `blocked`); while `blocked`, `/steer` sends text to
+  TraeX steering, not to the approval interface. Neither command can approve,
+  reject, or bypass a high-risk approval.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and
   terminal identity before changing a binding.
