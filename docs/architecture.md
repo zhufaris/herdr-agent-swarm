@@ -215,11 +215,11 @@ change during the target decomposition without changing these steps.
 3. A command is handled as a binding or operational workflow. Ordinary text in
    an active bound topic becomes a prompt job. A message received during an
    active turn may become steering when the runtime confirms that steering is
-   safe. Exact, case-insensitive `/stop` is a priority steering command only
-   while the supervised turn is explicitly `working`: it bypasses queued
-   ordinary prompts without cancelling or reordering them. In every other
-   state, including a race where the turn stops before injection, it is rejected
-   and never falls back to the ordinary FIFO.
+   safe. Exact, case-insensitive `/stop` is a local Herdr `Esc` control only
+   while the bridge has a supervised active turn: it bypasses queued ordinary
+   prompts and creates no prompt job. Explicit `/steer <text>` is the separate
+   priority steering command; it bypasses queued ordinary prompts and never
+   falls back to the ordinary FIFO.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
    Herdr unchanged; the bridge adds no hidden prompt suffix.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
@@ -326,8 +326,9 @@ and credentials.
 ## Safety rules
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
-- `/stop` is TraeX steering, not a remote process or pane kill. It cannot bypass
-  approval, and it is never queued when no `working` turn can accept it.
+- `/stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
+  `/steer <text>` is TraeX steering. Neither command can bypass approval, and
+  both require a supervised active turn.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and
   terminal identity before changing a binding.

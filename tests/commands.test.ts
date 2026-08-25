@@ -30,6 +30,8 @@ describe("commands", () => {
     expect(parseCommand("/herdr model GPT-5.5")).toEqual({ kind: "model", name: "GPT-5.5" });
     expect(parseCommand(" /STOP " )).toEqual({ kind: "stop" });
     expect(parseCommand("/stop now")).toEqual({ kind: "help" });
+    expect(parseCommand("/steer inspect the failing request")).toEqual({ kind: "steer", text: "inspect the failing request" });
+    expect(parseCommand("/steer")).toEqual({ kind: "help" });
     expect(parseCommand("hello")).toBeNull();
   });
 

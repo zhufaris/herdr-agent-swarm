@@ -17,7 +17,7 @@ describe("active-turn steering", () => {
     const hold = new Promise<void>((resolve) => { release = resolve; });
     const turns: string[] = [];
     const steering: string[] = [];
-    let rejectStop = false;
+    const escapes: string[] = [];
     const info = vi.fn();
     const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
     let cardNumber = 0;
@@ -41,10 +41,10 @@ describe("active-turn steering", () => {
         return "done";
       },
       async steerPrompt(_paneId, text) {
-        if (rejectStop && text === "/stop") return "not_working";
         steering.push(text);
         return "injected";
       },
+      async sendEscape(paneId) { escapes.push(paneId); },
       async readOutput() { return output; }, async renamePane() {}
     };
     const config = {
@@ -71,25 +71,22 @@ describe("active-turn steering", () => {
     store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
     await publisher.drain();
     await coordinator.handleMessage(message(4, "/stop"));
-    await coordinator.handleMessage(message(4, "/stop"));
-    await Promise.all([coordinator.handleMessage(message(2, "steer one")), coordinator.handleMessage(message(3, "steer two"))]);
-    await vi.waitFor(() => expect(steering).toEqual(["/stop", "steer one", "steer two"]));
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).filter((view) => ["/stop", "steer one", "steer two"].includes(view.requestText)).every((view) => view.phase === "completed")).toBe(true));
-    await coordinator.handleMessage(message(2, "steer one"));
-    expect(steering).toEqual(["/stop", "steer one", "steer two"]);
+    await vi.waitFor(() => expect(escapes).toEqual(["w1:p1"]));
+    expect(store.listRunCards(bindingId).some((view) => view.requestText === "/stop")).toBe(false);
+    await Promise.all([coordinator.handleMessage(message(2, "/steer steer one")), coordinator.handleMessage(message(3, "/steer steer two"))]);
+    await vi.waitFor(() => expect(steering).toEqual(["steer one", "steer two"]));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId).filter((view) => ["steer one", "steer two"].includes(view.requestText)).every((view) => view.phase === "completed")).toBe(true));
+    await coordinator.handleMessage(message(2, "/steer steer one"));
+    expect(steering).toEqual(["steer one", "steer two"]);
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "prompt-dispatch-decided", dispatchKind: "steering", outcome: "accepted" }), expect.any(String));
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "steering-delivered", outcome: "delivered" }), expect.any(String));
     expect(JSON.stringify(info.mock.calls)).not.toContain("steer one");
 
     expect(turns).toHaveLength(1);
     expect(turns[0]).toBe("parent");
-    expect(store.listRunCards(bindingId).filter((view) => view.requestText === "/stop")).toMatchObject([{ phase: "completed", answer: "", notice: "已加入当前执行" }]);
-    rejectStop = true;
-    await coordinator.handleMessage(message(5, "/stop"));
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).filter((view) => view.requestText === "/stop")).toHaveLength(2));
-    expect(store.listRunCards(bindingId).filter((view) => view.requestText === "/stop").at(-1)).toMatchObject({ phase: "failed", notice: expect.stringContaining("未加入后续任务队列") });
+    expect(escapes).toEqual(["w1:p1"]);
     expect(store.listQueuedTurnPromptIds(bindingId)).toEqual(["queued-turn"]);
-    expect(steering).toEqual(["/stop", "steer one", "steer two"]);
+    expect(steering).toEqual(["steer one", "steer two"]);
     release();
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed", answer: "◆ parent answer" }));
     await vi.waitFor(() => expect(turns).toEqual(["parent", "queued turn"]));

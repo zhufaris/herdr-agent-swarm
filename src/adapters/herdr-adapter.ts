@@ -148,6 +148,10 @@ export class HerdrCliAdapter implements HerdrPort {
     return "injected";
   }
 
+  async sendEscape(paneId: string): Promise<void> {
+    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Esc"], this.commandTimeoutMs);
+  }
+
   async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
     const before = await this.readOutput(paneId, 240);
     await this.submitPromptText(paneId, command, before);

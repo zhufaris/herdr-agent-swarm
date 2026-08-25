@@ -679,6 +679,13 @@ describe("Herdr adapter", () => {
     expect(calls.some((args) => args[1] === "send-text" || args[1] === "send-keys")).toBe(false);
   });
 
+  it("sends Esc directly without requiring named-agent working state", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) { calls.push(args); return { stdout: "", stderr: "" }; } };
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).sendEscape("w1:p1")).resolves.toBeUndefined();
+    expect(calls).toEqual([["pane", "send-keys", "w1:p1", "Esc"]]);
+  });
+
   it("surfaces an uncertain steering delivery when Enter fails after text was sent", async () => {
     const calls: string[][] = [];
     const outputs = ["before", "before\n❯ possibly typed"];

@@ -31,7 +31,7 @@ type InboundRouterStore = InboundStore & PromptAcceptanceStore;
 export interface InboundRouterOptions {
   config: BridgeConfig;
   store: InboundRouterStore;
-  herdr: Pick<HerdrPort, "assertWorkspace">;
+  herdr: Pick<HerdrPort, "assertWorkspace" | "sendEscape">;
   lark: Pick<LarkPort, "start" | "stop">;
   lifecycleEvents: LifecycleEventPublisher;
   outbound: OutboundIntentPort;
@@ -132,7 +132,8 @@ export class InboundRouter implements InboundRouterPort {
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
       if (command?.kind === "help") await this.reply(message.rootMessageId ?? message.messageId, renderHelpCard());
-      else if (command?.kind === "stop") disposition = await this.stopActiveTurn(message, binding) ? "prompt_queued" : "rejected";
+      else if (command?.kind === "stop") disposition = await this.stopActiveTurn(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "steer") disposition = await this.steerActiveTurn(message, binding, command.text) ? "prompt_queued" : "rejected";
       else if (command?.kind === "model") disposition = await this.options.operations.runModel(message, binding, command.name) ? "command_completed" : "rejected";
       else if (command?.kind === "reset") disposition = await this.options.provisioning.reset(message, binding, command.title) ? "command_completed" : "rejected";
       else if (command?.kind === "new" || command?.kind === "projects") await this.options.provisioning.selectProject(message, command.kind === "new" ? command.title : null);
@@ -158,7 +159,7 @@ export class InboundRouter implements InboundRouterPort {
   private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text, forcedParentPromptId?: string): Promise<void> {
     if (!forcedParentPromptId && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
-    const promptId = randomUUID(); const occurredAt = new Date().toISOString(); const activeRun = this.options.promptRun.activeTurn(binding.id); const parentPromptId = forcedParentPromptId ?? (activeRun?.state === "working" ? activeRun.promptId : null); const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
+    const promptId = randomUUID(); const occurredAt = new Date().toISOString(); const parentPromptId = forcedParentPromptId ?? null; const dispatchKind = parentPromptId ? "steering" as const : "turn" as const;
     const view = createQueuedRunCard({ promptId, bindingId: binding.id, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: dispatchKind === "steering" ? 0 : this.options.store.countPendingPrompts(binding.id) + 1, occurredAt });
     const { prompt, inserted } = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view) });
     this.options.outboundWork.wake();
@@ -173,7 +174,24 @@ export class InboundRouter implements InboundRouterPort {
   private async stopActiveTurn(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/stop` 未进入任务队列。"); return false; }
     const activeRun = this.options.promptRun.activeTurn(binding.id); if (!activeRun || activeRun.state !== "working") { await this.reject(message, "当前没有确认处于 working 的 TraeX 任务。`/stop` 未进入任务队列。"); return false; }
-    await this.enqueue(binding, message, "/stop", activeRun.promptId); return true;
+    if (!this.options.herdr.sendEscape) { await this.reject(message, "当前 Herdr 适配器不支持 Esc 停止。"); return false; }
+    try {
+      await this.options.herdr.sendEscape(activeRun.paneId);
+      this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.stop", target: binding.id, outcome: "success" });
+      return true;
+    } catch (error) {
+      await this.reject(message, `发送停止信号失败：${errorMessage(error)}`);
+      this.options.logger.warn({ event: "stop-escape-failed", err: safeLogError(error), bindingId: binding.id, paneId: activeRun.paneId, outcome: "failed" }, "failed to send stop Escape");
+      return false;
+    }
+  }
+
+  private async steerActiveTurn(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean> {
+    if (!binding || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
+    const activeRun = this.options.promptRun.activeTurn(binding.id);
+    if (!activeRun || activeRun.state !== "working") { await this.reject(message, "当前没有确认处于 working 的 TraeX 任务。`/steer` 未进入任务队列。"); return false; }
+    await this.enqueue(binding, message, text, activeRun.promptId);
+    return true;
   }
 
   private spaceNameFor(binding: Binding): string { const matches = binding.projectId ? this.options.config.projects.filter((project) => project.id === binding.projectId) : this.options.config.projects.filter((project) => project.workspaceId === binding.workspaceId); return matches.length === 1 ? projectSpaceName(matches[0]!) : "legacy/unresolved"; }

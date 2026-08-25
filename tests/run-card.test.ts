@@ -40,8 +40,8 @@ describe("run card", () => {
   it("documents priority stop steering and its safety boundary", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/stop");
-    expect(help).toContain("仅在 working 时");
-    expect(help).toContain("不会取消已排队消息");
+    expect(help).toContain("Herdr Esc");
+    expect(help).toContain("/steer <文本>");
   });
 
   it("renders project buttons with opaque ids and no host routing details", () => {

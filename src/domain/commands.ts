@@ -6,6 +6,9 @@ export function parseCommand(text: string): BridgeCommand | null {
   const trimmed = text.trim();
   if (/^\/stop$/i.test(trimmed)) return { kind: "stop" };
   if (/^\/stop\s+/i.test(trimmed)) return { kind: "help" };
+  const steerMatch = /^\/steer\s+([\s\S]+)$/i.exec(trimmed);
+  if (steerMatch) return { kind: "steer", text: steerMatch[1]!.trim() };
+  if (/^\/steer$/i.test(trimmed)) return { kind: "help" };
   const modelMatch = /^\/model(?:\s+([\s\S]*))?$/i.exec(trimmed);
   if (modelMatch) return { kind: "model", name: (modelMatch[1] ?? "").trim() || null };
   const resetMatch = /^\/new(?:\s+([\s\S]*))?$/i.exec(trimmed);

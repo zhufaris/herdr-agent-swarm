@@ -49,17 +49,20 @@ blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 H
 
 ### `/stop`
 
-当当前 TraeX turn 明确处于 `working` 时，将字面量 `/stop` 作为高优先级
-steering 立即注入当前 turn。它会绕过已经排队的普通消息，但不会取消、重排或
-执行这些消息；当前 turn 结束后，普通消息仍按原 FIFO 顺序继续。
+当当前话题有活动 TraeX turn 时，字面量 `/stop` 会直接向 Herdr pane 发送 `Esc`。
+它绕过普通 FIFO，不创建 prompt，也不依赖 Herdr 是否识别出 named agent。
 
 只有不带参数的 `/stop`（大小写不敏感）具有这个含义。`/stop now` 等带参数形式
-不会作为 steering。若没有 active binding，或当前状态是 `idle`、`done`、`blocked`、
-`unknown`，Bridge 会拒绝 `/stop` 且不会把它加入普通队列。如果状态在检查后、注入前
-发生变化，Bridge 同样会将本次 `/stop` 标记失败，不会降级为后续普通 turn。
+不会作为停止命令。若没有 active binding 或当前没有受 bridge 监督的活动 turn，Bridge
+会拒绝 `/stop`，不会加入普通队列。
 
-`/stop` 是发给 TraeX 的 steering，不是 Bridge 对进程或 Herdr pane 的远程强杀，
-也不能批准、拒绝或绕过高风险操作。重复投递同一个飞书事件只会注入一次。
+`/stop` 是 Herdr 本地 Esc 控制，不是 Bridge 对进程或 Herdr pane 的远程强杀，
+也不能批准、拒绝或绕过高风险操作。
+
+### `/steer <文本>`
+
+将文本作为当前活动 TraeX turn 的 steering 立即注入，绕过普通 FIFO。没有活动 turn
+时会拒绝，不会降级为普通任务。
 
 ### `/herdr new <标题>`
 
