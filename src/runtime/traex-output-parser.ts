@@ -57,7 +57,23 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
     ? visible
     : newestTerminalWindow(visible);
   if (visible.length > MAX_TERMINAL_DELTA_CHARS) update = "replace-all";
-  return { delta, snapshot: currentRaw, update };
+  return { delta, snapshot: currentRaw, update, ...extractTraexTelemetry(current) };
+}
+
+function extractTraexTelemetry(source: string): { model?: string; context?: string } {
+  const lines = source.replace(/\r/g, "").split("\n").slice(-40);
+  let model: string | undefined;
+  let context: string | undefined;
+  for (const line of lines) {
+    const clean = line.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "").trim();
+    const namedModel = /(?:^|\b)(?:model\s*[:=]\s*)?((?:GPT|Claude|Gemini|DeepSeek|Seed|Qwen|Llama|o\d)[A-Za-z0-9._-]*(?:\s+[A-Za-z0-9._-]+){0,2})(?=\s*(?:[·|]|Auto Mode|context|$))/i.exec(clean);
+    if (namedModel) model = namedModel[1]!.trim();
+    const usage = /(?:↓\s*)?(\d+(?:\.\d+)?\s*[KMG]?)\s+tokens?\b/i.exec(clean);
+    const window = /(\d+(?:\.\d+)?\s*[KMG]?)\s+context(?:\s+window)?\b/i.exec(clean);
+    if (usage) context = `${usage[1]!.replace(/\s+/g, "")} tokens`;
+    else if (window) context = `${window[1]!.replace(/\s+/g, "")} context`;
+  }
+  return { ...(model ? { model } : {}), ...(context ? { context } : {}) };
 }
 
 function newestTerminalWindow(value: string): string {

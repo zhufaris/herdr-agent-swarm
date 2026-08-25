@@ -7,10 +7,10 @@ const intervalMs = 2_000;
 
 console.log(`Smoke marker: ${marker}`);
 console.log("请由真实飞书用户在已配置群中依次执行：");
-console.log("1. /herdr spaces — 确认 Space 使用名称显示；已绑定 Pane 可打开话题。");
+console.log("1. /swarm spaces — 确认 Space 使用名称显示；已绑定 Pane 可打开话题。");
 console.log("2. 如有可安全认领的未绑定 TraeX Pane，点击「认领」；否则明确跳过。");
-console.log("3. /herdr sessions — 确认当前群会话可见，其他群信息不可见。");
-console.log("4. /herdr failures — 仅在有可丢弃测试 dead letter 时验证重试/忽略；不得重试 prompt。");
+console.log("3. /swarm sessions — 确认当前群会话可见，其他群信息不可见。");
+console.log("4. /swarm failures — 仅在有可丢弃测试 dead letter 时验证重试/忽略；不得重试 prompt。");
 console.log(`5. 在群中发送 "${marker}" 作为人工验收标记（不要让本脚本代发）。`);
 console.log(`未来 ${Math.round(timeoutMs / 1000)} 秒将只轮询 ${endpoint}。Ctrl-C 可提前结束。`);
 

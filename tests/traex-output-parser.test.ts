@@ -13,6 +13,14 @@ describe("TraeX output parser", () => {
     expect(parseTerminalStreamDelta(current, current, "deploy").delta).toBe("");
   });
 
+  it("extracts trusted model and context telemetry without exposing it as answer prose", () => {
+    const status = "GPT-5.6-Sol · Auto Mode · 31.1K tokens";
+
+    expect(parseTerminalStreamDelta(status, status, "inspect")).toMatchObject({
+      delta: "", model: "GPT-5.6-Sol", context: "31.1K tokens"
+    });
+  });
+
   it("replaces a redrawn terminal snapshot instead of appending the full screen again", () => {
     const previous = ["◆ First answer", "✧ Working"].join("\n");
     const current = [
