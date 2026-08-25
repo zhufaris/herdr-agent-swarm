@@ -128,7 +128,12 @@ export class OperationsWorkflow implements OperationsWorkflowPort {
     if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
     if (this.options.isBindingBusy(binding.id) || store.countPendingPrompts(binding.id) > 0 || binding.lastAgentState === "working" || binding.lastAgentState === "blocked" || !herdr.selectPaneModel || !herdr.runPaneCommand) return;
     try { const pane = await this.requireMatchingPane(binding, binding.paneId); await herdr.selectPaneModel(pane.paneId, model, config.commandTimeoutMs); const output = await herdr.runPaneCommand(pane.paneId, "/model", config.commandTimeoutMs); await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: pane.paneId, output, switched: true })); store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "switch_completed" }); }
-    catch (error) { logger.warn({ event: "model-selection-failed", err: safeLogError(error), bindingId, paneId: binding.paneId, outcome: "failed" }, "failed to select TraeX model"); store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "failed" }); }
+    catch (error) {
+      const message = `模型切换失败：${errorMessage(error)}`;
+      logger.warn({ event: "model-selection-failed", err: safeLogError(error), bindingId, paneId: binding.paneId, outcome: "failed" }, "failed to select TraeX model");
+      await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}:failed`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: message, switched: false }));
+      store.audit({ actorOpenId: action.operatorOpenId, action: "model.select", target: model, outcome: "failed" });
+    }
   }
 
   async requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {

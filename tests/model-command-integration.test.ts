@@ -83,6 +83,21 @@ describe("model command", () => {
     expect(fixture.store.listRunCards(fixture.bindingId)).toHaveLength(0);
     await fixture.close();
   });
+
+  it("updates the model card with a visible error when a dropdown switch fails", async () => {
+    const cards: object[] = [];
+    const updates: Array<{ messageId: string; card: object }> = [];
+    const selectPaneModel = vi.fn(async () => { throw new Error("Timed out waiting for TraeX model selection"); });
+    const fixture = await setup(cards, vi.fn(async () => "unused"), { updates, selectPaneModel });
+
+    await fixture.coordinator.handleCardAction({
+      messageId: "model-card-1", chatId: "chat", operatorOpenId: "user", option: "GPT-5.6-Terra",
+      value: { action: "select_model", bindingId: fixture.bindingId }
+    });
+
+    expect(JSON.stringify(updates.at(-1)!.card)).toContain("模型切换失败");
+    await fixture.close();
+  });
 });
 
 async function setup(

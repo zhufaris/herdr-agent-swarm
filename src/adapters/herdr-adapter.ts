@@ -189,8 +189,15 @@ export class HerdrCliAdapter implements HerdrPort {
       if (/Select Model and Effort/i.test(output) && /esc to go back/i.test(output)) {
         await this.runner.run(this.executable, ["pane", "send-text", paneId, model], this.commandTimeoutMs);
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+        let modeConfirmed = false;
         while (Date.now() < deadline) {
-          if (isTraexComposerReady(await this.readOutput(paneId, 240))) return;
+          const selected = await this.readOutput(paneId, 240);
+          if (!modeConfirmed && isInteractiveModelModeSelector(selected)) {
+            await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
+            modeConfirmed = true;
+            continue;
+          }
+          if (isTraexComposerReady(selected)) return;
           await abortableDelay(50);
         }
         throw new Error(`Timed out waiting for TraeX model selection in pane ${paneId}`);
@@ -459,6 +466,10 @@ function paneCommandOutput(before: string, after: string, command: string): stri
 function isInteractiveModelSelector(command: string, output: string): boolean {
   return normalizePromptEcho(command) === normalizePromptEcho("/model") &&
     /Select Model and Effort/i.test(output) && /esc to go back/i.test(output);
+}
+
+function isInteractiveModelModeSelector(output: string): boolean {
+  return /Select Model and Mode/i.test(output) && /esc to go back/i.test(output);
 }
 
 function interactiveModelSelectorOutput(command: string, output: string): string | null {

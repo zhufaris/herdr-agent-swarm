@@ -369,6 +369,27 @@ describe("Herdr adapter", () => {
     expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "/model GPT-5.6-Terra"]);
   });
 
+  it("confirms the default mode after TraeX selects a model", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "answer\n❯", "answer\n❯ /model",
+      "Select Model and Effort\n1. GPT-5.6-Terra\nPress enter to confirm or esc to go back",
+      "Select Model and Mode\n❯ 1. GPT-5.6-Terra / Standard\n  2. GPT-5.6-Terra / Max\nPress enter to confirm or esc to go back",
+      "Model switched to GPT-5.6-Terra / Standard\n❯ Use /skills to list available skills"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1) ?? "", stderr: "" };
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).selectPaneModel("w1:p1", "GPT-5.6-Terra", 1000))
+      .resolves.toBeUndefined();
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "send-keys" && args[3] === "Enter")).toHaveLength(3);
+  });
+
   it("creates default panes with an explicit downward split", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
