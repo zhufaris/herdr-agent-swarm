@@ -53,4 +53,54 @@ describe("TraeX terminal blocks", () => {
       "◆ Completed successfully"
     ].join("\n"));
   });
+
+  it("parses a wrapped Ran command and keeps stdout separate", () => {
+    expect(parseTraexTerminalBlocks([
+      "◆ Ran git diff --check && npm",
+      "  │ test",
+      "  └ PASS tests/parser.test.ts",
+      "    1 + stdout that resembles a diff"
+    ].join("\n"))).toEqual([{
+      kind: "command",
+      title: "◆ Ran",
+      command: "git diff --check && npmtest",
+      output: ["PASS tests/parser.test.ts", "    1 + stdout that resembles a diff"]
+    }]);
+  });
+
+  it("parses an explicit Bash marker and serializes command and output fences", () => {
+    const blocks = parseTraexTerminalBlocks([
+      "• Bash npm test",
+      "  └ {\"status\":\"ok\"}",
+      "PASS tests/a.test.ts"
+    ].join("\n"));
+
+    expect(renderTraexTerminalBlocks(blocks)).toBe([
+      "• Bash",
+      "```bash",
+      "npm test",
+      "```",
+      "```text",
+      "{\"status\":\"ok\"}",
+      "PASS tests/a.test.ts",
+      "```"
+    ].join("\n"));
+  });
+
+  it("continues command output across observations", () => {
+    const previous = "◆ Ran npm test\n  └ PASS first.test.ts";
+    const continuation = deriveTerminalContinuation(previous);
+
+    expect(continuation).toEqual({ kind: "command", title: "◆ Ran", command: "npm test" });
+    expect(parseTraexTerminalBlocks("PASS second.test.ts\n◆ Done", continuation)).toEqual([
+      { kind: "command", title: "◆ Ran", command: null, output: ["PASS second.test.ts"] },
+      { kind: "prose", lines: ["◆ Done"] }
+    ]);
+  });
+
+  it("does not infer a command from unmarked shell-like text", () => {
+    expect(parseTraexTerminalBlocks("npm test\necho hello")).toEqual([
+      { kind: "prose", lines: ["npm test", "echo hello"] }
+    ]);
+  });
 });
