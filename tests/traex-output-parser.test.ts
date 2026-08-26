@@ -157,6 +157,48 @@ describe("TraeX output parser", () => {
     ].join("\n"));
   });
 
+  it("preserves a compact Edited preview as one fenced diff block", () => {
+    const current = [
+      "◆ Edited src/fabric2onetable/construction/models.py (+4 -0)",
+      "    129      ] = PydanticField(min_length=1)",
+      "    130 +    expression: str | None = None",
+      "    131 +    source_bindings: tuple[dict[str, JsonValue], ...] = ()",
+      "    132 ⋮",
+      "    148      data_type: str = PydanticField(min_length=1)",
+      "    149 +    expression: str = PydanticField(min_length=1)"
+    ].join("\n");
+
+    expect(parseTerminalStreamDelta("", current, "inspect").delta).toBe([
+      "◆ Edited src/fabric2onetable/construction/models.py (+4 -0)",
+      "```diff",
+      "    129      ] = PydanticField(min_length=1)",
+      "    130 +    expression: str | None = None",
+      "    131 +    source_bindings: tuple[dict[str, JsonValue], ...] = ()",
+      "    132 ⋮",
+      "    148      data_type: str = PydanticField(min_length=1)",
+      "    149 +    expression: str = PydanticField(min_length=1)",
+      "```"
+    ].join("\n"));
+  });
+
+  it("fences an Edited preview whose body arrives after its heading", () => {
+    const previous = "◆ Edited src/model.py (+2 -0)";
+    const current = [
+      previous,
+      "    10      existing = True",
+      "    11 +    first = True",
+      "    12 +    second = True"
+    ].join("\n");
+
+    expect(parseTerminalStreamDelta(previous, current, "inspect").delta).toBe([
+      "```diff",
+      "    10      existing = True",
+      "    11 +    first = True",
+      "    12 +    second = True",
+      "```"
+    ].join("\n"));
+  });
+
   it("replaces an oversized live delta with its newest user-facing window", () => {
     const newest = "◆ Final live status: all focused tests passed";
     const oversized = `very first live output\n${"older output\n".repeat(1_100)}${newest}`;
