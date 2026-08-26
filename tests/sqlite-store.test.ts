@@ -674,6 +674,26 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["b1-head", "b2-head", "other-card", "b1-latest"]);
   });
 
+  it("preserves every pending Answer stream sequence", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const [answerCreate] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(answerCreate!.id, "answer-1", "cardkit-1");
+
+    for (const sequence of [1, 2, 3]) {
+      store.enqueueOutboundReply({
+        id: `content-${sequence}`, idempotencyKey: `stream:p1:cardkit-1:${sequence}`, bindingId: "b1", promptId: "p1", viewVersion: sequence, cardRole: "answer",
+        rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ elementId: answerElementId("p1", 0), content: `snapshot-${sequence}`, sequence })
+      });
+    }
+
+    expect(store.listPendingOutboundReplies().map((reply) => ({ id: reply.id, sequence: reply.viewVersion }))).toEqual([
+      { id: "content-1", sequence: 1 }, { id: "content-2", sequence: 2 }, { id: "content-3", sequence: 3 }
+    ]);
+  });
+
   it("rolls back status-card pruning when insertion fails", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

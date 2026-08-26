@@ -1002,7 +1002,7 @@ export class SqliteBindingStore implements BindingStorePort {
             )
         `).run(input.bindingId, input.rootMessageId, laneKey, input.bindingId, input.rootMessageId, laneKey);
       }
-      if ((input.kind === "card_update" || input.kind === "stream_content") && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
+      if (input.kind === "card_update" && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
         this.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?")
           .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
