@@ -27,6 +27,7 @@ import { ExecFileCommandRunner } from "./infra/command-runner.js";
 import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
 import { InstanceLeaseController } from "./runtime/instance-lease.js";
 import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
+import { HerdrCircuitBreaker } from "./runtime/herdr-circuit-breaker.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
@@ -50,6 +51,7 @@ const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
 const worktreeNameResolver = new WorktreeNameResolver(runner, config.commandTimeoutMs);
 let rawHerdr!: HerdrCliAdapter;
+let herdrCircuitBreaker!: HerdrCircuitBreaker;
 let herdr!: WorkspaceSnapshotCache;
 const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
   ? new HerdrSocketSubscriber(
@@ -66,7 +68,8 @@ const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
     )
   : null;
 rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
-herdr = new WorkspaceSnapshotCache(rawHerdr, 2_000, logger);
+herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
+herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, 2_000, logger);
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);
@@ -105,7 +108,7 @@ try {
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = (signal: string) => { outboxRetention.stop(); return shutdown.shutdown(signal); };

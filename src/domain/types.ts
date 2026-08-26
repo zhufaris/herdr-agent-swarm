@@ -80,6 +80,20 @@ export interface WorkspaceCacheStatus {
   oldestSnapshotAgeMs: number | null;
 }
 
+export interface HerdrCircuitBreakerStatus {
+  state: "closed" | "open" | "half_open";
+  failureThreshold: number;
+  openMs: number;
+  consecutiveFailures: number;
+  totalTransportFailures: number;
+  rejectedCalls: number;
+  successfulProbes: number;
+  openedAt: string | null;
+  nextProbeAt: string | null;
+  lastFailureAt: string | null;
+  lastFailure: string | null;
+}
+
 export interface SessionSummary {
   binding: Binding;
   queueDepth: number;

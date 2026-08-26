@@ -250,6 +250,11 @@ fall back to the CLI when the connection or method is unavailable. TraeX startup
 continues to use the configured executable through `pane run`; the bridge never
 substitutes the separate Codex executable. Prompt submission remains on the
 existing CLI path so its uncertain-dispatch/no-replay boundary stays unchanged.
+Active Herdr calls pass through a global transport circuit breaker inside the
+snapshot cache. Three consecutive transport failures open it for 15 seconds;
+after the cooldown one read-only call is admitted as a half-open probe. Commands,
+including prompt submission, never act as probes and the breaker never retries
+them. Domain errors do not count as transport failures.
 
 Herdr 0.7.5 requires `pane.agent_status_changed` subscriptions to name
 each Pane, so the subscriber reconnects and refreshes that set after Pane create
@@ -402,6 +407,8 @@ Health endpoints have separate meanings:
 class, plus due lane heads that have made no progress for five minutes. An
 active quarantine or stalled head degrades status without changing readiness,
 so one broken Lark target remains visible without stopping unrelated work.
+The same endpoint reports the Herdr circuit state, bounded last failure, recovery
+time, and rejection/failure counters. Open and half-open states degrade status.
 
 Shutdown stops ingress, waits for known work, and detaches observers if the
 grace period expires. It does not replay work or delete user state. Logs and
@@ -442,9 +449,6 @@ boundary change to fix.
   driven by a shared deadline from the composition root. A coordinated
   `AbortSignal` or deadline passed through shutdown would prevent premature
   timeout of in-flight work.
-- **Herdr circuit protection**: repeated Herdr CLI failures during an outage are
-  retried on every reconciliation and prompt attempt. A circuit breaker with
-  half-open probe would reduce log noise and load during Herdr unavailability.
 
 ## Current evolution priorities
 
@@ -455,7 +459,6 @@ boundary change to fix.
 2. Move remaining polling intervals and size limits into validated configuration
    as operator tuning needs arise.
 3. Coordinate shutdown through one shared deadline or `AbortSignal`.
-4. Add circuit protection around repeated Herdr transport failures.
 
 ## Related documents
 

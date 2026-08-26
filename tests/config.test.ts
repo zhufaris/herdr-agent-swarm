@@ -67,6 +67,14 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, LARK_REQUEST_TIMEOUT_MS: "0" })).toThrow();
   });
 
+  it("validates Herdr circuit breaker threshold and cooldown independently", () => {
+    expect(loadConfig({ ...requiredEnvironment }).herdrCircuitBreaker).toEqual({ failureThreshold: 3, openMs: 15_000 });
+    expect(loadConfig({ ...requiredEnvironment, HERDR_CIRCUIT_FAILURE_THRESHOLD: "5", HERDR_CIRCUIT_OPEN_MS: "20000" }).herdrCircuitBreaker)
+      .toEqual({ failureThreshold: 5, openMs: 20_000 });
+    expect(() => loadConfig({ ...requiredEnvironment, HERDR_CIRCUIT_FAILURE_THRESHOLD: "0" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, HERDR_CIRCUIT_OPEN_MS: "99" })).toThrow();
+  });
+
   it("bounds retention catch-up batches independently from batch size", () => {
     expect(loadConfig({ ...requiredEnvironment }).outboxRetention).toEqual({ days: 14, batchSize: 500, maxBatches: 20 });
     expect(loadConfig({ ...requiredEnvironment, OUTBOX_RETENTION_MAX_BATCHES: "3" }).outboxRetention.maxBatches).toBe(3);

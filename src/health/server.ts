@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
@@ -20,6 +20,7 @@ export function startHealthServer(options: {
   host: string; port: number; store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
   lease: { snapshot(): InstanceLeaseStatus };
   workspaceCache?: { status(): WorkspaceCacheStatus };
+  herdrCircuitBreaker?: { status(): HerdrCircuitBreakerStatus };
   lifecycleEvents?: LifecycleEventDiagnostics;
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
@@ -51,6 +52,9 @@ export function startHealthServer(options: {
       let promptWorker: PromptWorkerDiagnostics | { error: string } | undefined;
       try { promptWorker = options.promptWorker?.snapshot(); }
       catch (error) { promptWorker = { error: boundedError(error) }; }
+      let herdrCircuitBreaker: HerdrCircuitBreakerStatus | { error: string } | undefined;
+      try { herdrCircuitBreaker = options.herdrCircuitBreaker?.status(); }
+      catch (error) { herdrCircuitBreaker = { error: boundedError(error) }; }
       response.statusCode = 200;
       const operationalDegraded = "error" in operational
         || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
@@ -59,11 +63,13 @@ export function startHealthServer(options: {
         || operational.outboxLanes.stalled > 0;
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !operationalDegraded
-          && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker) ? "ok" : "degraded", identity: options.buildIdentity,
+          && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
+          && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed")) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
         ...(outboxDispatcher ? { outboxDispatcher } : {}),
         ...(promptWorker ? { promptWorker } : {}),
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
+        ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}),
         ...(options.herdrSocket ? { herdrSocket: options.herdrSocket.status() } : {}),
         ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));
