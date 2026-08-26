@@ -61,3 +61,26 @@ Tests cover atomic rollback, unique creation, monotonic checkpoints, concurrent
 convergence, startup no-op/current behavior, startup recovery, and unchanged
 Answer Page delivery. Full tests, typecheck, clean commit build, plugin restart,
 identity/readiness checks, and production database invariants gate rollout.
+
+## Rollout evidence
+
+Deployed on 2026-08-26 from commit `0f3e63137b9e690a1643ed3a2f4c9d92baceec76`
+with build ID
+`sha256:f0cbec99136c7ec85cb61fa5698912344488f60b30b45cf9826760d87589c66b`.
+The exact committed tree passed 64 Vitest files and 547 tests, TypeScript
+typecheck, and the production build.
+
+The first production start exposed a legacy JSON compatibility gap: older
+TopicViews did not contain every newly rendered field. `loadTopicView` now
+normalizes the complete persisted shape against `initialTopicView`, with a
+regression test that removes legacy `worktreeName`, `recentProgress`, and version
+fields. After rebuilding and restarting, the service reported `active=true`,
+`readiness=ready`, and matching expected/observed identity.
+
+The production database contained 81 TopicViews. Post-startup checks found zero
+rows missing version fields, zero `deliveredVersion > viewVersion` regressions,
+zero duplicate pending Main Card intents per binding/version, zero stale pending
+Main Card intents at or below the delivered version, and zero undelivered current
+versions without an outbox intent. Startup convergence reduced the transient
+outbox from 42 rows to one newly generated Main Card update while the dispatcher
+continued reporting successful deliveries and no new delivery failure.
