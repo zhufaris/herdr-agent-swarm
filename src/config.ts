@@ -47,7 +47,9 @@ const environmentSchema = z.object({
   INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
   INSTANCE_LEASE_HEARTBEAT_MS: z.coerce.number().int().min(500).default(5_000),
   MAX_QUEUE_DEPTH: z.coerce.number().int().positive().default(20),
-  LARK_MESSAGE_CHUNK_SIZE: z.coerce.number().int().min(500).max(20_000).default(3_500)
+  LARK_MESSAGE_CHUNK_SIZE: z.coerce.number().int().min(500).max(20_000).default(3_500),
+  OUTBOX_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(14),
+  OUTBOX_RETENTION_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(500)
 });
 
 export type BridgeConfig = ReturnType<typeof loadConfig>;
@@ -74,7 +76,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     reconcileIntervalMs: value.RECONCILE_INTERVAL_MS,
     instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
     maxQueueDepth: value.MAX_QUEUE_DEPTH,
-    larkMessageChunkSize: value.LARK_MESSAGE_CHUNK_SIZE
+    larkMessageChunkSize: value.LARK_MESSAGE_CHUNK_SIZE,
+    outboxRetention: { days: value.OUTBOX_RETENTION_DAYS, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE }
   } as const;
 }
 

@@ -30,6 +30,7 @@ import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
+import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
@@ -69,6 +70,7 @@ const inboundWork = new InProcessInboundWorkNotifier();
 const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
+const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize }, logger);
 const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger);
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
@@ -99,11 +101,13 @@ try {
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
-  lease.start(() => shutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; }));
+  const stopRuntime = (signal: string) => { outboxRetention.stop(); return shutdown.shutdown(signal); };
+  lease.start(() => stopRuntime("lease-lost").then(() => { process.exitCode = 1; }));
   channelPublisher.start();
+  outboxRetention.start();
   projector.start();
-  process.once("SIGINT", () => void shutdown.shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown.shutdown("SIGTERM"));
+  process.once("SIGINT", () => { void stopRuntime("SIGINT"); });
+  process.once("SIGTERM", () => { void stopRuntime("SIGTERM"); });
   logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
   herdrEventInbox?.activate();
@@ -111,6 +115,7 @@ try {
   logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");
 } catch (error) {
   logger.fatal({ event: "bridge-startup-failed", err: safeLogError(error), durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");
+  outboxRetention.stop();
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
   else { await Promise.all([herdrEventInbox?.stop(), herdrSocketSubscriber?.stop()]); lease.release(); store.close(); }
   process.exitCode = 1;

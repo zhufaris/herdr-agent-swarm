@@ -756,6 +756,28 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary()).toMatchObject({ deadLettersByClass: { transient: 0, permanent: 0, unknown: 1, legacy: 1 } });
   });
 
+  it("prunes only old delivered or dismissed outbox history in a bounded batch", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["delivered-old", "dismissed-old", "pending-old", "dead-old", "delivered-new"]) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    }
+    store.database.exec(`
+      UPDATE outbound_replies SET state = 'delivered', updated_at = '2026-08-01T00:00:00.000Z' WHERE id = 'delivered-old';
+      UPDATE outbound_replies SET state = 'dismissed', updated_at = '2026-08-01T00:00:00.000Z' WHERE id = 'dismissed-old';
+      UPDATE outbound_replies SET state = 'pending', updated_at = '2026-08-01T00:00:00.000Z' WHERE id = 'pending-old';
+      UPDATE outbound_replies SET state = 'dead_letter', updated_at = '2026-08-01T00:00:00.000Z' WHERE id = 'dead-old';
+      UPDATE outbound_replies SET state = 'delivered', updated_at = '2026-08-25T00:00:00.000Z' WHERE id = 'delivered-new';
+    `);
+
+    expect(store.pruneDeliveredOutboundReplies('2026-08-12T00:00:00.000Z', 1)).toBe(1);
+    expect(store.pruneDeliveredOutboundReplies('2026-08-12T00:00:00.000Z', 10)).toBe(1);
+    expect(store.database.prepare("SELECT id, state FROM outbound_replies ORDER BY id").all()).toEqual([
+      { id: 'dead-old', state: 'dead_letter' },
+      { id: 'delivered-new', state: 'delivered' },
+      { id: 'pending-old', state: 'pending' }
+    ]);
+  });
+
   it("does not reset the automatic recovery budget during a manual retry", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

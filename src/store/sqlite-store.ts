@@ -1182,6 +1182,20 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.changeDeadLetter(id, chatId, actorOpenId, "dismiss");
   }
 
+  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    const result = this.database.prepare(`
+      DELETE FROM outbound_replies
+      WHERE id IN (
+        SELECT id FROM outbound_replies
+        WHERE state IN ('delivered', 'dismissed') AND updated_at < ?
+        ORDER BY updated_at, delivery_order
+        LIMIT ?
+      )
+    `).run(cutoff, limit);
+    return Number(result.changes);
+  }
+
   private changeDeadLetter(id: string, chatId: string, actorOpenId: string, action: "retry" | "dismiss"): DeadLetterActionOutcome {
     this.database.exec("BEGIN IMMEDIATE");
     try {

@@ -157,6 +157,7 @@ export interface BindingStorePort {
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
+  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
   getOperationalSummary(): OperationalSummary;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;
