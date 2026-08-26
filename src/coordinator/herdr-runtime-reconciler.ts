@@ -153,18 +153,23 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     let pendingBindings: Binding[] | null = null;
     let interruptedProvisioningByProjectId: Map<string, Binding> | null = null;
     for (const binding of activeBindings) {
-      const workspacePanes = panesByWorkspace.get(binding.workspaceId);
-      if (!workspacePanes) {
-        const next = this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
-        this.options.logger.warn({ event: "binding-pane-probe-failed", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment, reason: "workspace_unavailable" }, "could not observe binding because its workspace was unavailable");
-        if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", { reason: `Herdr workspace ${binding.workspaceId} remained unavailable` });
-        continue;
+      try {
+        const workspacePanes = panesByWorkspace.get(binding.workspaceId);
+        if (!workspacePanes) {
+          const next = this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
+          this.options.logger.warn({ event: "binding-pane-probe-failed", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment, reason: "workspace_unavailable" }, "could not observe binding because its workspace was unavailable");
+          if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", { reason: `Herdr workspace ${binding.workspaceId} remained unavailable` });
+          continue;
+        }
+        if (binding.paneId && !paneIdsByWorkspace.get(binding.workspaceId)!.has(binding.paneId)) await this.orphanMissingPane(binding);
+      } catch (error) {
+        this.options.logger.warn({ event: "binding-reconciliation-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, phase: "missing-pane", outcome: "deferred" }, "failed to reconcile one binding");
       }
-      if (binding.paneId && !paneIdsByWorkspace.get(binding.workspaceId)!.has(binding.paneId)) await this.orphanMissingPane(binding);
     }
 
     const nextSkippedPaneReasons = requestedWorkspaceIds ? new Map(this.skippedPaneReasons) : new Map<string, string>();
     for (const [requestedWorkspaceId, panes] of panesByWorkspace) for (const snapshotPane of panes) {
+      try {
       let pane = snapshotPane;
       if (pane.workspaceId !== requestedWorkspaceId) {
         this.options.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId, reportedWorkspaceId: pane.workspaceId, paneId: pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
@@ -260,6 +265,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       // authoritative deduplication boundary for bound TraeX panes.
       await this.publishChangedLocalOutput(existing, pane.paneId, existing.generation);
       if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
+      } catch (error) {
+        this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
+      }
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
   }

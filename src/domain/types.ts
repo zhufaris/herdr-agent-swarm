@@ -94,6 +94,13 @@ export interface HerdrCircuitBreakerStatus {
   lastFailure: string | null;
 }
 
+export interface StartupRecoveryDiagnostics {
+  state: "idle" | "running" | "completed" | "degraded";
+  startedAt: string | null;
+  completedAt: string | null;
+  stages: Array<{ name: string; state: "completed" | "failed"; durationMs: number; error?: string }>;
+}
+
 export interface SessionSummary {
   binding: Binding;
   queueDepth: number;

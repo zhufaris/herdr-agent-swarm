@@ -365,18 +365,22 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
-  it("retries the same output revision after a transient terminal read failure", async () => {
+  it("isolates a transient terminal read failure and continues with the next pane", async () => {
     const store = new SqliteBindingStore(":memory:");
-    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 8, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const readOutput = vi.fn().mockRejectedValueOnce(new Error("temporary read failure")).mockResolvedValue("◆ recovered output\n────────");
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
+    for (const index of [1, 2]) {
+      store.createPendingBinding({ id: `b${index}`, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: `topic-${index}`, rootMessageId: `root-${index}`, title: `task-${index}` });
+      store.updateBinding(`b${index}`, { paneId: `w1:p${index}`, traexSessionId: `term-${index}`, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    }
+    const panes = [1, 2].map((index) => ({ paneId: `w1:p${index}`, terminalId: `term-${index}`, workspaceId: "w1", cwd: "/repo", label: `task-${index}`, agentState: "idle" as const, agentKind: "traex", outputRevision: 8, stateChangeSeq: 1, foregroundExecutables: ["traex"] }));
+    let failFirst = true;
+    const readOutput = vi.fn(async (paneId: string) => { if (paneId === "w1:p1" && failFirst) { failFirst = false; throw new Error("temporary read failure"); } return `◆ recovered ${paneId}\n────────`; });
+    const reconciler = fixture(store, { async listPanes() { return panes; }, readOutput } as unknown as HerdrPort);
 
-    await expect(reconciler.reconcile()).rejects.toThrow("temporary read failure");
+    await expect(reconciler.reconcile()).resolves.toBeUndefined();
+    expect(store.getBinding("b2")?.lastOutputFingerprint).not.toBeNull();
     await expect(reconciler.reconcile()).resolves.toBeUndefined();
 
-    expect(readOutput).toHaveBeenCalledTimes(2);
+    expect(readOutput.mock.calls.filter(([paneId]) => paneId === "w1:p1")).toHaveLength(2);
     store.close();
   });
 

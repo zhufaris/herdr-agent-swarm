@@ -8,6 +8,8 @@ import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { MainCardWorkflow } from "./main-card-workflow.js";
 import type { Binding } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
+import type { Logger } from "pino";
+import { safeLogError } from "../runtime/safe-error.js";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 
@@ -23,7 +25,8 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     private readonly outbound: OutboundIntentPort,
     private readonly outboundWork: OutboundWorkNotifier,
     private readonly answerPages?: AnswerPageWorkflowPort,
-    mainCards?: MainCardWorkflowPort
+    mainCards?: MainCardWorkflowPort,
+    private readonly logger?: Pick<Logger, "warn">
   ) {
     this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake());
     this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake());
@@ -36,6 +39,15 @@ export class StartupViewConverger implements StartupViewConvergerPort {
 
   async converge(): Promise<void> {
     for (const binding of this.store.listBindings()) {
+      try {
+        await this.convergeBinding(binding);
+      } catch (error) {
+        this.logger?.warn({ event: "startup-view-binding-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, outcome: "deferred" }, "failed to converge one binding's startup views");
+      }
+    }
+  }
+
+  private async convergeBinding(binding: Binding): Promise<void> {
       const spaceName = this.spaceNameFor(binding);
       const topicView = this.store.loadTopicView(binding.id);
       const currentTopicView = topicView ?? {
@@ -56,7 +68,6 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       const latestRun = runCards.at(-1);
       const finalTopic = latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
       await this.mainCardWorkflow.project(finalTopic);
-    }
   }
 
   private spaceNameFor(binding: Binding): string {

@@ -7,7 +7,7 @@ import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-e
 import type { BridgeEvent } from "../domain/events.js";
 import type { InboundStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
-import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
+import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
@@ -31,6 +31,7 @@ export interface InboundRouterPort {
   stop(context?: ShutdownContext): Promise<void>;
   handleMessage(message: IncomingLarkMessage): Promise<void>;
   handleCardAction(action: IncomingLarkCardAction): Promise<void>;
+  snapshot(): StartupRecoveryDiagnostics;
 }
 
 type InboundRouterStore = InboundStore & PromptAcceptanceStore;
@@ -64,6 +65,7 @@ export class InboundRouter implements InboundRouterPort {
   private stopControlSubscription: (() => void) | null = null;
   private readonly projectsById: Map<string, BridgeConfig["projects"][number]>;
   private readonly uniqueProjectByWorkspace: Map<string, BridgeConfig["projects"][number] | null>;
+  private startupRecovery: StartupRecoveryDiagnostics = { state: "idle", startedAt: null, completedAt: null, stages: [] };
 
   constructor(private readonly options: InboundRouterOptions) {
     this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
@@ -72,27 +74,43 @@ export class InboundRouter implements InboundRouterPort {
 
   async start(): Promise<void> {
     const { config, store, herdr, lark, logger, promptRun, reconciler, modelSelection, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
+    this.startupRecovery = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
-    await startupViews.converge();
+    await this.runStartupStage("view-convergence", () => startupViews.converge());
     const recoveredInbound = store.recoverProcessingInboundMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     await Promise.all([...new Set(config.projects.map((project) => project.workspaceId))].map((workspaceId) => herdr.assertWorkspace(workspaceId)));
-    await reconciler.captureBaselines();
+    await this.runStartupStage("runtime-baselines", () => reconciler.captureBaselines());
     this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
       if (event.kind === "control-ready") void this.options.paneControl.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
     });
-    await Promise.all([paneControl.recover(), this.options.paneClosure.recover()]);
-    await retiredPaneCleanup.recover();
-    await reconciler.reconcile();
+    await this.runStartupStage("pane-controls", () => Promise.all([paneControl.recover(), this.options.paneClosure.recover()]).then(() => undefined));
+    await this.runStartupStage("retired-pane-cleanup", () => retiredPaneCleanup.recover());
+    await this.runStartupStage("runtime-reconciliation", () => reconciler.reconcile());
     promptRun.start();
     reconciler.start(config.reconcileIntervalMs);
     retiredPaneCleanup.start(config.reconcileIntervalMs);
     this.stopInboundSubscription = inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
     await lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
-    await provisioning.recover();
+    await this.runStartupStage("provisioning", () => provisioning.recover());
     await this.drainInboundMessages();
+    this.startupRecovery = { ...this.startupRecovery, state: this.startupRecovery.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
+  }
+
+  snapshot(): StartupRecoveryDiagnostics { return { ...this.startupRecovery, stages: this.startupRecovery.stages.map((stage) => ({ ...stage })) }; }
+
+  private async runStartupStage(stage: string, operation: () => Promise<void>): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await operation();
+      this.startupRecovery.stages.push({ name: stage, state: "completed", durationMs: Date.now() - startedAt });
+      this.options.logger.info({ event: "startup-recovery-stage-completed", stage, durationMs: Date.now() - startedAt, outcome: "completed" }, "startup recovery stage completed");
+    } catch (error) {
+      this.startupRecovery.stages.push({ name: stage, state: "failed", durationMs: Date.now() - startedAt, error: errorMessage(error).slice(0, 500) });
+      this.options.logger.warn({ event: "startup-recovery-stage-failed", stage, durationMs: Date.now() - startedAt, err: safeLogError(error), outcome: "deferred" }, "startup recovery stage failed; periodic convergence will retry durable work");
+    }
   }
 
   async stop(context?: ShutdownContext): Promise<void> {

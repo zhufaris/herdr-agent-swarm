@@ -11,6 +11,22 @@ const config = {
 } as const satisfies Pick<BridgeConfig, "projects">;
 
 describe("StartupViewConverger", () => {
+  it("continues with later bindings when one binding view cannot converge", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    for (const id of ["bad", "good"]) {
+      store.createPendingBinding({ id, projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { paneId: `wH:${id}`, statusMessageId: `root-${id}`, state: "active" });
+    }
+    const mainCards = { project: vi.fn(async (view: { bindingId: string }) => { if (view.bindingId === "bad") throw new Error("bad view"); }) };
+    const logger = { warn: vi.fn() };
+    const converger = new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, undefined, mainCards, logger as never);
+
+    await expect(converger.converge()).resolves.toBeUndefined();
+    expect(mainCards.project).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "startup-view-binding-failed", bindingId: "bad" }), expect.any(String));
+    store.close();
+  });
+
   it("reprojects an existing root card using the durable binding title", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({

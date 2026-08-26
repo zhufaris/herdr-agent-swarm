@@ -9,6 +9,30 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("coordinator concurrency controls", () => {
+  it("continues startup after a recoverable view convergence stage fails", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const originalListBindings = store.listBindings.bind(store);
+    let first = true;
+    store.listBindings = () => { if (first) { first = false; throw new Error("one startup view is unreadable"); } return originalListBindings(); };
+    const lark = quietLark();
+    const start = vi.spyOn(lark, "start");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, emptyHerdr(), lark, bus, publisher, pino({ enabled: false }));
+
+    await expect(coordinator.start()).resolves.toBeUndefined();
+    expect(start).toHaveBeenCalledOnce();
+    expect(coordinator.snapshot()).toMatchObject({
+      state: "degraded", completedAt: expect.any(String),
+      stages: expect.arrayContaining([
+        { name: "view-convergence", state: "failed", error: "one startup view is unreadable", durationMs: expect.any(Number) },
+        { name: "runtime-reconciliation", state: "completed", durationMs: expect.any(Number) }
+      ])
+    });
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("checks configured workspaces concurrently during startup", async () => {
     const release = new Map<string, () => void>();
     const assertWorkspace = vi.fn((workspaceId: string) => new Promise<void>((resolve) => { release.set(workspaceId, resolve); }));

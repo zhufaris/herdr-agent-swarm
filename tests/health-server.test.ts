@@ -162,6 +162,22 @@ describe("health server", () => {
     });
   });
 
+  it("reports and degrades an isolated startup recovery failure", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      startupRecovery: { snapshot: () => ({ state: "degraded", startedAt: "2026-08-26T00:00:00.000Z", completedAt: "2026-08-26T00:00:01.000Z", stages: [{ name: "view-convergence", state: "failed", durationMs: 4, error: "bad view" }] }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", startupRecovery: { state: "degraded", stages: [{ name: "view-convergence", state: "failed", error: "bad view" }] }
+    });
+  });
+
   it("isolates dispatcher diagnostic failure from readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({

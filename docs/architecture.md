@@ -276,6 +276,13 @@ snapshot revision and are retried when a read fails.
 `HerdrRuntimeReconciler` is the sole convergence path for event-driven and periodic
 recovery:
 
+Startup recovery is split into named stages. Local database recovery and
+configured-workspace validation remain fail-fast gates. View repair, terminal
+baselines, control recovery, retired-pane cleanup, runtime reconciliation, and
+provisioning recovery are isolated stages whose failures are logged and exposed
+through `/status`; durable work remains eligible for normal convergence. Within
+view and runtime batches, one binding or pane failure does not stop later items.
+
 1. Read one current Herdr snapshot when available, with a compatibility fallback
    for older Herdr installations.
 2. Restrict the result to configured workspaces.
@@ -409,6 +416,8 @@ active quarantine or stalled head degrades status without changing readiness,
 so one broken Lark target remains visible without stopping unrelated work.
 The same endpoint reports the Herdr circuit state, bounded last failure, recovery
 time, and rejection/failure counters. Open and half-open states degrade status.
+It also reports each startup recovery stage with its bounded duration and error;
+an isolated failed stage degrades status without making the process unavailable.
 
 Shutdown stops ingress, waits for known work, and detaches observers if the
 grace period expires. It does not replay work or delete user state. Logs and
