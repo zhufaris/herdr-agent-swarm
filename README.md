@@ -28,8 +28,10 @@ restart; it remains detached while the bridge observes the existing Herdr turn.
 Prompts that have not started remain queued.
 
 This bridge deliberately omits remote stop and approval actions. High-risk
-approval stays in Herdr. For the reliability model, recovery path, and module
-ownership, see [Architecture](docs/architecture.md).
+approval stays in Herdr. For the reliability model and exact behavioral
+constraints, see [Architecture](docs/architecture.md). For a maintainer-oriented
+map of the domain model, major modules, and end-to-end flows, see
+[Architecture reference](docs/architecture-reference.md).
 
 ## Security model
 

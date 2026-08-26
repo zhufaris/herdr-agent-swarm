@@ -68,25 +68,25 @@ the source of workflow policy.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-The composition root already creates the concrete infrastructure adapters. The
-remaining migration is to inject narrower port interfaces into extracted
-application workflows. Runtime modules do not read plugin paths or
-process-manager state directly.
+The composition root creates the concrete infrastructure adapters and injects
+capability-focused ports into the application workflows. Runtime modules do not
+read plugin paths or process-manager state directly.
 
 ### Current implementation map
 
-The production implementation has not completed the target decomposition. Use
-the following names when tracing the current code and the target names when
-designing the next boundary.
+The production implementation uses the following modules and seams.
 
-| Current implementation | Current responsibility | Target boundary |
+| Module | Responsibility | Seam |
 | --- | --- | --- |
-| `SyncCoordinator` | Inbound routing, prompt acceptance and execution, binding provisioning, operations, and recovery wiring | `InboundRouter` plus separate application workflows |
-| `SessionReconciler` | Herdr snapshot convergence and queue scheduling callbacks | `HerdrRuntimeReconciler` publishing scoped work hints |
-| `BridgeEventBus` | Lifecycle projection events and durable-inbound notifications | Separate `LifecycleEventPublisher` contract; inbound dispatch remains a different contract |
-| `CardProjector` | Run-card and topic-view reduction plus outbound intent creation | `ConversationViewProjector` |
-| `LarkChannelPublisher` | Durable Lark outbox draining, retry, dead letters, and Answer-card-ready callbacks | `LarkOutboxDispatcher` publishing delivery checkpoints to the scheduler |
-| `BindingStorePort` / `SqliteBindingStore` | Broad persistence surface and atomic transitions | Capability-focused ports implemented by one transactional SQLite store |
+| `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
+| `PromptRunWorkflow` | FIFO turn execution, steering observation, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
+| `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
+| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Model state machine and the single stop/steer/model control queue | One queue owner with a narrow model executor seam |
+| `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
+| `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
+| `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
+| `LarkOutboxDispatcher` | Durable Lark delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore`; no direct aggregate mutation |
+| `SqliteBindingStore` | Atomic aggregate, projection, page, outbox, and lease persistence | Capability-focused ports over one transaction owner |
 
 ### Ubiquitous language and target module names
 
@@ -97,14 +97,14 @@ responsibility is a business or application concern.
 | Current or broad term | Target term | Meaning |
 | --- | --- | --- |
 | `Binding` | `TopicPaneBinding` in explanatory and external-facing contexts | The controlled association between a Lark topic or root message and a Herdr pane. `Binding` remains an acceptable short internal domain term. |
-| `SyncCoordinator` | `InboundRouter` after responsibilities are extracted | Routes normalized Lark input to application commands; it is not the long-term owner of execution, reconciliation, or delivery. |
+| `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
 | prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, steering, detached observation, `TurnSupervisor`, and prompt-specific shutdown behavior. |
 | `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
 | workflow wake-up bus | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
 | `BridgeEventBus` | `LifecycleEventPublisher` | Distributes lifecycle outcomes to projections. Before this rename, its inbound-message channel must be split into a separate ingress contract. |
 | `CardProjector` | `ConversationViewProjector` | Reduces lifecycle outcomes into topic and run-card read models, then records delivery intent. |
 | `LarkChannelPublisher` | `LarkOutboxDispatcher` | Drains durable outbox work to Lark with ordering, retries, and dead-letter handling. |
-| `BindingStorePort` | capability-focused stores | Replace the broad port incrementally with `PromptAcceptanceStore`, `PromptRunStore`, `ProjectionStore`, `OutboxStore`, `BindingProvisioningStore`, `OperationsStore`, and `LeaseStore`. |
+| `BindingStorePort` | capability-focused stores | `PromptAcceptanceStore`, `PromptRunStore`, `ProjectionStore`, `OutboxStore`, `BindingProvisioningStore`, `RuntimeReconciliationStore`, `OperationsStore`, and `LeaseStore` expose consumer-specific capabilities implemented by one transactional SQLite store. |
 
 `RunCardView`, `TopicViewState`, and Answer-page state are projections or read
 models. They are not domain entities alongside `Binding` and `Prompt`, nor are
@@ -140,7 +140,7 @@ be treated as two sources of persistent state.
 
 | Role | Meaning | Consumer behavior | Reliability boundary |
 | --- | --- | --- | --- |
-| Domain lifecycle event | A description of a business outcome, such as `PromptQueued`, `TurnStarted`, `TurnCompleted`, or a binding state change. | Project deterministic run-card and topic views, then record any outbound intent. | Currently process-local for most paths. Durable aggregate state is authoritative, but not every missed projection can yet be reconstructed automatically. |
+| Domain lifecycle event | A description of a business outcome, such as `PromptQueued`, `TurnStarted`, `TurnCompleted`, or a binding state change. | Project deterministic run-card and topic views, then record any outbound intent. | Process-local notification; durable terminal RunCard and TopicView state is rebuilt into missing delivery intent during startup convergence. |
 | Workflow wake-up | A bounded hint that a scoped binding or detached prompt may now have executable work. | Reload SQLite facts and atomically claim eligible work. | Best effort only: duplicate, reordered, or lost hints are safe because startup and periodic reconciliation scan durable work. |
 
 A wake-up is not a domain event and does not carry prompt text or authoritative
@@ -162,14 +162,11 @@ needs reliable cross-process event consumption, it requires a separately
 designed durable dispatcher or transactional event outbox; an in-memory bus
 cannot provide that guarantee.
 
-Lifecycle projection has a narrower guarantee today. Some binding transitions
-persist the transition, lifecycle event, topic view, and outbox intent in one
-transaction. Most prompt lifecycle paths update durable prompt or binding state
-and then publish an in-process event that updates `RunCardView`, `TopicViewState`,
-and the outbox. A crash between those steps can leave a stale projection even
-though the underlying prompt state is correct. Until projection rebuilding or a
-transactional lifecycle-event path covers every transition, do not treat
-`lifecycle_events` as a complete replay log.
+Prompt terminal paths update Prompt, Binding, RunCard, and TopicView state in one
+SQLite transaction. Startup convergence compares durable view and delivery
+versions and recreates missing Answer stream content/finalization plus main-card
+updates. Intermediate lifecycle notifications remain process-local, so
+`lifecycle_events` is not a complete event-sourcing log.
 
 The target contract is that every user-visible lifecycle transition is either
 projected transactionally with its durable state change or reconstructible from
@@ -280,11 +277,10 @@ recovery:
    the `unknown` fallback.
 5. Update binding state, publish lifecycle events, and wake eligible queues.
 
-The event-driven reconciliation request is scoped to affected workspaces, but
-the current implementation still performs a conservative reschedule for every
-active binding at the end of each reconciliation pass. Eligible-only wake-up
-through `PromptWorkScheduler` remains a target boundary, not a completed
-implementation detail.
+Event-driven reconciliation is scoped to affected workspaces. It emits targeted
+`binding-runtime-changed` and `prompt-ready` hints only when observed state and
+durable queue eligibility require work; periodic durable scans remain the safety
+net for lost hints.
 
 Periodic reconciliation remains required. A missed Socket event or UDP datagram
 may delay an update, but must not change the final converged state.
@@ -313,9 +309,11 @@ continuation card with a stable page idempotency key, and makes that page active
 Frozen pages are never patched again. Markdown fences are closed and reopened
 only in the render copy; the persisted Answer remains canonical source text.
 
-The current implementation keeps the active page in the run-card projection and
-uses durable outbox records as the history of creation and delivery. It does not
-yet have a separate `answer_pages` table.
+The `answer_pages` table records each page's message/CardKit/element identity,
+source offset, sequence, and `creating`, `active`, `frozen`, or `finished` state.
+Target validation uses the active page. The current-page fields remain mirrored
+in `RunCardView` during the compatibility migration; they are a read-model cache,
+not the only source of page identity.
 
 ## Lark delivery
 
@@ -372,21 +370,6 @@ These are concrete correctness or robustness gaps in the current implementation,
 distinct from the architectural evolution priorities above. They do not require a
 boundary change to fix.
 
-- **Event bus listener isolation**: `BridgeEventBus.publish` uses
-  `Promise.all` over listeners. A single listener rejection rejects the entire
-  publish call. This is safe with a single subscriber today, but additional
-  subscribers (metrics, audit) need per-listener error isolation before they can
-  be added safely.
-- **Synthetic local-detection prompt IDs**: when `HerdrRuntimeReconciler` detects a
-  locally-completed turn through output diffing, it synthesizes a
-  `` `local:${fingerprint}` `` prompt ID that does not correspond to a real
-  `prompt_jobs` row. Downstream code that loads prompts or run cards by that ID
-  must treat it as a terminal-output-only observation, not a prompt lifecycle
-  event.
-- **Pane ID to workspace ID derivation**: `WorkspaceSnapshotCache` derives
-  `workspaceId` with `paneId.split(":", 1)[0]`, assuming the composite
-  `workspaceId:paneId` format. The `HerdrPort` should expose workspace identity
-  as a structured field instead of requiring callers to parse a composite string.
 - **Terminal heuristics**: agent state detection relies on regex matching against
   terminal output patterns and poll-interval magic numbers. Reconciliation
   self-heals within one cycle, but TraeX UI changes can cause transient false
@@ -407,25 +390,14 @@ boundary change to fix.
 
 ## Current evolution priorities
 
-1. Model Answer pages explicitly when page-level recovery, audit, or operations
-   need more than the active page and outbox history.
-2. Make every user-visible lifecycle projection transactional or reconstructible
-   from durable aggregate state; do not rely on `BridgeEventBus` as a replay log.
-3. Extract prompt execution first, then binding provisioning and operations,
-   leaving the coordinator as inbound routing and application composition.
-4. Introduce `PromptWorkScheduler` as a best-effort wake-up path while retaining
-   startup and periodic durable scans as the correctness mechanism.
-5. Narrow the store dependency into capability-focused interfaces so workflows
-   do not depend on the entire SQLite surface.
-6. Add operational metrics (prompt latency, queue depth, dead-letter count,
+1. Add operational metrics (prompt latency, queue depth, dead-letter count,
    reconciliation duration, delivery latency) and lane-level backlog
    diagnostics; cross-lane concurrency with strict in-lane ordering is already
    implemented.
-7. Add per-listener error isolation to the lifecycle event publisher before
-   attaching additional subscribers.
-8. Replace synthetic `local:` prompt IDs with a dedicated observation event type
-   or a proper synthetic prompt record so downstream projections do not
-   encounter IDs with no backing row.
+2. Move remaining polling intervals and size limits into validated configuration
+   as operator tuning needs arise.
+3. Coordinate shutdown through one shared deadline or `AbortSignal`.
+4. Add circuit protection around repeated Herdr transport failures.
 
 ## Related documents
 
