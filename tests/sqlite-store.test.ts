@@ -502,6 +502,30 @@ describe("SQLite store", () => {
     expect(after.schema_version).toBe(before.schema_version);
   });
 
+  it("marks legacy terminal Answer pages finished before startup convergence", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-finish-migration-"));
+    const databasePath = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(databasePath);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    const [create] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(create!.id, "answer-1", "card-1");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "done", answerSegments: ["done"] });
+    store.enqueueOutboundReply({ id: "legacy-finish", idempotencyKey: "legacy-finish", bindingId: "b1", promptId: "p1", viewVersion: 7, cardRole: "answer", rootMessageId: "card-1", kind: "stream_finish", payload: JSON.stringify({ summary: "Completed", sequence: 7 }) });
+    store.markOutboundReplyDelivered("legacy-finish", "card-1");
+    store.database.prepare("UPDATE answer_pages SET state = 'active' WHERE prompt_id = 'p1' AND page_index = 0").run();
+    store.enqueueOutboundReply({ id: "late-content", idempotencyKey: "late-content", bindingId: "b1", promptId: "p1", viewVersion: 8, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "done", sequence: 8 }) });
+    store.database.prepare("DELETE FROM schema_migrations WHERE version = 3").run();
+    store.close();
+
+    store = new SqliteBindingStore(databasePath);
+
+    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "finished", sequence: 7 })]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'late-content'").get()).toEqual({ state: "dismissed" });
+  });
+
   it("does not let a late continuation delivery roll the active page backward", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

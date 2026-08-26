@@ -1553,13 +1553,60 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureRunCardsView();
     this.ensureQueryIndexes();
     const answerTargetMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
-    if (answerTargetMigration) return;
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.canonicalizeLegacyAnswerTargets(now());
-      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (2)").run();
-      this.database.exec("COMMIT");
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    if (!answerTargetMigration) {
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.canonicalizeLegacyAnswerTargets(now());
+        this.database.prepare("INSERT INTO schema_migrations(version) VALUES (2)").run();
+        this.database.exec("COMMIT");
+      } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    }
+    const answerFinishMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 3").get();
+    if (!answerFinishMigration) {
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.finishLegacyDeliveredAnswerPages(now());
+        this.database.prepare("INSERT INTO schema_migrations(version) VALUES (3)").run();
+        this.database.exec("COMMIT");
+      } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    }
+  }
+
+  private finishLegacyDeliveredAnswerPages(timestamp: string): void {
+    this.database.prepare(`
+      UPDATE answer_pages AS page
+      SET state = 'finished',
+          sequence = MAX(sequence, COALESCE((
+            SELECT MAX(COALESCE(reply.view_version, json_extract(reply.payload, '$.sequence'), 0))
+            FROM outbound_replies AS reply
+            WHERE reply.prompt_id = page.prompt_id AND reply.card_role = 'answer'
+              AND reply.kind = 'stream_finish' AND reply.state = 'delivered'
+              AND reply.root_message_id = page.card_id
+              AND json_extract(reply.payload, '$.pageIndex') IS NULL
+              AND json_extract(reply.payload, '$.summary') IN ('Completed', 'Failed')
+          ), sequence)),
+          updated_at = ?
+      WHERE page.state = 'active'
+        AND EXISTS (SELECT 1 FROM run_cards AS card WHERE card.prompt_id = page.prompt_id AND card.phase IN ('completed', 'failed'))
+        AND EXISTS (
+          SELECT 1 FROM outbound_replies AS reply
+          WHERE reply.prompt_id = page.prompt_id AND reply.card_role = 'answer'
+            AND reply.kind = 'stream_finish' AND reply.state = 'delivered'
+            AND reply.root_message_id = page.card_id
+            AND json_extract(reply.payload, '$.pageIndex') IS NULL
+            AND json_extract(reply.payload, '$.summary') IN ('Completed', 'Failed')
+        )
+    `).run(timestamp);
+    this.database.prepare(`
+      UPDATE outbound_replies
+      SET state = 'dismissed', error = 'Answer stream targets a legacy page that was already finished', updated_at = ?
+      WHERE state = 'pending' AND kind IN ('stream_content', 'stream_finish')
+        AND EXISTS (
+          SELECT 1 FROM answer_pages AS page
+          WHERE page.prompt_id = outbound_replies.prompt_id AND page.state = 'finished'
+            AND page.card_id = outbound_replies.root_message_id
+        )
+    `).run(timestamp);
   }
 
   private canonicalizeLegacyAnswerTargets(timestamp: string): void {
