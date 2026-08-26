@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented. Final migration-cleanup rollout pending on 2026-08-26.
+Implemented and deployed on 2026-08-26.
 
 ## Problem
 
@@ -58,11 +58,15 @@ implementation plan.
 - Design commit: `095f202`
 - Implementation commit: `fc25a27`
 - Legacy migration commit: `f4c4ac1`
-- Focused Answer Page suite: 123 tests passed.
-- Full suite: 533 tests passed.
+- Audit completion commit: `91cf42a`
+- Dead-letter migration commit: `e3bd14f`
+- Focused Answer Page suite: 124 tests passed.
+- Full suite: 534 tests passed.
 - Typecheck and production build passed.
-- The previously deployed migration build reported `ready` with matching expected
-  and observed build identity. Production invariant checks found no duplicate
-  active pages, no duplicate creating pages, no pending writes to immutable
-  pages, and no legacy terminal page left active. The final cleanup that also
-  dismisses superseded dead-letter rows is awaiting rollout.
+- Deployed build `sha256:8d0055071ae2a223d94786eb1bf1c4020c827c2aa329a963fe2e0c05644e61ad`
+  reported `ready` with matching expected and observed identity at commit
+  `e3bd14f`. Production migration versions 1 through 4 are present. Invariant
+  checks found no duplicate active or creating pages, no pending stream writes
+  to immutable pages, no legacy terminal page left active, and no superseded
+  pending or dead-letter stream writes. Twelve historical rows were retained as
+  `dismissed` audit history.

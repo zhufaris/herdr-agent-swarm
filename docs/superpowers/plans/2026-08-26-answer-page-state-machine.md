@@ -132,4 +132,4 @@
 - [x] Run `npm run build`.
 - [x] Inspect `git diff --check`, `git diff --stat`, and the exact changed-file list before committing.
 - [x] Commit only Answer Page state-machine files, preserving unrelated worktree changes.
-- [ ] Rebuild, restart with `herdr plugin action invoke restart --plugin herdr-lark-bridge`, then verify readiness, build identity, bounded plugin logs, and production database invariants.
+- [x] Rebuild, restart with `herdr plugin action invoke restart --plugin herdr-lark-bridge`, then verify readiness, build identity, bounded plugin logs, and production database invariants.
