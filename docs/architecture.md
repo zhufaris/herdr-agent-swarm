@@ -302,18 +302,25 @@ transient terminal view is replaced with the new safe screen (`replace-all`),
 which prevents an entire redrawn terminal from being appended twice. Final
 TraeX answers then converge the card to the completed result.
 
-Each run-card stores the active Answer page: its Lark message ID, CardKit ID,
-element ID, source start offset, page index, and sequence. When content reaches
-the safe CardKit size, the bridge finishes the active page, creates a
-continuation card with a stable page idempotency key, and makes that page active.
-Frozen pages are never patched again. Markdown fences are closed and reopened
-only in the render copy; the persisted Answer remains canonical source text.
+`AnswerPageWorkflow` is the single live and startup convergence path for Answer
+delivery. It uses a deterministic planner to compare the canonical RunCard answer
+with the authoritative active page, then asks SQLite to reserve the next content,
+finish, or continuation transition. Page sequence advancement, the compatibility
+RunCard mirror, and the corresponding outbox intent are committed atomically.
+
+Each page stores its Lark message ID, CardKit ID, element ID, source start offset,
+page index, and reserved sequence high-water mark. When content reaches the safe
+CardKit size, the workflow finishes the active page, creates a continuation card
+with a stable page idempotency key, and makes that page active after Lark identity
+checkpointing. Frozen pages are never patched again. Markdown fences are closed
+and reopened only in the render copy; the persisted Answer remains canonical
+source text.
 
 The `answer_pages` table records each page's message/CardKit/element identity,
 source offset, sequence, and `creating`, `active`, `frozen`, or `finished` state.
-Target validation uses the active page. The current-page fields remain mirrored
-in `RunCardView` during the compatibility migration; they are a read-model cache,
-not the only source of page identity.
+It is the lifecycle authority and target validation uses its active page. The
+current-page fields remain mirrored in `RunCardView` during the compatibility
+migration; they are a read-model cache, not a second transition authority.
 
 ## Lark delivery
 

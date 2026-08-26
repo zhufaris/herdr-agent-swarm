@@ -19,7 +19,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private safetyTimer: ReturnType<typeof setInterval> | null = null;
   private scanRequested = false;
   private forceRequested = false;
-  private readonly streamCardCreatedListeners = new Set<(promptId: string, viewVersion: number) => void>();
+  private readonly answerCheckpointListeners = new Set<(promptId: string, viewVersion: number) => void>();
   private scheduler: PromptWorkScheduler | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
@@ -45,9 +45,9 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     return this.unsubscribe;
   }
 
-  onStreamCardCreated(listener: (promptId: string, viewVersion: number) => void): () => void {
-    this.streamCardCreatedListeners.add(listener);
-    return () => this.streamCardCreatedListeners.delete(listener);
+  onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void {
+    this.answerCheckpointListeners.add(listener);
+    return () => this.answerCheckpointListeners.delete(listener);
   }
 
   connectPromptScheduler(scheduler: PromptWorkScheduler): void { this.scheduler = scheduler; }
@@ -186,7 +186,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           else this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
         if (reply.promptId && decoded.stream && decoded.stream.pageIndex > 0) {
-          for (const listener of this.streamCardCreatedListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
+          for (const listener of this.answerCheckpointListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
         }
       } else if (reply.kind === "stream_content") {
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
@@ -194,12 +194,14 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
         await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+        if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_finish") {
         if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
         const payload = JSON.parse(reply.payload) as { summary: string; sequence: number };
         assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+        if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
       } else {
         const sent = reply.kind === "text"
           ? await this.lark.replyText(reply.rootMessageId, reply.payload, reply.idempotencyKey)

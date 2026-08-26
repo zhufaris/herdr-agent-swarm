@@ -31,6 +31,7 @@ import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
 import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
+import { AnswerPageWorkflow } from "./coordinator/answer-page-workflow.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
@@ -70,8 +71,9 @@ const inboundWork = new InProcessInboundWorkNotifier();
 const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
+const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
 const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
-const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger);
+const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages);
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
@@ -87,7 +89,7 @@ const reconciler = new HerdrRuntimeReconciler({
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
   isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId)
 });
-const startupViews = new StartupViewConverger(config, store, outbound, outboundWork);
+const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages);
 const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT

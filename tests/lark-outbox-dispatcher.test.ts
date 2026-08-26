@@ -91,7 +91,7 @@ describe("Lark channel publisher", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
-    store.saveRunCard({ ...store.loadRunCard("p1")!, answerMessageId: "answer-2", answerCardId: "cardkit-2", answerElementId: answerElementId("p1", 1), answerPageIndex: 1, answerPageStart: 3_500 });
+    store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'; INSERT INTO answer_pages VALUES ('p1', 1, 'answer-2', 'cardkit-2', 'answer_content_p1_1', 3500, 0, 'active', 'now', 'now'); UPDATE run_cards SET answer_message_id = 'answer-2', answer_card_id = 'cardkit-2', answer_element_id = 'answer_content_p1_1', answer_page_index = 1, answer_page_start = 3500 WHERE prompt_id = 'p1';");
     store.enqueueOutboundReply({ id: "stale-content", idempotencyKey: "stream:p1:cardkit-1:2", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ elementId: answerElementId("p1", 0), content: "stale", sequence: 2 }) });
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream }), pino({ enabled: false }));
 
@@ -133,7 +133,7 @@ describe("Lark channel publisher", () => {
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: created }), pino({ enabled: false }));
     const resumed = vi.fn();
-    publisher.onStreamCardCreated(resumed);
+    publisher.onAnswerCheckpoint(resumed);
     store.enqueueOutboundReply({
       id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 7, cardRole: "answer",
       rootMessageId: "root-1", kind: "stream_card_create",

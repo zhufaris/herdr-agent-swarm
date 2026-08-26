@@ -186,7 +186,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const pendingWrites: string[] = [];
     const publisher = {
-      onStreamCardCreated: () => () => {},
+      onAnswerCheckpoint: () => () => {}, requestScan: async () => {},
       async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {},
       async enqueueStreamCardCreate() { pendingWrites.push("stream_card_create"); },
       async enqueueStreamFinish() { pendingWrites.push("stream_finish"); },

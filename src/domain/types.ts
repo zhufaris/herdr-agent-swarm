@@ -231,6 +231,14 @@ export interface AnswerPage {
   updatedAt: string;
 }
 
+export interface AnswerPageDeliveryFacts {
+  latestContent: { content: string; sequence: number; state: OutboundReplyState } | null;
+  finishPending: boolean;
+  continuationPending: boolean;
+}
+
+export type AnswerPageReservationOutcome = "reserved" | "waiting" | "stale";
+
 export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;

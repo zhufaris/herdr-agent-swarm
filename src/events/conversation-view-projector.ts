@@ -1,14 +1,15 @@
 import type { Logger } from "pino";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
+import type { AnswerPageStore, OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
+import type { AnswerPageWorkflowPort } from "../coordinator/answer-page-workflow.js";
+import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
-import { answerElementId } from "../domain/run-card-view.js";
+import { answerStreamContent } from "../runtime/answer-stream.js";
 
 const ANSWER_STREAM_INTERVAL_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 400;
@@ -25,59 +26,25 @@ export class ConversationViewProjector {
   private readonly primaryScheduler: CardUpdateScheduler;
   private readonly answerContentLengths = new Map<string, number>();
   private readonly primaryVersions = new Map<string, number>();
+  private readonly answerPages: AnswerPageWorkflowPort;
 
   constructor(
     private readonly bus: LifecycleEventSubscriber,
     private readonly store: ProjectionStore,
     private readonly channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    answerPages?: AnswerPageWorkflowPort
   ) {
+    this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, logger);
     this.scheduler = new CardUpdateScheduler(async (promptId) => {
-      let view = this.store.loadRunCard(promptId);
-      if (!view?.answerMessageId) return;
-      if (view.answerCardId) {
-        // A continuation is a durable hand-off. Until Lark has created that
-        // card and checkpointed the new page, do not enqueue more writes for
-        // the old card: those writes would be stale as soon as the checkpoint
-        // advances and could block the prompt's ordered outbox lane.
-        if (this.store.hasPendingAnswerContinuation(promptId, view.answerPageIndex + 1)) return;
-        const fullContent = answerStreamContent(view);
-        while (view.answerCardId) {
-          const { page, nextPageStart } = renderAnswerStreamPage(fullContent, view.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
-          // CardKit sequences are scoped to one streamed element. A continuation
-          // gets a new element and its durable answerSequence is reset to zero
-          // when its card creation is checkpointed. Do not carry viewVersion
-          // across that boundary.
-          const sequence = view.answerSequence + 1;
-          this.store.saveRunCard({ ...view, answerSequence: sequence });
-          await this.channelPublisher.enqueueStreamContent(view.bindingId, promptId, view.answerCardId, view.answerElementId, page, sequence);
-          this.answerContentLengths.set(promptId, fullContent.length);
-          if (nextPageStart === null) {
-            if (["completed", "failed"].includes(view.phase)) await this.channelPublisher.enqueueStreamFinish(
-              view.bindingId, promptId, view.answerCardId, view.phase === "completed" ? "Completed" : "Failed", sequence + 1
-            );
-            break;
-          }
-
-          await this.channelPublisher.enqueueStreamFinish(view.bindingId, promptId, view.answerCardId, `回答将在第 ${view.answerPageIndex + 2} 页继续`, sequence + 1);
-          const pageStart = nextPageStart;
-          const pageIndex = view.answerPageIndex + 1;
-          const nextElementId = answerElementId(promptId, pageIndex);
-          const nextPage = renderAnswerStreamPage(fullContent, pageStart, ANSWER_STREAM_PAGE_LIMIT).page;
-          const nextView = { ...view, answerElementId: nextElementId };
-          const binding = this.store.getBinding(view.bindingId);
-          if (!binding?.rootMessageId) return;
-          await this.channelPublisher.enqueueStreamCardCreate({
-            bindingId: view.bindingId, promptId, rootMessageId: binding.rootMessageId, pageIndex, pageStart, elementId: nextElementId, viewVersion: view.viewVersion,
-            card: renderRequestAnswerCard(nextView, { pageNumber: pageIndex + 1, initialContent: nextPage, streaming: true })
-          });
-          view = this.store.loadRunCard(promptId);
-          if (!view?.answerCardId || view.answerPageIndex !== pageIndex) return;
-        }
+      const view = this.store.loadRunCard(promptId);
+      if (!view?.answerCardId && view?.answerMessageId) {
+        await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
         return;
       }
-      if (view.larkMessageId) await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
+      await this.answerPages.converge(promptId);
+      if (view) this.answerContentLengths.set(promptId, answerStreamContent(view).length);
     }, ANSWER_STREAM_INTERVAL_MS);
     this.primaryScheduler = new CardUpdateScheduler(async (bindingId) => {
       const view = this.views.get(bindingId) ?? this.store.loadTopicView(bindingId);
@@ -91,9 +58,10 @@ export class ConversationViewProjector {
 
   start(): () => void {
     this.unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
-    this.unsubscribeStreamCardCreated = this.checkpoints.onStreamCardCreated((promptId, viewVersion) => {
-      const view = this.store.loadRunCard(promptId);
-      this.scheduler.schedule(promptId, Math.max(viewVersion, view?.viewVersion ?? 0), true);
+    this.unsubscribeStreamCardCreated = this.checkpoints.onAnswerCheckpoint((promptId) => {
+      void this.answerPages.converge(promptId).catch((error) => {
+        this.logger.error({ event: "answer-page-checkpoint-convergence-failed", err: safeLogError(error), promptId, outcome: "failed" }, "failed to converge Answer page after delivery checkpoint");
+      });
     });
     return () => { this.unsubscribe?.(); this.unsubscribeStreamCardCreated?.(); };
   }

@@ -61,16 +61,14 @@ describe("StartupViewConverger", () => {
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "durable answer", answerSegments: ["durable answer"], viewVersion: 3, answerDeliveredVersion: 1 });
-    const enqueueStreamContent = vi.fn<OutboundIntentPort["enqueueStreamContent"]>().mockResolvedValue(undefined);
-    const enqueueStreamFinish = vi.fn<OutboundIntentPort["enqueueStreamFinish"]>().mockResolvedValue(undefined);
-    const outbound = { enqueueCardUpdate: vi.fn(), enqueueStreamContent, enqueueStreamFinish } as unknown as OutboundIntentPort;
+    const outbound = { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort;
 
     await new StartupViewConverger(config, store, outbound, { wake: () => {}, subscribe: () => () => {} }).converge();
 
-    expect(enqueueStreamContent).toHaveBeenCalledWith("b1", "p1", "answer-card", expect.any(String), expect.stringContaining("durable answer"), expect.any(Number));
-    const sequence = enqueueStreamContent.mock.calls[0]![5];
-    expect(sequence).toBe(1);
-    expect(enqueueStreamFinish).toHaveBeenCalledWith("b1", "p1", "answer-card", "Completed", sequence + 1);
+    const pending = store.listPendingOutboundReplies();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ kind: "stream_content", promptId: "p1", rootMessageId: "answer-card", viewVersion: 1 });
+    expect(JSON.parse(pending[0]!.payload)).toMatchObject({ content: expect.stringContaining("durable answer"), sequence: 1, pageIndex: 0 });
     store.close();
   });
 });

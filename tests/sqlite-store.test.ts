@@ -428,7 +428,9 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
     const legacyId = "answer_content_legacy_identifier_that_is_too_long_1";
-    store.saveRunCard({ ...store.loadRunCard("p1")!, answerElementId: legacyId, answerPageIndex: 1 });
+    store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'");
+    store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 1, NULL, NULL, ?, 20000, 0, 'creating', 'now', 'now')").run(legacyId);
+    store.database.prepare("UPDATE run_cards SET answer_element_id = ?, answer_page_index = 1, answer_page_start = 20000 WHERE prompt_id = 'p1'").run(legacyId);
     store.enqueueOutboundReply({ id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "m1", kind: "stream_card_create", payload: JSON.stringify({ card: { body: { elements: [{ element_id: legacyId }] } }, stream: { pageIndex: 1, pageStart: 20_000, elementId: legacyId } }) });
 
     expect(store.recoverLegacyElementIdDeadLetters()).toBe(0);
@@ -507,14 +509,14 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
     store.enqueueOutboundReply({ id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "m1", kind: "stream_card_create", payload: JSON.stringify({ card: {}, stream: { pageIndex: 1, pageStart: 20_000, elementId: answerElementId("p1", 1) } }) });
-    store.saveRunCard({ ...store.loadRunCard("p1")!, answerMessageId: "answer-3", answerCardId: "card-3", answerElementId: answerElementId("p1", 2), answerPageIndex: 2, answerPageStart: 40_000 });
+    store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'; INSERT INTO answer_pages VALUES ('p1', 2, 'answer-3', 'card-3', 'answer_content_p1_2', 40000, 0, 'active', 'now', 'now'); UPDATE run_cards SET answer_message_id = 'answer-3', answer_card_id = 'card-3', answer_element_id = 'answer_content_p1_2', answer_page_index = 2, answer_page_start = 40000 WHERE prompt_id = 'p1';");
 
     store.markOutboundReplyDelivered("page-2", "late-answer-2", "late-card-2");
 
     expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "answer-3", answerCardId: "card-3", answerElementId: answerElementId("p1", 2), answerPageIndex: 2, answerPageStart: 40_000 });
     expect(store.listAnswerPages("p1")).toEqual([
       expect.objectContaining({ pageIndex: 0, state: "frozen", cardId: "card-1" }),
-      expect.objectContaining({ pageIndex: 1, state: "creating", cardId: null }),
+      expect.objectContaining({ pageIndex: 1, state: "frozen", cardId: null }),
       expect.objectContaining({ pageIndex: 2, state: "active", cardId: "card-3" })
     ]);
     expect(store.listPendingOutboundReplies()).toEqual([]);
