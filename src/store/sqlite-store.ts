@@ -7,7 +7,7 @@ import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome,
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
-import { mirrorRunCardToTopic } from "../domain/topic-view.js";
+import { initialTopicView, mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { BridgeEvent } from "../domain/events.js";
 import { transitionSession, type AttachmentState, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
@@ -1290,8 +1290,9 @@ export class SqliteBindingStore implements BindingStorePort {
   loadTopicView(bindingId: string): TopicViewState | null {
     const row = this.database.prepare("SELECT state_json FROM topic_views WHERE binding_id = ?").get(bindingId) as { state_json: string } | undefined;
     if (!row) return null;
-    const view = JSON.parse(row.state_json) as TopicViewState;
-    return { ...view, viewVersion: Number.isInteger(view.viewVersion) ? view.viewVersion : 1, deliveredVersion: Number.isInteger(view.deliveredVersion) ? view.deliveredVersion : 0 };
+    const stored = JSON.parse(row.state_json) as Partial<TopicViewState>;
+    const view = { ...initialTopicView(bindingId), ...stored, bindingId };
+    return { ...view, recentProgress: Array.isArray(view.recentProgress) ? view.recentProgress : [], viewVersion: Number.isInteger(stored.viewVersion) ? stored.viewVersion! : 1, deliveredVersion: Number.isInteger(stored.deliveredVersion) ? stored.deliveredVersion! : 0 };
   }
 
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome {
