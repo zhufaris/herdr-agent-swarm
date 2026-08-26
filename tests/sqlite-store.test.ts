@@ -133,6 +133,7 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1", "p2"]);
+    expect(store.listQueuedTurnRunCards("b1")).toEqual([]);
     const inbound = { eventId: "e1", messageId: "m2", chatId: "c1", topicId: "t1", rootMessageId: "m1", actorOpenId: "u1", text: "first", mentionsBot: false, isRootMessage: false };
     expect(store.recordInboundMessage(inbound)).toBe(true);
     expect(store.recordInboundMessage(inbound)).toBe(false);
@@ -152,6 +153,18 @@ describe("SQLite store", () => {
     const view = { ...initialTopicView("b1"), title: "Task" };
     store.saveTopicView(view);
     expect(store.loadTopicView("b1")).toEqual(view);
+  });
+
+  it("loads queued ordinary-turn cards in durable FIFO order", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const first = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "first", workspaceId: "w1", paneId: "w1:p1", requestText: "first", queuePosition: 1, occurredAt: "2026-01-01T00:00:00.000Z" });
+    const second = createQueuedRunCard({ promptId: "p2", bindingId: "b1", title: "second", workspaceId: "w1", paneId: "w1:p1", requestText: "second", queuePosition: 2, occurredAt: "2026-01-01T00:00:01.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "first" }, view: first, rootMessageId: "root", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "p2", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "second" }, view: second, rootMessageId: "root", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "p1" }, view: { ...second, promptId: "s1" }, rootMessageId: "root", answerCard: {} });
+
+    expect(store.listQueuedTurnRunCards("b1").map((view) => view.promptId)).toEqual(["p1", "p2"]);
   });
 
   it("queries bindings and run cards by their exact reconciliation scope", () => {
@@ -214,6 +227,29 @@ describe("SQLite store", () => {
       traexSessionId: "term-1", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
       agentSessionKind: "id", agentSessionValue: "conversation-1"
     });
+  });
+
+  it("atomically applies an authoritative pane observation behind binding identity fences", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "traex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-1", state: "active", lifecycle: "active", attachment: "degraded", degradationCount: 1
+    });
+
+    const applied = store.applyRuntimeObservation({
+      bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1,
+      pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" } }
+    });
+
+    expect(applied).toMatchObject({ outcome: "applied", terminalIdentityRefreshed: true, nativeSessionMismatch: false });
+    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working", attachment: "attached", degradationCount: 0, agentSessionValue: "session-1" });
+
+    expect(store.applyRuntimeObservation({
+      bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 0,
+      pane: { paneId: "w1:p1", terminalId: "term-3", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }
+    })).toEqual({ outcome: "stale_binding" });
+    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
   });
 
   it("cancels queued turns and steering when a session archives", () => {
@@ -344,6 +380,9 @@ describe("SQLite store", () => {
       larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
     });
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({
+      promptId: "p1", pageIndex: 0, messageId: "answer-card-m1", cardId: "cardkit-1", elementId: answerElementId("p1", 0), sourceStart: 0, sequence: 0, state: "active"
+    })]);
     store.markPromptDispatched("p1");
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false });
     expect(store.loadRunCard("p1")).toMatchObject({
@@ -473,6 +512,11 @@ describe("SQLite store", () => {
     store.markOutboundReplyDelivered("page-2", "late-answer-2", "late-card-2");
 
     expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "answer-3", answerCardId: "card-3", answerElementId: answerElementId("p1", 2), answerPageIndex: 2, answerPageStart: 40_000 });
+    expect(store.listAnswerPages("p1")).toEqual([
+      expect.objectContaining({ pageIndex: 0, state: "frozen", cardId: "card-1" }),
+      expect.objectContaining({ pageIndex: 1, state: "creating", cardId: null }),
+      expect.objectContaining({ pageIndex: 2, state: "active", cardId: "card-3" })
+    ]);
     expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
@@ -871,5 +915,83 @@ describe("SQLite store", () => {
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
     expect(store.claimNextPaneControlOperation("b1")).toMatchObject({ id: "model-1", state: "running" });
     store.finishPaneControlOperation("model-1", "confirmed");
+  });
+
+  it("does not let a late pane-control completion overwrite a terminal outcome", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.acceptPaneControlOperation({ id: "model-1", idempotencyKey: "message:model", bindingId: "b1", paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "u1", sourceMessageId: "message" });
+    store.claimPaneControlOperation("model-1");
+    store.finishPaneControlOperation("model-1", "confirmed", "confirmed first");
+
+    store.finishPaneControlOperation("model-1", "uncertain", "late failure");
+
+    expect(store.getPaneControlOperation("model-1")).toMatchObject({ state: "confirmed", detail: "confirmed first" });
+  });
+
+  it("commits a pane-control outcome and its user-visible result atomically", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.acceptPaneControlOperation({ id: "model-1", idempotencyKey: "message:model", bindingId: "b1", paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "u1", sourceMessageId: "message" });
+    store.claimPaneControlOperation("model-1");
+
+    store.finishPaneControlWithResult({
+      operationId: "model-1", state: "confirmed", detail: "Model selector listed",
+      result: { kind: "card_reply", targetMessageId: "m1", idempotencyKey: "model:model-1:confirmed", targetRole: "operation_result", card: { schema: "2.0" } }
+    });
+
+    expect(store.getPaneControlOperation("model-1")).toMatchObject({ state: "confirmed", detail: "Model selector listed" });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      bindingId: "b1", idempotencyKey: "model:model-1:confirmed", kind: "card_reply", rootMessageId: "m1", targetRole: "operation_result"
+    })]);
+  });
+
+  it("atomically checkpoints a delivered session-status card and its binding target", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const reply = store.enqueueOutboundReply({
+      id: "status-1", idempotencyKey: "status-card:b1", bindingId: "b1", targetRole: "session_status",
+      rootMessageId: "m1", kind: "card_reply", payload: "{}"
+    });
+
+    store.markOutboundReplyDelivered(reply.id, "status-message-1");
+
+    expect(store.getBinding("b1")?.statusMessageId).toBe("status-message-1");
+    expect(store.database.prepare("SELECT state, delivered_message_id FROM outbound_replies WHERE id = ?").get(reply.id)).toEqual({ state: "delivered", delivered_message_id: "status-message-1" });
+  });
+
+  it("rolls back a status-card delivery checkpoint when its binding target cannot be updated", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const reply = store.enqueueOutboundReply({
+      id: "status-1", idempotencyKey: "status-card:b1", bindingId: "b1", targetRole: "session_status",
+      rootMessageId: "m1", kind: "card_reply", payload: "{}"
+    });
+    store.database.exec("CREATE TRIGGER reject_status_pointer BEFORE UPDATE OF status_message_id ON bindings BEGIN SELECT RAISE(ABORT, 'reject status pointer'); END");
+
+    expect(() => store!.markOutboundReplyDelivered(reply.id, "status-message-1")).toThrow(/reject status pointer/);
+
+    expect(store.getBinding("b1")?.statusMessageId).toBeNull();
+    expect(store.database.prepare("SELECT state, delivered_message_id FROM outbound_replies WHERE id = ?").get(reply.id)).toEqual({ state: "pending", delivered_message_id: null });
+  });
+
+  it("rolls back the pane-control outcome when its result intent cannot be persisted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.acceptPaneControlOperation({ id: "model-1", idempotencyKey: "message:model", bindingId: "b1", paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "u1", sourceMessageId: "message" });
+    store.claimPaneControlOperation("model-1");
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    expect(() => store!.finishPaneControlWithResult({
+      operationId: "model-1", state: "confirmed", detail: "must roll back",
+      result: { kind: "card_reply", targetMessageId: "m1", idempotencyKey: "model:model-1:confirmed", targetRole: "operation_result", card: circular }
+    })).toThrow(/circular/i);
+
+    expect(store.getPaneControlOperation("model-1")).toMatchObject({ state: "running", detail: null });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 });

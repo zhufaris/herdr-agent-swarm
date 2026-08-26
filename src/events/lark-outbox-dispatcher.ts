@@ -206,7 +206,6 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           : await this.lark.replyCard(reply.rootMessageId, JSON.parse(reply.payload) as object, reply.idempotencyKey);
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId);
         this.store.recordBridgeMessage(sent.messageId);
-        if (reply.kind === "card_reply" && reply.bindingId && !reply.promptId) this.store.updateBinding(reply.bindingId, { statusMessageId: sent.messageId });
       }
       this.lastDeliveryAt = new Date().toISOString();
       return "delivered";

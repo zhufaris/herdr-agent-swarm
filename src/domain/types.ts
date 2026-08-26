@@ -12,6 +12,8 @@ export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
+export type OutboundTargetRole = "session_status" | "operation_result";
+export type AnswerPageState = "creating" | "active" | "frozen" | "finished";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
 export type PaneControlOperationKind = "stop" | "steer" | "model";
@@ -142,6 +144,13 @@ export interface Binding {
   updatedAt: string;
 }
 
+export type BindingMetadataPatch = Partial<Pick<Binding,
+  | "projectId" | "topicId" | "rootMessageId" | "retiredTopicId" | "retiredRootMessageId"
+  | "reservedTopicId" | "reservedRootMessageId" | "resetMessageId" | "paneId" | "traexSessionId"
+  | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"
+  | "title" | "statusMessageId" | "lastOutputFingerprint" | "lastActivityAt"
+>>;
+
 export interface PromptJob {
   id: string;
   bindingId: string;
@@ -190,6 +199,7 @@ export interface OutboundReply {
   viewVersion: number | null;
   selectionId: string | null;
   cardRole: RequestCardRole | null;
+  targetRole: OutboundTargetRole | null;
   rootMessageId: string;
   kind: OutboundReplyKind;
   payload: string;
@@ -204,6 +214,19 @@ export interface OutboundReply {
   autoRecoveryCount: number;
   deadLetteredAt: string | null;
   nextAttemptAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnswerPage {
+  promptId: string;
+  pageIndex: number;
+  messageId: string | null;
+  cardId: string | null;
+  elementId: string;
+  sourceStart: number;
+  sequence: number;
+  state: AnswerPageState;
   createdAt: string;
   updatedAt: string;
 }
@@ -302,6 +325,11 @@ export interface RuntimeObservation {
   composerReady: boolean;
   evidenceSource: "structured" | "recent" | "visible" | "process" | "none";
 }
+
+export type RuntimeObservationApplication =
+  | { outcome: "applied"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionMismatch: boolean }
+  | { outcome: "terminal_identity_changed"; binding: Binding }
+  | { outcome: "stale_binding" };
 
 export interface RuntimeTurnObservation {
   state: AgentState;

@@ -3,56 +3,21 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AgentState, Binding, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyKind, OutboundReplyState, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, ProjectSelectionState, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, SessionSummary } from "../domain/types.js";
+import type { AnswerPage, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
 import { mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { BridgeEvent } from "../domain/events.js";
-import { transitionSession, type AttachmentState, type ProvisioningCheckpoint, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
+import { transitionSession, type AttachmentState, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
-
-type SqlValue = string | number | bigint | null;
-type BindingRow = Record<string, SqlValue> & {
-  id: string; project_id: string | null; workspace_id: string; chat_id: string; topic_id: string | null; root_message_id: string | null;
-  retired_topic_id: string | null; retired_root_message_id: string | null;
-  replaces_binding_id: string | null; reserved_topic_id: string | null; reserved_root_message_id: string | null; reset_message_id: string | null;
-  pane_id: string | null; traex_session_id: string | null; agent_session_source: string | null; agent_session_agent: string | null; agent_session_kind: string | null; agent_session_value: string | null; title: string; runtime: string; state: string;
-  status_message_id: string | null; last_agent_state: string; last_output_fingerprint: string | null;
-  lifecycle: string; attachment: string; generation: number; provisioning_checkpoint: string; degradation_count: number;
-  has_completed_turn: number; last_observed_at: string | null; archived_at: string | null; last_activity_at: string;
-  created_at: string; updated_at: string;
-};
-type PromptRow = Record<string, SqlValue> & {
-  id: string; binding_id: string; lark_message_id: string; actor_open_id: string; body: string; state: string;
-  dispatch_kind: string; parent_prompt_id: string | null;
-  observation_state: string;
-  attempt_count: number; error: string | null; created_at: string; updated_at: string;
-};
-type OutboundReplyRow = Record<string, SqlValue> & {
-  id: string; idempotency_key: string; binding_id: string | null; prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; root_message_id: string; kind: string; payload: string; state: string;
-  attempt_count: number; error: string | null; delivered_message_id: string | null; next_attempt_at: string; created_at: string; updated_at: string;
-  card_id_checkpoint: string | null;
-  delivery_order: number;
-  lane_key: string;
-  failure_class: string | null; http_status: number | null; lark_error_code: string | null; auto_recovery_count: number; dead_lettered_at: string | null;
-};
-type ProjectSelectionRow = Record<string, SqlValue> & {
-  id: string; command_message_id: string; selector_message_id: string | null; chat_id: string; topic_id: string | null; root_message_id: string; actor_open_id: string;
-  requested_title: string | null; selected_project_id: string | null; binding_id: string | null; state: string; error: string | null; expires_at: string; created_at: string; updated_at: string;
-};
-type RetiredPaneCleanupRow = Record<string, SqlValue> & {
-  id: string; old_binding_id: string; replacement_binding_id: string; pane_id: string; expected_workspace_id: string; expected_project_id: string; expected_cwd: string; expected_terminal_id: string; actor_open_id: string; state: string; attempt_count: number; detail: string | null; created_at: string; updated_at: string;
-};
-type PaneControlOperationRow = Record<string, SqlValue> & {
-  id: string; idempotency_key: string; binding_id: string; pane_id: string; terminal_id: string | null; binding_generation: number;
-  kind: string; payload: string | null; parent_prompt_id: string | null; state: string; attempt_count: number; detail: string | null;
-  actor_open_id: string; source_message_id: string; created_at: string; updated_at: string;
-};
+import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
+import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
+import { mapAnswerPage, mapBinding, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "project_selections", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards"
+  "project_selections", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -430,6 +395,8 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.requireBinding(id);
   }
 
+  updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.updateBinding(id, patch); }
+
   transitionBinding(id: string, transition: SessionTransition): Binding {
     const binding = this.requireBinding(id);
     const next = transitionSession({
@@ -447,6 +414,50 @@ export class SqliteBindingStore implements BindingStorePort {
       state: legacyState, lastObservedAt: transition.type === "pane_observed" ? now() : binding.lastObservedAt,
       archivedAt: next.lifecycle === "archived" ? binding.archivedAt ?? now() : binding.archivedAt
     });
+  }
+
+  applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      let binding = this.requireBinding(input.bindingId);
+      if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || (binding.lifecycle !== "active" && binding.lifecycle !== "draining") || binding.attachment === "orphaned") {
+        this.database.exec("COMMIT");
+        return { outcome: "stale_binding" };
+      }
+      const persistedSession = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+        ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
+        : null;
+      const observedSession = input.pane.agentSession ?? null;
+      const sameSession = Boolean(persistedSession && observedSession
+        && persistedSession.source === observedSession.source && persistedSession.agent === observedSession.agent
+        && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
+      const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
+      if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) {
+        binding = this.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
+        this.database.exec("COMMIT");
+        return { outcome: "terminal_identity_changed", binding };
+      }
+      const nativeSessionMismatch = Boolean(persistedSession && observedSession && !sameSession);
+      if (terminalIdentityRefreshed || (!persistedSession && observedSession)) binding = this.updateBinding(binding.id, {
+        ...(terminalIdentityRefreshed ? { traexSessionId: input.pane.terminalId ?? null } : {}),
+        ...(!persistedSession && observedSession ? { agentSessionSource: observedSession.source, agentSessionAgent: observedSession.agent, agentSessionKind: observedSession.kind, agentSessionValue: observedSession.value } : {})
+      });
+      binding = this.transitionBinding(binding.id, { type: "pane_observed", runtime: input.pane.agentState });
+      this.database.exec("COMMIT");
+      return { outcome: "applied", binding, terminalIdentityRefreshed, nativeSessionMismatch };
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  checkpointRuntimeOutput(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; fingerprint: string }): boolean {
+    const result = this.database.prepare(`
+      UPDATE bindings SET last_output_fingerprint = ?, updated_at = ?
+      WHERE id = ? AND pane_id = ? AND generation = ?
+        AND lifecycle IN ('active', 'draining') AND attachment != 'orphaned'
+    `).run(input.fingerprint, now(), input.bindingId, input.expectedPaneId, input.expectedGeneration);
+    return Number(result.changes) === 1;
   }
 
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding {
@@ -555,6 +566,16 @@ export class SqliteBindingStore implements BindingStorePort {
     return (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn' ORDER BY created_at, rowid").all(bindingId) as Array<{ id: string }>).map((row) => row.id);
   }
 
+  listQueuedTurnRunCards(bindingId: string): RunCardView[] {
+    const rows = this.database.prepare(`
+      SELECT view.state_json FROM prompt_jobs AS prompt
+      JOIN run_cards_view AS view ON view.prompt_id = prompt.id
+      WHERE prompt.binding_id = ? AND prompt.state = 'queued' AND prompt.dispatch_kind = 'turn'
+      ORDER BY prompt.created_at, prompt.rowid
+    `).all(bindingId) as Array<{ state_json: string }>;
+    return rows.map((row) => JSON.parse(row.state_json) as RunCardView);
+  }
+
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -641,8 +662,39 @@ export class SqliteBindingStore implements BindingStorePort {
     return (this.database.prepare("SELECT * FROM pane_control_operations WHERE state IN ('running', 'applied') ORDER BY updated_at, id").all() as PaneControlOperationRow[]).map(mapPaneControlOperation);
   }
 
-  finishPaneControlOperation(id: string, state: Extract<PaneControlOperationState, "applied" | "confirmed" | "rejected" | "failed" | "uncertain">, detail: string | null = null): void {
-    this.database.prepare("UPDATE pane_control_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ?").run(state, detail, now(), id);
+  finishPaneControlOperation(id: string, state: PaneControlOutcome, detail: string | null = null): boolean {
+    const sources = paneControlOutcomeSources(state);
+    const placeholders = sources.map(() => "?").join(", ");
+    const result = this.database.prepare(`UPDATE pane_control_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN (${placeholders})`)
+      .run(state, detail, now(), id, ...sources);
+    return Number(result.changes) === 1;
+  }
+
+  finishPaneControlWithResult(input: {
+    operationId: string;
+    state: PaneControlOutcome;
+    detail?: string | null;
+    result: { kind: "card_reply" | "card_update"; targetMessageId: string; idempotencyKey: string; targetRole?: OutboundTargetRole | null; card: object };
+  }): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const operation = this.getPaneControlOperation(input.operationId);
+      if (!operation) throw new Error(`Pane control operation not found: ${input.operationId}`);
+      if (operation.state !== input.state && !this.finishPaneControlOperation(input.operationId, input.state, input.detail ?? null)) {
+        this.database.exec("COMMIT");
+        return false;
+      }
+      this.enqueueOutboundReply({
+        id: randomUUID(), idempotencyKey: input.result.idempotencyKey, bindingId: operation.bindingId,
+        targetRole: input.result.targetRole ?? null, rootMessageId: input.result.targetMessageId,
+        kind: input.result.kind, payload: JSON.stringify(input.result.card)
+      });
+      this.database.exec("COMMIT");
+      return true;
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   recoverRunningPrompts(): number {
@@ -929,7 +981,7 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
     const timestamp = now();
     const laneKey = outboundLaneKey(input);
     const ownsTransaction = !this.database.isTransaction;
@@ -955,15 +1007,25 @@ export class SqliteBindingStore implements BindingStorePort {
           .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
       this.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, target_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
         ON CONFLICT(idempotency_key) DO UPDATE SET
           payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
           view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
       const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
+      if (input.kind === "stream_card_create" && input.promptId) {
+        const stream = streamCardState(input.payload);
+        const pageIndex = stream?.pageIndex ?? 0;
+        const view = this.loadRunCard(input.promptId);
+        const elementId = stream?.elementId ?? view?.answerElementId;
+        if (!view || !elementId) throw new Error(`Answer page metadata missing for prompt: ${input.promptId}`);
+        this.database.prepare(`INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at)
+          VALUES (?, ?, NULL, NULL, ?, ?, 0, 'creating', ?, ?) ON CONFLICT(prompt_id, page_index) DO NOTHING`)
+          .run(input.promptId, pageIndex, elementId, stream?.pageStart ?? 0, timestamp, timestamp);
+      }
       if (ownsTransaction) this.database.exec("COMMIT");
       return mapOutboundReply(row);
     } catch (error) {
@@ -1035,21 +1097,35 @@ export class SqliteBindingStore implements BindingStorePort {
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.database.prepare("SELECT prompt_id, view_version, selection_id, card_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; kind: string; payload: string } | undefined;
+      const row = this.database.prepare("SELECT binding_id, prompt_id, view_version, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
       this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
           if (row.kind === "card_reply" || row.kind === "stream_card_create") {
             const stream = row.kind === "stream_card_create" ? streamCardState(row.payload) : null;
             const expectedPageIndex = stream && stream.pageIndex > 0 ? stream.pageIndex - 1 : null;
-            this.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ? AND (? IS NULL OR answer_page_index = ?)")
+            const pageIndex = stream?.pageIndex ?? 0;
+            const updated = this.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ? AND (? IS NULL OR answer_page_index = ?)")
               .run(messageId, cardId ?? null, stream?.elementId ?? null, stream ? 1 : null, stream?.pageIndex ?? null, stream?.pageStart ?? null, cardId ?? null, messageId, row.view_version ?? 0, now(), row.prompt_id, expectedPageIndex, expectedPageIndex);
+            if (updated.changes > 0) {
+              if (pageIndex > 0) this.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND state = 'active' AND page_index < ?").run(now(), row.prompt_id, pageIndex);
+              this.database.prepare("UPDATE answer_pages SET message_id = ?, card_id = COALESCE(?, card_id), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, state = 'active', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'")
+                .run(messageId, cardId ?? null, cardId ?? null, now(), row.prompt_id, pageIndex);
+            }
           }
-          else this.database.prepare("UPDATE run_cards SET answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
+          else {
+            this.database.prepare("UPDATE run_cards SET answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
+            if (row.kind === "stream_content") this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE prompt_id = ? AND state = 'active'").run(row.view_version ?? 0, now(), row.prompt_id);
+            if (row.kind === "stream_finish") {
+              const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
+              this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE prompt_id = ? AND state = 'active'").run(row.view_version ?? 0, pendingContinuation ? "frozen" : "finished", now(), row.prompt_id);
+            }
+          }
         } else if (row.kind === "card_reply") this.database.prepare("UPDATE run_cards SET lark_message_id = ?, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(messageId, row.view_version ?? 0, now(), row.prompt_id);
         else this.database.prepare("UPDATE run_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
       }
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
+      if (row?.binding_id && row.kind === "card_reply" && row.target_role === "session_status") this.updateBinding(row.binding_id, { statusMessageId: messageId });
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
@@ -1202,9 +1278,23 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   saveRunCard(view: RunCardView): RunCardView {
-    this.database.prepare(`UPDATE run_cards SET lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
-      .run(view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
-    return this.loadRunCard(view.promptId)!;
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`UPDATE run_cards SET lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
+        .run(view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
+      if (view.answerCardId) {
+        this.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND state = 'active' AND page_index != ?").run(view.updatedAt, view.promptId, view.answerPageIndex);
+        this.database.prepare("INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(prompt_id, page_index) DO UPDATE SET message_id = excluded.message_id, card_id = excluded.card_id, element_id = excluded.element_id, source_start = excluded.source_start, sequence = excluded.sequence, state = 'active', updated_at = excluded.updated_at")
+          .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.createdAt, view.updatedAt);
+      }
+      const result = this.loadRunCard(view.promptId)!;
+      if (ownsTransaction) this.database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   loadRunCard(promptId: string): RunCardView | null {
@@ -1229,9 +1319,20 @@ export class SqliteBindingStore implements BindingStorePort {
     return rows.map((row) => JSON.parse(row.state_json) as RunCardView);
   }
 
+  getActiveAnswerPage(promptId: string): AnswerPage | null {
+    const row = this.database.prepare("SELECT * FROM answer_pages WHERE prompt_id = ? AND state = 'active' ORDER BY page_index DESC LIMIT 1").get(promptId) as AnswerPageRow | undefined;
+    return row ? mapAnswerPage(row) : null;
+  }
+
+  listAnswerPages(promptId: string): AnswerPage[] {
+    return (this.database.prepare("SELECT * FROM answer_pages WHERE prompt_id = ? ORDER BY page_index").all(promptId) as AnswerPageRow[]).map(mapAnswerPage);
+  }
+
   private insertRunCard(view: RunCardView): void {
     this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(view.promptId, view.bindingId, view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
   }
 
   private requireBinding(id: string): Binding {
@@ -1288,7 +1389,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
       CREATE TABLE IF NOT EXISTS outbound_replies(
-        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
         error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -1337,17 +1438,25 @@ export class SqliteBindingStore implements BindingStorePort {
         view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, answer_delivered_version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS run_cards_binding ON run_cards(binding_id, created_at);
+      CREATE TABLE IF NOT EXISTS answer_pages(
+        prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id), page_index INTEGER NOT NULL, message_id TEXT, card_id TEXT, element_id TEXT NOT NULL,
+        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
     `);
     this.ensureOutboundReplyColumns();
     this.ensureInboundMessageIdempotency();
     this.ensureOutboundCardCheckpoint();
     this.ensureRequestCardOutboxColumns();
+    this.ensureOutboundTargetRole();
     this.ensureRunCardRequestText();
     this.ensureRunCardSpaceName();
     this.ensureDualRequestCardColumns();
     this.ensureRunCardAnswerState();
     this.ensureStreamingCardColumns();
+    this.ensureAnswerPages();
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
@@ -1404,6 +1513,15 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id)");
   }
 
+  private ensureOutboundTargetRole(): void {
+    const columns = new Set((this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!columns.has("target_role")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN target_role TEXT CHECK(target_role IN ('session_status','operation_result'))");
+    this.database.prepare("UPDATE outbound_replies SET target_role = 'session_status' WHERE target_role IS NULL AND kind = 'card_reply' AND idempotency_key LIKE 'status-card:%'").run();
+    this.database.prepare("UPDATE outbound_replies SET target_role = 'operation_result' WHERE target_role IS NULL AND kind = 'card_reply' AND idempotency_key LIKE 'model:%'").run();
+    this.database.prepare("UPDATE outbound_replies SET state = 'dismissed', error = 'Status update target was an operation result', updated_at = ? WHERE state = 'pending' AND kind = 'card_update' AND prompt_id IS NULL AND root_message_id IN (SELECT delivered_message_id FROM outbound_replies WHERE target_role = 'operation_result' AND delivered_message_id IS NOT NULL)").run(now());
+    this.database.prepare("UPDATE bindings SET status_message_id = root_message_id, updated_at = ? WHERE root_message_id IS NOT NULL AND status_message_id IN (SELECT delivered_message_id FROM outbound_replies WHERE target_role = 'operation_result' AND delivered_message_id IS NOT NULL)").run(now());
+  }
+
   private ensureTwoPhaseResetState(): void {
     const columns = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!columns.has("replaces_binding_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN replaces_binding_id TEXT REFERENCES bindings(id)");
@@ -1437,11 +1555,11 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec(`
       PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
       CREATE TABLE outbound_replies_next(
-        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), root_message_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
-      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql()}, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
+      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql()}, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
       CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
     `);
@@ -1460,6 +1578,20 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!names.has("answer_page_start")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_start INTEGER NOT NULL DEFAULT 0"); changed = true; }
     this.database.exec("UPDATE run_cards SET answer_element_id = 'answer-content-' || replace(prompt_id, ':', '-') WHERE answer_element_id = ''");
     if (changed) this.recreateRunCardsView();
+  }
+
+  private ensureAnswerPages(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS answer_pages(
+        prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id), page_index INTEGER NOT NULL, message_id TEXT, card_id TEXT, element_id TEXT NOT NULL,
+        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
+      INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at)
+      SELECT prompt_id, answer_page_index, answer_message_id, answer_card_id, answer_element_id, answer_page_start, answer_sequence,
+        CASE WHEN answer_card_id IS NULL THEN 'creating' ELSE 'active' END, created_at, updated_at FROM run_cards;
+    `);
   }
 
   private ensurePromptCancelledState(): void {
@@ -1699,24 +1831,6 @@ export class SqliteBindingStore implements BindingStorePort {
 }
 
 function now(): string { return new Date().toISOString(); }
-function outboundLaneKeySql(): string {
-  return "CASE WHEN card_role = 'answer' AND prompt_id IS NOT NULL THEN 'answer:' || prompt_id WHEN kind IN ('stream_content','stream_finish') THEN 'stream:' || root_message_id ELSE 'message:' || root_message_id END";
-}
-function outboundLaneKey(input: { cardRole?: RequestCardRole | null; promptId?: string | null; kind: OutboundReplyKind; rootMessageId: string }): string {
-  if (input.cardRole === "answer" && input.promptId) return `answer:${input.promptId}`;
-  if (input.kind === "stream_content" || input.kind === "stream_finish") return `stream:${input.rootMessageId}`;
-  return `message:${input.rootMessageId}`;
-}
-function mapInstanceLease(row: { owner_id: string; fencing_token: number; expires_at: string; updated_at: string }): InstanceLease {
-  return { ownerId: row.owner_id, fencingToken: Number(row.fencing_token), expiresAt: row.expires_at, updatedAt: row.updated_at };
-}
-function mapPaneControlOperation(row: PaneControlOperationRow): PaneControlOperation {
-  return {
-    id: row.id, idempotencyKey: row.idempotency_key, bindingId: row.binding_id, paneId: row.pane_id, terminalId: row.terminal_id, bindingGeneration: Number(row.binding_generation),
-    kind: row.kind as PaneControlOperationKind, payload: row.payload, parentPromptId: row.parent_prompt_id, state: row.state as PaneControlOperationState,
-    attemptCount: Number(row.attempt_count), detail: row.detail, actorOpenId: row.actor_open_id, sourceMessageId: row.source_message_id, createdAt: row.created_at, updatedAt: row.updated_at
-  };
-}
 function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
 function retryAt(attempt: number, explicitDelayMs?: number): string {
   const exponential = Math.min(60_000, 1_000 * 2 ** (attempt - 1));
@@ -1755,53 +1869,3 @@ function replaceCardElementIds(value: unknown, elementId: string): unknown {
   ]));
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-
-function mapBinding(row: BindingRow): Binding {
-  return {
-    id: row.id, projectId: row.project_id, workspaceId: row.workspace_id, chatId: row.chat_id, topicId: row.topic_id,
-    rootMessageId: row.root_message_id, retiredTopicId: row.retired_topic_id ?? null, retiredRootMessageId: row.retired_root_message_id ?? null,
-    replacesBindingId: row.replaces_binding_id ?? null, reservedTopicId: row.reserved_topic_id ?? null, reservedRootMessageId: row.reserved_root_message_id ?? null, resetMessageId: row.reset_message_id ?? null,
-    paneId: row.pane_id, traexSessionId: row.traex_session_id, agentSessionSource: row.agent_session_source ?? null, agentSessionAgent: row.agent_session_agent ?? null,
-    agentSessionKind: row.agent_session_kind as "id" | "path" | null, agentSessionValue: row.agent_session_value ?? null,
-    title: row.title, runtime: "traex", state: row.state as BindingState, statusMessageId: row.status_message_id,
-    lastAgentState: row.last_agent_state as AgentState, lastOutputFingerprint: row.last_output_fingerprint,
-    lifecycle: row.lifecycle as SessionLifecycle, attachment: row.attachment as AttachmentState, generation: Number(row.generation),
-    provisioningCheckpoint: row.provisioning_checkpoint as ProvisioningCheckpoint, degradationCount: Number(row.degradation_count),
-    hasCompletedTurn: Boolean(row.has_completed_turn), lastObservedAt: row.last_observed_at, archivedAt: row.archived_at, lastActivityAt: row.last_activity_at,
-    createdAt: row.created_at, updatedAt: row.updated_at
-  };
-}
-
-function mapRetiredPaneCleanup(row: RetiredPaneCleanupRow): RetiredPaneCleanupOperation {
-  return {
-    id: row.id, oldBindingId: row.old_binding_id, replacementBindingId: row.replacement_binding_id, paneId: row.pane_id,
-    expectedWorkspaceId: row.expected_workspace_id, expectedProjectId: row.expected_project_id, expectedCwd: row.expected_cwd, expectedTerminalId: row.expected_terminal_id,
-    actorOpenId: row.actor_open_id, state: row.state as RetiredPaneCleanupState, attemptCount: Number(row.attempt_count), detail: row.detail, createdAt: row.created_at, updatedAt: row.updated_at
-  };
-}
-
-function mapPrompt(row: PromptRow): PromptJob {
-  return {
-    id: row.id, bindingId: row.binding_id, larkMessageId: row.lark_message_id, actorOpenId: row.actor_open_id,
-    body: row.body, dispatchKind: row.dispatch_kind as PromptDispatchKind, parentPromptId: row.parent_prompt_id, observationState: row.observation_state as PromptObservationState, state: row.state as PromptState, attemptCount: Number(row.attempt_count), error: row.error,
-    createdAt: row.created_at, updatedAt: row.updated_at
-  };
-}
-
-function mapOutboundReply(row: OutboundReplyRow): OutboundReply {
-  return {
-    id: row.id, idempotencyKey: row.idempotency_key, bindingId: row.binding_id, rootMessageId: row.root_message_id,
-    promptId: row.prompt_id, viewVersion: row.view_version === null ? null : Number(row.view_version), selectionId: row.selection_id, cardRole: row.card_role as RequestCardRole | null, kind: row.kind as OutboundReplyKind, payload: row.payload, state: row.state as OutboundReplyState,
-    attemptCount: Number(row.attempt_count), error: row.error, deliveredMessageId: row.delivered_message_id, cardIdCheckpoint: row.card_id_checkpoint ?? null,
-    failureClass: row.failure_class as DeliveryFailureClass | null, httpStatus: row.http_status === null ? null : Number(row.http_status), larkErrorCode: row.lark_error_code, autoRecoveryCount: Number(row.auto_recovery_count ?? 0), deadLetteredAt: row.dead_lettered_at, nextAttemptAt: row.next_attempt_at,
-    createdAt: row.created_at, updatedAt: row.updated_at
-  };
-}
-
-function mapProjectSelection(row: ProjectSelectionRow): ProjectSelection {
-  return {
-    id: row.id, commandMessageId: row.command_message_id, selectorMessageId: row.selector_message_id, chatId: row.chat_id, topicId: row.topic_id, rootMessageId: row.root_message_id,
-    actorOpenId: row.actor_open_id, requestedTitle: row.requested_title, selectedProjectId: row.selected_project_id, bindingId: row.binding_id,
-    state: row.state as ProjectSelectionState, error: row.error, expiresAt: row.expires_at, createdAt: row.created_at, updatedAt: row.updated_at
-  };
-}

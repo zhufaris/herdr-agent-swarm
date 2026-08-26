@@ -1,3 +1,5 @@
+import type { RunCardView } from "../domain/run-card-view.js";
+
 /**
  * A Lark streaming element is visually rendered as a whole-card refresh. Keep
  * the mutable portion intentionally short, then freeze it and continue in a
@@ -11,6 +13,12 @@ const FENCE = /^ {0,3}(`{3,})([A-Za-z0-9_+.-]{0,32})\s*$/;
 interface RenderedAnswerStreamPage {
   page: string;
   nextPageStart: number | null;
+}
+
+export function answerStreamContent(view: RunCardView): string {
+  const base = ["⏳ 已接收请求", view.answer].filter(Boolean).join("\n\n");
+  return view.phase === "blocked" ? `${base}\n\n⚠️ ${view.notice ?? "等待用户处理"}`
+    : view.phase === "failed" ? `${base}\n\n❌ ${view.notice ?? "执行失败"}` : base;
 }
 
 /** Builds a render-safe page without changing the canonical Answer stream. */

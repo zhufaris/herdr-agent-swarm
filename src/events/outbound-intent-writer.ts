@@ -6,8 +6,8 @@ import { assertAnswerCardTarget, assertAnswerStreamTarget } from "./outbound-tar
 export class OutboundIntentWriter implements OutboundIntentPort {
   constructor(private readonly store: OutboundIntentStore, private readonly work: OutboundWorkNotifier) {}
 
-  async enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId: string | null = null): Promise<void> {
-    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey, bindingId, rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+  async enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId: string | null = null, targetRole: "session_status" | "operation_result" | null = null): Promise<void> {
+    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey, bindingId, targetRole, rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
     this.work.wake();
   }
 

@@ -96,12 +96,15 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
         patch = { answer, ...answerState, progressEvents: change.progressEvents };
         break;
       }
-      const events = [...state.progressEvents];
-      const positions = new Map(events.map((event, index) => [event.key, index]));
-      for (const event of change.progressEvents) {
-        const position = positions.get(event.key);
-        if (position === undefined) { positions.set(event.key, events.length); events.push(event); }
-        else events[position] = event;
+      let events = state.progressEvents;
+      if (change.progressEvents.length > 0) {
+        events = [...state.progressEvents];
+        const positions = new Map(events.map((event, index) => [event.key, index]));
+        for (const event of change.progressEvents) {
+          const position = positions.get(event.key);
+          if (position === undefined) { positions.set(event.key, events.length); events.push(event); }
+          else events[position] = event;
+        }
       }
       if (answer === state.answer && sameProgress(events, state.progressEvents)) return state;
       patch = { answer, ...answerState, progressEvents: events };

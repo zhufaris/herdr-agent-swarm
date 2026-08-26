@@ -34,4 +34,16 @@ describe("pane/thread lifecycle", () => {
     expect(transitionSession(orphaned, { type: "pane_reattached", replacement: false })).toMatchObject({ generation: 1, attachment: "attached" });
     expect(transitionSession(orphaned, { type: "pane_reattached", replacement: true })).toMatchObject({ generation: 2, attachment: "attached", runtime: "unknown" });
   });
+
+  it("recovers a verified failed binding through explicit domain transitions", () => {
+    const failed = { ...ready, lifecycle: "failed" as const };
+
+    expect(transitionSession(failed, { type: "recover_failed", runtime: "idle" })).toMatchObject({
+      lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", runtime: "idle", degradationCount: 0
+    });
+    expect(transitionSession(failed, { type: "retry_failed_provisioning", runtime: "done" })).toMatchObject({
+      lifecycle: "provisioning", attachment: "unattached", provisioningCheckpoint: "runtime_started", runtime: "done", degradationCount: 0
+    });
+    expect(() => transitionSession(ready, { type: "recover_failed", runtime: "idle" })).toThrow(/recover_failed.*active/i);
+  });
 });

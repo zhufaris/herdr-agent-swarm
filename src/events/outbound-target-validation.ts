@@ -21,16 +21,18 @@ export function assertAnswerCardCreateTarget(
   if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) throw new PermanentDeliveryError(`Answer continuation element mismatch for prompt ${promptId}`);
 }
 
-export function assertAnswerCardTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, cardId: string): void {
+export function assertAnswerCardTarget(store: Pick<OutboxStore, "getActiveAnswerPage" | "loadRunCard">, bindingId: string | null, promptId: string | null, cardId: string): void {
   if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer stream target is missing binding or prompt identity");
   const view = store.loadRunCard(promptId);
-  if (!view || view.bindingId !== bindingId || view.answerCardId !== cardId) throw new PermanentDeliveryError(`Answer stream card target mismatch for prompt ${promptId}`);
+  const page = store.getActiveAnswerPage(promptId);
+  if (!view || view.bindingId !== bindingId || (page?.cardId ?? view.answerCardId) !== cardId) throw new PermanentDeliveryError(`Answer stream card target mismatch for prompt ${promptId}`);
 }
 
-export function assertAnswerStreamTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, cardId: string, elementId: string): void {
+export function assertAnswerStreamTarget(store: Pick<OutboxStore, "getActiveAnswerPage" | "loadRunCard">, bindingId: string | null, promptId: string | null, cardId: string, elementId: string): void {
   assertAnswerCardTarget(store, bindingId, promptId, cardId);
   const view = store.loadRunCard(promptId!);
-  if (!view || view.answerElementId !== elementId) throw new PermanentDeliveryError(`Answer stream element target mismatch for prompt ${promptId}`);
+  const page = store.getActiveAnswerPage(promptId!);
+  if (!view || (page?.elementId ?? view.answerElementId) !== elementId) throw new PermanentDeliveryError(`Answer stream element target mismatch for prompt ${promptId}`);
 }
 
 export function assertAnswerMessageTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, messageId: string): void {

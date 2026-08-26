@@ -13,6 +13,22 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("Lark channel publisher", () => {
+  it("records only the explicit session-status reply as the binding status card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "status-1" });
+    const replyCard = vi.fn(async () => ({ messageId: "operation-1" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyCard }), pino({ enabled: false }));
+
+    await connectedWriter(store, publisher).enqueueCard("root-1", "model:operation-1:confirmed", { schema: "2.0" }, "b1");
+
+    expect(store.getBinding("b1")?.statusMessageId).toBe("status-1");
+    replyCard.mockResolvedValueOnce({ messageId: "status-2" });
+    await connectedWriter(store, publisher).enqueueCard("root-1", "status-card:b1", { schema: "2.0" }, "b1", "session_status");
+    expect(store.getBinding("b1")?.statusMessageId).toBe("status-2");
+    store.close();
+  });
+
   it("creates one CardKit answer and streams cumulative content without patching the message", async () => {
     const create = vi.fn(async () => ({ messageId: "answer-1", cardId: "cardkit-1" }));
     const stream = vi.fn(async () => {});

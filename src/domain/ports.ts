@@ -1,8 +1,9 @@
-import type { AgentState, Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, AnswerPage, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
 import type { BridgeEvent } from "./events.js";
+import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
 
 export interface LarkPort {
   start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<void>): Promise<void>;
@@ -92,7 +93,10 @@ export interface BindingStorePort {
   finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail?: string): void;
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[];
   updateBinding(id: string, patch: Partial<Binding>): Binding;
+  updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding;
   transitionBinding(id: string, transition: SessionTransition): Binding;
+  applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication;
+  checkpointRuntimeOutput(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; fingerprint: string }): boolean;
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
   attachBindingPane(id: string, pane: HerdrPane, replacement: boolean): Binding;
   findBindingByTopic(topicId: string): Binding | null;
@@ -106,6 +110,7 @@ export interface BindingStorePort {
   listFailures(chatId: string): FailureSummary[];
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
+  listQueuedTurnRunCards(bindingId: string): RunCardView[];
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean };
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null;
   claimPaneControlOperation(id: string): PaneControlOperation | null;
@@ -113,7 +118,13 @@ export interface BindingStorePort {
   rejectAppliedPaneControlOperation(id: string, detail: string): PaneControlOperation | null;
   getPaneControlOperation(id: string): PaneControlOperation | null;
   listRecoverablePaneControlOperations(): PaneControlOperation[];
-  finishPaneControlOperation(id: string, state: Extract<PaneControlOperation["state"], "applied" | "confirmed" | "rejected" | "failed" | "uncertain">, detail?: string | null): void;
+  finishPaneControlOperation(id: string, state: PaneControlOutcome, detail?: string | null): boolean;
+  finishPaneControlWithResult(input: {
+    operationId: string;
+    state: PaneControlOutcome;
+    detail?: string | null;
+    result: { kind: "card_reply" | "card_update"; targetMessageId: string; idempotencyKey: string; targetRole?: OutboundReply["targetRole"]; card: object };
+  }): boolean;
   recoverRunningPrompts(): number;
   scanDurablePromptWork(): DurablePromptWorkScan;
   listDetachedPrompts(): PromptJob[];
@@ -123,6 +134,8 @@ export interface BindingStorePort {
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
   acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
+  getActiveAnswerPage(promptId: string): AnswerPage | null;
+  listAnswerPages(promptId: string): AnswerPage[];
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];
@@ -131,7 +144,7 @@ export interface BindingStorePort {
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
   failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"] }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean;
   dismissSupersededAnswerStream(replyId: string): boolean;
   listPendingOutboundReplies(): OutboundReply[];
@@ -166,7 +179,7 @@ export type LeaseStore = Pick<BindingStorePort,
 export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "listBindings">;
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
-  | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary"
+  | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"
   | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "saveRunCard" | "saveTopicView"
 >;
 
@@ -184,32 +197,33 @@ export type PromptRunStore = Pick<BindingStorePort,
   | "completeTurn"
   | "failPrompt"
   | "completeSteering"
-  | "updateBinding"
+  | "updateBindingMetadata"
   | "transitionBinding"
   | "countPendingPrompts"
-  | "listQueuedTurnPromptIds"
-  | "listRunCards"
+  | "listQueuedTurnRunCards"
   | "loadRunCard"
   | "loadTopicView"
   | "transitionBindingWithOutbox"
 >;
 
 export type RuntimeReconciliationStore = Pick<BindingStorePort,
+  | "applyRuntimeObservation"
+  | "checkpointRuntimeOutput"
   | "countPendingPrompts"
   | "findBindingByPane"
   | "listBindingsByState"
   | "listRunCardsByPhases"
   | "saveRunCard"
   | "transitionBinding"
-  | "updateBinding"
+  | "updateBindingMetadata"
 >;
 
 export type BindingProvisioningStore = Pick<BindingStorePort,
   | "attachBindingPane" | "audit" | "claimProjectSelection" | "completeProjectSelection"
   | "countPendingPrompts" | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
-  | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindings"
+  | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindingsByState"
   | "listProcessingProjectSelections" | "loadTopicView" | "pauseProjectSelection" | "recordBridgeMessage"
-  | "createResetCandidate" | "cutoverResetCandidate" | "saveTopicView" | "transitionBinding" | "updateBinding"
+  | "createResetCandidate" | "cutoverResetCandidate" | "saveTopicView" | "transitionBinding" | "updateBindingMetadata"
 >;
 
 export type RetiredPaneCleanupStore = Pick<BindingStorePort,
@@ -219,24 +233,24 @@ export type RetiredPaneCleanupStore = Pick<BindingStorePort,
 
 export type OperationsStore = Pick<BindingStorePort,
   | "audit" | "cancelQueuedPrompts" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
-  | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
+  | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "finishPaneControlWithResult" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
   | "claimAppliedPaneControlOperation" | "rejectAppliedPaneControlOperation"
   | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"
-  | "listFailures" | "listRunCards" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
-  | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBinding"
+  | "listFailures" | "listRunCardsByPhases" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
+  | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBindingMetadata"
 >;
 
-export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "hasPendingAnswerContinuation" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
+export type ProjectionStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getBinding" | "hasPendingAnswerContinuation" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
 
 export type OutboxStore = Pick<BindingStorePort,
-  | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
+  | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
   | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDeadLetter" | "markOutboundReplyDelivered"
-  | "markOutboundReplyFailed" | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream" | "updateBinding"
+  | "markOutboundReplyFailed" | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream"
 >;
-export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getBinding" | "loadRunCard">;
+export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "loadRunCard">;
 
 export interface OutboundIntentPort {
-  enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId?: string | null): Promise<void>;
+  enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId?: string | null, targetRole?: OutboundReply["targetRole"]): Promise<void>;
   enqueueCardUpdate(bindingId: string | null, messageId: string, eventId: string, card: object): Promise<void>;
   enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object): Promise<void>;
   enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void>;

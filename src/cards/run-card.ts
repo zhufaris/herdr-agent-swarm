@@ -161,9 +161,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
   const streaming = options.streaming ?? input.phase !== "completed";
-  const structuredAnswer = Array.isArray(input.answerSegments) && typeof input.answerDraft === "string"
-    ? [...input.answerSegments, input.answerDraft].filter((part) => part.trim()).join("\n\n")
-    : "";
+  const structuredAnswer = structuredAnswerContent(input);
   const answer = structuredAnswer || input.answer;
   const prose = stripNativeTraexStatus(answer);
   const stepProgress = progressSummary(input.progressEvents);
@@ -318,6 +316,13 @@ function formatRunDuration(input: RunCardView): string | null {
 }
 function stripNativeTraexStatus(source: string): string {
   return stripTraexConsoleStatus(stripNativeTaskFrame(source));
+}
+function structuredAnswerContent(input: RunCardView): string {
+  if (!Array.isArray(input.answerSegments) || typeof input.answerDraft !== "string") return "";
+  const parts: string[] = [];
+  for (const part of input.answerSegments) if (part.trim()) parts.push(part);
+  if (input.answerDraft.trim()) parts.push(input.answerDraft);
+  return parts.join("\n\n");
 }
 function latestLines(source: string, limit: number): string | null {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
