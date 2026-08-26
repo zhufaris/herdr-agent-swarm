@@ -37,6 +37,13 @@ describe("topic view reducer", () => {
     expect(observed).toMatchObject({ model: "GPT-5.6-Sol", context: "31.1K tokens" });
   });
 
+  it("keeps a running main card running when reconciliation observes more terminal output", () => {
+    const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    const observed = reduceTopicView(running, event("PaneOutputObserved", { answer: "still working" }));
+
+    expect(observed).toMatchObject({ phase: "running", agentState: "working", activePromptId: "p1", answer: "still working" });
+  });
+
   it("does not update the project card for an identical visible snapshot", () => {
     const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     const first = reduceTopicView(running, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active" }] }));

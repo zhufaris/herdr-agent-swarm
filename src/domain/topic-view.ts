@@ -49,9 +49,7 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       const context = event.payload.context ?? state.context;
       const tabId = event.payload.tabId ?? state.tabId;
       if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId) return state;
-      return event.payload.answer === undefined
-        ? { ...base, answer, model, context, tabId }
-        : { ...base, phase: "done", agentState: "done", answer, model, context, tabId, notice: null, activePromptId: null };
+      return { ...base, answer, model, context, tabId };
     }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
