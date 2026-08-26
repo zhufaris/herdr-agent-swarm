@@ -2,7 +2,67 @@ import { describe, expect, it } from "vitest";
 import { HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 
+const nativeClient = (calls: Array<{ method: string; params: object }>) => ({
+  async request(method: string, params: object): Promise<unknown> {
+    calls.push({ method, params });
+    if (method === "session.snapshot") return { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }], agents: [] } };
+    if (method === "agent.read") throw new Error("agent_not_found: agent target w1:p1 not found");
+    throw new Error(`unexpected native request: ${method}`);
+  }
+});
+
 describe("Herdr adapter", () => {
+  it("reads an unknown TraeX Pane through the Pane CLI without a failing native agent.read", async () => {
+    const nativeCalls: Array<{ method: string; params: object }> = [];
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "pane" && args[1] === "read") return { stdout: "native agent not detected", stderr: "" };
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", nativeClient(nativeCalls));
+
+    await adapter.listAllPanes();
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("native agent not detected");
+
+    expect(nativeCalls).toEqual([
+      { method: "session.snapshot", params: {} },
+      { method: "agent.read", params: { target: "w1:p1", source: "recent_unwrapped", lines: 80, format: "text", strip_ansi: true } }
+    ]);
+    expect(calls).toEqual([["pane", "read", "w1:p1", "--source", "recent-unwrapped", "--lines", "80", "--format", "text"]]);
+  });
+
+  it("remembers native agent_not_found and skips repeated native reads for that Pane", async () => {
+    const nativeCalls: string[] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] === "pane" && args[1] === "read") return { stdout: "CLI output", stderr: "" };
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    } };
+    const native = { async request(method: string): Promise<unknown> {
+      nativeCalls.push(method);
+      throw new Error("agent_not_found: agent target w1:p1 not found");
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native);
+
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("CLI output");
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("CLI output");
+    expect(nativeCalls).toEqual(["agent.read"]);
+  });
+
+  it("coalesces concurrent reads of the same Pane output", async () => {
+    let reads = 0;
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] !== "pane" || args[1] !== "read") throw new Error(`unexpected command: ${args.join(" ")}`);
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { stdout: "same snapshot", stderr: "" };
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000);
+
+    await expect(Promise.all([adapter.readOutput("w1:p1", 240), adapter.readOutput("w1:p1", 240)])).resolves.toEqual(["same snapshot", "same snapshot"]);
+    expect(reads).toBe(1);
+  });
+
   it("recovers an unknown bound pane from exact TraeX process and composer evidence", async () => {
     const runner: CommandRunner = {
       async run(_executable, args) {

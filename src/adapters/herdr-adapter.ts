@@ -36,6 +36,9 @@ interface HerdrNativeRequestClient {
 }
 
 export class HerdrCliAdapter implements HerdrPort {
+  private readonly nativeReadUnsupportedPanes = new Set<string>();
+  private readonly outputReads = new Map<string, Promise<string>>();
+
   constructor(
     private readonly runner: CommandRunner,
     private readonly executable: string,
@@ -95,7 +98,7 @@ export class HerdrCliAdapter implements HerdrPort {
     try {
       const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
       if (recentState !== "unknown") return this.runtimeObservation(observed, recentState, "recent");
-      const visibleState = inferTraexAgentState(await this.readOutputSource(paneId, 80, "visible"));
+      const visibleState = inferTraexAgentState(await this.coalesceOutputRead(paneId, 80, "visible"));
       return this.runtimeObservation(observed, visibleState, visibleState === "unknown" ? "process" : "visible");
     } catch {
       return { pane: observed, traexProcess, composerReady: false, evidenceSource: "process" };
@@ -247,22 +250,43 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async readOutput(paneId: string, lines: number): Promise<string> {
-    return this.readOutputSource(paneId, lines, "recent-unwrapped");
+    return this.coalesceOutputRead(paneId, lines, "recent-unwrapped");
   }
 
   private async readOutputSource(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
-    if (this.native) {
+    // Some snapshots report an unknown status for a registered native agent,
+    // so retain the native fast path until Herdr explicitly rejects this Pane
+    // as an agent target. Cache that negative capability: agent.read targets
+    // agents rather than arbitrary Panes, and retrying agent_not_found on every
+    // observer pass creates an avoidable RPC storm.
+    if (this.native && !this.nativeReadUnsupportedPanes.has(paneId)) {
       try {
         const result = nativeReadSchema.parse(await this.native.request("agent.read", {
           target: paneId, source: source === "recent-unwrapped" ? "recent_unwrapped" : source, lines, format: "text", strip_ansi: true
         }, this.commandTimeoutMs));
         return result.read.text;
-      } catch { /* Read-only native failure falls back to the Pane CLI. */ }
+      } catch (error) {
+        if (isUnknownNativeAgent(error)) this.nativeReadUnsupportedPanes.add(paneId);
+        // Read-only native failures fall back to the Pane CLI.
+      }
     }
     const { stdout } = await this.runner.run(this.executable, [
       "pane", "read", paneId, "--source", source, "--lines", String(lines), "--format", "text"
     ], this.commandTimeoutMs);
     return unwrapText(stdout);
+  }
+
+  private coalesceOutputRead(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
+    const key = `${paneId}\0${source}\0${lines}`;
+    const active = this.outputReads.get(key);
+    if (active) return active;
+    const read = this.readOutputSource(paneId, lines, source);
+    this.outputReads.set(key, read);
+    void read.then(
+      () => { if (this.outputReads.get(key) === read) this.outputReads.delete(key); },
+      () => { if (this.outputReads.get(key) === read) this.outputReads.delete(key); }
+    );
+    return read;
   }
 
   private async waitForOutputMarker(paneId: string, marker: string, deadline: number): Promise<void> {
@@ -532,6 +556,10 @@ function unwrapText(stdout: string): string {
 
 function isTraexWorking(output: string): boolean {
   return /[✧◆]\s*Work(?:ing|i…)/u.test(output);
+}
+
+function isUnknownNativeAgent(error: unknown): boolean {
+  return /(?:^|[\s:_-])agent_not_found(?:$|[\s:_-])|agent target .+ not found/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isTraexIdle(output: string): boolean {
