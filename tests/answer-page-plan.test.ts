@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planAnswerPage } from "../src/domain/answer-page-plan.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { AnswerPage } from "../src/domain/types.js";
 import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
@@ -28,6 +28,22 @@ describe("answer page planner", () => {
   it("waits while content delivery is pending", () => {
     const { view, page } = fixture("new");
     expect(planAnswerPage(view, page, { latestContent: { content: "old", sequence: 1, state: "pending" }, finishPending: false, continuationPending: false })).toEqual({ type: "wait" });
+  });
+
+  it("does not enqueue empty content when a running answer shrinks before a continuation offset", () => {
+    const { view, page } = fixture("short transient redraw");
+    const continuation = { ...page, pageIndex: 2, sourceStart: answerStreamContent(view).length + 20, elementId: answerElementId("p1", 2) };
+
+    expect(planAnswerPage(view, continuation, { latestContent: { content: "previous visible content", sequence: 9, state: "delivered" }, finishPending: false, continuationPending: false }))
+      .toEqual({ type: "wait" });
+  });
+
+  it("finishes a terminal continuation without sending empty content", () => {
+    const { view, page } = fixture("short final answer", "completed");
+    const continuation = { ...page, pageIndex: 2, sourceStart: answerStreamContent(view).length + 20, elementId: answerElementId("p1", 2) };
+
+    expect(planAnswerPage(view, continuation, { latestContent: { content: "previous visible content", sequence: 9, state: "delivered" }, finishPending: false, continuationPending: false }))
+      .toEqual({ type: "finish-terminal", summary: "Completed" });
   });
 
   it("plans deterministic continuation pages", () => {

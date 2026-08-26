@@ -199,7 +199,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
         const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
         assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
-        await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
+        if (payload.content) await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
+        else this.logger.info({ event: "lark-outbox-empty-answer-content-skipped", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: payload.sequence, outcome: "checkpointed" }, "checkpointed an empty legacy Answer update without sending it to Lark");
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_finish") {

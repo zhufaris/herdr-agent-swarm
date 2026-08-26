@@ -65,6 +65,26 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("checkpoints an empty legacy stream update without calling Lark", async () => {
+    const stream = vi.fn(async () => {});
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    store.enqueueOutboundReply({ id: "empty-content", idempotencyKey: "empty-content", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "", sequence: 2 }) });
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream }), pino({ enabled: false }));
+    const checkpoint = vi.fn();
+    publisher.onAnswerCheckpoint(checkpoint);
+
+    await publisher.requestScan();
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'empty-content'").get()).toEqual({ state: "delivered" });
+    expect(checkpoint).toHaveBeenCalledWith("p1", 2);
+    store.close();
+  });
+
   it("finalizes an Answer stream through settings without replacing the card tree", async () => {
     const finish = vi.fn(async () => {});
     const updateCard = vi.fn(async () => {});

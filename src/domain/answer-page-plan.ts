@@ -14,6 +14,13 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
   const content = answerStreamContent(view);
   const rendered = renderAnswerStreamPage(content, page.sourceStart, ANSWER_STREAM_PAGE_LIMIT);
   if (facts.latestContent?.state === "pending") return { type: "wait" };
+  if (!rendered.page) {
+    if (view.phase === "completed" || view.phase === "failed") {
+      if (facts.finishPending) return { type: "wait" };
+      return { type: "finish-terminal", summary: view.phase === "completed" ? "Completed" : "Failed" };
+    }
+    return { type: "wait" };
+  }
   if (facts.latestContent?.content !== rendered.page) return { type: "stream-content", content: rendered.page };
   if (rendered.nextPageStart !== null) {
     if (facts.finishPending || facts.continuationPending) return { type: "wait" };
