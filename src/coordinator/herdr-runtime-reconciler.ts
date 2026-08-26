@@ -241,10 +241,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
         if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
       }
-      // Snapshot revisions describe pane metadata, not terminal content, for
-      // unstructured panes. Keep reading those bounded outputs and let the
-      // output fingerprint suppress unchanged projections.
-      if (pane.agentState !== "unknown" && pane.outputRevision !== null && pane.outputRevision !== undefined && this.observedOutputRevisions.get(pane.paneId) === pane.outputRevision) continue;
+      // Pane snapshot revisions are metadata revisions, not a trustworthy
+      // terminal-content cursor. A direct Herdr operation can change screen
+      // output without changing this value, so content fingerprinting is the
+      // authoritative deduplication boundary for bound TraeX panes.
       await this.publishChangedLocalOutput(existing, pane.paneId, existing.generation);
       if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
     }

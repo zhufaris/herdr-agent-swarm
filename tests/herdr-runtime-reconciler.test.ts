@@ -162,18 +162,22 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
-  it("skips terminal reads when the Herdr output revision is unchanged", async () => {
+  it("projects changed terminal output even when the Herdr Pane metadata revision is unchanged", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const readOutput = vi.fn(async () => "unchanged");
+    const readOutput = vi.fn().mockResolvedValueOnce("◆ first local answer\n────────").mockResolvedValueOnce("◆ second local answer\n────────");
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
+    const bus = new BridgeEventBus();
+    const answers: string[] = [];
+    bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved" && "answer" in event.payload) answers.push(event.payload.answer); });
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
 
     await reconciler.reconcile();
     await reconciler.reconcile();
 
-    expect(readOutput).toHaveBeenCalledTimes(1);
+    expect(readOutput).toHaveBeenCalledTimes(2);
+    expect(answers).toEqual(["first local answer", "second local answer"]);
     store.close();
   });
 
@@ -192,7 +196,7 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
-  it("reads terminal output when the output revision changes even if agent state does not", async () => {
+  it("keeps reading terminal output when pane metadata revision changes", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
@@ -209,7 +213,7 @@ describe("HerdrRuntimeReconciler", () => {
     outputRevision = 8;
     await reconciler.reconcile();
 
-    expect(readOutput).toHaveBeenCalledTimes(2);
+    expect(readOutput).toHaveBeenCalledTimes(3);
     store.close();
   });
 
@@ -511,11 +515,12 @@ function fixture(
   store: SqliteBindingStore,
   herdr: HerdrPort,
   discoverPane: ConstructorParameters<typeof HerdrRuntimeReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); },
-  logger = pino({ enabled: false })
+  logger = pino({ enabled: false }),
+  lifecycleEvents = new BridgeEventBus()
 ) {
   return new HerdrRuntimeReconciler({
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
-    store, herdr, lifecycleEvents: new BridgeEventBus(),
+    store, herdr, lifecycleEvents,
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
     logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
   });
