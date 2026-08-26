@@ -6,7 +6,12 @@ import { loadConfig, validateProjectDirectories } from "./config.js";
 import { InboundRouter } from "./coordinator/inbound-router.js";
 import { BindingProvisioningWorkflow } from "./coordinator/binding-provisioning-workflow.js";
 import { HerdrRuntimeReconciler } from "./coordinator/herdr-runtime-reconciler.js";
-import { OperationsWorkflow } from "./coordinator/operations-workflow.js";
+import { ModelSelectionWorkflow } from "./coordinator/model-selection-workflow.js";
+import { PaneControlWorkflow } from "./coordinator/pane-control-workflow.js";
+import { OperationsQueryWorkflow } from "./coordinator/operations-query-workflow.js";
+import { SessionAdministrationWorkflow } from "./coordinator/session-administration-workflow.js";
+import { DeliveryRecoveryWorkflow } from "./coordinator/delivery-recovery-workflow.js";
+import { PaneClosureWorkflow } from "./coordinator/pane-closure-workflow.js";
 import { PromptRunWorkflow } from "./coordinator/prompt-run-workflow.js";
 import { RetiredPaneCleanupWorkflow } from "./coordinator/retired-pane-cleanup-workflow.js";
 import { StartupViewConverger } from "./coordinator/startup-view-converger.js";
@@ -69,14 +74,19 @@ channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
 const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
-const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
+const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
+const paneControl = new PaneControlWorkflow({ store, herdr, outbound, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
+const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound, logger });
+const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
+const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound, outboundWork, logger });
+const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
   isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId)
 });
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, operations, reconciler, retiredPaneCleanup, startupViews });
+const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)

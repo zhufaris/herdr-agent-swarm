@@ -43,6 +43,15 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
       return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, model, context };
     }
+    case "PaneOutputObserved": {
+      const answer = event.payload.answer === undefined ? state.answer : keepAnswerTail(event.payload.answer);
+      const model = event.payload.model ?? state.model;
+      const context = event.payload.context ?? state.context;
+      if (answer === state.answer && model === state.model && context === state.context) return state;
+      return event.payload.answer === undefined
+        ? { ...base, answer, model, context }
+        : { ...base, phase: "done", agentState: "done", answer, model, context, notice: null, activePromptId: null };
+    }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       return { ...base, phase: event.payload.state === "blocked" ? "blocked" : event.payload.state === "working" ? "running" : base.phase, agentState: event.payload.state, queueDepth: event.payload.queueDepth, activePromptId: event.payload.promptId ?? base.activePromptId, notice: event.payload.state === "blocked" ? "TraeX 需要人工审批。请查看对应 Herdr panel 并完成所需交互。" : base.notice };
@@ -66,6 +75,7 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
 }
 
 function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
+  if (updates.length === 0) return current;
   const result = [...current];
   const positions = new Map(result.map((item, index) => [item.key, index]));
   for (const update of updates) {

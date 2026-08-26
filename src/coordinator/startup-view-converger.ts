@@ -4,6 +4,7 @@ import type { OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.
 import { initialTopicView, mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { Binding } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
+import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 
@@ -57,10 +58,18 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         renderProjectEntryCard(reconciledTopicView)
       );
       const runCards = this.store.listRunCards(binding.id);
-      for (const view of runCards.filter((item) => item.larkMessageId)) {
+      for (const view of runCards) {
         if (!view.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(view.promptId, binding.rootMessageId, renderRequestAnswerCard(view)); this.outboundWork.wake(); }
         const current = view.spaceName !== spaceName ? this.store.saveRunCard({ ...view, spaceName, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
         if (!current.answerCardId && current.answerMessageId && (view.spaceName !== spaceName || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
+        else if (current.answerCardId && current.viewVersion > current.answerDeliveredVersion && !this.store.hasPendingAnswerContinuation(current.promptId, current.answerPageIndex + 1)) {
+          const content = answerStreamContent(current);
+          const { page, nextPageStart } = renderAnswerStreamPage(content, current.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
+          const sequence = Math.max(current.answerSequence + 1, current.viewVersion);
+          this.store.saveRunCard({ ...current, answerSequence: sequence });
+          await this.outbound.enqueueStreamContent(current.bindingId, current.promptId, current.answerCardId, current.answerElementId, page, sequence);
+          if (nextPageStart === null && (current.phase === "completed" || current.phase === "failed")) await this.outbound.enqueueStreamFinish(current.bindingId, current.promptId, current.answerCardId, current.phase === "completed" ? "Completed" : "Failed", sequence + 1);
+        }
       }
       const latestRun = runCards.at(-1);
       const currentTopic = this.store.loadTopicView(binding.id) ?? reconciledTopicView;

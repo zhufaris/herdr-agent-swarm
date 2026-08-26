@@ -7,7 +7,7 @@ import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../runtime/answer-stream.js";
+import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { answerElementId } from "../domain/run-card-view.js";
 
 export class ConversationViewProjector {
@@ -35,7 +35,7 @@ export class ConversationViewProjector {
         // the old card: those writes would be stale as soon as the checkpoint
         // advances and could block the prompt's ordered outbox lane.
         if (this.store.hasPendingAnswerContinuation(promptId, view.answerPageIndex + 1)) return;
-        const fullContent = answerContent(view);
+        const fullContent = answerStreamContent(view);
         while (view.answerCardId) {
           const { page, nextPageStart } = renderAnswerStreamPage(fullContent, view.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
           const sequence = Math.max(view.answerSequence + 1, view.viewVersion);
@@ -121,7 +121,7 @@ export class ConversationViewProjector {
       if (binding.statusMessageId) {
         await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, event.eventId, card);
       } else {
-        await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id);
+        await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id, "session_status");
       }
     } catch (error) {
       this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
@@ -138,12 +138,6 @@ export class ConversationViewProjector {
     });
     return work;
   }
-}
-
-function answerContent(view: NonNullable<ReturnType<ProjectionStore["loadRunCard"]>>): string {
-  const base = ["⏳ 已接收请求", view.answer].filter(Boolean).join("\n\n");
-  return view.phase === "blocked" ? `${base}\n\n⚠️ ${view.notice ?? "等待用户处理"}`
-    : view.phase === "failed" ? `${base}\n\n❌ ${view.notice ?? "执行失败"}` : base;
 }
 
 function promptIdOf(event: BridgeEvent): string | null {

@@ -318,9 +318,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private async refreshQueuePositions(bindingId: string): Promise<void> {
-    const queuedTurnIds = new Set(this.options.store.listQueuedTurnPromptIds(bindingId));
-    const queued = this.options.store.listRunCards(bindingId).filter((view) => view.phase === "queued" && queuedTurnIds.has(view.promptId));
-    for (const [index, view] of queued.entries()) {
+    for (const [index, view] of this.options.store.listQueuedTurnRunCards(bindingId).entries()) {
       const queuePosition = index + 1;
       if (view.queuePosition !== queuePosition) await this.publish(bindingId, "RunQueuePositionChanged", "bridge", { promptId: view.promptId, queuePosition });
     }

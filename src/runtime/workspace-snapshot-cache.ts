@@ -7,6 +7,7 @@ interface Snapshot { panes: HerdrPane[]; capturedAt: number }
 
 export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly snapshots = new Map<string, Snapshot>();
+  private readonly paneWorkspaceIds = new Map<string, string>();
   private readonly refreshes = new Map<string, Promise<HerdrPane[]>>();
   private allRefresh: Promise<HerdrPane[]> | null = null;
   private allSnapshot: Snapshot | null = null;
@@ -66,14 +67,18 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       group.push(pane);
       byWorkspace.set(pane.workspaceId, group);
     }
+    this.snapshots.clear();
+    this.paneWorkspaceIds.clear();
     this.allSnapshot = { panes: clonePanes(panes), capturedAt };
     for (const [workspaceId, workspacePanes] of byWorkspace) this.snapshots.set(workspaceId, { panes: clonePanes(workspacePanes), capturedAt });
+    for (const pane of panes) this.paneWorkspaceIds.set(pane.paneId, pane.workspaceId);
     return clonePanes(panes);
   }
 
   invalidate(workspaceId: string): void {
     this.snapshots.delete(workspaceId);
     this.allSnapshot = null;
+    this.forgetWorkspacePanes(workspaceId);
   }
 
   status(): WorkspaceCacheStatus {
@@ -87,11 +92,16 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   }
 
   async assertWorkspace(workspaceId: string): Promise<void> { await this.delegate.assertWorkspace(workspaceId); }
-  async getPane(paneId: string): Promise<HerdrPane | null> { return this.delegate.getPane(paneId); }
+  async getPane(paneId: string): Promise<HerdrPane | null> {
+    const pane = await this.delegate.getPane(paneId);
+    if (pane) this.rememberPane(pane);
+    return pane;
+  }
   async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const observation = await this.delegate.observeRuntime(paneId);
     const pane = observation.pane;
     if (pane) {
+      this.rememberPane(pane);
       const snapshot = this.snapshots.get(pane.workspaceId);
       if (snapshot) replaceCachedPane(snapshot, pane);
       if (this.allSnapshot) replaceCachedPane(this.allSnapshot, pane);
@@ -105,6 +115,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> {
     const pane = await this.delegate.createPane(workspaceId, cwd, options);
     this.invalidate(workspaceId);
+    this.rememberPane(pane);
     return pane;
   }
   async startTraex(paneId: string, executable: string): Promise<void> { await this.delegate.startTraex(paneId, executable); }
@@ -129,15 +140,18 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   }
   async readOutput(paneId: string, lines: number): Promise<string> { return this.delegate.readOutput(paneId, lines); }
   async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {
+    const workspaceId = this.paneWorkspaceIds.get(paneId);
     await this.delegate.renamePane(paneId, title, options);
-    const workspaceId = paneId.split(":", 1)[0];
     if (workspaceId) this.invalidate(workspaceId);
+    else this.invalidateAll();
   }
   async closePane(paneId: string): Promise<void> {
     if (!this.delegate.closePane) throw new Error("Herdr adapter does not support closing panes");
+    const workspaceId = this.paneWorkspaceIds.get(paneId);
     await this.delegate.closePane(paneId);
-    const workspaceId = paneId.split(":", 1)[0];
     if (workspaceId) this.invalidate(workspaceId);
+    else this.invalidateAll();
+    this.paneWorkspaceIds.delete(paneId);
   }
 
   private async refresh(workspaceId: string, options: { forceRefresh?: boolean }): Promise<HerdrPane[]> {
@@ -151,6 +165,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       }
       const panes = await this.delegate.listPanes(workspaceId, { forceRefresh: true });
       const capturedAt = this.clock();
+      this.rememberWorkspaceSnapshot(workspaceId, panes);
       this.snapshots.set(workspaceId, { panes: clonePanes(panes), capturedAt });
       this.logger?.debug({ event: "workspace-snapshot-refreshed", workspaceId, paneCount: panes.length, outcome: "refreshed" }, "refreshed Herdr workspace snapshot");
       return panes;
@@ -159,6 +174,29 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       this.logger?.warn({ event: "workspace-snapshot-refresh-failed", workspaceId, err: safeLogError(error), outcome: "failed" }, "failed to refresh Herdr workspace snapshot");
       throw error;
     }
+  }
+
+  private rememberPane(pane: HerdrPane): void {
+    const previousWorkspaceId = this.paneWorkspaceIds.get(pane.paneId);
+    if (previousWorkspaceId && previousWorkspaceId !== pane.workspaceId) this.invalidate(previousWorkspaceId);
+    this.paneWorkspaceIds.set(pane.paneId, pane.workspaceId);
+  }
+
+  private rememberWorkspaceSnapshot(workspaceId: string, panes: readonly HerdrPane[]): void {
+    this.forgetWorkspacePanes(workspaceId);
+    for (const pane of panes) this.rememberPane(pane);
+  }
+
+  private forgetWorkspacePanes(workspaceId: string): void {
+    for (const [paneId, indexedWorkspaceId] of this.paneWorkspaceIds) {
+      if (indexedWorkspaceId === workspaceId) this.paneWorkspaceIds.delete(paneId);
+    }
+  }
+
+  private invalidateAll(): void {
+    this.snapshots.clear();
+    this.allSnapshot = null;
+    this.paneWorkspaceIds.clear();
   }
 }
 

@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
-import { buildSpaceDirectoryGroups, selectSpaceDirectoryBinding } from "../src/coordinator/operations-workflow.js";
+import { buildSpaceDirectoryGroups, selectSpaceDirectoryBinding } from "../src/coordinator/operations-query-workflow.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { HerdrPane } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";

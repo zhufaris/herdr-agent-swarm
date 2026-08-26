@@ -213,6 +213,57 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("discards terminal output when the binding generation changes during the read", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    let release!: (output: string) => void;
+    const readOutput = vi.fn(() => new Promise<string>((resolve) => { release = resolve; }));
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const events: string[] = [];
+    const bus = new BridgeEventBus();
+    bus.onBridgeEvent("test", (event) => { events.push(event.type); });
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
+      herdr: { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort, lifecycleEvents: bus,
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    const reconciliation = reconciler.reconcile();
+    await vi.waitFor(() => expect(readOutput).toHaveBeenCalledOnce());
+    store.updateBinding("b1", { generation: 2 });
+    release("◆ stale answer\n────────");
+    await reconciliation;
+
+    expect(store.getBinding("b1")).toMatchObject({ generation: 2, lastOutputFingerprint: null });
+    expect(events).not.toContain("TurnCompleted");
+    store.close();
+  });
+
+  it("does not publish duplicate telemetry for an unchanged terminal snapshot", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const events: string[] = [];
+    const bus = new BridgeEventBus();
+    const stop = bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved") events.push(event.type); });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
+      herdr: { async listPanes() { return [pane]; }, async readOutput() { return "GPT-5.6-Sol · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort,
+      lifecycleEvents: bus, channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(events).toEqual(["PaneOutputObserved"]);
+    stop();
+    store.close();
+  });
+
   it("projects passively observed model and context telemetry for an idle binding", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -230,7 +281,7 @@ describe("HerdrRuntimeReconciler", () => {
 
     await reconciler.reconcile();
 
-    expect(observed.find((event) => event.type === "TurnOutputObserved")?.payload).toMatchObject({ model: "GPT-5.6-Terra", context: "31.1K tokens", answerSnapshot: "" });
+    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ model: "GPT-5.6-Terra", context: "31.1K tokens" });
     store.close();
   });
 

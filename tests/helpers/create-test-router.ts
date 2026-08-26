@@ -3,7 +3,12 @@ import type { BridgeConfig } from "../../src/config.js";
 import { BindingProvisioningWorkflow } from "../../src/coordinator/binding-provisioning-workflow.js";
 import { HerdrRuntimeReconciler } from "../../src/coordinator/herdr-runtime-reconciler.js";
 import { InboundRouter } from "../../src/coordinator/inbound-router.js";
-import { OperationsWorkflow } from "../../src/coordinator/operations-workflow.js";
+import { ModelSelectionWorkflow } from "../../src/coordinator/model-selection-workflow.js";
+import { PaneControlWorkflow } from "../../src/coordinator/pane-control-workflow.js";
+import { OperationsQueryWorkflow } from "../../src/coordinator/operations-query-workflow.js";
+import { SessionAdministrationWorkflow } from "../../src/coordinator/session-administration-workflow.js";
+import { DeliveryRecoveryWorkflow } from "../../src/coordinator/delivery-recovery-workflow.js";
+import { PaneClosureWorkflow } from "../../src/coordinator/pane-closure-workflow.js";
 import { PromptRunWorkflow } from "../../src/coordinator/prompt-run-workflow.js";
 import { RetiredPaneCleanupWorkflow } from "../../src/coordinator/retired-pane-cleanup-workflow.js";
 import { StartupViewConverger } from "../../src/coordinator/startup-view-converger.js";
@@ -35,7 +40,12 @@ export function createTestRouter(
   const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
   const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
-  const operations = new OperationsWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
+  const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
+  const paneControl = new PaneControlWorkflow({ store, herdr, outbound: writer, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
+  const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, logger });
+  const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
+  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
+  const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
@@ -43,6 +53,6 @@ export function createTestRouter(
   });
   return new InboundRouter({
     config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, provisioning, operations, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork)
+    promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork)
   });
 }

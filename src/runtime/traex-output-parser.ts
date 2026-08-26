@@ -23,23 +23,30 @@ interface ParsedTerminalStreamDelta { delta: string; snapshot: string; update: "
 
 /** True when TraeX is visibly waiting at its composer despite missing structured agent state. */
 export function isTraexComposerReady(output: string): boolean {
-  const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
-  return lines.slice(-8).some((line) => /^\s*[❯›](?:\s+\S.*)?$/u.test(line));
+  return hasTraexComposerReady(stripTerminalControl(output).split("\n"));
 }
 
 /** Infer state only from strong markers near the live end of a TraeX terminal. */
 export function inferTraexAgentState(output: string): AgentState {
-  const tail = stripTerminalControl(output).replace(/\r/g, "").split("\n").slice(-12).join("\n");
-  if (isTraexComposerReady(tail)) return "idle";
-  if (/(?:Approve (?:command|action)?|approval required|waiting for (?:approval|user))/i.test(tail)) return "blocked";
-  if (/[✧◆]\s*Work(?:ing|i…)|\bAuto Mode\b.*\bactive turn\b/iu.test(tail)) return "working";
+  const tail = stripTerminalControl(output).split("\n").slice(-12);
+  if (hasTraexComposerReady(tail)) return "idle";
+  const tailText = tail.join("\n");
+  if (/(?:Approve (?:command|action)?|approval required|waiting for (?:approval|user))/i.test(tailText)) return "blocked";
+  if (/[✧◆]\s*Work(?:ing|i…)|\bAuto Mode\b.*\bactive turn\b/iu.test(tailText)) return "working";
   return "unknown";
+}
+
+function hasTraexComposerReady(lines: readonly string[]): boolean {
+  for (let index = lines.length - 1, seen = 0; index >= 0 && seen < 8; index -= 1, seen += 1) {
+    if (/^\s*[❯›](?:\s+\S.*)?$/u.test(lines[index]!)) return true;
+  }
+  return false;
 }
 
 /** Convert two Herdr terminal snapshots into a safe append or active-window replacement. */
 export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string, promptEcho: string): ParsedTerminalStreamDelta {
-  const previous = stripTerminalControl(previousRaw).replace(/\r/g, "");
-  const current = stripTerminalControl(currentRaw).replace(/\r/g, "");
+  const previous = stripTerminalControl(previousRaw);
+  const current = stripTerminalControl(currentRaw);
   if (current === previous) return { delta: "", snapshot: currentRaw, update: "append", ...extractTraexTelemetry(current) };
 
   const overlap = terminalDelta(previous, current, promptEcho);
@@ -61,7 +68,7 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
 }
 
 function extractTraexTelemetry(source: string): { model?: string; context?: string } {
-  const lines = source.replace(/\r/g, "").split("\n").slice(-40);
+  const lines = lastTerminalLines(source, 40);
   let model: string | undefined;
   let context: string | undefined;
   for (const line of lines) {
@@ -76,6 +83,16 @@ function extractTraexTelemetry(source: string): { model?: string; context?: stri
   return { ...(model ? { model } : {}), ...(context ? { context } : {}) };
 }
 
+function lastTerminalLines(source: string, count: number): string[] {
+  let start = source.length;
+  for (let seen = 0; seen < count && start > 0; seen += 1) {
+    const newline = source.lastIndexOf("\n", start - 1);
+    if (newline < 0) { start = 0; break; }
+    start = newline;
+  }
+  return source.slice(start === 0 ? 0 : start + 1).split("\n");
+}
+
 function newestTerminalWindow(value: string): string {
   const prefix = `${LIVE_WINDOW_NOTICE}\n\n`;
   const tail = value.slice(-(MAX_TERMINAL_DELTA_CHARS - prefix.length)).trimStart();
@@ -85,12 +102,32 @@ function newestTerminalWindow(value: string): string {
 function terminalDelta(previous: string, current: string, promptEcho: string): { value: string; fullSnapshot: boolean } {
   if (current.startsWith(previous)) return { value: current.slice(previous.length).replace(/^\n/, ""), fullSnapshot: false };
   const limit = Math.min(previous.length, current.length);
-  for (let size = limit; size >= Math.min(MIN_RELIABLE_TERMINAL_OVERLAP, limit); size -= 1) {
-    if (previous.endsWith(current.slice(0, size))) return { value: current.slice(size).replace(/^\n/, ""), fullSnapshot: false };
+  const overlap = longestTerminalOverlap(previous, current);
+  if (overlap >= Math.min(MIN_RELIABLE_TERMINAL_OVERLAP, limit) && (limit >= MIN_RELIABLE_TERMINAL_OVERLAP || overlap === limit)) {
+    return { value: current.slice(overlap).replace(/^\n/, ""), fullSnapshot: false };
   }
   const afterPrompt = outputAfterPromptEcho(current, promptEcho);
   const value = afterPrompt || (/^\s*(?:◆|✧|╭)/mu.test(current) ? current : "");
   return { value, fullSnapshot: true };
+}
+
+/** Longest prefix of current that is also a suffix of previous, in linear time. */
+function longestTerminalOverlap(previous: string, current: string): number {
+  if (!previous || !current) return 0;
+  const prefix = new Uint32Array(current.length);
+  for (let index = 1, matched = 0; index < current.length; index += 1) {
+    while (matched > 0 && current[index] !== current[matched]) matched = prefix[matched - 1]!;
+    if (current[index] === current[matched]) matched += 1;
+    prefix[index] = matched;
+  }
+
+  let matched = 0;
+  for (let index = 0; index < previous.length; index += 1) {
+    while (matched > 0 && previous[index] !== current[matched]) matched = prefix[matched - 1]!;
+    if (previous[index] === current[matched]) matched += 1;
+    if (matched === current.length && index + 1 < previous.length) matched = prefix[matched - 1]!;
+  }
+  return matched;
 }
 
 function outputAfterPromptEcho(current: string, promptEcho: string): string {
@@ -168,11 +205,20 @@ function stripTraeCodeBanner(source: string): string {
   const lines = source.split("\n");
   const output: string[] = [];
   for (let index = 0; index < lines.length;) {
-    if (/^\s*╭[─-]+╮\s*$/.test(lines[index]!)) {
-      const end = lines.findIndex((line, candidate) => candidate >= index && /^\s*╰[─-]+╯\s*$/.test(line));
-      if (end >= index && lines.slice(index, end + 1).some((line) => /TraeCode CLI/.test(line))) { index = end + 1; continue; }
+    if (!/^\s*╭[─-]+╮\s*$/.test(lines[index]!)) {
+      output.push(lines[index++]!);
+      continue;
     }
-    output.push(lines[index++]!);
+
+    const box: string[] = [];
+    let containsTraeCode = false;
+    while (index < lines.length) {
+      const line = lines[index++]!;
+      box.push(line);
+      containsTraeCode ||= /TraeCode CLI/.test(line);
+      if (/^\s*╰[─-]+╯\s*$/.test(line)) break;
+    }
+    if (!containsTraeCode || !/^\s*╰[─-]+╯\s*$/.test(box.at(-1)!)) output.push(...box);
   }
   return output.join("\n");
 }
@@ -212,7 +258,7 @@ export function parseTraexOutput(previousRaw: string, currentRaw: string, _works
   const appendedBlock = Boolean(previousAnswer) && current.startsWith(previous) && /^\s*◆\s+/m.test(rawDelta);
   return {
     answerSnapshot, previousAnswerSnapshot: previousAnswer,
-    answerUpdate: isNativeStatusFrame(answerSnapshot) ? "replace-status" : appendedBlock ? "append" : "replace",
+    answerUpdate: progress.found ? "replace-status" : appendedBlock ? "append" : "replace",
     progressEvents: progress.steps, hasProgressSnapshot: progress.found
   };
 }
@@ -227,13 +273,15 @@ function nativeProgress(answer: string): { found: boolean; steps: ParsedProgress
 }
 
 function extractAnswer(output: string): string {
-  const matches = [...output.matchAll(/^\s*◆\s+/gm)];
-  const marker = matches.at(-1);
+  const markerPattern = /^\s*◆\s+/gm;
+  let marker: RegExpExecArray | null = null;
+  for (let match = markerPattern.exec(output); match; match = markerPattern.exec(output)) marker = match;
   if (!marker || marker.index === undefined) return "";
-  return output.slice(marker.index + marker[0].length).split(/\n\s*─{3,}/)[0]?.trimEnd() ?? "";
+  const answerStart = marker.index + marker[0].length;
+  const separator = /\n\s*─{3,}/g;
+  separator.lastIndex = answerStart;
+  const answerEnd = separator.exec(output)?.index ?? output.length;
+  return output.slice(answerStart, answerEnd).trimEnd();
 }
 
 function safeAnswer(value: string): string { return !value || UNSAFE.test(value) ? "" : value; }
-function isNativeStatusFrame(value: string): boolean {
-  return findNativeTaskFrame(value) !== null;
-}

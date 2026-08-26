@@ -25,6 +25,22 @@ describe("model command", () => {
     await fixture.close();
   });
 
+  it("replies to each distinct /swarm model message even when the rendered result is identical", async () => {
+    const cards: object[] = [];
+    const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
+    const fixture = await setup(cards, runPaneCommand);
+    const statusMessageId = fixture.store.getBinding(fixture.bindingId)!.statusMessageId;
+
+    await fixture.coordinator.handleMessage(message("/swarm model", "first"));
+    await fixture.coordinator.handleMessage(message("/swarm model", "second"));
+
+    await vi.waitFor(() => expect(runPaneCommand).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(cards.filter((card) => JSON.stringify(card).includes("Current model: GPT-5.5"))).toHaveLength(2));
+    expect(fixture.store.getBinding(fixture.bindingId)?.statusMessageId).toBe(statusMessageId);
+    expect(fixture.store.countPendingPrompts(fixture.bindingId)).toBe(0);
+    await fixture.close();
+  });
+
   it("runs before queued ordinary prompts while the pane is idle", async () => {
     const cards: object[] = [];
     const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
@@ -343,8 +359,8 @@ async function setup(
   return { coordinator, store, bindingId, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }
 
-function message(text: string) {
-  return { eventId: `event-${text}`, messageId: `message-${text}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
+function message(text: string, id = text) {
+  return { eventId: `event-${id}`, messageId: `message-${id}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
 }
 
 function config(): BridgeConfig {

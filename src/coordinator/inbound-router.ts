@@ -15,7 +15,12 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
-import type { OperationsWorkflowPort } from "./operations-workflow.js";
+import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
+import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
+import type { OperationsQueryWorkflowPort } from "./operations-query-workflow.js";
+import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
+import type { DeliveryRecoveryWorkflowPort } from "./delivery-recovery-workflow.js";
+import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
@@ -41,7 +46,12 @@ export interface InboundRouterOptions {
   inboundWork: InboundWorkNotifier;
   promptRun: PromptRunWorkflowPort;
   provisioning: BindingProvisioningWorkflowPort;
-  operations: OperationsWorkflowPort;
+  modelSelection: ModelSelectionWorkflowPort;
+  paneControl: PaneControlWorkflowPort;
+  operationsQuery: OperationsQueryWorkflowPort;
+  sessionAdministration: SessionAdministrationWorkflowPort;
+  deliveryRecovery: DeliveryRecoveryWorkflowPort;
+  paneClosure: PaneClosureWorkflowPort;
   reconciler: HerdrRuntimeReconcilerPort;
   retiredPaneCleanup: RetiredPaneCleanupWorkflowPort;
   startupViews: StartupViewConvergerPort;
@@ -60,7 +70,7 @@ export class InboundRouter implements InboundRouterPort {
   }
 
   async start(): Promise<void> {
-    const { config, store, herdr, lark, logger, promptRun, reconciler, operations, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
+    const { config, store, herdr, lark, logger, promptRun, reconciler, modelSelection, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
@@ -70,9 +80,9 @@ export class InboundRouter implements InboundRouterPort {
     await Promise.all([...new Set(config.projects.map((project) => project.workspaceId))].map((workspaceId) => herdr.assertWorkspace(workspaceId)));
     await reconciler.captureBaselines();
     this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
-      if (event.kind === "control-ready") void this.options.operations.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
+      if (event.kind === "control-ready") void this.options.paneControl.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
     });
-    await operations.recover();
+    await Promise.all([paneControl.recover(), this.options.paneClosure.recover()]);
     await retiredPaneCleanup.recover();
     await reconciler.reconcile();
     promptRun.start();
@@ -88,7 +98,7 @@ export class InboundRouter implements InboundRouterPort {
     await this.options.lark.stop();
     this.stopInboundSubscription?.();
     this.stopControlSubscription?.();
-    this.options.operations.shutdown();
+    this.options.modelSelection.shutdown();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(), ...(this.inboundDrain ? [this.inboundDrain] : [])]);
   }
 
@@ -106,13 +116,13 @@ export class InboundRouter implements InboundRouterPort {
   async handleCardAction(action: IncomingLarkCardAction): Promise<void> {
     if (action.chatId !== this.options.config.lark.chatId) return;
     const model = parseModelSelectionAction(action.value, action.option);
-    if (model) return this.options.operations.selectModel(action, model.bindingId, model.model);
+    if (model) return this.options.modelSelection.selectModel(action, model.bindingId, model.model);
     const mode = parseModelModeSelectionAction(action.value, action.option);
-    if (mode) return this.options.operations.selectModelMode(action, mode.bindingId, mode.operationId, mode.mode);
+    if (mode) return this.options.modelSelection.selectModelMode(action, mode.bindingId, mode.operationId, mode.mode);
     const open = parseOpenThreadAction(action.value);
-    if (open) return this.options.operations.openThread(action, open.bindingId);
+    if (open) return this.options.deliveryRecovery.openThread(action, open.bindingId);
     const deadLetter = parseDeadLetterAction(action.value);
-    if (deadLetter) return this.options.operations.decideDeadLetter(action, deadLetter.replyId, deadLetter.action);
+    if (deadLetter) return this.options.deliveryRecovery.decideDeadLetter(action, deadLetter.replyId, deadLetter.action);
     const paneClaim = parsePaneClaimAction(action.value);
     if (paneClaim) {
       const project = this.projectsById.get(paneClaim.projectId);
@@ -145,23 +155,23 @@ export class InboundRouter implements InboundRouterPort {
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
       if (command?.kind === "help") await this.reply(message.rootMessageId ?? message.messageId, renderHelpCard());
-      else if (command?.kind === "stop") disposition = await this.options.operations.stop(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "steer") disposition = await this.options.operations.steer(message, binding, command.text) ? "command_completed" : "rejected";
-      else if (command?.kind === "model") disposition = await this.options.operations.runModel(message, binding, command.name) ? "command_completed" : "rejected";
+      else if (command?.kind === "stop") disposition = await this.options.paneControl.stop(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "steer") disposition = await this.options.paneControl.steer(message, binding, command.text) ? "command_completed" : "rejected";
+      else if (command?.kind === "model") disposition = await this.options.modelSelection.runModel(message, binding, command.name) ? "command_completed" : "rejected";
       else if (command?.kind === "reset") disposition = await this.options.provisioning.reset(message, binding, command.title) ? "command_completed" : "rejected";
       else if (command?.kind === "new" || command?.kind === "projects") await this.options.provisioning.selectProject(message, command.kind === "new" ? command.title : null);
-      else if (command?.kind === "spaces") await this.options.operations.listSpaces(message);
-      else if (command?.kind === "sessions") await this.options.operations.listSessions(message);
-      else if (command?.kind === "failures") await this.options.operations.listFailures(message);
+      else if (command?.kind === "spaces") await this.options.operationsQuery.listSpaces(message);
+      else if (command?.kind === "sessions") await this.options.operationsQuery.listSessions(message);
+      else if (command?.kind === "failures") await this.options.operationsQuery.listFailures(message);
       else if (command?.kind === "attach") disposition = await this.options.provisioning.attach(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
-      else if (command?.kind === "status") { if (!binding) { await this.reject(message, "这个话题尚未连接 Herdr。请发送 `/swarm new` 创建项目。"); disposition = "rejected"; } else await this.options.operations.emitStatus(binding); }
-      else if (command?.kind === "rename") disposition = await this.options.operations.rename(message, binding, command.title) ? "command_completed" : "rejected";
-      else if (command?.kind === "close") disposition = await this.options.operations.archive(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "pane_close_request") disposition = await this.options.operations.requestPaneClose(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "pane_close_confirm") disposition = await this.options.operations.confirmPaneClose(message, binding, command.code) ? "command_completed" : "rejected";
+      else if (command?.kind === "status") { if (!binding) { await this.reject(message, "这个话题尚未连接 Herdr。请发送 `/swarm new` 创建项目。"); disposition = "rejected"; } else await this.options.sessionAdministration.emitStatus(binding); }
+      else if (command?.kind === "rename") disposition = await this.options.sessionAdministration.rename(message, binding, command.title) ? "command_completed" : "rejected";
+      else if (command?.kind === "close") disposition = await this.options.sessionAdministration.archive(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "pane_close_request") disposition = await this.options.paneClosure.requestPaneClose(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "pane_close_confirm") disposition = await this.options.paneClosure.confirmPaneClose(message, binding, command.code) ? "command_completed" : "rejected";
       else if (command?.kind === "reattach") { if (!binding || binding.attachment !== "orphaned") { await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected"; } else await this.options.provisioning.reattach(binding, command.paneId, message.actorOpenId); }
       else if (command?.kind === "replace") { if (!binding || binding.attachment !== "orphaned") { await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected"; } else await this.options.provisioning.replace(binding, message.actorOpenId); }
-      else if (command?.kind === "resume") disposition = await this.options.operations.resume(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "resume") disposition = await this.options.sessionAdministration.resume(message, binding) ? "command_completed" : "rejected";
       else if (binding?.state === "active" && binding.lifecycle === "active") { await this.enqueue(binding, message); disposition = "prompt_queued"; }
       else if (message.isRootMessage && message.mentionsBot) { const created = await this.options.provisioning.createRoot(message, deriveTopicTitle(message.text)); await this.enqueue(created, message, message.text); disposition = "prompt_queued"; }
       else { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }

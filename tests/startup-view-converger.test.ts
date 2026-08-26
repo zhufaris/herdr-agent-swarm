@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { StartupViewConverger } from "../src/coordinator/startup-view-converger.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { OutboundIntentPort } from "../src/domain/ports.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
@@ -48,6 +49,28 @@ describe("StartupViewConverger", () => {
     await new StartupViewConverger(multiProjectConfig, store, { enqueueCardUpdate } as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }).converge();
 
     expect(store.loadTopicView("legacy")?.spaceName).toBe("legacy/unresolved");
+    store.close();
+  });
+
+  it("rebuilds missing terminal stream intents from a durable completed run card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "work", workspaceId: "wH", paneId: "wH:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "request", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "durable answer", answerSegments: ["durable answer"], viewVersion: 3, answerDeliveredVersion: 1 });
+    const enqueueStreamContent = vi.fn<OutboundIntentPort["enqueueStreamContent"]>().mockResolvedValue(undefined);
+    const enqueueStreamFinish = vi.fn<OutboundIntentPort["enqueueStreamFinish"]>().mockResolvedValue(undefined);
+    const outbound = { enqueueCardUpdate: vi.fn(), enqueueStreamContent, enqueueStreamFinish } as unknown as OutboundIntentPort;
+
+    await new StartupViewConverger(config, store, outbound, { wake: () => {}, subscribe: () => () => {} }).converge();
+
+    expect(enqueueStreamContent).toHaveBeenCalledWith("b1", "p1", "answer-card", expect.any(String), expect.stringContaining("durable answer"), expect.any(Number));
+    const sequence = enqueueStreamContent.mock.calls[0]![5];
+    expect(sequence).toBeGreaterThanOrEqual(3);
+    expect(enqueueStreamFinish).toHaveBeenCalledWith("b1", "p1", "answer-card", "Completed", sequence + 1);
     store.close();
   });
 });

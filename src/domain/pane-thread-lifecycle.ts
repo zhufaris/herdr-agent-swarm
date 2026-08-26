@@ -17,9 +17,9 @@ export interface PaneThreadSessionState {
 
 export type SessionTransition =
   | { type: "pane_created" }
-  | { type: "runtime_started" }
+  | { type: "runtime_started"; runtime?: AgentState }
   | { type: "thread_created" }
-  | { type: "activate" }
+  | { type: "activate"; runtime?: AgentState }
   | { type: "provisioning_failed" }
   | { type: "archive_requested"; hasActiveTurn: boolean }
   | { type: "drain_completed" }
@@ -27,6 +27,8 @@ export type SessionTransition =
   | { type: "pane_probe_failed"; confirmedMissing: boolean; orphanThreshold: number }
   | { type: "pane_observed"; runtime: AgentState }
   | { type: "pane_reattached"; replacement: boolean }
+  | { type: "recover_failed"; runtime: AgentState }
+  | { type: "retry_failed_provisioning"; runtime: AgentState }
   | { type: "turn_completed" };
 
 export function transitionSession(state: PaneThreadSessionState, transition: SessionTransition): PaneThreadSessionState {
@@ -36,13 +38,13 @@ export function transitionSession(state: PaneThreadSessionState, transition: Ses
       return { ...state, attachment: "attached", provisioningCheckpoint: "pane_created" };
     case "runtime_started":
       requireLifecycle(state, transition.type, "provisioning");
-      return { ...state, runtime: "idle", provisioningCheckpoint: "runtime_started" };
+      return { ...state, runtime: transition.runtime ?? "idle", provisioningCheckpoint: "runtime_started" };
     case "thread_created":
       requireLifecycle(state, transition.type, "provisioning");
       return { ...state, provisioningCheckpoint: "thread_created" };
     case "activate":
       requireLifecycle(state, transition.type, "provisioning", "archived");
-      return { ...state, lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", degradationCount: 0 };
+      return { ...state, lifecycle: "active", attachment: "attached", runtime: transition.runtime ?? state.runtime, provisioningCheckpoint: "activated", degradationCount: 0 };
     case "provisioning_failed":
       requireLifecycle(state, transition.type, "provisioning");
       return { ...state, lifecycle: "failed" };
@@ -62,12 +64,18 @@ export function transitionSession(state: PaneThreadSessionState, transition: Ses
       return { ...state, attachment, degradationCount };
     }
     case "pane_observed":
-      requireLifecycle(state, transition.type, "active", "draining");
+      requireLifecycle(state, transition.type, "provisioning", "active", "draining");
       return { ...state, attachment: "attached", degradationCount: 0, runtime: transition.runtime };
     case "pane_reattached":
       if (state.attachment !== "orphaned") throw invalidTransition(state, transition.type);
       requireLifecycle(state, transition.type, "active", "archived", "draining");
       return { ...state, lifecycle: "active", attachment: "attached", runtime: "unknown", degradationCount: 0, generation: state.generation + (transition.replacement ? 1 : 0) };
+    case "recover_failed":
+      requireLifecycle(state, transition.type, "failed");
+      return { ...state, lifecycle: "active", attachment: "attached", runtime: transition.runtime, provisioningCheckpoint: "activated", degradationCount: 0 };
+    case "retry_failed_provisioning":
+      requireLifecycle(state, transition.type, "failed");
+      return { ...state, lifecycle: "provisioning", attachment: "unattached", runtime: transition.runtime, provisioningCheckpoint: "runtime_started", degradationCount: 0 };
     case "turn_completed":
       requireLifecycle(state, transition.type, "active", "draining");
       return { ...state, runtime: "done", hasCompletedTurn: true };

@@ -11,11 +11,19 @@ const STATES = { "✔": "done", "✓": "done", "■": "active", "◻": "pending"
 
 export function findNativeTaskFrame(source: string): NativeTaskFrame | null {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  return findNativeTaskFrameLines(lines);
+}
+
+function findNativeTaskFrameLines(lines: readonly string[]): NativeTaskFrame | null {
   for (let taskCount = lines.length - 1; taskCount >= 0; taskCount -= 1) {
     if (!TASK_COUNT.test(lines[taskCount]!)) continue;
     let start = taskCount;
     while (start > 0 && lines[start - 1]!.trim()) start -= 1;
-    if (!lines.slice(start, taskCount).some((line) => META.test(line))) continue;
+    let hasMeta = false;
+    for (let index = start; index < taskCount; index += 1) {
+      if (META.test(lines[index]!)) { hasMeta = true; break; }
+    }
+    if (!hasMeta) continue;
 
     const steps: NativeTaskStep[] = [];
     let end = taskCount + 1;
@@ -49,7 +57,7 @@ function isTaskContinuation(line: string): boolean {
 export function stripNativeTaskFrame(source: string): string {
   const normalized = source.replace(/\r\n?/g, "\n");
   const lines = normalized.split("\n");
-  const frame = findNativeTaskFrame(normalized);
+  const frame = findNativeTaskFrameLines(lines);
   if (!frame) return normalized.trim();
   return [...lines.slice(0, frame.start), ...lines.slice(frame.end)].join("\n").trim();
 }

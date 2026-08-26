@@ -12,12 +12,24 @@ describe("application composition boundaries", () => {
   it("keeps concrete workflow and adapter construction in the composition root", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-    expect(router).not.toMatch(/new (?:PromptRunWorkflow|BindingProvisioningWorkflow|OperationsWorkflow|HerdrRuntimeReconciler|StartupViewConverger)/);
+    expect(router).not.toMatch(/new (?:PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
-    for (const component of ["PromptRunWorkflow", "BindingProvisioningWorkflow", "OperationsWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger"]) {
+    for (const component of ["PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger"]) {
       expect(main).toContain(`new ${component}`);
     }
+  });
+
+  it("routes query and session administration through dedicated workflow seams", () => {
+    const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
+    expect(router).toContain("OperationsQueryWorkflowPort");
+    expect(router).toContain("SessionAdministrationWorkflowPort");
+    expect(router).toContain("ModelSelectionWorkflowPort");
+    expect(router).toContain("PaneControlWorkflowPort");
+    expect(router).toContain("PaneClosureWorkflowPort");
+    expect(router).toContain("DeliveryRecoveryWorkflowPort");
+    expect(router).toContain("operationsQuery.listSpaces");
+    expect(router).toContain("sessionAdministration.archive");
   });
 
   it("keeps lifecycle publishers and subscribers behind their ports", () => {
@@ -34,7 +46,7 @@ describe("application composition boundaries", () => {
   it("keeps outbound intent persistence separate from Lark delivery", () => {
     const writer = readFileSync(new URL("../src/events/outbound-intent-writer.ts", import.meta.url), "utf8");
     const dispatcher = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
-    const coordinators = ["inbound-router.ts", "binding-provisioning-workflow.ts", "operations-workflow.ts", "prompt-run-workflow.ts", "herdr-runtime-reconciler.ts"]
+    const coordinators = ["inbound-router.ts", "binding-provisioning-workflow.ts", "model-selection-workflow.ts", "pane-control-workflow.ts", "pane-closure-workflow.ts", "session-administration-workflow.ts", "operations-query-workflow.ts", "delivery-recovery-workflow.ts", "prompt-run-workflow.ts", "herdr-runtime-reconciler.ts"]
       .map((file) => readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8"))
       .join("\n");
     expect(writer).toContain("implements OutboundIntentPort");

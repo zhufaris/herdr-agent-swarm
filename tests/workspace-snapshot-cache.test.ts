@@ -60,6 +60,52 @@ describe("workspace snapshot cache", () => {
     expect(cache.status().entries).toBe(0);
   });
 
+  it("invalidates mutations through the observed workspace identity instead of parsing the Pane ID", async () => {
+    const unstructuredPane = { ...pane("workspace-alpha", 1), paneId: "opaque-pane-id" };
+    const listPanes = vi.fn(async () => [unstructuredPane]);
+    const delegate = adapter({ listPanes, async closePane() {} });
+    const cache = new WorkspaceSnapshotCache(delegate);
+
+    await cache.listPanes("workspace-alpha");
+    expect(cache.status().entries).toBe(1);
+    await cache.renamePane("opaque-pane-id", "renamed");
+    expect(cache.status().entries).toBe(0);
+
+    await cache.listPanes("workspace-alpha");
+    expect(cache.status().entries).toBe(1);
+    await cache.closePane("opaque-pane-id");
+    expect(cache.status().entries).toBe(0);
+  });
+
+  it("invalidates all snapshots when a successful mutation has no observed workspace identity", async () => {
+    const cache = new WorkspaceSnapshotCache(adapter({
+      async listPanes(workspaceId) { return [pane(workspaceId, 1)]; }
+    }));
+
+    await cache.listPanes("w1");
+    await cache.listPanes("w2");
+    expect(cache.status().entries).toBe(2);
+
+    await cache.renamePane("never-observed-pane", "renamed");
+    expect(cache.status().entries).toBe(0);
+  });
+
+  it("forgets panes that disappear from a refreshed workspace snapshot", async () => {
+    let workspaceOnePanes = [{ ...pane("w1", 1), paneId: "removed-pane" }];
+    const cache = new WorkspaceSnapshotCache(adapter({
+      async listPanes(workspaceId) { return workspaceId === "w1" ? workspaceOnePanes : [pane(workspaceId, 1)]; }
+    }));
+
+    await cache.listPanes("w1");
+    await cache.listPanes("w2");
+    workspaceOnePanes = [];
+    await cache.listPanes("w1", { forceRefresh: true });
+    expect(cache.status().entries).toBe(2);
+
+    await cache.renamePane("removed-pane", "renamed");
+    expect(cache.status().entries).toBe(0);
+  });
+
   it("signals that callers must use workspace fallback when the delegate has no all-pane snapshot", async () => {
     const cache = new WorkspaceSnapshotCache(adapter({ async listPanes(workspaceId) { return [pane(workspaceId, 1)]; } }));
 

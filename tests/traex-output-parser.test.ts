@@ -21,6 +21,15 @@ describe("TraeX output parser", () => {
     });
   });
 
+  it("extracts telemetry only from the bounded terminal tail", () => {
+    const early = "GPT-5.6-Sol · Auto Mode · 1K tokens";
+    const tail = ["GPT-5.6-Terra · Auto Mode · 31.1K tokens", ...Array.from({ length: 39 }, (_, index) => `tail ${index}`)].join("\n");
+
+    expect(parseTerminalStreamDelta("", `${early}\n${tail}`, "inspect")).toMatchObject({
+      model: "GPT-5.6-Terra", context: "31.1K tokens"
+    });
+  });
+
   it("replaces a redrawn terminal snapshot instead of appending the full screen again", () => {
     const previous = ["◆ First answer", "✧ Working"].join("\n");
     const current = [
@@ -39,6 +48,33 @@ describe("TraeX output parser", () => {
       delta: "◆ Current answer",
       update: "replace-all"
     });
+  });
+
+  it("keeps only the new suffix after a long redrawn-snapshot overlap", () => {
+    const overlap = `${"terminal row\n".repeat(100)}◆ Shared live status`;
+    const previous = `stale header\n${overlap}`;
+    const current = `${overlap}\n◆ New live status`;
+
+    expect(parseTerminalStreamDelta(previous, current, "inspect")).toMatchObject({
+      delta: "◆ New live status", update: "append"
+    });
+  });
+
+  it("preserves incomplete and non-TraeCode terminal boxes", () => {
+    const nonTraeCodeBox = [
+      "╭───────────────────────────╮",
+      "│ Build output              │",
+      "╰───────────────────────────╯",
+      "◆ Keep this result"
+    ].join("\n");
+    const incompleteBox = [
+      "╭───────────────────────────╮",
+      "│ TraeCode CLI (v1)         │",
+      "◆ Keep incomplete output"
+    ].join("\n");
+
+    expect(parseTerminalStreamDelta("previous", nonTraeCodeBox, "inspect").delta).toContain(nonTraeCodeBox);
+    expect(parseTerminalStreamDelta("previous", incompleteBox, "inspect").delta).toContain(incompleteBox);
   });
 
   it("drops a narrow composer echo and unwraps terminal-width prose for Lark", () => {
@@ -151,6 +187,15 @@ describe("TraeX output parser", () => {
 
   it("uses the latest answer block for a later turn", () => {
     expect(extractFinalTraexAnswer("◆ answer 1\n────────\n◆ answer 2\n────────")).toBe("answer 2");
+  });
+
+  it("stops the latest answer at its first terminal separator", () => {
+    expect(extractFinalTraexAnswer("◆ answer\n────────\nolder terminal content\n────────")).toBe("answer");
+  });
+
+  it("extracts the latest answer without retaining prior answer matches", () => {
+    const output = Array.from({ length: 100 }, (_, index) => `◆ historical answer ${index}\n────────`).join("\n");
+    expect(extractFinalTraexAnswer(`${output}\n◆ final answer\n────────`)).toBe("final answer");
   });
 
   it("filters subagent console status from the final answer", () => {
