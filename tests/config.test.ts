@@ -81,6 +81,12 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_RETENTION_MAX_BATCHES: "0" })).toThrow();
   });
 
+  it("configures a low-frequency SQLite integrity audit", () => {
+    expect(loadConfig({ ...requiredEnvironment }).sqliteIntegrityAudit).toEqual({ intervalMs: 900_000, issueLimit: 20 });
+    expect(loadConfig({ ...requiredEnvironment, SQLITE_INTEGRITY_AUDIT_INTERVAL_MS: "120000" }).sqliteIntegrityAudit.intervalMs).toBe(120_000);
+    expect(() => loadConfig({ ...requiredEnvironment, SQLITE_INTEGRITY_AUDIT_INTERVAL_MS: "59999" })).toThrow();
+  });
+
   it("uses plugin-native paths unless explicit paths override them", () => {
     expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
       PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"

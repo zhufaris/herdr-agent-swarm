@@ -298,6 +298,27 @@ export interface OperationalSummary {
   oldestInactiveAt: string | null;
 }
 
+export interface SqliteIntegrityIssue {
+  rule: string;
+  table: string;
+  count: number;
+  rowId?: number;
+}
+
+export interface SqliteIntegrityInspection {
+  quickCheck: "ok" | "failed";
+  issues: SqliteIntegrityIssue[];
+  truncated: boolean;
+}
+
+export interface SqliteIntegrityDiagnostics extends SqliteIntegrityInspection {
+  state: "idle" | "running" | "healthy" | "degraded";
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  error: string | null;
+}
+
 export interface OutboxDispatcherDiagnostics {
   state: "idle" | "running" | "stopping";
   activeDeliveries: number;

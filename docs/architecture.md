@@ -133,6 +133,12 @@ instance lease. Atomic acceptance and claim transitions must remain atomic
 when ports are narrowed; splitting a large store interface must not split a
 workflow transaction.
 
+A read-only SQLite integrity auditor runs before startup completes and every 15
+minutes afterward. It caches bounded results from `quick_check`,
+`foreign_key_check`, bridge-owned reference checks, and outbox lane-index
+consistency checks. Findings degrade `/status` without failing `/ready`; the
+auditor never repairs rows or exposes prompt, payload, or terminal content.
+
 Herdr and Lark are external systems behind ports. Herdr observations establish
 the live pane and TraeX state; Lark receives visible messages and cards. Neither
 adapter defines business-state transitions, and no workflow may infer durable

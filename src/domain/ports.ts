@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -165,6 +165,7 @@ export interface BindingStorePort {
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
   getOperationalSummary(): OperationalSummary;
+  inspectIntegrity(limit: number): SqliteIntegrityInspection;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;
   loadTopicView(bindingId: string): TopicViewState | null;
@@ -185,6 +186,7 @@ export type LeaseStore = Pick<BindingStorePort,
 >;
 
 export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "listBindings">;
+export type DatabaseIntegrityStore = Pick<BindingStorePort, "inspectIntegrity">;
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
   | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"

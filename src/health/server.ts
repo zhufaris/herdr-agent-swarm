@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
@@ -22,6 +22,7 @@ export function startHealthServer(options: {
   workspaceCache?: { status(): WorkspaceCacheStatus };
   herdrCircuitBreaker?: { status(): HerdrCircuitBreakerStatus };
   startupRecovery?: { snapshot(): StartupRecoveryDiagnostics };
+  sqliteIntegrity?: { snapshot(): SqliteIntegrityDiagnostics };
   lifecycleEvents?: LifecycleEventDiagnostics;
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
@@ -59,6 +60,9 @@ export function startHealthServer(options: {
       let startupRecovery: StartupRecoveryDiagnostics | { error: string } | undefined;
       try { startupRecovery = options.startupRecovery?.snapshot(); }
       catch (error) { startupRecovery = { error: boundedError(error) }; }
+      let sqliteIntegrity: SqliteIntegrityDiagnostics | { error: string } | undefined;
+      try { sqliteIntegrity = options.sqliteIntegrity?.snapshot(); }
+      catch (error) { sqliteIntegrity = { error: boundedError(error) }; }
       response.statusCode = 200;
       const operationalDegraded = "error" in operational
         || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
@@ -69,13 +73,15 @@ export function startHealthServer(options: {
         status: readiness.status === "ready" && !operationalDegraded
           && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
           && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
-          && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded")) ? "ok" : "degraded", identity: options.buildIdentity,
+          && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))
+          && !(sqliteIntegrity && (!("quickCheck" in sqliteIntegrity) || sqliteIntegrity.state === "idle" || sqliteIntegrity.state === "degraded" || sqliteIntegrity.state === "running" && (sqliteIntegrity.quickCheck !== "ok" || sqliteIntegrity.issues.length > 0 || sqliteIntegrity.error !== null))) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
         ...(outboxDispatcher ? { outboxDispatcher } : {}),
         ...(promptWorker ? { promptWorker } : {}),
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
         ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}),
         ...(startupRecovery ? { startupRecovery } : {}),
+        ...(sqliteIntegrity ? { sqliteIntegrity } : {}),
         ...(options.herdrSocket ? { herdrSocket: options.herdrSocket.status() } : {}),
         ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));

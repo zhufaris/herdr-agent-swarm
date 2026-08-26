@@ -61,6 +61,34 @@ describe("health server", () => {
     expect(assertWorkspace).toHaveBeenCalledOnce();
   });
 
+  it("degrades status for SQLite inconsistencies without failing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      sqliteIntegrity: { snapshot: () => ({ state: "degraded", quickCheck: "ok", issues: [{ rule: "outbox_lane_missing_head", table: "outbox_lane_heads", count: 1 }], truncated: false, startedAt: "2026-08-26T00:00:00.000Z", completedAt: "2026-08-26T00:00:00.010Z", durationMs: 10, error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "degraded", readiness: { status: "ready" }, sqliteIntegrity: { state: "degraded", issues: [{ rule: "outbox_lane_missing_head", count: 1 }] } });
+  });
+
+  it("keeps status degraded while rechecking a previously failed SQLite audit", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      sqliteIntegrity: { snapshot: () => ({ state: "running", quickCheck: "ok", issues: [{ rule: "sqlite_foreign_key", table: "run_cards", count: 1 }], truncated: false, startedAt: "2026-08-26T00:15:00.000Z", completedAt: "2026-08-26T00:00:00.010Z", durationMs: 10, error: null }) },
+      buildIdentity
+    });
+
+    expect(await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json()).toMatchObject({ status: "degraded", sqliteIntegrity: { state: "running" } });
+  });
+
   it("becomes not ready when lease ownership is lost", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({

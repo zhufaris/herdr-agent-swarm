@@ -17,6 +17,56 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("reports a healthy database through the bounded integrity seam", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    expect(store.inspectIntegrity(20)).toEqual({ quickCheck: "ok", issues: [], truncated: false });
+  });
+
+  it("detects dangling business references and contradictory outbox lane state without exposing identifiers", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "sensitive-binding", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Secret title" });
+    store.enqueueOutboundReply({ id: "sensitive-reply", idempotencyKey: "integrity-reply", bindingId: "sensitive-binding", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "private-card", kind: "text", payload: "private payload" });
+    store.database.prepare("DELETE FROM outbox_lane_heads").run();
+
+    const inspection = store.inspectIntegrity(20);
+
+    expect(inspection.quickCheck).toBe("ok");
+    expect(inspection.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }),
+      expect.objectContaining({ rule: "outbound_selection_reference", table: "outbound_replies", count: 1 }),
+      expect.objectContaining({ rule: "outbox_lane_missing_head", table: "outbox_lane_heads", count: 1 })
+    ]));
+    expect(JSON.stringify(inspection)).not.toMatch(/sensitive|missing-prompt|missing-selection|private/);
+  });
+
+  it("caps integrity issue records while preserving a truncated signal", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "reply", idempotencyKey: "integrity", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "card", kind: "text", payload: "hidden" });
+
+    expect(store.inspectIntegrity(1)).toEqual({ quickCheck: "ok", truncated: true, issues: [
+      { rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }
+    ] });
+  });
+
+  it("detects foreign-key, active-turn, lane-head, and quarantine contradictions", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "one" });
+    store.enqueuePrompt({ id: "p2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "two" });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running'").run();
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card", kind: "text", payload: "hidden" });
+    store.database.prepare("UPDATE outbox_lane_heads SET delivery_order = delivery_order + 1").run();
+    store.database.exec("PRAGMA foreign_keys = OFF");
+    store.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES ('missing-binding', '{}', 'now')").run();
+    store.database.exec("PRAGMA foreign_keys = ON");
+    store.database.prepare("INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at) SELECT lane_key, id, 'immutable', 'permanent', 'active', 'blocked', 'hidden', 'now', 'now' FROM outbound_replies WHERE id = 'head'").run();
+
+    expect(store.inspectIntegrity(20).issues.map((issue) => issue.rule)).toEqual(expect.arrayContaining([
+      "sqlite_foreign_key", "multiple_running_turns", "outbox_lane_head_mismatch", "quarantined_lane_has_head"
+    ]));
+  });
+
   it("atomically supersedes and consumes pane-close confirmations", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

@@ -52,7 +52,8 @@ const environmentSchema = z.object({
   LARK_MESSAGE_CHUNK_SIZE: z.coerce.number().int().min(500).max(20_000).default(3_500),
   OUTBOX_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(14),
   OUTBOX_RETENTION_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(500),
-  OUTBOX_RETENTION_MAX_BATCHES: z.coerce.number().int().min(1).max(100).default(20)
+  OUTBOX_RETENTION_MAX_BATCHES: z.coerce.number().int().min(1).max(100).default(20),
+  SQLITE_INTEGRITY_AUDIT_INTERVAL_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(900_000)
 });
 
 export type BridgeConfig = ReturnType<typeof loadConfig>;
@@ -81,7 +82,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
     maxQueueDepth: value.MAX_QUEUE_DEPTH,
     larkMessageChunkSize: value.LARK_MESSAGE_CHUNK_SIZE,
-    outboxRetention: { days: value.OUTBOX_RETENTION_DAYS, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE, maxBatches: value.OUTBOX_RETENTION_MAX_BATCHES }
+    outboxRetention: { days: value.OUTBOX_RETENTION_DAYS, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE, maxBatches: value.OUTBOX_RETENTION_MAX_BATCHES },
+    sqliteIntegrityAudit: { intervalMs: value.SQLITE_INTEGRITY_AUDIT_INTERVAL_MS, issueLimit: 20 }
   } as const;
 }
 

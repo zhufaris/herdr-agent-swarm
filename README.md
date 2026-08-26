@@ -171,6 +171,7 @@ TURN_TIMEOUT_MS=3600000
 RECONCILE_INTERVAL_MS=30000
 HERDR_CIRCUIT_FAILURE_THRESHOLD=3
 HERDR_CIRCUIT_OPEN_MS=15000
+SQLITE_INTEGRITY_AUDIT_INTERVAL_MS=900000
 INSTANCE_LEASE_TTL_MS=15000
 INSTANCE_LEASE_HEARTBEAT_MS=5000
 MAX_QUEUE_DEPTH=20
@@ -225,6 +226,9 @@ already-dispatched TraeX prompt is never replayed automatically.
 The process holds a fenced SQLite lease. A second process using the same database
 fails startup while the current lease is live. `/ready` requires lease ownership,
 and `/status` reports bounded lease and two-second workspace-cache diagnostics.
+It also reports the cached result of a read-only SQLite integrity audit that runs
+at startup and every 15 minutes. Integrity findings degrade `/status` without
+making `/ready` fail and are never repaired automatically.
 
 ## Operate through Herdr
 
