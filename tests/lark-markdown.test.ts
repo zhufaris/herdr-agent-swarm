@@ -46,6 +46,32 @@ describe("Lark Markdown normalization", () => {
     expect(normalizeLarkMarkdown(source)).toBe(source);
   });
 
+  it("fences consecutive TraeX numbered diff rows without guessing at signed prose", () => {
+    const source = [
+      "Updated the renderer:",
+      "    145 +        *_table(",
+      "    146 +            [\"Relationship\", \"Count\"],",
+      "     19 -                {\"legacy\": true}",
+      "     20 +                {",
+      "+ ordinary list-like prose",
+      "Growth was +12%",
+      "    210 + isolated row"
+    ].join("\n");
+
+    expect(normalizeLarkMarkdown(source)).toBe([
+      "Updated the renderer:",
+      "```diff",
+      "    145 +        *_table(",
+      "    146 +            [\"Relationship\", \"Count\"],",
+      "     19 -                {\"legacy\": true}",
+      "     20 +                {",
+      "```",
+      "+ ordinary list-like prose",
+      "Growth was +12%",
+      "    210 + isolated row"
+    ].join("\n"));
+  });
+
   it("marks truncation and leaves valid fenced Markdown", () => {
     const result = truncateLarkMarkdown("before\n```ts\n" + "x".repeat(100), 48);
     expect(result).toContain("…（内容已截断）");
@@ -158,6 +184,22 @@ describe("source-aware Lark Markdown pages", () => {
     expect(first.page.endsWith("```")).toBe(true);
     expect(second.page.startsWith("```md\n")).toBe(true);
     expect(second.nextPageStart).toBeNull();
+  });
+
+  it("wraps a TraeX diff across pages while retaining canonical offsets", () => {
+    const source = [
+      "Before",
+      "  145 + first changed line",
+      "  146 + second changed line",
+      "  147 - third changed line",
+      "After"
+    ].join("\n");
+    const first = renderLarkMarkdownPage(source, 0, 48);
+    const second = renderLarkMarkdownPage(source, first.nextPageStart!, 48);
+
+    expect(first.page).toContain("```diff\n  145 + first changed line\n```");
+    expect(second.page).toContain("```diff\n  146 + second changed line");
+    expect(first.nextPageStart).toBe(source.indexOf("  146"));
   });
 
   it("makes bounded progress through one long source line", () => {

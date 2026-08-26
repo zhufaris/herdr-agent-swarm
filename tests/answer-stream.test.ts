@@ -74,6 +74,24 @@ describe("Answer stream pagination", () => {
     ].join("\n"));
   });
 
+  it("renders accumulated TraeX numbered diff output as a code block", () => {
+    const content = [
+      "◆ Edited scripts/render.py",
+      "    145 +        *_table(",
+      "    146 +            [\"Relationship\", \"Count\"],",
+      "    147 +        )"
+    ].join("\n");
+
+    expect(renderAnswerStreamPage(content, 0).page).toBe([
+      "◆ Edited scripts/render.py",
+      "```diff",
+      "    145 +        *_table(",
+      "    146 +            [\"Relationship\", \"Count\"],",
+      "    147 +        )",
+      "```"
+    ].join("\n"));
+  });
+
   it("sanitizes prose but leaves fenced code literals unchanged", () => {
     const content = [
       "<b>Result</b> [unsafe](data:text/plain,no)",

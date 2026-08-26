@@ -1,5 +1,6 @@
 const FENCE = /^ {0,3}(`{3,})([^`]*)$/;
 const TABLE_DELIMITER = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+const TRAEX_DIFF_ROW = /^\s*\d+\s+[+-](?:\s|$)/u;
 const TRUNCATION_MARKER = "…（内容已截断）";
 const LEADING_TRUNCATION_MARKER = "…（较早内容已省略）";
 
@@ -9,7 +10,7 @@ export interface RenderedLarkMarkdownPage {
 }
 
 interface MarkdownBlock {
-  kind: "prose" | "code" | "table";
+  kind: "prose" | "code" | "table" | "diff";
   start: number;
   end: number;
   opening?: string;
@@ -158,6 +159,12 @@ function normalizeProse(source: string): string {
   const lines = value.split("\n");
   const output: string[] = [];
   for (let index = 0; index < lines.length;) {
+    const diffEnd = traexDiffEnd(lines, index);
+    if (diffEnd !== null) {
+      output.push("```diff", ...lines.slice(index, diffEnd), "```");
+      index = diffEnd;
+      continue;
+    }
     if (index + 1 < lines.length && isTableRow(lines[index]!) && TABLE_DELIMITER.test(lines[index + 1]!)) {
       const table: string[] = [lines[index]!, lines[index + 1]!];
       index += 2;
@@ -198,9 +205,10 @@ function renderMarkdownRange(source: string, start: number, end: number): string
       output.push(normalizeProse(raw));
       continue;
     }
-    if (block.kind === "table") {
+    if (block.kind === "table" || block.kind === "diff") {
       const trailingNewline = raw.endsWith("\n");
-      output.push(`\`\`\`text\n${trailingNewline ? raw.slice(0, -1) : raw}\n\`\`\`${trailingNewline ? "\n" : ""}`);
+      const language = block.kind === "diff" ? "diff" : "text";
+      output.push(`\`\`\`${language}\n${trailingNewline ? raw.slice(0, -1) : raw}\n\`\`\`${trailingNewline ? "\n" : ""}`);
       continue;
     }
     const prefix = from > block.start ? `${block.opening}\n` : "";
@@ -213,6 +221,7 @@ function renderMarkdownRange(source: string, start: number, end: number): string
 
 function markdownBlocks(source: string): MarkdownBlock[] {
   const lines = sourceLines(source);
+  const lineTexts = lines.map(({ text }) => text);
   const blocks: MarkdownBlock[] = [];
   let index = 0;
   while (index < lines.length) {
@@ -234,10 +243,17 @@ function markdownBlocks(source: string): MarkdownBlock[] {
       index = cursor;
       continue;
     }
+    const diffEnd = traexDiffEnd(lineTexts, index);
+    if (diffEnd !== null) {
+      blocks.push({ kind: "diff", start: line.start, end: lines[diffEnd - 1]!.end });
+      index = diffEnd;
+      continue;
+    }
     let cursor = index + 1;
     while (cursor < lines.length) {
       if (FENCE.test(lines[cursor]!.text)) break;
       if (cursor + 1 < lines.length && isTableRow(lines[cursor]!.text) && TABLE_DELIMITER.test(lines[cursor + 1]!.text)) break;
+      if (traexDiffEnd(lineTexts, cursor) !== null) break;
       cursor += 1;
     }
     blocks.push({ kind: "prose", start: line.start, end: lines[cursor - 1]!.end });
@@ -313,6 +329,13 @@ function isSafeHttpUrl(value: string): boolean {
 function isTableRow(line: string): boolean {
   const trimmed = line.trim();
   return trimmed.includes("|") && (trimmed.startsWith("|") || trimmed.endsWith("|"));
+}
+
+function traexDiffEnd(lines: readonly string[], start: number): number | null {
+  if (!TRAEX_DIFF_ROW.test(lines[start] ?? "")) return null;
+  let end = start + 1;
+  while (end < lines.length && TRAEX_DIFF_ROW.test(lines[end]!)) end += 1;
+  return end - start >= 2 ? end : null;
 }
 
 function isMarkdownBlockLine(line: string): boolean {
