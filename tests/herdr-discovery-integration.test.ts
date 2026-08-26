@@ -107,9 +107,16 @@ describe("Herdr discovery", () => {
     expect(events.filter((event) => event === "AgentStateChanged:working")).toHaveLength(1);
     expect(events.filter((event) => event === "TurnOutputObserved")).toHaveLength(4);
     expect(events.filter((event) => event === "AgentStateChanged:done")).toHaveLength(1);
-    expect(answerSnapshots).toEqual(["✧ Working", "◆ Ran first", "◆ Ran second", "◆ done"]);
+    expect(answerSnapshots).toEqual([
+      "✧ Working",
+      "◆ Ran\n```bash\nfirst\n```",
+      "◆ Ran\n```bash\nsecond\n```",
+      "◆ done"
+    ]);
     expect(answerUpdates).toEqual(["append", "append", "append", "append"]);
-    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("✧ Working\n\n◆ Ran first\n\n◆ Ran second\n\n◆ done");
+    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe(
+      "✧ Working\n\n◆ Ran\n```bash\nfirst\n```\n\n◆ Ran\n```bash\nsecond\n```\n\n◆ done"
+    );
     expect(submittedPrompts).toEqual(["run"]);
     const completedBeforeReconcile = events.filter((event) => event === "TurnCompleted").length;
     const doneBeforeReconcile = events.filter((event) => event === "AgentStateChanged:done").length;

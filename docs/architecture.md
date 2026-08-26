@@ -326,6 +326,15 @@ transient terminal view is replaced with the new safe screen (`replace-all`),
 which prevents an entire redrawn terminal from being appended twice. Final
 TraeX answers then converge the card to the completed result.
 
+Explicit TraeX tool markers are parsed into typed terminal blocks before the
+visible delta becomes Markdown. `Edited` blocks preserve numbered context,
+change, and folded rows in a `diff` fence. `Ran` and `Bash` blocks render the
+command in a `bash` fence and stdout in a separate `text` fence. Continuation is
+derived from the previous bounded terminal snapshot rather than persisted as new
+workflow state. Unmarked text remains prose; the bridge does not guess that
+shell-like text is a command. Native structured tool events may later feed the
+same serializer while terminal parsing remains the compatibility fallback.
+
 `AnswerPageWorkflow` is the single live and startup convergence path for Answer
 delivery. It uses a deterministic planner to compare the canonical RunCard answer
 with the authoritative active page, then asks SQLite to reserve the next content,

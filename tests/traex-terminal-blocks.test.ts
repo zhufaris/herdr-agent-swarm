@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { deriveTerminalContinuation, parseTraexTerminalBlocks, renderTraexTerminalBlocks } from "../src/runtime/traex-terminal-blocks.js";
 
 describe("TraeX terminal blocks", () => {
@@ -102,5 +103,32 @@ describe("TraeX terminal blocks", () => {
     expect(parseTraexTerminalBlocks("npm test\necho hello")).toEqual([
       { kind: "prose", lines: ["npm test", "echo hello"] }
     ]);
+  });
+
+  it("preserves the captured task-jz33 Edit and command structure", () => {
+    const source = readFileSync(new URL("./fixtures/task-jz33-terminal-output.txt", import.meta.url), "utf8").trimEnd();
+    const blocks = parseTraexTerminalBlocks(source);
+    const rendered = renderTraexTerminalBlocks(blocks);
+
+    expect(blocks).toEqual([
+      {
+        kind: "diff", title: "◆ Edited scripts/render_domain.py (+20 -3)",
+        lines: [
+          "    145 +        *_table(",
+          "    146 +            [\"Relationship\", \"Count\"],",
+          "    147 ⋮",
+          "    180 -        return old_value"
+        ]
+      },
+      {
+        kind: "command", title: "◆ Ran",
+        command: "uv run pytest -q tests/test_render.py", output: ["11 passed in 0.44s"]
+      }
+    ]);
+    expect(rendered).toContain("```diff");
+    expect(rendered).toContain("```bash\nuv run pytest -q tests/test_render.py\n```");
+    expect(rendered).toContain("```text\n11 passed in 0.44s\n```");
+    expect(rendered).not.toContain("147 ⋮180");
+    expect((rendered.match(/^```/gm) ?? [])).toHaveLength(6);
   });
 });
