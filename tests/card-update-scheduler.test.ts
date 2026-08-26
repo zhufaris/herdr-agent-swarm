@@ -7,10 +7,10 @@ describe("card update scheduler", () => {
   it("coalesces ordinary updates briefly and flushes terminal updates immediately", async () => {
     vi.useFakeTimers();
     const delivered: number[] = [];
-    const scheduler = new CardUpdateScheduler(async (_promptId, version) => { delivered.push(version); });
+    const scheduler = new CardUpdateScheduler(async (_promptId, version) => { delivered.push(version); }, 1_500);
     scheduler.schedule("p1", 2, false);
     scheduler.schedule("p1", 3, false);
-    await vi.advanceTimersByTimeAsync(749);
+    await vi.advanceTimersByTimeAsync(1_499);
     expect(delivered).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(delivered).toEqual([3]);

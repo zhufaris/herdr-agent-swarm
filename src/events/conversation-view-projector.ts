@@ -10,6 +10,10 @@ import { safeLogError } from "../runtime/safe-error.js";
 import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { answerElementId } from "../domain/run-card-view.js";
 
+const ANSWER_STREAM_INTERVAL_MS = 1_500;
+const ANSWER_STREAM_MIN_DELTA_CHARS = 400;
+const PRIMARY_CARD_INTERVAL_MS = 3_000;
+
 export class ConversationViewProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
   private readonly bindingTails = new Map<string, Promise<void>>();
@@ -18,6 +22,9 @@ export class ConversationViewProjector {
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
   private readonly scheduler: CardUpdateScheduler;
+  private readonly primaryScheduler: CardUpdateScheduler;
+  private readonly answerContentLengths = new Map<string, number>();
+  private readonly primaryVersions = new Map<string, number>();
 
   constructor(
     private readonly bus: LifecycleEventSubscriber,
@@ -41,6 +48,7 @@ export class ConversationViewProjector {
           const sequence = Math.max(view.answerSequence + 1, view.viewVersion);
           this.store.saveRunCard({ ...view, answerSequence: sequence });
           await this.channelPublisher.enqueueStreamContent(view.bindingId, promptId, view.answerCardId, view.answerElementId, page, sequence);
+          this.answerContentLengths.set(promptId, fullContent.length);
           if (nextPageStart === null) {
             if (["completed", "failed"].includes(view.phase)) await this.channelPublisher.enqueueStreamFinish(
               view.bindingId, promptId, view.answerCardId, view.phase === "completed" ? "Completed" : "Failed", sequence + 1
@@ -66,7 +74,15 @@ export class ConversationViewProjector {
         return;
       }
       if (view.larkMessageId) await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
-    });
+    }, ANSWER_STREAM_INTERVAL_MS);
+    this.primaryScheduler = new CardUpdateScheduler(async (bindingId) => {
+      const view = this.views.get(bindingId) ?? this.store.loadTopicView(bindingId);
+      const binding = this.store.getBinding(bindingId);
+      if (!view || !binding?.rootMessageId) return;
+      const card = renderProjectEntryCard(view);
+      if (binding.statusMessageId) await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, view.lastEventId ?? `primary:${binding.id}`, card);
+      else await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id, "session_status");
+    }, PRIMARY_CARD_INTERVAL_MS);
   }
 
   start(): () => void {
@@ -86,6 +102,9 @@ export class ConversationViewProjector {
     this.unsubscribeStreamCardCreated?.();
     this.unsubscribeStreamCardCreated = null;
     this.scheduler.stop();
+    this.primaryScheduler.stop();
+    this.answerContentLengths.clear();
+    this.primaryVersions.clear();
     this.stopPromise = Promise.allSettled([...this.bindingTails.values()]).then(() => undefined);
     return this.stopPromise;
   }
@@ -100,7 +119,11 @@ export class ConversationViewProjector {
         const next = reduceRunCard(runCard, change);
         if (next !== runCard) {
           this.store.saveRunCard(next);
-          this.scheduler.schedule(promptId, next.viewVersion, ["blocked", "completed", "failed"].includes(next.phase));
+          const terminal = ["blocked", "completed", "failed"].includes(next.phase);
+          const contentLength = answerStreamContent(next).length;
+          const previousLength = this.answerContentLengths.get(promptId) ?? 0;
+          this.scheduler.schedule(promptId, next.viewVersion, terminal || contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS);
+          if (terminal) this.answerContentLengths.delete(promptId);
         } else if (["blocked", "completed", "failed"].includes(runCard.phase) && runCard.viewVersion > runCard.answerDeliveredVersion) {
           // The durable workflow transition may have projected the terminal view
           // before this process-local lifecycle notification arrived.
@@ -114,16 +137,12 @@ export class ConversationViewProjector {
     this.store.saveTopicView(next);
     this.views.set(event.bindingId, next);
 
-    const binding = this.store.getBinding(event.bindingId);
-    if (!binding?.rootMessageId) return;
-    const card = renderProjectEntryCard(next);
     try {
-      if (binding.statusMessageId) {
-        await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, event.eventId, card);
-      } else {
-        await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id, "session_status");
-      }
-    } catch (error) {
+      const version = (this.primaryVersions.get(event.bindingId) ?? 0) + 1;
+      this.primaryVersions.set(event.bindingId, version);
+      this.primaryScheduler.schedule(event.bindingId, version, primaryDeliveryImmediate(event, next));
+    }
+    catch (error) {
       this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
     }
   }
@@ -138,6 +157,11 @@ export class ConversationViewProjector {
     });
     return work;
   }
+}
+
+function primaryDeliveryImmediate(event: BridgeEvent, view: ReturnType<typeof initialTopicView>): boolean {
+  if (event.type !== "TurnOutputObserved" && event.type !== "PaneOutputObserved") return true;
+  return view.phase === "done" || view.phase === "blocked" || view.phase === "error";
 }
 
 function promptIdOf(event: BridgeEvent): string | null {
