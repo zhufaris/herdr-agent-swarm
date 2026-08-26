@@ -202,7 +202,7 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await publisher.drain();
-    expect({ created, replied, updated }).toEqual({ created: 1, replied: 0, updated: 2 });
+    expect({ created, replied, updated }).toEqual({ created: 1, replied: 0, updated: 1 });
     expect(store.findBindingByPane("w1:p1")).toMatchObject({ title: "configured-space / task", statusMessageId: "root-1", state: "active" });
     expect(JSON.stringify(rootCard)).toContain("configured-space / task");
 

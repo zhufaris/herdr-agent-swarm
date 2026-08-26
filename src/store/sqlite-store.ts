@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -468,10 +468,8 @@ export class SqliteBindingStore implements BindingStorePort {
       const timestamp = now();
       this.database.prepare("INSERT OR IGNORE INTO lifecycle_events(event_id, binding_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)")
         .run(input.event.eventId, input.id, input.event.type, JSON.stringify(input.event.payload), input.event.occurredAt);
-      this.database.prepare(`INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`)
-        .run(input.id, JSON.stringify(input.view), timestamp);
-      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_update', ?, ?, 'pending', 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(randomUUID(), `card-update:${input.messageId}:${input.event.eventId}`, input.id, input.messageId, JSON.stringify(input.card), `message:${input.messageId}`, timestamp, timestamp, timestamp);
+      this.saveTopicView(input.view);
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${input.id}:${input.view.viewVersion}`, bindingId: input.id, viewVersion: input.view.viewVersion, targetRole: "session_status", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
       this.database.exec("COMMIT");
       return binding;
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
@@ -1120,7 +1118,15 @@ export class SqliteBindingStore implements BindingStorePort {
         else this.database.prepare("UPDATE run_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
       }
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
-      if (row?.binding_id && row.kind === "card_reply" && row.target_role === "session_status") this.updateBinding(row.binding_id, { statusMessageId: messageId });
+      if (row?.binding_id && row.target_role === "session_status") {
+        if (row.kind === "card_reply") this.updateBinding(row.binding_id, { statusMessageId: messageId });
+        this.database.prepare(`
+          UPDATE topic_views
+          SET state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?)),
+              updated_at = ?
+          WHERE binding_id = ?
+        `).run(row.view_version ?? 0, now(), row.binding_id);
+      }
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
@@ -1272,15 +1278,43 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   saveTopicView(view: TopicViewState): void {
+    const current = this.loadTopicView(view.bindingId);
+    if (current && current.viewVersion > view.viewVersion) return;
+    const persisted = { ...view, deliveredVersion: Math.max(view.deliveredVersion, current?.deliveredVersion ?? 0) };
     this.database.prepare(`
       INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(binding_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at
-    `).run(view.bindingId, JSON.stringify(view), now());
+    `).run(view.bindingId, JSON.stringify(persisted), now());
   }
 
   loadTopicView(bindingId: string): TopicViewState | null {
     const row = this.database.prepare("SELECT state_json FROM topic_views WHERE binding_id = ?").get(bindingId) as { state_json: string } | undefined;
-    return row ? JSON.parse(row.state_json) as TopicViewState : null;
+    if (!row) return null;
+    const view = JSON.parse(row.state_json) as TopicViewState;
+    return { ...view, viewVersion: Number.isInteger(view.viewVersion) ? view.viewVersion : 1, deliveredVersion: Number.isInteger(view.deliveredVersion) ? view.deliveredVersion : 0 };
+  }
+
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveTopicView(view);
+      const current = this.loadTopicView(view.bindingId);
+      if (!current || current.viewVersion !== view.viewVersion) { this.database.exec("COMMIT"); return "waiting"; }
+      const binding = this.requireBinding(view.bindingId);
+      if (current.viewVersion <= current.deliveredVersion) { this.database.exec("COMMIT"); return "current"; }
+      const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND COALESCE(view_version, 0) >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
+      if (existingCurrent) { this.database.exec("COMMIT"); return "waiting"; }
+      const timestamp = now();
+      if (!binding.statusMessageId) {
+        const pending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
+        if (pending) { this.database.exec("COMMIT"); return "waiting"; }
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+      } else {
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
+      }
+      this.database.exec("COMMIT");
+      return "reserved";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   saveRunCard(view: RunCardView): RunCardView {

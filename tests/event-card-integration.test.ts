@@ -197,8 +197,9 @@ describe("event-driven card projection", () => {
     await bus.publish({ eventId: "output-after-rollover", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: "new live output", answerUpdate: "replace", progressEvents: [] } });
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(store.listPendingOutboundReplies()).toHaveLength(1);
-    expect(store.listPendingOutboundReplies()[0]).toMatchObject({ id: "page-2", kind: "stream_card_create" });
+    const answerReplies = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1");
+    expect(answerReplies).toHaveLength(1);
+    expect(answerReplies[0]).toMatchObject({ id: "page-2", kind: "stream_card_create" });
     expect(pendingWrites).toEqual([]);
     await projector.stop(); store.close(); vi.useRealTimers();
   });

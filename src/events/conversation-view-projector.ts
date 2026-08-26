@@ -1,9 +1,11 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
+import { renderRequestAnswerCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { AnswerPageStore, OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
+import type { AnswerPageStore, MainCardStore, OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
 import type { AnswerPageWorkflowPort } from "../coordinator/answer-page-workflow.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
+import type { MainCardWorkflowPort } from "../coordinator/main-card-workflow.js";
+import { MainCardWorkflow } from "../coordinator/main-card-workflow.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
@@ -13,20 +15,19 @@ import { answerStreamContent } from "../runtime/answer-stream.js";
 
 const ANSWER_STREAM_INTERVAL_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 400;
-const PRIMARY_CARD_INTERVAL_MS = 3_000;
 
 export class ConversationViewProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
   private readonly bindingTails = new Map<string, Promise<void>>();
   private unsubscribe: (() => void) | null = null;
   private unsubscribeStreamCardCreated: (() => void) | null = null;
+  private unsubscribeMainCardCheckpoint: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
   private readonly scheduler: CardUpdateScheduler;
-  private readonly primaryScheduler: CardUpdateScheduler;
   private readonly answerContentLengths = new Map<string, number>();
-  private readonly primaryVersions = new Map<string, number>();
   private readonly answerPages: AnswerPageWorkflowPort;
+  private readonly mainCards: MainCardWorkflowPort;
 
   constructor(
     private readonly bus: LifecycleEventSubscriber,
@@ -34,9 +35,11 @@ export class ConversationViewProjector {
     private readonly channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
-    answerPages?: AnswerPageWorkflowPort
+    answerPages?: AnswerPageWorkflowPort,
+    mainCards?: MainCardWorkflowPort
   ) {
     this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, logger);
+    this.mainCards = mainCards ?? new MainCardWorkflow(store as ProjectionStore & MainCardStore, () => { void checkpoints.requestScan(); }, logger);
     this.scheduler = new CardUpdateScheduler(async (promptId) => {
       const view = this.store.loadRunCard(promptId);
       if (!view?.answerCardId && view?.answerMessageId) {
@@ -46,14 +49,6 @@ export class ConversationViewProjector {
       await this.answerPages.converge(promptId);
       if (view) this.answerContentLengths.set(promptId, answerStreamContent(view).length);
     }, ANSWER_STREAM_INTERVAL_MS);
-    this.primaryScheduler = new CardUpdateScheduler(async (bindingId) => {
-      const view = this.views.get(bindingId) ?? this.store.loadTopicView(bindingId);
-      const binding = this.store.getBinding(bindingId);
-      if (!view || !binding?.rootMessageId) return;
-      const card = renderProjectEntryCard(view);
-      if (binding.statusMessageId) await this.channelPublisher.enqueueCardUpdate(binding.id, binding.statusMessageId, view.lastEventId ?? `primary:${binding.id}`, card);
-      else await this.channelPublisher.enqueueCard(binding.rootMessageId, `status-card:${binding.id}`, card, binding.id, "session_status");
-    }, PRIMARY_CARD_INTERVAL_MS);
   }
 
   start(): () => void {
@@ -63,7 +58,12 @@ export class ConversationViewProjector {
         this.logger.error({ event: "answer-page-checkpoint-convergence-failed", err: safeLogError(error), promptId, outcome: "failed" }, "failed to converge Answer page after delivery checkpoint");
       });
     });
-    return () => { this.unsubscribe?.(); this.unsubscribeStreamCardCreated?.(); };
+    this.unsubscribeMainCardCheckpoint = this.checkpoints.onMainCardCheckpoint?.((bindingId) => {
+      void this.mainCards.converge(bindingId).catch((error) => {
+        this.logger.error({ event: "main-card-checkpoint-convergence-failed", err: safeLogError(error), bindingId, outcome: "failed" }, "failed to converge Main Card after delivery checkpoint");
+      });
+    }) ?? null;
+    return () => { this.unsubscribe?.(); this.unsubscribeStreamCardCreated?.(); this.unsubscribeMainCardCheckpoint?.(); };
   }
 
   stop(): Promise<void> {
@@ -73,10 +73,10 @@ export class ConversationViewProjector {
     this.unsubscribe = null;
     this.unsubscribeStreamCardCreated?.();
     this.unsubscribeStreamCardCreated = null;
+    this.unsubscribeMainCardCheckpoint?.();
+    this.unsubscribeMainCardCheckpoint = null;
     this.scheduler.stop();
-    this.primaryScheduler.stop();
     this.answerContentLengths.clear();
-    this.primaryVersions.clear();
     this.stopPromise = Promise.allSettled([...this.bindingTails.values()]).then(() => undefined);
     return this.stopPromise;
   }
@@ -106,16 +106,14 @@ export class ConversationViewProjector {
     const current = this.views.get(event.bindingId) ?? this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
     const next = reduceTopicView(current, event);
     if (next === current) return;
-    this.store.saveTopicView(next);
     this.views.set(event.bindingId, next);
 
     try {
-      const version = (this.primaryVersions.get(event.bindingId) ?? 0) + 1;
-      this.primaryVersions.set(event.bindingId, version);
-      this.primaryScheduler.schedule(event.bindingId, version, primaryDeliveryImmediate(event, next));
+      await this.mainCards.project(next);
     }
     catch (error) {
       this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
+      throw error;
     }
   }
 
@@ -129,11 +127,6 @@ export class ConversationViewProjector {
     });
     return work;
   }
-}
-
-function primaryDeliveryImmediate(event: BridgeEvent, view: ReturnType<typeof initialTopicView>): boolean {
-  if (event.type !== "TurnOutputObserved" && event.type !== "PaneOutputObserved") return true;
-  return view.phase === "done" || view.phase === "blocked" || view.phase === "error";
 }
 
 function promptIdOf(event: BridgeEvent): string | null {

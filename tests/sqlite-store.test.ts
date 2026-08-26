@@ -540,6 +540,59 @@ describe("SQLite store", () => {
     expect(after.schema_version).toBe(before.schema_version);
   });
 
+  it("atomically persists a Main Card view with one versioned delivery intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = { ...initialTopicView("b1"), title: "Visible", viewVersion: 1 };
+
+    expect(store.reserveMainCard(view, "root-1", { version: 1 })).toBe("reserved");
+    expect(store.reserveMainCard(view, "root-1", { version: 1 })).toBe("waiting");
+    expect(store.loadTopicView("b1")).toMatchObject({ title: "Visible", viewVersion: 1, deliveredVersion: 0 });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_reply", bindingId: "b1", viewVersion: 1, targetRole: "session_status" })]);
+  });
+
+  it("rolls back a Main Card projection when its outbox reservation fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.database.exec("CREATE TEMP TRIGGER reject_main_card BEFORE INSERT ON outbound_replies WHEN NEW.target_role = 'session_status' BEGIN SELECT RAISE(ABORT, 'forced_main_card_failure'); END");
+
+    expect(() => store!.reserveMainCard({ ...initialTopicView("b1"), title: "Never committed", viewVersion: 1 }, "root-1", {})).toThrow("forced_main_card_failure");
+
+    expect(store.loadTopicView("b1")).toBeNull();
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+  });
+
+  it("does not recreate or wake a dead-lettered Main Card version", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = { ...initialTopicView("b1"), title: "Visible", viewVersion: 1 };
+    expect(store.reserveMainCard(view, "root-1", { version: 1 })).toBe("reserved");
+    const [reply] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDeadLetter(reply!.id, "permanent failure", { failureClass: "permanent" });
+
+    expect(store.reserveMainCard(view, "root-1", { version: 1 })).toBe("waiting");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.getOutboundReply(reply!.id)).toMatchObject({ state: "dead_letter", attemptCount: 1 });
+  });
+
+  it("normalizes legacy Main Card versions and checkpoints delivery monotonically", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const legacy = initialTopicView("b1") as Partial<ReturnType<typeof initialTopicView>>;
+    delete legacy.viewVersion; delete legacy.deliveredVersion;
+    store.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES (?, ?, ?)").run("b1", JSON.stringify(legacy), "now");
+    const normalized = store.loadTopicView("b1")!;
+    expect(normalized).toMatchObject({ viewVersion: 1, deliveredVersion: 0 });
+    expect(store.reserveMainCard(normalized, "root-1", { version: 1 })).toBe("reserved");
+    const [reply] = store.listPendingOutboundReplies();
+
+    store.markOutboundReplyDelivered(reply!.id, "main-card-1");
+    store.markOutboundReplyDelivered(reply!.id, "main-card-1");
+
+    expect(store.getBinding("b1")?.statusMessageId).toBe("main-card-1");
+    expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 1, deliveredVersion: 1 });
+  });
+
   it("marks legacy terminal Answer pages finished before startup convergence", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-finish-migration-"));
     const databasePath = join(temporaryDirectory, "bridge.db");

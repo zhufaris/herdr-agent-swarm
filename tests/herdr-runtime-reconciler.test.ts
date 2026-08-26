@@ -305,6 +305,27 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("projects the resolved Git worktree directory name for the main card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const bus = new BridgeEventBus();
+    const observed: Array<{ type: string; payload: unknown }> = [];
+    bus.onBridgeEvent("worktree-test", (event) => { observed.push(event); });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo/.worktree/feat-main-card/src", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
+      herdr: { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort, lifecycleEvents: bus,
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }), discoverPane: async () => { throw new Error("not used"); },
+      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, worktreeNameFor: async (cwd) => cwd ? "feat-main-card" : null
+    });
+
+    await reconciler.reconcile();
+
+    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ worktreeName: "feat-main-card" });
+    store.close();
+  });
+
   it("does not regress Agent state from an older native state sequence", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

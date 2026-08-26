@@ -14,6 +14,7 @@ export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_
 export type RequestCardRole = "task" | "answer";
 export type OutboundTargetRole = "session_status" | "operation_result";
 export type AnswerPageState = "creating" | "active" | "frozen" | "finished";
+export type MainCardReservationOutcome = "reserved" | "waiting" | "current";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
 export type PaneControlOperationKind = "stop" | "steer" | "model";

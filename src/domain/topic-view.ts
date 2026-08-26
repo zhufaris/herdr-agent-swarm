@@ -4,16 +4,27 @@ import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
-  bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; phase: TopicViewPhase;
+  bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
+  viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
-  return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null };
+  return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
+  const next = reduceTopicViewSnapshot(state, event);
+  return updateTopicView(state, next);
+}
+
+export function updateTopicView(state: TopicViewState, patch: Partial<TopicViewState>): TopicViewState {
+  const next = { ...state, ...patch };
+  return sameTopicPresentation(next, state) ? state : { ...next, viewVersion: state.viewVersion + 1, deliveredVersion: state.deliveredVersion };
+}
+
+function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): TopicViewState {
   const base = { ...state, lastEventId: event.eventId };
   switch (event.type) {
     case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, phase: "provisioning" };
@@ -48,8 +59,12 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       const model = event.payload.model ?? state.model;
       const context = event.payload.context ?? state.context;
       const tabId = event.payload.tabId ?? state.tabId;
-      if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId) return state;
-      return { ...base, answer, model, context, tabId };
+      const worktreeName = event.payload.worktreeName ?? state.worktreeName;
+      if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId && worktreeName === state.worktreeName) return state;
+      if (event.payload.answer !== undefined && state.activePromptId === null && state.phase !== "running" && state.phase !== "blocked") {
+        return { ...base, phase: "done", agentState: "done", answer, model, context, tabId, worktreeName, notice: null };
+      }
+      return { ...base, answer, model, context, tabId, worktreeName };
     }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
@@ -65,12 +80,12 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
 
 export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): TopicViewState {
   const phase = { queued: "queued", running: "running", blocked: "blocked", completed: "done", failed: "error" }[run.phase] as TopicViewPhase;
-  return {
+  return updateTopicView(state, {
     ...state, phase, queueDepth: run.queuePosition, answer: run.answer ? keepAnswerTail(run.answer) : null, notice: run.notice,
     activePromptId: run.phase === "running" || run.phase === "blocked" ? run.promptId : null,
     agentState: run.phase === "running" ? "working" : run.phase === "blocked" ? "blocked" : run.phase === "completed" ? "done" : state.agentState,
     recentProgress: run.progressEvents
-  };
+  });
 }
 
 function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
@@ -97,6 +112,15 @@ function sameVisibleProgress(left: RunProgressEvent[], right: RunProgressEvent[]
     const other = right[index];
     return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state;
   });
+}
+
+function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boolean {
+  return left.title === right.title && left.workspaceId === right.workspaceId && left.spaceName === right.spaceName
+    && left.tabId === right.tabId && left.paneId === right.paneId && left.worktreeName === right.worktreeName
+    && left.phase === right.phase && left.agentState === right.agentState && left.queueDepth === right.queueDepth
+    && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
+    && left.model === right.model && left.context === right.context
+    && sameVisibleProgress(left.recentProgress, right.recentProgress);
 }
 
 function keepAnswerTail(answer: string): string { return answer.slice(-2_500); }

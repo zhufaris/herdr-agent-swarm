@@ -44,12 +44,36 @@ describe("topic view reducer", () => {
     expect(observed).toMatchObject({ phase: "running", agentState: "working", activePromptId: "p1", answer: "still working" });
   });
 
+  it("marks an idle passive terminal answer completed when no turn is active", () => {
+    const ready = reduceTopicView(initialTopicView("b1"), event("BindingActivated", { paneId: "w1:p1", topicId: "t1" }));
+    const observed = reduceTopicView(ready, event("PaneOutputObserved", { answer: "completed outside the bridge" }));
+
+    expect(observed).toMatchObject({ phase: "done", agentState: "done", activePromptId: null, answer: "completed outside the bridge" });
+  });
+
+  it("persists the Git worktree directory name without changing the turn lifecycle", () => {
+    const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    const observed = reduceTopicView(running, event("PaneOutputObserved", { worktreeName: "feat-main-card" }));
+
+    expect(observed).toMatchObject({ phase: "running", activePromptId: "p1", worktreeName: "feat-main-card" });
+  });
+
   it("does not update the project card for an identical visible snapshot", () => {
     const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     const first = reduceTopicView(running, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active" }] }));
     const duplicateEvent = { ...event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step" as const, label: "Run tests", state: "active" as const }] }), eventId: "duplicate", occurredAt: "later" };
 
     expect(reduceTopicView(first, duplicateEvent)).toBe(first);
+  });
+
+  it("advances a durable Main Card version only for visible changes", () => {
+    const initial = initialTopicView("b1");
+    const started = reduceTopicView(initial, event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    const duplicate = reduceTopicView(started, { ...event("TurnStarted", { promptId: "p1", queueDepth: 1 }), eventId: "duplicate" });
+
+    expect(initial).toMatchObject({ viewVersion: 0, deliveredVersion: 0 });
+    expect(started).toMatchObject({ viewVersion: 1, deliveredVersion: 0 });
+    expect(duplicate).toBe(started);
   });
 
   it("keeps complete current-turn progress and the latest 2500 answer characters", () => {
@@ -104,7 +128,7 @@ describe("topic view reducer", () => {
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "done", answer: "finished" });
 
     expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(2_600), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
-      phase: "done", answer: "x".repeat(2_500), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) }))
+      phase: "done", answer: "x".repeat(2_500), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
     });
   });
 });

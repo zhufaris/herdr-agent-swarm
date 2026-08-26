@@ -112,6 +112,12 @@ they execution concepts like `Turn` and `Steering`. Their renderers and reducers
 belong to the presentation and projection side of the application, while
 durable storage for them remains an infrastructure concern.
 
+`MainCardWorkflow` is the single live, startup, and delivery-checkpoint
+convergence path for the topic's Main Card. `TopicViewState.viewVersion` is the
+durable desired presentation version and `deliveredVersion` is the highest
+version confirmed visible by a successful Lark delivery. Only visible field
+changes advance `viewVersion`; event IDs and duplicate observations do not.
+
 ### Ports and persistence
 
 Ports belong to the core-facing boundary and describe a consumer's capability,
@@ -321,6 +327,28 @@ source offset, sequence, and `creating`, `active`, `frozen`, or `finished` state
 It is the lifecycle authority and target validation uses its active page. The
 current-page fields remain mirrored in `RunCardView` during the compatibility
 migration; they are a read-model cache, not a second transition authority.
+
+## Main Card convergence
+
+The Main Card is independent from Answer pagination. Its latest desired content
+and delivery checkpoint live in `TopicViewState`; no in-memory counter is a
+delivery authority. Live lifecycle projection and startup repair both call
+`MainCardWorkflow`, which serializes convergence per binding.
+
+SQLite saves the desired TopicView and reserves its `session_status` outbox row
+in one transaction. Initial creation uses `status-card:<bindingId>`; subsequent
+updates use `main-card:update:<bindingId>:<viewVersion>`. A pending or
+dead-lettered row for the current version is not recreated. After successful
+creation or update, the same transaction marks the outbox row delivered, records
+the created `statusMessageId` when applicable, and advances `deliveredVersion`
+monotonically. The resulting checkpoint hint immediately asks the workflow to
+check whether a newer persisted version arrived while the prior card was in
+flight.
+
+Startup compares `viewVersion` with `deliveredVersion` and recreates only missing
+intent. It does not emit timestamp-keyed unconditional updates. A lost in-process
+wake-up may delay delivery, but cannot lose the desired Main Card state or cause
+the corresponding TraeX work to run again.
 
 ## Lark delivery
 

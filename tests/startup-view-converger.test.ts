@@ -27,12 +27,8 @@ describe("StartupViewConverger", () => {
     expect(store.loadTopicView("b1")).toMatchObject({
       title: "herdr-lark-bridge / task-ab12", spaceName: "herdr-lark-bridge", paneId: "wH:p2H"
     });
-    expect(enqueueCardUpdate).toHaveBeenCalledWith(
-      "b1",
-      "root-card",
-      expect.stringMatching(/^startup-root-card-reconcile:b1:/),
-      expect.objectContaining({ header: expect.objectContaining({ title: { tag: "plain_text", content: "herdr-lark-bridge / task-ab12" } }) })
-    );
+    expect(enqueueCardUpdate).not.toHaveBeenCalled();
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", bindingId: "b1", viewVersion: 1, targetRole: "session_status" })]);
     store.close();
   });
 
@@ -52,6 +48,19 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
+  it("does not enqueue a Main Card update when its durable version is already delivered", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "task", workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: "wH:p1", phase: "ready", viewVersion: 1, deliveredVersion: 1 });
+
+    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }).converge();
+
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 1, deliveredVersion: 1 });
+    store.close();
+  });
+
   it("rebuilds missing terminal stream intents from a durable completed run card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -66,9 +75,10 @@ describe("StartupViewConverger", () => {
     await new StartupViewConverger(config, store, outbound, { wake: () => {}, subscribe: () => () => {} }).converge();
 
     const pending = store.listPendingOutboundReplies();
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({ kind: "stream_content", promptId: "p1", rootMessageId: "answer-card", viewVersion: 1 });
-    expect(JSON.parse(pending[0]!.payload)).toMatchObject({ content: expect.stringContaining("durable answer"), sequence: 1, pageIndex: 0 });
+    const answer = pending.find((reply) => reply.promptId === "p1");
+    expect(answer).toMatchObject({ kind: "stream_content", promptId: "p1", rootMessageId: "answer-card", viewVersion: 1 });
+    expect(JSON.parse(answer!.payload)).toMatchObject({ content: expect.stringContaining("durable answer"), sequence: 1, pageIndex: 0 });
+    expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", bindingId: "b1", targetRole: "session_status" }));
     store.close();
   });
 });

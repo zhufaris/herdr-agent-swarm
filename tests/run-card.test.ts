@@ -73,14 +73,14 @@ describe("run card", () => {
     expect(serialized).toContain("31.1K tokens");
   });
 
-  it("renders Space, Tab, and Pane on one compact main-card identity row", () => {
-    const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
+  it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
+    const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
     const cards = [renderRunCard(input), renderProjectEntryCard(input)] as Array<{ body: { elements: Array<{ tag: string; content?: string }> } }> ;
 
     for (const card of cards) {
       expect(card.body.elements[0]).toMatchObject({
         tag: "markdown",
-        content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`"
+        content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
       });
       expect(card.body.elements.some((element) => element.tag === "column_set")).toBe(false);
     }

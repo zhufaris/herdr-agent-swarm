@@ -32,6 +32,8 @@ import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
 import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
 import { AnswerPageWorkflow } from "./coordinator/answer-page-workflow.js";
+import { MainCardWorkflow } from "./coordinator/main-card-workflow.js";
+import { WorktreeNameResolver } from "./runtime/worktree-name-resolver.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
@@ -46,6 +48,7 @@ const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
+const worktreeNameResolver = new WorktreeNameResolver(runner, config.commandTimeoutMs);
 let rawHerdr!: HerdrCliAdapter;
 let herdr!: WorkspaceSnapshotCache;
 const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
@@ -72,8 +75,9 @@ const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
 const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
+const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
 const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
-const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages);
+const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards);
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
@@ -87,9 +91,10 @@ const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEve
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
-  isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId)
+  isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
+  worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
 });
-const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages);
+const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards);
 const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT

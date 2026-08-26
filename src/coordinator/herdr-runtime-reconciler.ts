@@ -22,6 +22,7 @@ interface HerdrRuntimeReconcilerOptions {
   discoverPane(pane: HerdrPane, project: ProjectConfig): Promise<Binding>;
   scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
+  worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>;
 }
 
 const BASELINE_READ_CONCURRENCY = 4;
@@ -43,6 +44,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly observedOutputRevisions = new Map<string, number>();
   private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
   private readonly observedTabIds = new Map<string, string | null>();
+  private readonly observedWorktreeNames = new Map<string, string | null>();
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
@@ -238,10 +240,13 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       if (existing.state !== "active") continue;
       const tabId = pane.tabId ?? null;
       const priorTabId = this.observedTabIds.get(pane.paneId);
-      if ((tabId !== null && priorTabId !== tabId) || (tabId === null && priorTabId !== undefined && priorTabId !== null)) {
-        this.observedTabIds.set(pane.paneId, tabId);
-        await this.publish(existing.id, "PaneOutputObserved", { tabId });
-      } else if (priorTabId === undefined) this.observedTabIds.set(pane.paneId, tabId);
+      const worktreeName = await this.options.worktreeNameFor?.(pane.foregroundCwd ?? pane.cwd) ?? null;
+      const priorWorktreeName = this.observedWorktreeNames.get(pane.paneId);
+      const tabChanged = (tabId !== null && priorTabId !== tabId) || (tabId === null && priorTabId !== undefined && priorTabId !== null);
+      const worktreeChanged = (worktreeName !== null && priorWorktreeName !== worktreeName) || (worktreeName === null && priorWorktreeName !== undefined && priorWorktreeName !== null);
+      this.observedTabIds.set(pane.paneId, tabId);
+      this.observedWorktreeNames.set(pane.paneId, worktreeName);
+      if (tabChanged || worktreeChanged) await this.publish(existing.id, "PaneOutputObserved", { ...(tabChanged ? { tabId } : {}), ...(worktreeChanged ? { worktreeName } : {}) });
       if (this.options.isBindingBusy(existing.id)) continue;
       if (previous !== pane.agentState) {
         const queueDepth = this.options.store.countPendingPrompts(existing.id);

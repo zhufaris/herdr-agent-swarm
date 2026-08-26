@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -166,6 +166,7 @@ export interface BindingStorePort {
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;
   loadTopicView(bindingId: string): TopicViewState | null;
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome;
   saveRunCard(view: RunCardView): RunCardView;
   loadRunCard(promptId: string): RunCardView | null;
   listRunCards(bindingId: string): RunCardView[];
@@ -185,7 +186,7 @@ export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "list
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
   | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"
-  | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "saveRunCard" | "saveTopicView"
+  | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "reserveMainCard" | "saveRunCard" | "saveTopicView"
 >;
 
 export type PromptRunStore = Pick<BindingStorePort,
@@ -246,6 +247,7 @@ export type OperationsStore = Pick<BindingStorePort,
 >;
 
 export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish">;
+export type MainCardStore = Pick<BindingStorePort, "getBinding" | "loadTopicView" | "reserveMainCard" | "saveTopicView">;
 
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
 
@@ -267,6 +269,7 @@ export interface OutboundIntentPort {
 
 export interface OutboundCheckpointSubscriber {
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void;
+  onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void;
   requestScan(force?: boolean): Promise<void>;
 }
 

@@ -264,7 +264,7 @@ export function renderMessageRejectedCard(message: string): object {
   };
 }
 
-function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "paneId" | "model" | "context" | "queueDepth">): string {
+function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "paneId" | "worktreeName" | "model" | "context" | "queueDepth">): string {
   const entries: Array<[label: string, value: string]> = [
     ["SPACE", input.spaceName],
     ["TAB", input.tabId ?? "—"],
@@ -277,7 +277,7 @@ function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "pa
     ["QUEUE", String(input.queueDepth)]
   ];
   const runtime = metrics.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
-  return [identity, runtime].join("\n");
+  return [identity, runtime, `**WORKTREE**  \`${escapeCode(truncate(input.worktreeName ?? "—", 64))}\``].join("\n");
 }
 
 function callout(color: string, content: string): object {

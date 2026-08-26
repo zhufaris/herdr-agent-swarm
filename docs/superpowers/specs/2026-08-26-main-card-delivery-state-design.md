@@ -44,7 +44,8 @@ based unconditional update keys. If `viewVersion > deliveredVersion`, missing
 intent is recreated; otherwise startup is a no-op. Duplicate or lost wake-ups are
 safe because every pass reloads SQLite state.
 
-Legacy TopicViews are normalized on read. Their first meaningful reconciliation
+Legacy TopicViews are normalized on read to `viewVersion=1` and
+`deliveredVersion=0`. Their first meaningful reconciliation
 sets a durable desired version and emits one delivery; no schema rewrite of the
 JSON table is required. Existing pending Main Card rows are respected.
 

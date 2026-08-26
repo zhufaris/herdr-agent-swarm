@@ -11,8 +11,25 @@ import { OutboundIntentWriter } from "../src/events/outbound-intent-writer.js";
 import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("Lark channel publisher", () => {
+  it("checkpoints a delivered Main Card version and emits a convergence hint", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+    store.reserveMainCard({ ...initialTopicView("b1"), title: "Version 2", viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 });
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard: vi.fn(async () => {}) }), pino({ enabled: false }));
+    const checkpoint = vi.fn();
+    publisher.onMainCardCheckpoint(checkpoint);
+
+    await publisher.requestScan();
+
+    expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 2, deliveredVersion: 2 });
+    expect(checkpoint).toHaveBeenCalledWith("b1", 2);
+    store.close();
+  });
+
   it("records only the explicit session-status reply as the binding status card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

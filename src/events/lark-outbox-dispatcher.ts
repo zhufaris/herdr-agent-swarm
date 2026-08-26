@@ -20,6 +20,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private scanRequested = false;
   private forceRequested = false;
   private readonly answerCheckpointListeners = new Set<(promptId: string, viewVersion: number) => void>();
+  private readonly mainCardCheckpointListeners = new Set<(bindingId: string, viewVersion: number) => void>();
   private scheduler: PromptWorkScheduler | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
@@ -48,6 +49,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void {
     this.answerCheckpointListeners.add(listener);
     return () => this.answerCheckpointListeners.delete(listener);
+  }
+
+  onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void {
+    this.mainCardCheckpointListeners.add(listener);
+    return () => this.mainCardCheckpointListeners.delete(listener);
   }
 
   connectPromptScheduler(scheduler: PromptWorkScheduler): void { this.scheduler = scheduler; }
@@ -167,6 +173,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         await this.lark.updateCard(reply.rootMessageId, JSON.parse(reply.payload) as object);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+        if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_card_create") {
         const decoded = decodeStreamingCardPayload(reply.payload);
         assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.card, decoded.stream);
@@ -208,6 +215,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           : await this.lark.replyCard(reply.rootMessageId, JSON.parse(reply.payload) as object, reply.idempotencyKey);
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId);
         this.store.recordBridgeMessage(sent.messageId);
+        if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       }
       this.lastDeliveryAt = new Date().toISOString();
       return "delivered";
