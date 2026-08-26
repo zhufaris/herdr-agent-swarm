@@ -303,10 +303,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (state === "working" || state === "blocked") observedActive = true;
         const unknownOutput = state === "unknown" ? await this.options.herdr.readOutput(paneId, 240) : null;
         if (observation.traexProcess && (state === "done" || state === "idle" && (observedActive || observation.composerReady))) {
-          const answer = extractFinalTraexAnswer(unknownOutput ?? await this.options.herdr.readOutput(paneId, 240));
+          const terminalAnswer = extractFinalTraexAnswer(unknownOutput ?? await this.options.herdr.readOutput(paneId, 240));
+          const streamed = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
-          const finalAnswer = answer || "TraeX 已完成；Bridge 重连后未能恢复更多文本，请查看 Herdr pane。";
-          this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(answer), occurredAt: new Date().toISOString() });
+          const finalAnswer = streamed || terminalAnswer || "TraeX 已完成，但 Bridge 重连后未能恢复可安全展示的结果。请查看 Herdr pane。";
+          this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(terminalAnswer), occurredAt: new Date().toISOString() });
           await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;

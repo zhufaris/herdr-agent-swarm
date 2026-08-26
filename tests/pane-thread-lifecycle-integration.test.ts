@@ -269,7 +269,7 @@ describe("pane/thread lifecycle integration", () => {
         }
         return "done";
       },
-      async readOutput() { return restarted ? "◆ first complete\n────────\n❯ Use /skills to list available skills" : "◆ Working…"; }, async renamePane() {}
+      async readOutput() { return restarted ? "❯ Use /skills to list available skills" : "◆ Working…"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
@@ -283,6 +283,8 @@ describe("pane/thread lifecycle integration", () => {
     await firstRuntime.coordinator.stop();
     await firstRuntime.projector.stop(); await firstRuntime.publisher.stop();
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1 });
+    const firstPrompt = store.database.prepare("SELECT id FROM prompt_jobs WHERE lark_message_id = 'm30'").get() as { id: string };
+    store.saveRunCard({ ...store.loadRunCard(firstPrompt.id)!, answer: "durable streamed answer", answerSegments: ["durable streamed answer"], answerDraft: "", answerDraftTransient: false });
 
     restarted = true;
     store.updateBinding("b1", { lastAgentState: "idle" });
@@ -290,6 +292,7 @@ describe("pane/thread lifecycle integration", () => {
     await secondRuntime.coordinator.start();
     await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
+    expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: "durable streamed answer" });
 
     await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();
   });
