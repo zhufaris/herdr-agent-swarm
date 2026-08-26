@@ -304,6 +304,43 @@ describe("event-driven card projection", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it("restarts CardKit stream sequence from one on each continuation card", async () => {
+    const streamed: Array<{ cardId: string; content: string; sequence: number }> = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
+      async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
+      async replyStreamingCard(_rootMessageId, _card) {
+        const number = new Set(streamed.map((update) => update.cardId)).size + 1;
+        return { messageId: `answer-${number}`, cardId: `cardkit-${number}` };
+      },
+      async streamCardContent(cardId, _elementId, content, sequence) { streamed.push({ cardId, content, sequence }); },
+      async finishStreamingCard() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    await publisher.drain();
+
+    const firstAnswer = `${"a".repeat(ANSWER_STREAM_PAGE_LIMIT - 100)}\n${"b".repeat(600)}`;
+    await bus.publish({ eventId: "first-page", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: firstAnswer, answerUpdate: "replace", progressEvents: [] } });
+    await vi.waitFor(() => expect(streamed.filter((update) => update.cardId === "cardkit-2")).toHaveLength(1));
+
+    const latestMarker = "LATEST_CONTINUATION_CONTENT";
+    await bus.publish({ eventId: "second-page", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: `${firstAnswer}\n${"c".repeat(500)}\n${latestMarker}`, answerUpdate: "replace", progressEvents: [] } });
+    await vi.waitFor(() => expect(streamed.filter((update) => update.cardId === "cardkit-2")).toHaveLength(2));
+
+    const continuationUpdates = streamed.filter((update) => update.cardId === "cardkit-2");
+    expect(continuationUpdates.map((update) => update.sequence)).toEqual([1, 2]);
+    expect(continuationUpdates.at(-1)?.content).toContain(latestMarker);
+
+    await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("stops projection without waiting for background card delivery", async () => {
     let releaseUpdate!: () => void;
     const updateBlocked = new Promise<void>((resolve) => { releaseUpdate = resolve; });

@@ -45,7 +45,11 @@ export class ConversationViewProjector {
         const fullContent = answerStreamContent(view);
         while (view.answerCardId) {
           const { page, nextPageStart } = renderAnswerStreamPage(fullContent, view.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
-          const sequence = Math.max(view.answerSequence + 1, view.viewVersion);
+          // CardKit sequences are scoped to one streamed element. A continuation
+          // gets a new element and its durable answerSequence is reset to zero
+          // when its card creation is checkpointed. Do not carry viewVersion
+          // across that boundary.
+          const sequence = view.answerSequence + 1;
           this.store.saveRunCard({ ...view, answerSequence: sequence });
           await this.channelPublisher.enqueueStreamContent(view.bindingId, promptId, view.answerCardId, view.answerElementId, page, sequence);
           this.answerContentLengths.set(promptId, fullContent.length);

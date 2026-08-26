@@ -65,7 +65,9 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         else if (current.answerCardId && current.viewVersion > current.answerDeliveredVersion && !this.store.hasPendingAnswerContinuation(current.promptId, current.answerPageIndex + 1)) {
           const content = answerStreamContent(current);
           const { page, nextPageStart } = renderAnswerStreamPage(content, current.answerPageStart, ANSWER_STREAM_PAGE_LIMIT);
-          const sequence = Math.max(current.answerSequence + 1, current.viewVersion);
+          // Recover the same per-stream-element sequence protocol used by live
+          // projection. A continuation page starts from sequence 1.
+          const sequence = current.answerSequence + 1;
           this.store.saveRunCard({ ...current, answerSequence: sequence });
           await this.outbound.enqueueStreamContent(current.bindingId, current.promptId, current.answerCardId, current.answerElementId, page, sequence);
           if (nextPageStart === null && (current.phase === "completed" || current.phase === "failed")) await this.outbound.enqueueStreamFinish(current.bindingId, current.promptId, current.answerCardId, current.phase === "completed" ? "Completed" : "Failed", sequence + 1);

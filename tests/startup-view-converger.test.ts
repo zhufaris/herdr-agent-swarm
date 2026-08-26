@@ -69,7 +69,7 @@ describe("StartupViewConverger", () => {
 
     expect(enqueueStreamContent).toHaveBeenCalledWith("b1", "p1", "answer-card", expect.any(String), expect.stringContaining("durable answer"), expect.any(Number));
     const sequence = enqueueStreamContent.mock.calls[0]![5];
-    expect(sequence).toBeGreaterThanOrEqual(3);
+    expect(sequence).toBe(1);
     expect(enqueueStreamFinish).toHaveBeenCalledWith("b1", "p1", "answer-card", "Completed", sequence + 1);
     store.close();
   });
