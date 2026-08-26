@@ -7,7 +7,16 @@ describe("TraeX output parser", () => {
     const current = `${previous}\n• Bash curl -H 'Authorization: Bearer secret-token' /health\nHTTP 200\n◆ Deployment healthy`;
 
     const first = parseTerminalStreamDelta(previous, current, "deploy");
-    expect(first.delta).toBe("• Bash curl -H 'Authorization: Bearer [REDACTED]' /health\nHTTP 200\n◆ Deployment healthy");
+    expect(first.delta).toBe([
+      "• Bash",
+      "```bash",
+      "curl -H 'Authorization: Bearer [REDACTED]' /health",
+      "```",
+      "```text",
+      "HTTP 200",
+      "```",
+      "◆ Deployment healthy"
+    ].join("\n"));
     expect(first.update).toBe("append");
     expect(first.snapshot).toBe(current);
     expect(parseTerminalStreamDelta(current, current, "deploy").delta).toBe("");
@@ -133,7 +142,7 @@ describe("TraeX output parser", () => {
     expect(delta).not.toContain("\u001b");
   });
 
-  it("reconstructs terminal-wrapped tool headings without flattening tool output", () => {
+  it("structures a wrapped Ran command without flattening tool output", () => {
     const current = [
       "◆ Ran sqli",
       "  │ te3",
@@ -147,14 +156,32 @@ describe("TraeX output parser", () => {
     ].join("\n");
 
     expect(parseTerminalStreamDelta("", current, "inspect").delta).toBe([
-      "◆ Ran sqlite3",
-      "  └ database result",
+      "◆ Ran",
+      "```bash",
+      "sqlite3",
+      "```",
+      "```text",
+      "database result",
+      "```",
       "◆ Read 2 files",
       "```text",
       "keep",
       "line breaks",
       "```"
     ].join("\n"));
+  });
+
+  it("redacts secrets inside structured command and output fences", () => {
+    const current = [
+      "◆ Ran curl -H 'Authorization: Bearer secret-token' /health",
+      "  └ token=another-secret"
+    ].join("\n");
+
+    const { delta } = parseTerminalStreamDelta("", current, "inspect");
+    expect(delta).toContain("```bash\ncurl -H 'Authorization: Bearer [REDACTED]' /health\n```");
+    expect(delta).toContain("```text\ntoken=[REDACTED]\n```");
+    expect(delta).not.toContain("secret-token");
+    expect(delta).not.toContain("another-secret");
   });
 
   it("preserves a compact Edited preview as one fenced diff block", () => {

@@ -69,18 +69,32 @@ export function parseTraexTerminalBlocks(source: string, continuation: TerminalC
       index = end;
       continue;
     }
-    if (!isEditedHeading(line)) {
-      prose.push(line);
+    if (isEditedHeading(line)) {
+      flushProse();
+      const title = line.trim();
+      index += 1;
+      const end = editedBodyEnd(lines, index);
+      if (end === index) output.push({ kind: "prose", lines: [line] });
+      else output.push({ kind: "diff", title, lines: lines.slice(index, end) });
+      index = end;
+      continue;
+    }
+    if (isStatusLine(line)) {
+      flushProse();
+      output.push({ kind: "status", lines: [line] });
       index += 1;
       continue;
     }
-    flushProse();
-    const title = line.trim();
+    if (/^\s*◆\s+/u.test(line)) {
+      flushProse();
+      const block = [line];
+      index += 1;
+      while (index < lines.length && !isBlockBoundary(lines[index]!)) block.push(lines[index++]!);
+      output.push({ kind: "prose", lines: block });
+      continue;
+    }
+    prose.push(line);
     index += 1;
-    const end = editedBodyEnd(lines, index);
-    if (end === index) output.push({ kind: "prose", lines: [line] });
-    else output.push({ kind: "diff", title, lines: lines.slice(index, end) });
-    index = end;
   }
   flushProse();
   return output;
@@ -109,7 +123,11 @@ function isCommandHeading(line: string): boolean {
 }
 
 function isBlockBoundary(line: string): boolean {
-  return /^\s*(?:◆|•\s+Bash|✧|❯|›)/u.test(line) || /^\s*[─━-]{3,}\s*$/u.test(line);
+  return /^\s*(?:◆|•|✧|❯|›)/u.test(line) || /^\s*[─━-]{3,}\s*$/u.test(line);
+}
+
+function isStatusLine(line: string): boolean {
+  return /^\s*(?:✧|•)\s+/u.test(line) || /^\s*[╭│╰]/u.test(line);
 }
 
 function parseCommandHeading(lines: readonly string[], start: number): { title: string; command: string | null; next: number } {

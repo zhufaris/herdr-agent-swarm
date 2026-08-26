@@ -3,6 +3,7 @@ import type { AgentState } from "../domain/types.js";
 import { stripTerminalControl } from "./output.js";
 import { findNativeTaskFrame } from "./native-task-frame.js";
 import { normalizeLarkPreview } from "./lark-markdown.js";
+import { deriveTerminalContinuation, parseTraexTerminalBlocks, renderTraexTerminalBlocks } from "./traex-terminal-blocks.js";
 
 interface ParsedProgressEvent { key: string; kind: ProgressEventKind; label: string; state: ProgressEventState }
 interface ParsedTraexOutput {
@@ -52,7 +53,10 @@ export function parseTerminalStreamDelta(previousRaw: string, currentRaw: string
   const overlap = terminalDelta(previous, current, promptEcho);
   let update: ParsedTerminalStreamDelta["update"] = previous && overlap.fullSnapshot ? "replace-all" : "append";
   const visible = redactTerminalSecrets(
-    normalizeTerminalForLark(overlap.value, promptEcho, continuesEditedPreview(previous))
+    renderTraexTerminalBlocks(parseTraexTerminalBlocks(
+      cleanTerminalForBlockParsing(overlap.value, promptEcho),
+      deriveTerminalContinuation(previous)
+    ))
       .replace(REASONING_BLOCK, "\n")
       .split("\n")
       .filter((line) => line.trim() !== promptEcho.trim() && !/^\s*[─━-]{3,}\s*$/.test(line))
@@ -141,19 +145,11 @@ function outputAfterPromptEcho(current: string, promptEcho: string): string {
   return "";
 }
 
-function normalizeTerminalForLark(source: string, promptEcho: string, startsInsideEditedPreview = false): string {
+function cleanTerminalForBlockParsing(source: string, promptEcho: string): string {
   const withoutBanner = stripTraeCodeBanner(source);
   const lines = withoutBanner.split("\n");
   const output: string[] = [];
   for (let index = 0; index < lines.length;) {
-    if (startsInsideEditedPreview && index === 0) {
-      const end = editedPreviewBodyEnd(lines, index);
-      if (end > index) {
-        output.push("```diff", ...lines.slice(index, end), "```");
-        index = end;
-        continue;
-      }
-    }
     const composer = /^\s*▍\s?(.*)$/.exec(lines[index]!);
     if (composer) {
       const parts: string[] = [];
@@ -170,14 +166,7 @@ function normalizeTerminalForLark(source: string, promptEcho: string, startsInsi
     if (isSubagentConsoleLine(line)) { index += 1; continue; }
     if (isTerminalChrome(line)) { index += 1; continue; }
     if (/^\s*◆\s+/.test(line)) {
-      if (/^\s*◆\s+Edited\b/u.test(line)) {
-        output.push(line);
-        index += 1;
-        const end = editedPreviewBodyEnd(lines, index);
-        if (end > index) output.push("```diff", ...lines.slice(index, end), "```");
-        index = end;
-        continue;
-      }
+      if (/^\s*◆\s+(?:Edited|Ran)\b/u.test(line)) { output.push(line); index += 1; continue; }
       if (index + 1 < lines.length && isToolHeadingContinuation(lines[index + 1]!)) {
         const heading = [line];
         index += 1;
@@ -195,27 +184,6 @@ function normalizeTerminalForLark(source: string, promptEcho: string, startsInsi
     index += 1;
   }
   return output.join("\n");
-}
-
-function editedPreviewBodyEnd(lines: readonly string[], start: number): number {
-  let end = start;
-  while (end < lines.length && isEditedPreviewRow(lines[end]!)) end += 1;
-  return end;
-}
-
-function isEditedPreviewRow(line: string): boolean {
-  return /^\s*\d+(?:\s+[+-](?:\s|$)|\s+⋮(?:\s|$)|\s{2,}\S)/u.test(line);
-}
-
-function continuesEditedPreview(previous: string): boolean {
-  const lines = previous.split("\n");
-  let lastMarker = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (/^\s*◆\s+/u.test(lines[index]!)) { lastMarker = index; break; }
-  }
-  return lastMarker >= 0
-    && /^\s*◆\s+Edited\b/u.test(lines[lastMarker]!)
-    && lines.slice(lastMarker + 1).every((line) => !line.trim() || isEditedPreviewRow(line));
 }
 
 /** Remove TraeX's orchestration UI; it is not part of the agent's answer. */
