@@ -106,3 +106,11 @@ Tests must prove:
 - restart rebuilds correct lane heads without losing quarantine state;
 - status diagnostics are bounded and contain no payload or prompt text;
 - existing Answer Page and Main Card durable-delivery suites remain green.
+
+## Rollout evidence (2026-08-26)
+
+- Code commit: `0b5de0a0a28c425db501f053c0ed159c2f0d17f7`
+- Build ID: `sha256:01da75d887284b726247c65ccde4525e0b0b35ab740b6e8a4f715ad8cca2af78`
+- Verification: `npm test` passed 64 files and 571 tests; `npm run typecheck`, `npm run build`, and `git diff --check` passed.
+- Runtime: `herdr-lark-bridge.service` active; `/status` reported `status=ok` and `/ready` reported `ready`; expected and observed identities matched the code commit and build ID above.
+- Production SQLite: migration version 5 present exactly once; duplicate active quarantines, active quarantines with lane heads, active Answer quarantines with pending successors, stale lane heads, and active quarantines were all zero.
