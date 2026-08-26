@@ -148,7 +148,17 @@ describe("event-driven card projection", () => {
     await publisher.drain();
 
     const pageHalf = Math.ceil(ANSWER_STREAM_PAGE_LIMIT / 2);
-    const answer = `${"a".repeat(pageHalf)}\n${"b".repeat(pageHalf)}`;
+    const answer = [
+      "<b>Result</b> [unsafe](javascript:alert(1))",
+      "| Key | Value |",
+      "| --- | --- |",
+      "| mode | fast |",
+      "```ts",
+      "const preserved = '[literal](javascript:alert(1))';",
+      "```",
+      "a".repeat(pageHalf),
+      "b".repeat(pageHalf)
+    ].join("\n");
     await bus.publish({ eventId: "done", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
     await vi.waitFor(() => expect(finished).toHaveLength(2));
 
@@ -162,6 +172,10 @@ describe("event-driven card projection", () => {
       { cardId: "cardkit-1", elementId: "answer_content_p1_0", content: firstPage.page },
       { cardId: "cardkit-2", elementId: "answer_content_p1_1", content: secondPage.page }
     ]);
+    expect(streamed[0]!.content).toContain("Result unsafe");
+    expect(streamed[0]!.content).toContain("```text\n| Key | Value |");
+    expect(streamed[0]!.content).toContain("[literal](javascript:alert(1))");
+    expect(streamed[0]!.content).not.toContain("<b>Result</b>");
     expect(finished.map(({ cardId, summary }) => ({ cardId, summary }))).toEqual([
       { cardId: "cardkit-1", summary: "回答将在第 2 页继续" }, { cardId: "cardkit-2", summary: "Completed" }
     ]);

@@ -65,4 +65,28 @@ describe("Answer stream pagination", () => {
     expect(first.page.length).toBeLessThanOrEqual(17);
     expect(first.nextPageStart).toBeGreaterThan(0);
   });
+
+  it("renders tables with a monospaced CardKit fallback", () => {
+    const content = ["Summary", "| Key | Value |", "| --- | --- |", "| mode | fast |"].join("\n");
+
+    expect(renderAnswerStreamPage(content, 0).page).toBe([
+      "Summary", "```text", "| Key | Value |", "| --- | --- |", "| mode | fast |", "```"
+    ].join("\n"));
+  });
+
+  it("sanitizes prose but leaves fenced code literals unchanged", () => {
+    const content = [
+      "<b>Result</b> [unsafe](data:text/plain,no)",
+      "```md",
+      "<b>[literal](javascript:alert(1))</b>",
+      "```"
+    ].join("\n");
+
+    expect(renderAnswerStreamPage(content, 0).page).toBe([
+      "Result unsafe",
+      "```md",
+      "<b>[literal](javascript:alert(1))</b>",
+      "```"
+    ].join("\n"));
+  });
 });

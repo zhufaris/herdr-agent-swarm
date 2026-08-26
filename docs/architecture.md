@@ -322,6 +322,14 @@ checkpointing. Frozen pages are never patched again. Markdown fences are closed
 and reopened only in the render copy; the persisted Answer remains canonical
 source text.
 
+Every initial page and cumulative stream update passes through the same pure,
+source-aware Markdown renderer. It preserves supported Markdown and language-tagged
+code fences, converts tables to fenced `text` blocks, removes HTML, and limits
+clickable links to HTTP or HTTPS. Synthetic table and continuation fences count
+toward the 9,000-character rendered limit, while `source_start` always remains an
+offset into the unmodified canonical Answer. This keeps live delivery and restart
+recovery deterministic even when normalization changes the displayed length.
+
 The `answer_pages` table records each page's message/CardKit/element identity,
 source offset, sequence, and `creating`, `active`, `frozen`, or `finished` state.
 It is the lifecycle authority and target validation uses its active page. The

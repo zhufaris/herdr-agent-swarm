@@ -3,6 +3,20 @@ const TABLE_DELIMITER = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 const TRUNCATION_MARKER = "…（内容已截断）";
 const LEADING_TRUNCATION_MARKER = "…（较早内容已省略）";
 
+export interface RenderedLarkMarkdownPage {
+  page: string;
+  nextPageStart: number | null;
+}
+
+interface MarkdownBlock {
+  kind: "prose" | "code" | "table";
+  start: number;
+  end: number;
+  opening?: string;
+  marker?: string;
+  closed?: boolean;
+}
+
 /** Produces the conservative Markdown subset accepted by Lark CardKit. */
 export function normalizeLarkMarkdown(source: string): string {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
@@ -32,6 +46,37 @@ export function normalizeLarkMarkdown(source: string): string {
   flushProse();
   if (fenceMarker) output.push(fenceMarker);
   return output.join("\n");
+}
+
+/** Renders one bounded page while keeping continuation offsets in the source string. */
+export function renderLarkMarkdownPage(source: string, pageStart: number, limit: number): RenderedLarkMarkdownPage {
+  const start = Math.max(0, Math.min(pageStart, source.length));
+  const boundedLimit = Math.max(0, limit);
+  const complete = renderMarkdownRange(source, start, source.length);
+  if (complete.length <= boundedLimit) return { page: complete, nextPageStart: null };
+
+  const lineEnds: number[] = [];
+  for (let index = source.indexOf("\n", start); index >= 0; index = source.indexOf("\n", index + 1)) {
+    const end = index + 1;
+    if (end < source.length) lineEnds.push(end);
+  }
+  const lineEnd = latestFittingEnd(source, start, boundedLimit, lineEnds);
+  if (lineEnd !== null) return { page: renderMarkdownRange(source, start, lineEnd), nextPageStart: lineEnd };
+
+  let low = start + 1;
+  let high = source.length - 1;
+  let hardEnd: number | null = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (renderMarkdownRange(source, start, middle).length <= boundedLimit) {
+      hardEnd = middle;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  if (hardEnd !== null) return { page: renderMarkdownRange(source, start, hardEnd), nextPageStart: hardEnd };
+
+  const forcedEnd = Math.min(source.length, start + Math.max(1, boundedLimit));
+  return { page: source.slice(start, forcedEnd).slice(0, boundedLimit), nextPageStart: forcedEnd < source.length ? forcedEnd : null };
 }
 
 /** Normalizes first, then applies a bounded render-only copy. */
@@ -125,6 +170,93 @@ function normalizeProse(source: string): string {
   }
   value = output.join("\n");
   return value.replace(/\uE000(\d+)\uE001/g, (_, index: string) => inlineCode[Number(index)] ?? "");
+}
+
+function latestFittingEnd(source: string, start: number, limit: number, candidates: readonly number[]): number | null {
+  let low = 0;
+  let high = candidates.length - 1;
+  let result: number | null = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const end = candidates[middle]!;
+    if (renderMarkdownRange(source, start, end).length <= limit) {
+      result = end;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  return result;
+}
+
+function renderMarkdownRange(source: string, start: number, end: number): string {
+  const output: string[] = [];
+  for (const block of markdownBlocks(source)) {
+    const from = Math.max(start, block.start);
+    const to = Math.min(end, block.end);
+    if (from >= to) continue;
+    const raw = source.slice(from, to).replace(/\r\n?/g, "\n");
+    if (block.kind === "prose") {
+      output.push(normalizeProse(raw));
+      continue;
+    }
+    if (block.kind === "table") {
+      const trailingNewline = raw.endsWith("\n");
+      output.push(`\`\`\`text\n${trailingNewline ? raw.slice(0, -1) : raw}\n\`\`\`${trailingNewline ? "\n" : ""}`);
+      continue;
+    }
+    const prefix = from > block.start ? `${block.opening}\n` : "";
+    const needsClosure = to < block.end || block.closed !== true;
+    const suffix = needsClosure ? `${raw.endsWith("\n") ? "" : "\n"}${block.marker}` : "";
+    output.push(`${prefix}${raw}${suffix}`);
+  }
+  return output.join("");
+}
+
+function markdownBlocks(source: string): MarkdownBlock[] {
+  const lines = sourceLines(source);
+  const blocks: MarkdownBlock[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index]!;
+    const fence = FENCE.exec(line.text);
+    if (fence) {
+      let cursor = index + 1;
+      while (cursor < lines.length && !isClosingFence(lines[cursor]!.text, fence[1]!.length)) cursor += 1;
+      const closed = cursor < lines.length;
+      const last = closed ? cursor : lines.length - 1;
+      blocks.push({ kind: "code", start: line.start, end: lines[last]!.end, opening: line.text, marker: fence[1]!, closed });
+      index = last + 1;
+      continue;
+    }
+    if (index + 1 < lines.length && isTableRow(line.text) && TABLE_DELIMITER.test(lines[index + 1]!.text)) {
+      let cursor = index + 2;
+      while (cursor < lines.length && isTableRow(lines[cursor]!.text)) cursor += 1;
+      blocks.push({ kind: "table", start: line.start, end: lines[cursor - 1]!.end });
+      index = cursor;
+      continue;
+    }
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      if (FENCE.test(lines[cursor]!.text)) break;
+      if (cursor + 1 < lines.length && isTableRow(lines[cursor]!.text) && TABLE_DELIMITER.test(lines[cursor + 1]!.text)) break;
+      cursor += 1;
+    }
+    blocks.push({ kind: "prose", start: line.start, end: lines[cursor - 1]!.end });
+    index = cursor;
+  }
+  return blocks;
+}
+
+function sourceLines(source: string): Array<{ start: number; end: number; text: string }> {
+  if (!source) return [];
+  const lines: Array<{ start: number; end: number; text: string }> = [];
+  let start = 0;
+  while (start < source.length) {
+    const newline = source.indexOf("\n", start);
+    const end = newline < 0 ? source.length : newline + 1;
+    lines.push({ start, end, text: source.slice(start, newline < 0 ? end : newline).replace(/\r$/, "") });
+    start = end;
+  }
+  return lines;
 }
 
 function normalizeLinks(line: string): string {

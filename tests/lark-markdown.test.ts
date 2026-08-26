@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeLarkMarkdown, normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
+import { normalizeLarkMarkdown, normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
 
 describe("Lark Markdown normalization", () => {
   it("preserves supported document structure and closes a streaming fence in the rendered copy", () => {
@@ -73,5 +73,99 @@ describe("Lark Markdown normalization", () => {
       "下一步需要二选一：", "", "- 短期：完成授权", "- 长期：支持 service principal", "",
       "```text", "keep", "line breaks", "```"
     ].join("\n"));
+  });
+});
+
+describe("source-aware Lark Markdown pages", () => {
+  it("normalizes mixed Markdown without changing the canonical source", () => {
+    const source = [
+      "# Result",
+      "",
+      "- **done** with `value`",
+      "[safe](https://example.com) [bad](javascript:alert(1))",
+      "<b>visible</b><!-- hidden -->",
+      "",
+      "```ts",
+      "const value = 1;",
+      "```"
+    ].join("\n");
+
+    expect(renderLarkMarkdownPage(source, 0, 9_000)).toEqual({
+      page: [
+        "# Result",
+        "",
+        "- **done** with `value`",
+        "[safe](https://example.com) bad",
+        "visible",
+        "",
+        "```ts",
+        "const value = 1;",
+        "```"
+      ].join("\n"),
+      nextPageStart: null
+    });
+    expect(source).toContain("javascript:alert(1)");
+  });
+
+  it("maps transformed table pages back to canonical source offsets", () => {
+    const source = [
+      "Before",
+      "| Name | Value |",
+      "| --- | ---: |",
+      "| Alpha | 1 |",
+      "| Beta | 2 |",
+      "After"
+    ].join("\n");
+    const pages: Array<{ start: number; page: string }> = [];
+    let start = 0;
+    while (start < source.length) {
+      const rendered = renderLarkMarkdownPage(source, start, 52);
+      pages.push({ start, page: rendered.page });
+      if (rendered.nextPageStart === null) break;
+      expect(rendered.nextPageStart).toBeGreaterThan(start);
+      start = rendered.nextPageStart;
+    }
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.every(({ page }) => page.length <= 52)).toBe(true);
+    const tablePages = pages.filter(({ page }) => page.includes("|"));
+    expect(tablePages.length).toBeGreaterThan(1);
+    expect(tablePages.every(({ page }) => /```text\n[\s\S]*?\n```/.test(page))).toBe(true);
+    expect(source.slice(pages[1]!.start)).not.toBe(source.slice(pages[0]!.page.length));
+  });
+
+  it("normalizes CRLF while retaining canonical source offsets", () => {
+    const source = "```ts\r\nconst first = 1;\r\nconst second = 2;\r\n```";
+    const first = renderLarkMarkdownPage(source, 0, 34);
+    const second = renderLarkMarkdownPage(source, first.nextPageStart!, 34);
+
+    expect(first.page).not.toContain("\r");
+    expect(second.page).not.toContain("\r");
+    expect(first.nextPageStart).toBe(source.indexOf("const second"));
+  });
+
+  it("preserves literal links inside code while splitting at canonical offsets", () => {
+    const source = [
+      "```md",
+      "[raw](javascript:alert(1))",
+      "second line",
+      "```"
+    ].join("\n");
+    const first = renderLarkMarkdownPage(source, 0, 45);
+    const second = renderLarkMarkdownPage(source, first.nextPageStart!, 45);
+
+    expect(first.page).toContain("[raw](javascript:alert(1))");
+    expect(first.page.endsWith("```")).toBe(true);
+    expect(second.page.startsWith("```md\n")).toBe(true);
+    expect(second.nextPageStart).toBeNull();
+  });
+
+  it("makes bounded progress through one long source line", () => {
+    const source = "x".repeat(120);
+    const first = renderLarkMarkdownPage(source, 0, 40);
+
+    expect(first.page).toHaveLength(40);
+    expect(first.nextPageStart).toBe(40);
+    expect(renderLarkMarkdownPage(source, first.nextPageStart!, 40).page).toHaveLength(40);
   });
 });
