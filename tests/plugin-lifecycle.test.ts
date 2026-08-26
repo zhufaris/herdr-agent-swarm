@@ -36,9 +36,28 @@ describe("plugin lifecycle", () => {
     const fixture = createFixture();
     await runPluginLifecycle("install", fixture.environment);
     writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
-    await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" })).rejects.toThrow();
+    await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" })).rejects.toThrow();
     expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
-    expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart test-bridge.service");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block test-bridge.service");
+  });
+
+  it("waits for two matching health observations after a non-blocking restart", async () => {
+    let healthRequests = 0;
+    const server = createServer((_request, response) => {
+      healthRequests += 1;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      expect(healthRequests).toBeGreaterThanOrEqual(2);
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("refreshes the unit identity before starting a rebuilt stopped plugin", async () => {
@@ -97,6 +116,22 @@ describe("plugin lifecycle", () => {
       await runPluginLifecycle("install", fixture.environment);
       await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
         .rejects.toThrow(/expected build sha256:test-build.*observed sha256:stale-build/);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("reports the final active unit and stale build when restart handover times out", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.1.0", buildId: "sha256:stale-build" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" }))
+        .rejects.toThrow(/restart did not become active with expected build sha256:test-build.*unit active.*observed sha256:stale-build/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

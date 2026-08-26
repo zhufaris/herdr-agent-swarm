@@ -285,6 +285,10 @@ npm run build
 herdr plugin action invoke restart --plugin herdr-lark-bridge
 ```
 
+The restart action completes only after the replacement service reports the
+expected build identity. This lets systemd finish an in-flight graceful shutdown
+without treating the handover as a failed restart.
+
 To edit the project registry later, invoke
 `configure-projects`. It edits a temporary copy and atomically replaces the
 registry only after validation succeeds.

@@ -37,9 +37,12 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
     const reload = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (reload !== 0) return reload;
   }
-  const result = delegate("systemctl", ["--user", action, paths.serviceName], environment);
+  const argumentsForAction = action === "restart"
+    ? ["--user", "restart", "--no-block", paths.serviceName]
+    : ["--user", action, paths.serviceName];
+  const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
-  return waitForHealth(paths, environment);
+  return waitForHealth(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment));
 }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
@@ -140,15 +143,16 @@ function requireInstalled(paths: RuntimePaths): void {
   if (!existsSync(paths.unitFile)) throw new Error(`service is not installed: ${paths.unitFile}; run the setup action first`);
 }
 
-async function waitForHealth(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
+async function waitForHealth(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
-  const timeoutMs = positiveMilliseconds(base.BRIDGE_PLUGIN_START_TIMEOUT_MS, 15_000);
   const deadline = Date.now() + timeoutMs;
   let consecutiveHealthyChecks = 0;
   let observedBuildId = "unavailable";
+  let unitState = "inactive";
   do {
     const active = isUnitActive(paths.serviceName, base);
+    unitState = active ? "active" : "inactive";
     const health = active ? await probeHealthIdentity(config.http.host, config.http.port) : null;
     observedBuildId = health?.buildId ?? "unavailable";
     const healthy = health?.status === "ok" && health.serviceId === BRIDGE_SERVICE_ID && health.buildId === expected.buildId;
@@ -161,8 +165,12 @@ async function waitForHealth(paths: RuntimePaths, base: NodeJS.ProcessEnv): Prom
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   } while (Date.now() < deadline);
-  throw new Error(`bridge service did not become active with expected build ${expected.buildId} within ${timeoutMs}ms; observed ${observedBuildId}; inspect systemctl --user status ${paths.serviceName}`);
+  throw new Error(`bridge ${action} did not become active with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; observed ${observedBuildId}; inspect systemctl --user status ${paths.serviceName}`);
 }
+
+function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.BRIDGE_PLUGIN_START_TIMEOUT_MS, 15_000); }
+
+function restartTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.BRIDGE_PLUGIN_RESTART_TIMEOUT_MS, 90_000); }
 
 async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
