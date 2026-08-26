@@ -7,6 +7,7 @@ export type AnswerPagePlan =
   | { type: "wait" }
   | { type: "stream-content"; content: string }
   | { type: "finish-terminal"; summary: "Completed" | "Failed" }
+  | { type: "rebuild"; currentSummary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; initialContent: string }
   | { type: "continue"; currentSummary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; initialContent: string };
 
 export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: AnswerPageDeliveryFacts): AnswerPagePlan {
@@ -14,6 +15,13 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
   const content = answerStreamContent(view);
   const rendered = renderAnswerStreamPage(content, page.sourceStart, ANSWER_STREAM_PAGE_LIMIT);
   if (facts.latestContent?.state === "pending") return { type: "wait" };
+  if (facts.latestContent?.state === "dead_letter") {
+    const nextPageIndex = page.pageIndex + 1;
+    return {
+      type: "rebuild", currentSummary: "回答将在恢复页继续", nextPageIndex, nextPageStart: page.sourceStart,
+      nextElementId: answerElementId(view.promptId, nextPageIndex), initialContent: rendered.page
+    };
+  }
   if (!rendered.page) {
     if (view.phase === "completed" || view.phase === "failed") {
       if (facts.finishPending) return { type: "wait" };

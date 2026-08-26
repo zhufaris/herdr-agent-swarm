@@ -30,6 +30,15 @@ describe("answer page planner", () => {
     expect(planAnswerPage(view, page, { latestContent: { content: "old", sequence: 1, state: "pending" }, finishPending: false, continuationPending: false })).toEqual({ type: "wait" });
   });
 
+  it("rebuilds a permanently failed stream on a new card from the same source offset", () => {
+    const { view, page } = fixture("canonical answer");
+
+    expect(planAnswerPage(view, page, { latestContent: { content: "partial", sequence: 2, state: "dead_letter" }, finishPending: false, continuationPending: false })).toEqual({
+      type: "rebuild", currentSummary: "回答将在恢复页继续", nextPageIndex: 1, nextPageStart: 0,
+      nextElementId: answerElementId("p1", 1), initialContent: answerStreamContent(view)
+    });
+  });
+
   it("does not enqueue empty content when a running answer shrinks before a continuation offset", () => {
     const { view, page } = fixture("short transient redraw");
     const continuation = { ...page, pageIndex: 2, sourceStart: answerStreamContent(view).length + 20, elementId: answerElementId("p1", 2) };

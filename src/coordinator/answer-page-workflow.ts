@@ -39,6 +39,14 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
         rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion,
         card: renderRequestAnswerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true })
       });
+    } else if (plan.type === "rebuild") {
+      const binding = this.store.getBinding(view.bindingId);
+      if (!binding?.rootMessageId) return;
+      outcome = this.store.reserveAnswerRebuild({
+        promptId, pageIndex: page.pageIndex, nextPageIndex: plan.nextPageIndex, sourceStart: plan.nextPageStart, nextElementId: plan.nextElementId,
+        rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion,
+        card: renderRequestAnswerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true })
+      });
     }
     if (outcome === "reserved") this.wakeOutbound();
     if (plan.type !== "wait") this.logger?.debug({ event: "answer-page-converged", promptId, bindingId: view.bindingId, pageIndex: page.pageIndex, action: plan.type, outcome }, "planned durable Answer page delivery");

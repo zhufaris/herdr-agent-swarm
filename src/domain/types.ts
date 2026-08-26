@@ -10,6 +10,9 @@ export type PromptObservationState = "not_started" | "attached" | "detached" | "
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
+export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
+export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "released_newer_snapshot";
+export interface OutboundFailureTransition { state: OutboundReplyState; action: OutboxQuarantineAction; laneClass: OutboxLaneClass; promptId: string | null; reply: OutboundReply }
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type OutboundTargetRole = "session_status" | "operation_result";
@@ -252,7 +255,11 @@ export interface OperationalSummary {
   oldestPendingAt: string | null;
   outboxLanes: {
     pending: number; eligible: number; blocked: number; nextAttemptAt: string | null;
-    oldestHeadAt: string | null; oldestHeadAgeSeconds: number | null;
+    oldestHeadAt: string | null; oldestHeadAgeSeconds: number | null; stalled: number; oldestStalledAgeSeconds: number | null;
+  };
+  outboxQuarantines: {
+    active: number; released: number; byLaneClass: Record<OutboxLaneClass, number>; byFailureClass: Record<DeliveryFailureClass, number>;
+    latest: { replyId: string; replyKind: OutboundReplyKind; laneClass: OutboxLaneClass; failureClass: DeliveryFailureClass; action: string; reason: string; createdAt: string; releasedAt: string | null } | null;
   };
   recentFailedPrompt: { promptId: string; bindingId: string; updatedAt: string; error: string } | null;
   recentDeadLetter: { replyId: string; bindingId: string | null; promptId: string | null; attemptCount: number; updatedAt: string; error: string } | null;

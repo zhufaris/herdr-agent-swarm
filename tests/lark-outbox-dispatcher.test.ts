@@ -12,6 +12,7 @@ import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notif
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
+import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 
 describe("Lark channel publisher", () => {
   it("checkpoints a delivered Main Card version and emits a convergence hint", async () => {
@@ -137,6 +138,44 @@ describe("Lark channel publisher", () => {
     expect(stream).not.toHaveBeenCalled();
     expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = 'stale-content'").get()).toEqual({ state: "dismissed", error: "Answer stream superseded by a continuation page" });
     expect(store.getOperationalSummary().deadLetters).toBe(0);
+    store.close();
+  });
+
+  it("quarantines a permanently rejected Answer sequence and wakes canonical reconstruction", async () => {
+    const permanent = Object.assign(new Error("invalid sequence"), { response: { status: 400, data: { code: 200740 } } });
+    const stream = vi.fn(async () => { throw permanent; });
+    const replyText = vi.fn(async () => ({ messageId: "text-1" }));
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+    for (const sequence of [1, 2]) store.enqueueOutboundReply({
+      id: `content-${sequence}`, idempotencyKey: `content-${sequence}`, bindingId: "b1", promptId: "p1", viewVersion: sequence, cardRole: "answer",
+      rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: `snapshot-${sequence}`, sequence })
+    });
+    store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", rootMessageId: "root-2", kind: "text", payload: "still deliver" });
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream, replyText }), pino({ enabled: false }));
+    const checkpoint = vi.fn();
+    const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+    let convergence = Promise.resolve();
+    publisher.onAnswerCheckpoint((promptId, version) => { checkpoint(promptId, version); convergence = workflow.converge(promptId); });
+
+    await publisher.requestScan();
+
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(replyText).toHaveBeenCalledTimes(1);
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+    expect(checkpoint).toHaveBeenCalledWith("p1", 1);
+    expect(store.database.prepare("SELECT id, state FROM outbound_replies WHERE id IN ('content-1','content-2') ORDER BY delivery_order").all()).toEqual([
+      { id: "content-1", state: "dead_letter" }, { id: "content-2", state: "dismissed" }
+    ]);
+    await convergence;
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_card_create", promptId: "p1" })]);
+    expect(store.listAnswerPages("p1")).toMatchObject([
+      { pageIndex: 0, sourceStart: 0, state: "frozen" }, { pageIndex: 1, sourceStart: 0, state: "creating" }
+    ]);
+    await publisher.stop();
     store.close();
   });
 

@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -140,6 +140,7 @@ export interface BindingStorePort {
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
   reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
   reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
+  reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];
@@ -158,6 +159,7 @@ export interface BindingStorePort {
   checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null;
   markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null;
   markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null;
+  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
@@ -246,15 +248,15 @@ export type OperationsStore = Pick<BindingStorePort,
   | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBindingMetadata"
 >;
 
-export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish">;
+export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish" | "reserveAnswerRebuild">;
 export type MainCardStore = Pick<BindingStorePort, "getBinding" | "loadTopicView" | "reserveMainCard" | "saveTopicView">;
 
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
 
 export type OutboxStore = Pick<BindingStorePort,
   | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
-  | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDeadLetter" | "markOutboundReplyDelivered"
-  | "markOutboundReplyFailed" | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream"
+  | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDelivered" | "markOutboundReplyFailedWithQuarantine"
+  | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream"
 >;
 export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "loadRunCard">;
 

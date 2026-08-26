@@ -224,18 +224,21 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       const classified = classifyDeliveryError(error);
       const permanent = classified.failureClass === "permanent";
       const metadata = { failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode };
-      const failed = permanent
-        ? this.store.markOutboundReplyDeadLetter(reply.id, classified.message, metadata)
-        : this.store.markOutboundReplyFailed(reply.id, classified.message, classified.retryDelayMs, metadata);
+      const transition = this.store.markOutboundReplyFailedWithQuarantine(reply.id, classified.message, metadata, classified.retryDelayMs);
+      const failed = transition?.reply ?? null;
       const context = {
         event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled",
         err: safeLogError(error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
         attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt,
         failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, autoRecoveryCount: failed?.autoRecoveryCount ?? reply.autoRecoveryCount,
+        laneClass: transition?.laneClass, quarantineAction: transition?.action,
         outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry"
       };
       if (failed?.state === "dead_letter") this.logger.error(context, permanent ? "Lark outbox reply rejected by durable target validation" : "Lark outbox reply exhausted retries");
       else this.logger.warn(context, "Lark outbox reply delivery failed; retry scheduled");
+      if (transition?.action === "rebuild_answer" && transition.promptId) {
+        for (const listener of this.answerCheckpointListeners) listener(transition.promptId, failed?.viewVersion ?? 0);
+      }
       blockedTargets.add(deliveryTargetKey(reply));
       this.lastDeliveryFailureAt = new Date().toISOString();
       return "failed";

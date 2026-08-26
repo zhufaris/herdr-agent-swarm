@@ -374,6 +374,16 @@ future-due head blocks only its own lane. Lark requests use a dedicated bounded
 timeout; HTTP 429 responses honor a bounded `Retry-After`, and other transient
 failures use jittered exponential backoff.
 
+Permanent failures and transient failures that exhaust their single cooled
+recovery round are handled by a durable lane quarantine. Answer stream failures
+never allow a later content sequence or finish operation to skip the failed
+head: unsafe successors are dismissed and `AnswerPageWorkflow` reconstructs
+delivery from the canonical RunCard state. Main Card and other replaceable card
+lanes may advance only to a newer durable snapshot. Immutable card creation,
+text, and unknown work remain blocked until an operator retries or dismisses the
+failed head. The dead letter, quarantine decision, successor changes, and lane
+head update are committed in one SQLite transaction.
+
 ## Process lifecycle and diagnostics
 
 The supported production owner is a user systemd service installed and operated
@@ -387,6 +397,11 @@ Health endpoints have separate meanings:
   and Lark to be usable.
 - `/status` returns a sanitized operational snapshot even when dependencies are
   degraded.
+
+`/status` reports active and released outbox quarantines by lane and failure
+class, plus due lane heads that have made no progress for five minutes. An
+active quarantine or stalled head degrades status without changing readiness,
+so one broken Lark target remains visible without stopping unrelated work.
 
 Shutdown stops ingress, waits for known work, and detaches observers if the
 grace period expires. It does not replay work or delete user state. Logs and

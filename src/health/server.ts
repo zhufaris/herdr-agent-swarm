@@ -54,7 +54,9 @@ export function startHealthServer(options: {
       response.statusCode = 200;
       const operationalDegraded = "error" in operational
         || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
-        || operational.eligibleDeadLetterRecoveries > 0;
+        || operational.eligibleDeadLetterRecoveries > 0
+        || operational.outboxQuarantines.active > 0
+        || operational.outboxLanes.stalled > 0;
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !operationalDegraded
           && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker) ? "ok" : "degraded", identity: options.buildIdentity,

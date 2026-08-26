@@ -286,6 +286,27 @@ describe("SQLite store", () => {
     expect(serialized).not.toContain("private card payload");
   });
 
+  it("reports bounded quarantine and stalled-lane diagnostics without payload data", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:10:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "blocked", idempotencyKey: "blocked", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "private card payload" });
+    store.database.prepare("UPDATE outbound_replies SET created_at = ?, next_attempt_at = ? WHERE id = 'blocked'").run("2026-08-26T00:00:00.000Z", "2026-08-26T00:00:00.000Z");
+    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", bindingId: "b1", rootMessageId: "root-2", kind: "card_reply", payload: "another private payload" });
+    store.markOutboundReplyFailedWithQuarantine("failed", "invalid target " + "x".repeat(800), { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
+
+    const summary = store.getOperationalSummary();
+    expect(summary.outboxLanes).toMatchObject({ stalled: 1, oldestStalledAgeSeconds: 600 });
+    expect(summary.outboxQuarantines).toMatchObject({
+      active: 1, released: 0, byLaneClass: { immutable: 1 }, byFailureClass: { permanent: 1 },
+      latest: { replyId: "failed", replyKind: "card_reply", laneClass: "immutable", failureClass: "permanent", action: "blocked" }
+    });
+    expect(summary.outboxQuarantines.latest!.reason.length).toBeLessThanOrEqual(500);
+    expect(JSON.stringify(summary)).not.toMatch(/private card payload|another private payload/);
+    vi.useRealTimers();
+  });
+
   it("commits prompt completion and terminal projections atomically before lifecycle delivery", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -775,7 +796,8 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary().outboxLanes).toEqual({
       pending: 8, eligible: 7, blocked: 1,
       nextAttemptAt: "2026-08-24T00:01:00.000Z",
-      oldestHeadAt: "2026-08-24T00:00:00.000Z", oldestHeadAgeSeconds: 10
+      oldestHeadAt: "2026-08-24T00:00:00.000Z", oldestHeadAgeSeconds: 10,
+      stalled: 0, oldestStalledAgeSeconds: null
     });
     expect(store.getNextOutboundLaneHeadAttemptAt()).toBe(store.listPendingOutboundReplies()[1]!.nextAttemptAt);
     vi.useRealTimers();
@@ -802,6 +824,161 @@ describe("SQLite store", () => {
     expect(store.recoverEligibleDeadLetters("2026-08-24T00:05:00.000Z", 1).map((reply) => reply.id)).toEqual(["later"]);
     expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["later"]);
     vi.useRealTimers();
+  });
+
+  it("quarantines a failed Answer sequence without letting later stream work bypass it", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const [create] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(create!.id, "answer-1", "cardkit-1");
+    for (const sequence of [1, 2, 3]) store.enqueueOutboundReply({
+      id: `content-${sequence}`, idempotencyKey: `content-${sequence}`, bindingId: "b1", promptId: "p1", viewVersion: sequence, cardRole: "answer",
+      rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: `snapshot-${sequence}`, sequence })
+    });
+    store.enqueueOutboundReply({ id: "finish-4", idempotencyKey: "finish-4", bindingId: "b1", promptId: "p1", viewVersion: 4, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_finish", payload: JSON.stringify({ pageIndex: 0, summary: "Completed", sequence: 4 }) });
+    store.markOutboundReplyDelivered("content-1", "cardkit-1");
+
+    const transition = store.markOutboundReplyFailedWithQuarantine("content-2", "invalid sequence", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "200740" });
+
+    expect(transition).toMatchObject({ state: "dead_letter", action: "rebuild_answer", laneClass: "answer_stream", promptId: "p1" });
+    expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([]);
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([]);
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
+  });
+
+  it("keeps immutable successors quarantined until an operator retries the failed head", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
+
+    expect(store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked", laneClass: "immutable" });
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0 } });
+
+    expect(store.retryDeadLetter("create", "c1", "u1")).toBe("retried");
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["create"]);
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, latest: { action: "manual_retry" } } });
+  });
+
+  it.each([
+    { id: "answer-create", cardRole: "answer" as const, targetRole: null, kind: "stream_card_create" as const },
+    { id: "main-create", cardRole: null, targetRole: "session_status" as const, kind: "card_reply" as const }
+  ])("keeps $id classified as immutable card creation", ({ id, cardRole, targetRole, kind }) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    let replyId = id;
+    if (cardRole) {
+      const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+      store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+      replyId = store.listPendingOutboundReplies()[0]!.id;
+    } else {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, bindingId: "b1", promptId: null, viewVersion: 1, cardRole, targetRole, rootMessageId: "root-1", kind, payload: "{}" });
+    }
+
+    expect(store.markOutboundReplyFailedWithQuarantine(replyId, "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({
+      action: "blocked", laneClass: "immutable"
+    });
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, byLaneClass: { immutable: 1 } } });
+  });
+
+  it("keeps a repeated failure callback idempotent after quarantine", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    const metadata = { failureClass: "permanent" as const, httpStatus: 400, larkErrorCode: null };
+
+    expect(store.markOutboundReplyFailedWithQuarantine("create", "invalid target", metadata)).toMatchObject({ action: "blocked", reply: { attemptCount: 1 } });
+    expect(store.markOutboundReplyFailedWithQuarantine("create", "duplicate callback", metadata)).toMatchObject({ action: "blocked", reply: { attemptCount: 1 } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbox_lane_quarantines").get()).toEqual({ count: 1 });
+  });
+
+  it("releases only a strictly newer Main Card snapshot after a permanent failure", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const first = { ...initialTopicView("b1"), title: "First", viewVersion: 1 };
+    expect(store.reserveMainCard(first, "root-1", { version: 1 })).toBe("reserved");
+    const [create] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(create!.id, "main-card-1");
+    const second = { ...first, title: "Second", viewVersion: 2 };
+    expect(store.reserveMainCard(second, "root-1", { version: 2 })).toBe("reserved");
+    const [failed] = store.listPendingOutboundReplies();
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" })).toMatchObject({
+      action: "released_newer_snapshot", laneClass: "main_card"
+    });
+    expect(store.reserveMainCard(second, "root-1", { version: 2 })).toBe("waiting");
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+
+    const third = { ...second, title: "Third", viewVersion: 3 };
+    expect(store.reserveMainCard(third, "root-1", { version: 3 })).toBe("reserved");
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ targetRole: "session_status", viewVersion: 3 })]);
+  });
+
+  it("releases only the newest coalesced replaceable-card successor", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head" });
+    store.enqueueOutboundReply({ id: "middle", idempotencyKey: "middle", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "middle" });
+    store.enqueueOutboundReply({ id: "latest", idempotencyKey: "latest", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "latest" });
+
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["head", "latest"]);
+    expect(store.markOutboundReplyFailedWithQuarantine("head", "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({
+      action: "released_newer_snapshot", laneClass: "replaceable_card"
+    });
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["latest"]);
+  });
+
+  it("allows one cooled transient recovery but never bypasses the resulting immutable quarantine", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine("create", "unavailable", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+    }
+
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0 } });
+    expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toMatchObject([{ id: "create", state: "pending", autoRecoveryCount: 1 }]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine("create", "still unavailable", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+    }
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1 } });
+    expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toEqual([]);
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it("atomically releases an immutable quarantine when the failed head is dismissed", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
+    store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
+
+    expect(store.dismissDeadLetter("create", "c1", "u1")).toBe("dismissed");
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["later"]);
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, latest: { action: "manual_dismiss" } } });
+    expect(store.dismissDeadLetter("create", "c1", "u1")).toBe("stale");
+  });
+
+  it("preserves one immutable quarantine and its blocked lane across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-outbox-quarantine-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
+    store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 5").all()).toEqual([{ version: 5 }]);
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0 } });
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
   });
 
   it("coalesces pending binding status-card snapshots behind the in-flight-safe lane head", () => {
@@ -870,7 +1047,7 @@ describe("SQLite store", () => {
 
     expect(store.getOperationalSummary().outboxLanes).toEqual({
       pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null,
-      oldestHeadAt: null, oldestHeadAgeSeconds: null
+      oldestHeadAt: null, oldestHeadAgeSeconds: null, stalled: 0, oldestStalledAgeSeconds: null
     });
   });
 

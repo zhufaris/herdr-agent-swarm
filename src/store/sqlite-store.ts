@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, PaneControlOperationState, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RequestCardRole, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -17,7 +17,7 @@ import { mapAnswerPage, mapBinding, mapInstanceLease, mapOutboundReply, mapPaneC
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "outbox_lane_heads",
+  "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 
@@ -1138,19 +1138,20 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
-    this.database.exec("BEGIN IMMEDIATE");
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
       const row = this.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
+      if (!row) { if (ownsTransaction) this.database.exec("COMMIT"); return null; }
       const attempts = Number(row.attempt_count) + 1;
       const timestamp = now();
       const deadLetteredAt = attempts >= 5 ? timestamp : null;
       this.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ?`)
         .run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
       const result = this.getOutboundReply(id);
-      this.database.exec("COMMIT");
+      if (ownsTransaction) this.database.exec("COMMIT");
       return result;
-    } catch (cause) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw cause; }
+    } catch (cause) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw cause; }
   }
 
   markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null {
@@ -1160,11 +1161,72 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.getOutboundReply(id);
   }
 
+  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const before = this.getOutboundReply(id);
+      if (!before) { this.database.exec("COMMIT"); return null; }
+      if (before.state === "dead_letter") {
+        const existing = this.database.prepare("SELECT lane_class, action FROM outbox_lane_quarantines WHERE lane_key = ? AND failed_reply_id = ?").get(outboundLaneKey(before), id) as { lane_class: OutboxLaneClass; action: OutboundFailureTransition["action"] } | undefined;
+        if (existing) {
+          this.database.exec("COMMIT");
+          return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
+        }
+      }
+      const failed = metadata.failureClass === "permanent"
+        ? this.markOutboundReplyDeadLetter(id, error, metadata)
+        : this.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
+      if (!failed) { this.database.exec("COMMIT"); return null; }
+      const laneClass = outboundLaneClass(failed);
+      if (failed.state !== "dead_letter") { this.database.exec("COMMIT"); return { state: failed.state, action: "retry", laneClass, promptId: failed.promptId, reply: failed }; }
+      if (metadata.failureClass === "transient" && failed.autoRecoveryCount === 0) {
+        this.database.exec("COMMIT");
+        return { state: failed.state, action: "retry", laneClass, promptId: failed.promptId, reply: failed };
+      }
+      const timestamp = now();
+      let action: OutboundFailureTransition["action"] = "blocked";
+      let quarantineState: "active" | "released" = "active";
+      if (laneClass === "answer_stream" && failed.promptId) {
+        this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ?
+          WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
+        action = "rebuild_answer"; quarantineState = "released";
+      } else if (laneClass === "main_card" || laneClass === "replaceable_card") {
+        action = "released_newer_snapshot"; quarantineState = "released";
+      }
+      const laneKey = outboundLaneKey(failed);
+      this.database.prepare(`INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(lane_key) DO UPDATE SET failed_reply_id = excluded.failed_reply_id, lane_class = excluded.lane_class, failure_class = excluded.failure_class, state = excluded.state, action = excluded.action, reason = excluded.reason, updated_at = excluded.updated_at, released_at = excluded.released_at`)
+        .run(laneKey, id, laneClass, metadata.failureClass, quarantineState, action, boundedError(error), timestamp, timestamp, quarantineState === "released" ? timestamp : null);
+      if (quarantineState === "released") this.refreshOutboxLaneHead(laneKey);
+      else this.database.prepare("DELETE FROM outbox_lane_heads WHERE lane_key = ?").run(laneKey);
+      this.database.exec("COMMIT");
+      return { state: failed.state, action, laneClass, promptId: failed.promptId, reply: failed };
+    } catch (cause) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw cause; }
+  }
+
+  private outboundDeliveryOrder(id: string): number {
+    const row = this.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = ?").get(id) as { delivery_order: number } | undefined;
+    if (!row) throw new Error(`Outbound reply not found: ${id}`);
+    return Number(row.delivery_order);
+  }
+
+  private refreshOutboxLaneHead(laneKey: string): void {
+    this.database.prepare("DELETE FROM outbox_lane_heads WHERE lane_key = ?").run(laneKey);
+    this.database.prepare(`INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+      SELECT lane_key, id, delivery_order, next_attempt_at, created_at FROM outbound_replies
+      WHERE lane_key = ? AND state = 'pending' AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = ? AND q.state = 'active')
+      ORDER BY delivery_order LIMIT 1`).run(laneKey, laneKey);
+  }
+
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const rows = this.database.prepare(`SELECT id FROM outbound_replies WHERE state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at IS NOT NULL AND dead_lettered_at <= ? ORDER BY dead_lettered_at, delivery_order LIMIT ?`).all(cutoff, limit) as Array<{ id: string }>;
+      const rows = this.database.prepare(`SELECT o.id FROM outbound_replies o
+        WHERE o.state = 'dead_letter' AND o.failure_class = 'transient' AND o.auto_recovery_count = 0 AND o.dead_lettered_at IS NOT NULL AND o.dead_lettered_at <= ?
+          AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = o.lane_key AND q.state = 'active')
+        ORDER BY o.dead_lettered_at, o.delivery_order LIMIT ?`).all(cutoff, limit) as Array<{ id: string }>;
       const recovered: OutboundReply[] = [];
       for (const row of rows) {
         const updated = this.database.prepare(`UPDATE outbound_replies SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, auto_recovery_count = 1, updated_at = ? WHERE id = ? AND state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at <= ?`).run(now(), now(), row.id, cutoff);
@@ -1206,8 +1268,14 @@ export class SqliteBindingStore implements BindingStorePort {
       else if (row.chat_id !== chatId) outcome = "unauthorized";
       else if (row.state !== "dead_letter") outcome = "stale";
       else {
+        const lane = this.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(id) as { lane_key: string } | undefined;
         const nextState = action === "retry" ? "pending" : "dismissed";
         this.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, attempt_count = CASE WHEN ? = 'pending' THEN 0 ELSE attempt_count END, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, nextState, now(), now(), id);
+        if (lane) {
+          this.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', action = ?, released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'")
+            .run(action === "retry" ? "manual_retry" : "manual_dismiss", now(), now(), lane.lane_key, id);
+          this.refreshOutboxLaneHead(lane.lane_key);
+        }
         outcome = action === "retry" ? "retried" : "dismissed";
       }
       this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(actorOpenId, `outbound.${action}`, id, outcome, now());
@@ -1218,6 +1286,7 @@ export class SqliteBindingStore implements BindingStorePort {
 
   getOperationalSummary(): OperationalSummary {
     const observedAt = now();
+    const stalledBefore = new Date(Date.parse(observedAt) - 300_000).toISOString();
     const groupedCounts = <T extends string>(table: string, column: string, values: readonly T[]): Record<T, number> => {
       const result = Object.fromEntries(values.map((value) => [value, 0])) as Record<T, number>;
       const rows = this.database.prepare(`SELECT ${column} AS value, COUNT(*) AS count FROM ${table} GROUP BY ${column}`).all() as Array<{ value: T; count: number }>;
@@ -1232,15 +1301,22 @@ export class SqliteBindingStore implements BindingStorePort {
         SUM(CASE WHEN h.next_attempt_at <= ? THEN 1 ELSE 0 END) AS eligible,
         SUM(CASE WHEN o.error IS NOT NULL OR h.next_attempt_at > ? THEN 1 ELSE 0 END) AS blocked,
         MIN(CASE WHEN h.next_attempt_at > ? THEN h.next_attempt_at END) AS next_attempt_at,
-        MIN(h.created_at) AS oldest_head_at
+        MIN(h.created_at) AS oldest_head_at,
+        SUM(CASE WHEN h.next_attempt_at <= ? AND h.created_at <= ? THEN 1 ELSE 0 END) AS stalled,
+        MIN(CASE WHEN h.next_attempt_at <= ? AND h.created_at <= ? THEN h.created_at END) AS oldest_stalled_at
       FROM outbox_lane_heads h
       JOIN outbound_replies o ON o.id = h.reply_id
-    `).get(observedAt, observedAt, observedAt) as { pending: number; eligible: number | null; blocked: number | null; next_attempt_at: string | null; oldest_head_at: string | null };
+    `).get(observedAt, observedAt, observedAt, observedAt, stalledBefore, observedAt, stalledBefore) as { pending: number; eligible: number | null; blocked: number | null; next_attempt_at: string | null; oldest_head_at: string | null; stalled: number | null; oldest_stalled_at: string | null };
     const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
     const deadLettersByClass = { transient: 0, permanent: 0, unknown: 0, legacy: 0 };
     const failureRows = this.database.prepare("SELECT failure_class, COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' GROUP BY failure_class").all() as Array<{ failure_class: DeliveryFailureClass | null; count: number }>;
     for (const row of failureRows) deadLettersByClass[row.failure_class ?? "legacy"] = Number(row.count);
     const eligibleRecoveries = this.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at IS NOT NULL AND dead_lettered_at <= ?").get(new Date(Date.parse(observedAt) - 300_000).toISOString()) as { count: number };
+    const quarantineStates = groupedCounts<"active" | "released">("outbox_lane_quarantines", "state", ["active", "released"]);
+    const quarantinesByLaneClass = groupedCounts<OutboxLaneClass>("outbox_lane_quarantines", "lane_class", ["answer_stream", "main_card", "replaceable_card", "immutable"]);
+    const quarantinesByFailureClass = groupedCounts<DeliveryFailureClass>("outbox_lane_quarantines", "failure_class", ["transient", "permanent", "unknown"]);
+    const latestQuarantine = this.database.prepare(`SELECT q.failed_reply_id, o.kind AS reply_kind, q.lane_class, q.failure_class, q.action, q.reason, q.created_at, q.released_at
+      FROM outbox_lane_quarantines q JOIN outbound_replies o ON o.id = q.failed_reply_id ORDER BY q.updated_at DESC LIMIT 1`).get() as { failed_reply_id: string; reply_kind: OutboundReply["kind"]; lane_class: OutboxLaneClass; failure_class: DeliveryFailureClass; action: string; reason: string; created_at: string; released_at: string | null } | undefined;
     const oldestInactive = this.database.prepare("SELECT MIN(last_activity_at) AS value FROM bindings WHERE lifecycle != 'active' OR attachment != 'attached'").get() as { value: string | null };
     const recoverableProvisioning = this.database.prepare("SELECT COUNT(*) AS count FROM project_selections WHERE state = 'processing' AND binding_id IS NOT NULL").get() as { count: number };
     const archivedPanesPresent = this.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL").get() as { count: number };
@@ -1255,7 +1331,13 @@ export class SqliteBindingStore implements BindingStorePort {
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),
         nextAttemptAt: laneHealth.next_attempt_at, oldestHeadAt: laneHealth.oldest_head_at,
-        oldestHeadAgeSeconds: laneHealth.oldest_head_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_head_at)) / 1_000))
+        oldestHeadAgeSeconds: laneHealth.oldest_head_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_head_at)) / 1_000)),
+        stalled: Number(laneHealth.stalled ?? 0),
+        oldestStalledAgeSeconds: laneHealth.oldest_stalled_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_stalled_at)) / 1_000))
+      },
+      outboxQuarantines: {
+        active: quarantineStates.active, released: quarantineStates.released, byLaneClass: quarantinesByLaneClass, byFailureClass: quarantinesByFailureClass,
+        latest: latestQuarantine ? { replyId: latestQuarantine.failed_reply_id, replyKind: latestQuarantine.reply_kind, laneClass: latestQuarantine.lane_class, failureClass: latestQuarantine.failure_class, action: latestQuarantine.action, reason: boundedError(latestQuarantine.reason), createdAt: latestQuarantine.created_at, releasedAt: latestQuarantine.released_at } : null
       },
       lifecycle: groupedCounts<SessionLifecycle>("bindings", "lifecycle", ["provisioning", "active", "draining", "archived", "closed", "failed"]),
       attachment: groupedCounts<AttachmentState>("bindings", "attachment", ["unattached", "attached", "degraded", "orphaned"]),
@@ -1363,7 +1445,7 @@ export class SqliteBindingStore implements BindingStorePort {
   getAnswerPageDeliveryFacts(promptId: string, pageIndex: number): AnswerPageDeliveryFacts {
     const page = this.database.prepare("SELECT card_id, element_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(promptId, pageIndex) as { card_id: string | null; element_id: string } | undefined;
     if (!page) return { latestContent: null, finishPending: false, continuationPending: false };
-    const rows = this.database.prepare("SELECT kind, payload, state, view_version FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','delivered') ORDER BY delivery_order DESC").all(promptId) as Array<{ kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
+    const rows = this.database.prepare("SELECT kind, payload, state, view_version FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC").all(promptId) as Array<{ kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
     let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
     let finishPending = false;
     let continuationPending = false;
@@ -1421,6 +1503,21 @@ export class SqliteBindingStore implements BindingStorePort {
         .run(sequence, now(), input.promptId, input.pageIndex);
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) });
+      return "reserved";
+    });
+  }
+
+  reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
+    return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
+      if (input.nextPageIndex !== input.pageIndex + 1 || input.sourceStart !== page.sourceStart) return "stale";
+      if (this.hasPendingAnswerContinuation(input.promptId, input.nextPageIndex)) return "waiting";
+      const timestamp = now();
+      this.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active'")
+        .run(timestamp, input.promptId, input.pageIndex);
+      this.enqueueOutboundReply({
+        id: randomUUID(), idempotencyKey: `stream-rebuild:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
+        rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId } })
+      });
       return "reserved";
     });
   }
@@ -1581,6 +1678,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
     this.ensureOutboundLaneKey();
+    this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
     this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
@@ -1922,7 +2020,13 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE INDEX IF NOT EXISTS outbox_lane_heads_delivery_order ON outbox_lane_heads(delivery_order);
       CREATE INDEX IF NOT EXISTS outbox_lane_heads_next_attempt ON outbox_lane_heads(next_attempt_at, delivery_order);
-      CREATE TRIGGER IF NOT EXISTS outbox_lane_heads_after_insert AFTER INSERT ON outbound_replies
+    `);
+    const trigger = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbox_lane_heads_after_insert'").get() as { sql: string } | undefined;
+    if (!trigger?.sql.includes("outbox_lane_quarantines")) this.database.exec(`
+      DROP TRIGGER IF EXISTS outbox_lane_heads_after_insert;
+      DROP TRIGGER IF EXISTS outbox_lane_heads_after_update;
+      DROP TRIGGER IF EXISTS outbox_lane_heads_after_delete;
+      CREATE TRIGGER outbox_lane_heads_after_insert AFTER INSERT ON outbound_replies
       WHEN NEW.delivery_order IS NOT NULL
       BEGIN
         DELETE FROM outbox_lane_heads WHERE lane_key = NEW.lane_key;
@@ -1930,42 +2034,63 @@ export class SqliteBindingStore implements BindingStorePort {
           SELECT lane_key, id, delivery_order, next_attempt_at, created_at
           FROM outbound_replies
           WHERE lane_key = NEW.lane_key AND state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = NEW.lane_key AND q.state = 'active')
           ORDER BY delivery_order LIMIT 1;
       END;
-      CREATE TRIGGER IF NOT EXISTS outbox_lane_heads_after_update AFTER UPDATE OF state, lane_key, delivery_order, next_attempt_at ON outbound_replies
+      CREATE TRIGGER outbox_lane_heads_after_update AFTER UPDATE OF state, lane_key, delivery_order, next_attempt_at ON outbound_replies
       BEGIN
         DELETE FROM outbox_lane_heads WHERE lane_key = OLD.lane_key;
         INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
           SELECT lane_key, id, delivery_order, next_attempt_at, created_at
           FROM outbound_replies
           WHERE lane_key = OLD.lane_key AND state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = OLD.lane_key AND q.state = 'active')
           ORDER BY delivery_order LIMIT 1;
         DELETE FROM outbox_lane_heads WHERE lane_key = NEW.lane_key;
         INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
           SELECT lane_key, id, delivery_order, next_attempt_at, created_at
           FROM outbound_replies
           WHERE lane_key = NEW.lane_key AND state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = NEW.lane_key AND q.state = 'active')
           ORDER BY delivery_order LIMIT 1;
       END;
-      CREATE TRIGGER IF NOT EXISTS outbox_lane_heads_after_delete AFTER DELETE ON outbound_replies
+      CREATE TRIGGER outbox_lane_heads_after_delete AFTER DELETE ON outbound_replies
       BEGIN
         DELETE FROM outbox_lane_heads WHERE lane_key = OLD.lane_key;
         INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
           SELECT lane_key, id, delivery_order, next_attempt_at, created_at
           FROM outbound_replies
           WHERE lane_key = OLD.lane_key AND state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = OLD.lane_key AND q.state = 'active')
           ORDER BY delivery_order LIMIT 1;
       END;
+    `);
+    this.database.exec(`
       DELETE FROM outbox_lane_heads;
       INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
         SELECT pending.lane_key, pending.id, pending.delivery_order, pending.next_attempt_at, pending.created_at
         FROM outbound_replies pending
         WHERE pending.state = 'pending'
+          AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = pending.lane_key AND q.state = 'active')
           AND pending.delivery_order = (
             SELECT MIN(candidate.delivery_order)
             FROM outbound_replies candidate
             WHERE candidate.state = 'pending' AND candidate.lane_key = pending.lane_key
           );
+    `);
+  }
+
+  private ensureOutboxLaneQuarantines(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS outbox_lane_quarantines(
+        lane_key TEXT PRIMARY KEY, failed_reply_id TEXT NOT NULL REFERENCES outbound_replies(id) ON DELETE CASCADE,
+        lane_class TEXT NOT NULL CHECK(lane_class IN ('answer_stream','main_card','replaceable_card','immutable')),
+        failure_class TEXT NOT NULL CHECK(failure_class IN ('transient','permanent','unknown')),
+        state TEXT NOT NULL CHECK(state IN ('active','released')), action TEXT NOT NULL, reason TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, released_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS outbox_lane_quarantines_state ON outbox_lane_quarantines(state, created_at);
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
     `);
   }
 
@@ -2065,6 +2190,13 @@ function retryAt(attempt: number, explicitDelayMs?: number): string {
   const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
   const delay = explicitDelayMs === undefined ? jittered : Math.max(exponential, Math.min(3_600_000, explicitDelayMs));
   return new Date(Date.now() + delay).toISOString();
+}
+
+function outboundLaneClass(reply: OutboundReply): OutboxLaneClass {
+  if (reply.cardRole === "answer" && reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish")) return "answer_stream";
+  if (reply.targetRole === "session_status" && reply.kind === "card_update") return "main_card";
+  if (reply.kind === "card_update") return "replaceable_card";
+  return "immutable";
 }
 function streamCardState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
   try {
