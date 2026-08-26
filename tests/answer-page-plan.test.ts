@@ -18,6 +18,13 @@ describe("answer page planner", () => {
     expect(planAnswerPage(view, page, { latestContent: { content, sequence: 1, state: "delivered" }, finishPending: false, continuationPending: false })).toEqual({ type: "finish-terminal", summary: "Completed" });
   });
 
+  it("finishes an empty terminal answer after its status content is delivered", () => {
+    const { view, page } = fixture("", "completed");
+    const content = answerStreamContent(view);
+    expect(planAnswerPage(view, page, { latestContent: { content, sequence: 1, state: "delivered" }, finishPending: false, continuationPending: false }))
+      .toEqual({ type: "finish-terminal", summary: "Completed" });
+  });
+
   it("waits while content delivery is pending", () => {
     const { view, page } = fixture("new");
     expect(planAnswerPage(view, page, { latestContent: { content: "old", sequence: 1, state: "pending" }, finishPending: false, continuationPending: false })).toEqual({ type: "wait" });

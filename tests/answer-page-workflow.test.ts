@@ -38,4 +38,22 @@ describe("AnswerPageWorkflow", () => {
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
     store.close();
   });
+
+  it("reserves one terminal finish across repeated convergence", async () => {
+    const store = readyStore();
+    const content = "⏳ 已接收请求\n\ndone";
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "done", answerSegments: ["done"], viewVersion: 2 });
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: store.getActiveAnswerPage("p1")!.elementId, content })).toBe("reserved");
+    const [contentReply] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(contentReply!.id, "card-1");
+    const wake = vi.fn();
+    const workflow = new AnswerPageWorkflow(store, wake);
+
+    await Promise.all([workflow.converge("p1"), workflow.converge("p1"), workflow.converge("p1")]);
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_finish", viewVersion: 2 })]);
+    expect(store.getActiveAnswerPage("p1")?.sequence).toBe(2);
+    expect(wake).toHaveBeenCalledOnce();
+    store.close();
+  });
 });

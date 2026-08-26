@@ -1600,7 +1600,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.prepare(`
       UPDATE outbound_replies
       SET state = 'dismissed', error = 'Answer stream targets a legacy page that was already finished', updated_at = ?
-      WHERE state = 'pending' AND kind IN ('stream_content', 'stream_finish')
+      WHERE state IN ('pending', 'dead_letter') AND kind IN ('stream_content', 'stream_finish')
         AND EXISTS (
           SELECT 1 FROM answer_pages AS page
           WHERE page.prompt_id = outbound_replies.prompt_id AND page.state = 'finished'

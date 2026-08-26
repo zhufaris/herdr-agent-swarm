@@ -1,5 +1,9 @@
 # Durable Answer Page State Machine
 
+**Ticket:** [Durable Answer Page State Machine](../tickets/2026-08-26-answer-page-state-machine.md)
+
+**Implementation plan:** [Durable Answer Page State Machine Implementation Plan](../plans/2026-08-26-answer-page-state-machine.md)
+
 ## Purpose
 
 Answer pages are the durable delivery boundary for a TraeX response. A long
@@ -222,6 +226,8 @@ and repairs only safe compatibility gaps:
 - create a missing page-zero row from a RunCard that has an Answer card identity;
 - align the RunCard mirror to the unique authoritative active page;
 - canonicalize element IDs using the existing element-ID migration;
+- seal a legacy terminal page when a matching `Completed` or `Failed` finish was
+  already delivered, dismissing later superseded writes to that card;
 - preserve delivered, dead-letter, and dismissed outbox history.
 
 Ambiguous states are not guessed. Examples include two plausible active pages or
