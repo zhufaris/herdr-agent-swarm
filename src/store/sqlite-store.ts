@@ -17,6 +17,7 @@ import { mapAnswerPage, mapBinding, mapInstanceLease, mapOutboundReply, mapPaneC
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "outbox_lane_heads",
   "project_selections", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 
@@ -1068,29 +1069,21 @@ export class SqliteBindingStore implements BindingStorePort {
 
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = []): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
-    const exclusions = excludedLaneKeys.length > 0 ? `AND lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
-    const due = dueAt === null ? "" : "AND next_attempt_at <= ?";
+    const exclusions = excludedLaneKeys.length > 0 ? `AND h.lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
+    const due = dueAt === null ? "" : "AND h.next_attempt_at <= ?";
     const parameters: SqlValue[] = [...excludedLaneKeys];
     if (dueAt !== null) parameters.push(dueAt);
     parameters.push(limit);
     return (this.database.prepare(`
-      WITH ranked AS (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY lane_key ORDER BY delivery_order) AS lane_position
-        FROM outbound_replies WHERE state = 'pending'
-      )
-      SELECT * FROM ranked WHERE lane_position = 1 ${exclusions} ${due}
-      ORDER BY delivery_order LIMIT ?
+      SELECT o.* FROM outbox_lane_heads h
+      JOIN outbound_replies o ON o.id = h.reply_id
+      WHERE 1 = 1 ${exclusions} ${due}
+      ORDER BY h.delivery_order LIMIT ?
     `).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
   getNextOutboundLaneHeadAttemptAt(): string | null {
-    const row = this.database.prepare(`
-      WITH ranked AS (
-        SELECT next_attempt_at, ROW_NUMBER() OVER (PARTITION BY lane_key ORDER BY delivery_order) AS lane_position
-        FROM outbound_replies WHERE state = 'pending'
-      )
-      SELECT MIN(next_attempt_at) AS next_attempt_at FROM ranked WHERE lane_position = 1
-    `).get() as { next_attempt_at: string | null };
+    const row = this.database.prepare("SELECT MIN(next_attempt_at) AS next_attempt_at FROM outbox_lane_heads").get() as { next_attempt_at: string | null };
     return row.next_attempt_at;
   }
 
@@ -1227,16 +1220,13 @@ export class SqliteBindingStore implements BindingStorePort {
     const recentDeadLetter = this.database.prepare("SELECT id, binding_id, prompt_id, attempt_count, updated_at, error FROM outbound_replies WHERE state = 'dead_letter' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
     const oldestPending = this.database.prepare("SELECT MIN(created_at) AS value FROM outbound_replies WHERE state = 'pending'").get() as { value: string | null };
     const laneHealth = this.database.prepare(`
-      WITH heads AS (
-        SELECT lane_key, next_attempt_at, created_at, error, ROW_NUMBER() OVER (PARTITION BY lane_key ORDER BY delivery_order) AS position
-        FROM outbound_replies WHERE state = 'pending'
-      )
       SELECT COUNT(*) AS pending,
-        SUM(CASE WHEN next_attempt_at <= ? THEN 1 ELSE 0 END) AS eligible,
-        SUM(CASE WHEN error IS NOT NULL OR next_attempt_at > ? THEN 1 ELSE 0 END) AS blocked,
-        MIN(CASE WHEN next_attempt_at > ? THEN next_attempt_at END) AS next_attempt_at,
-        MIN(created_at) AS oldest_head_at
-      FROM heads WHERE position = 1
+        SUM(CASE WHEN h.next_attempt_at <= ? THEN 1 ELSE 0 END) AS eligible,
+        SUM(CASE WHEN o.error IS NOT NULL OR h.next_attempt_at > ? THEN 1 ELSE 0 END) AS blocked,
+        MIN(CASE WHEN h.next_attempt_at > ? THEN h.next_attempt_at END) AS next_attempt_at,
+        MIN(h.created_at) AS oldest_head_at
+      FROM outbox_lane_heads h
+      JOIN outbound_replies o ON o.id = h.reply_id
     `).get(observedAt, observedAt, observedAt) as { pending: number; eligible: number | null; blocked: number | null; next_attempt_at: string | null; oldest_head_at: string | null };
     const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
     const deadLettersByClass = { transient: 0, permanent: 0, unknown: 0, legacy: 0 };
@@ -1483,6 +1473,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
     this.ensureOutboundLaneKey();
+    this.ensureOutboxLaneHeads();
     this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
     this.ensurePaneControlOperationState();
@@ -1752,6 +1743,61 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec(`
       UPDATE outbound_replies SET lane_key = ${outboundLaneKeySql()} WHERE lane_key IS NULL OR lane_key = '';
       CREATE INDEX IF NOT EXISTS outbound_replies_lane_order ON outbound_replies(state, lane_key, delivery_order);
+    `);
+  }
+
+  private ensureOutboxLaneHeads(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS outbox_lane_heads(
+        lane_key TEXT PRIMARY KEY, reply_id TEXT NOT NULL UNIQUE REFERENCES outbound_replies(id) ON DELETE CASCADE,
+        delivery_order INTEGER NOT NULL, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS outbox_lane_heads_delivery_order ON outbox_lane_heads(delivery_order);
+      CREATE INDEX IF NOT EXISTS outbox_lane_heads_next_attempt ON outbox_lane_heads(next_attempt_at, delivery_order);
+      CREATE TRIGGER IF NOT EXISTS outbox_lane_heads_after_insert AFTER INSERT ON outbound_replies
+      WHEN NEW.delivery_order IS NOT NULL
+      BEGIN
+        DELETE FROM outbox_lane_heads WHERE lane_key = NEW.lane_key;
+        INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+          SELECT lane_key, id, delivery_order, next_attempt_at, created_at
+          FROM outbound_replies
+          WHERE lane_key = NEW.lane_key AND state = 'pending'
+          ORDER BY delivery_order LIMIT 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS outbox_lane_heads_after_update AFTER UPDATE OF state, lane_key, delivery_order, next_attempt_at ON outbound_replies
+      BEGIN
+        DELETE FROM outbox_lane_heads WHERE lane_key = OLD.lane_key;
+        INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+          SELECT lane_key, id, delivery_order, next_attempt_at, created_at
+          FROM outbound_replies
+          WHERE lane_key = OLD.lane_key AND state = 'pending'
+          ORDER BY delivery_order LIMIT 1;
+        DELETE FROM outbox_lane_heads WHERE lane_key = NEW.lane_key;
+        INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+          SELECT lane_key, id, delivery_order, next_attempt_at, created_at
+          FROM outbound_replies
+          WHERE lane_key = NEW.lane_key AND state = 'pending'
+          ORDER BY delivery_order LIMIT 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS outbox_lane_heads_after_delete AFTER DELETE ON outbound_replies
+      BEGIN
+        DELETE FROM outbox_lane_heads WHERE lane_key = OLD.lane_key;
+        INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+          SELECT lane_key, id, delivery_order, next_attempt_at, created_at
+          FROM outbound_replies
+          WHERE lane_key = OLD.lane_key AND state = 'pending'
+          ORDER BY delivery_order LIMIT 1;
+      END;
+      DELETE FROM outbox_lane_heads;
+      INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+        SELECT pending.lane_key, pending.id, pending.delivery_order, pending.next_attempt_at, pending.created_at
+        FROM outbound_replies pending
+        WHERE pending.state = 'pending'
+          AND pending.delivery_order = (
+            SELECT MIN(candidate.delivery_order)
+            FROM outbound_replies candidate
+            WHERE candidate.state = 'pending' AND candidate.lane_key = pending.lane_key
+          );
     `);
   }
 

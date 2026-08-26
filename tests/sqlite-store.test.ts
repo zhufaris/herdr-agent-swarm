@@ -643,6 +643,29 @@ describe("SQLite store", () => {
     vi.useRealTimers();
   });
 
+  it("maintains lane heads across coalescing, delivery, retry, dismissal, and dead-letter recovery", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", rootMessageId: "card-1", kind: "card_update", payload: "head" });
+    store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", rootMessageId: "card-1", kind: "card_update", payload: "later" });
+    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["head"]);
+
+    store.markOutboundReplyFailed("head", "temporary", 60_000);
+    expect(store.listOutboundLaneHeads(1, new Date().toISOString())).toEqual([]);
+    expect(store.getNextOutboundLaneHeadAttemptAt()).toBe("2026-08-24T00:01:00.000Z");
+
+    store.markOutboundReplyDeadLetter("head", "permanent");
+    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["later"]);
+    store.markOutboundReplyDeadLetter("later", "temporary", { failureClass: "transient" });
+    expect(store.listOutboundLaneHeads(1, null)).toEqual([]);
+
+    vi.setSystemTime(new Date("2026-08-24T00:06:00.000Z"));
+    expect(store.recoverEligibleDeadLetters("2026-08-24T00:05:00.000Z", 1).map((reply) => reply.id)).toEqual(["later"]);
+    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["later"]);
+    vi.useRealTimers();
+  });
+
   it("coalesces pending binding status-card snapshots behind the in-flight-safe lane head", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
