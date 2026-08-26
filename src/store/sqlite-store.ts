@@ -1570,6 +1570,15 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.exec("COMMIT");
       } catch (error) { this.database.exec("ROLLBACK"); throw error; }
     }
+    const answerDeadLetterMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 4").get();
+    if (!answerDeadLetterMigration) {
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.dismissStreamsForFinishedAnswerPages(now());
+        this.database.prepare("INSERT INTO schema_migrations(version) VALUES (4)").run();
+        this.database.exec("COMMIT");
+      } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    }
   }
 
   private finishLegacyDeliveredAnswerPages(timestamp: string): void {
@@ -1597,6 +1606,10 @@ export class SqliteBindingStore implements BindingStorePort {
             AND json_extract(reply.payload, '$.summary') IN ('Completed', 'Failed')
         )
     `).run(timestamp);
+    this.dismissStreamsForFinishedAnswerPages(timestamp);
+  }
+
+  private dismissStreamsForFinishedAnswerPages(timestamp: string): void {
     this.database.prepare(`
       UPDATE outbound_replies
       SET state = 'dismissed', error = 'Answer stream targets a legacy page that was already finished', updated_at = ?

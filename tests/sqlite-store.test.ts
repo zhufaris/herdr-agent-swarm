@@ -565,6 +565,26 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'late-content'").get()).toEqual({ state: "dismissed" });
   });
 
+  it("dismisses superseded Answer dead letters when upgrading a database that already applied migration 3", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-dead-letter-migration-"));
+    const databasePath = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(databasePath);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'p1' AND page_index = 0").run();
+    store.enqueueOutboundReply({ id: "late-content", idempotencyKey: "late-content", bindingId: "b1", promptId: "p1", viewVersion: 8, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "done", sequence: 8 }) });
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("late-content", "legacy page rejected");
+    store.database.prepare("DELETE FROM schema_migrations WHERE version = 4").run();
+    store.close();
+
+    store = new SqliteBindingStore(databasePath);
+
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'late-content'").get()).toEqual({ state: "dismissed" });
+    expect(store.database.prepare("SELECT 1 AS applied FROM schema_migrations WHERE version = 4").get()).toEqual({ applied: 1 });
+  });
+
   it("does not let a late continuation delivery roll the active page backward", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
