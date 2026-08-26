@@ -6,30 +6,49 @@ interface OutboxRetentionStore {
 
 export class OutboxRetentionMaintainer {
   private timer: NodeJS.Timeout | null = null;
+  private running: Promise<number> | null = null;
+  private stopping = false;
 
   constructor(
     private readonly store: OutboxRetentionStore,
-    private readonly options: { retentionDays: number; batchSize: number; intervalMs?: number },
+    private readonly options: { retentionDays: number; batchSize: number; maxBatches?: number; intervalMs?: number },
     private readonly logger: Pick<Logger, "info" | "error">
   ) {}
 
   start(): void {
     if (this.timer) return;
-    this.run();
+    this.stopping = false;
+    void this.run();
     this.timer = setInterval(() => this.run(), this.options.intervalMs ?? 3_600_000);
     this.timer.unref?.();
   }
 
   stop(): void {
+    this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
 
-  run(): number {
+  run(): Promise<number> {
+    if (this.running) return this.running;
+    this.running = this.pruneBatches().finally(() => { this.running = null; });
+    return this.running;
+  }
+
+  private async pruneBatches(): Promise<number> {
     try {
       const cutoff = new Date(Date.now() - this.options.retentionDays * 86_400_000).toISOString();
-      const removed = this.store.pruneDeliveredOutboundReplies(cutoff, this.options.batchSize);
-      if (removed > 0) this.logger.info({ event: "outbox-retention-pruned", removed, cutoff, limit: this.options.batchSize, outcome: "pruned" }, "pruned retained Lark outbox history");
+      const maxBatches = this.options.maxBatches ?? 20;
+      let removed = 0;
+      let batches = 0;
+      while (!this.stopping && batches < maxBatches) {
+        const batch = this.store.pruneDeliveredOutboundReplies(cutoff, this.options.batchSize);
+        removed += batch;
+        batches += 1;
+        if (batch < this.options.batchSize) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (removed > 0) this.logger.info({ event: "outbox-retention-pruned", removed, batches, cutoff, limit: this.options.batchSize, maxBatches, outcome: "pruned" }, "pruned retained Lark outbox history");
       return removed;
     } catch (error) {
       this.logger.error({ event: "outbox-retention-failed", err: error, outcome: "failed" }, "failed to prune retained Lark outbox history");

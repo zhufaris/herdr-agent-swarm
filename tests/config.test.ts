@@ -67,6 +67,12 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, LARK_REQUEST_TIMEOUT_MS: "0" })).toThrow();
   });
 
+  it("bounds retention catch-up batches independently from batch size", () => {
+    expect(loadConfig({ ...requiredEnvironment }).outboxRetention).toEqual({ days: 14, batchSize: 500, maxBatches: 20 });
+    expect(loadConfig({ ...requiredEnvironment, OUTBOX_RETENTION_MAX_BATCHES: "3" }).outboxRetention.maxBatches).toBe(3);
+    expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_RETENTION_MAX_BATCHES: "0" })).toThrow();
+  });
+
   it("uses plugin-native paths unless explicit paths override them", () => {
     expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
       PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"

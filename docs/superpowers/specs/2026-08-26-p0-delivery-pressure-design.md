@@ -22,11 +22,13 @@ second safety layer.
 
 ## Outbox retention
 
-At startup and then once per hour, the bridge deletes at most a configured batch
-of `delivered` or `dismissed` outbound rows older than 14 days. It never deletes
-`pending` or `dead_letter` rows, never performs VACUUM, and makes no delivery
-decision from a deleted record. The current projections preserve the state
-needed for restart convergence.
+At startup and then once per hour, the bridge deletes old `delivered` or
+`dismissed` outbound rows in batches. The default is 500 rows per SQLite
+transaction and at most 20 batches per maintenance run; full batches yield to
+the event loop before the next transaction. It never deletes `pending` or
+`dead_letter` rows, never performs VACUUM, and stops before another batch during
+shutdown. The current projections preserve the state needed for restart
+convergence.
 
 ## Verification
 

@@ -70,7 +70,7 @@ const inboundWork = new InProcessInboundWorkNotifier();
 const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
-const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize }, logger);
+const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
 const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger);
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
