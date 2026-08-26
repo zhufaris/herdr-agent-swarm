@@ -185,7 +185,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   return {
     schema: "2.0", config: {
       update_multi: true, streaming_mode: streaming,
-      ...(streaming ? { streaming_config: { print_frequency_ms: { default: 70 }, print_step: { default: 1 }, print_strategy: "fast" } } : {}),
+      ...(streaming ? { streaming_config: { print_frequency_ms: { default: 40 }, print_step: { default: 50 }, print_strategy: "fast" } } : {}),
       summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` }
     },
     header: {

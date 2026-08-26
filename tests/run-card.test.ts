@@ -266,7 +266,7 @@ describe("run card", () => {
     expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
       config: {
         streaming_mode: true,
-        streaming_config: { print_frequency_ms: { default: 70 }, print_step: { default: 1 }, print_strategy: "fast" }
+        streaming_config: { print_frequency_ms: { default: 40 }, print_step: { default: 50 }, print_strategy: "fast" }
       }
     });
     expect(renderRequestAnswerCard({ ...view, phase: "completed" })).toMatchObject({ config: { streaming_mode: false } });
