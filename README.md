@@ -27,6 +27,11 @@ for reconciliation. An interrupted running prompt is not replayed after a
 restart; it remains detached while the bridge observes the existing Herdr turn.
 Prompts that have not started remain queued.
 
+The project main card presents two compact metric rows: authoritative Herdr
+`SPACE / TAB / PANE`, followed by `MODEL / CONTEXT / QUEUE`. `TAB` is Herdr's
+stable `tab_id`, not a display label; it is refreshed from reconciliation and
+rendered as `—` when the installed Herdr runtime does not report it.
+
 This bridge deliberately omits remote stop and approval actions. High-risk
 approval stays in Herdr. For the reliability model and exact behavioral
 constraints, see [Architecture](docs/architecture.md). For a maintainer-oriented

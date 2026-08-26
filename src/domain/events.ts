@@ -11,8 +11,8 @@ interface EventBase<T extends string, P> {
 }
 
 export type BridgeEvent =
-  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; paneId: string | null }>
-  | EventBase<"BindingActivated", { paneId: string; topicId: string }>
+  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; tabId?: string | null; paneId: string | null }>
+  | EventBase<"BindingActivated", { paneId: string; tabId?: string | null; topicId: string }>
   | EventBase<"BindingRenamed", { title: string }>
   | EventBase<"BindingDraining", { reason: string }>
   | EventBase<"BindingArchived", { reason: string }>
@@ -27,7 +27,7 @@ export type BridgeEvent =
   | EventBase<"SteeringFailed", { promptId: string; parentPromptId: string; error: string }>
   | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number; promptId?: string }>
   | EventBase<"TurnOutputObserved", { promptId: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: Omit<RunProgressEvent, "occurredAt">[]; hasProgressSnapshot?: boolean; model?: string; context?: string }>
-  | EventBase<"PaneOutputObserved", { answer?: string; model?: string; context?: string }>
+  | EventBase<"PaneOutputObserved", { answer?: string; model?: string; context?: string; tabId?: string | null }>
   | EventBase<"TurnCompleted", { promptId: string; answer: string; queueDepth: number }>
   | EventBase<"TurnFailed", { promptId: string; error: string; queueDepth: number }>;
 

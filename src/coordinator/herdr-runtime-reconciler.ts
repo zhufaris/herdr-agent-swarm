@@ -42,6 +42,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly observedTerminalOutputs = new Map<string, string>();
   private readonly observedOutputRevisions = new Map<string, number>();
   private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
+  private readonly observedTabIds = new Map<string, string | null>();
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
@@ -234,7 +235,14 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
           event: "binding-agent-session-mismatch", bindingId: existing.id, paneId: pane.paneId, outcome: "preserved_persisted_identity"
         }, "Herdr reported a different native Agent session for the existing terminal identity");
       }
-      if (existing.state !== "active" || this.options.isBindingBusy(existing.id)) continue;
+      if (existing.state !== "active") continue;
+      const tabId = pane.tabId ?? null;
+      const priorTabId = this.observedTabIds.get(pane.paneId);
+      if ((tabId !== null && priorTabId !== tabId) || (tabId === null && priorTabId !== undefined && priorTabId !== null)) {
+        this.observedTabIds.set(pane.paneId, tabId);
+        await this.publish(existing.id, "PaneOutputObserved", { tabId });
+      } else if (priorTabId === undefined) this.observedTabIds.set(pane.paneId, tabId);
+      if (this.options.isBindingBusy(existing.id)) continue;
       if (previous !== pane.agentState) {
         const queueDepth = this.options.store.countPendingPrompts(existing.id);
         await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth });

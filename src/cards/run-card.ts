@@ -264,15 +264,20 @@ export function renderMessageRejectedCard(message: string): object {
   };
 }
 
-function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "paneId" | "model" | "context" | "queueDepth">): string {
+function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "paneId" | "model" | "context" | "queueDepth">): string {
   const entries: Array<[label: string, value: string]> = [
     ["SPACE", input.spaceName],
-    ["PANE", input.paneId ?? "provisioning"],
+    ["TAB", input.tabId ?? "—"],
+    ["PANE", input.paneId ?? "provisioning"]
+  ];
+  const identity = entries.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
+  const metrics: Array<[label: string, value: string]> = [
     ["MODEL", input.model ?? "—"],
     ["CONTEXT", input.context ?? "—"],
     ["QUEUE", String(input.queueDepth)]
   ];
-  return entries.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("\n");
+  const runtime = metrics.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
+  return [identity, runtime].join("\n");
 }
 
 function callout(color: string, content: string): object {

@@ -73,7 +73,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       binding = store.transitionBinding(binding.id, { type: "runtime_started", runtime: startedPane.agentState });
       binding = store.transitionBinding(binding.id, { type: "thread_created" });
       binding = store.transitionBinding(binding.id, { type: "activate" });
-      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: binding.topicId! });
+      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: binding.topicId! });
       store.audit({ actorOpenId: message.actorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
       return binding;
     } catch (error) {
@@ -147,7 +147,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
     binding = store.transitionBinding(binding.id, { type: "pane_created" });
     binding = store.transitionBinding(binding.id, { type: "runtime_started" });
-    const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId });
+    const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId });
     const initialView = reduceTopicView(initialTopicView(binding.id), createdEvent);
     store.saveTopicView(initialView);
     const topic = await lark.createTopic(renderProjectEntryCard(initialView), binding.id);
@@ -156,7 +156,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     binding = store.transitionBinding(binding.id, { type: "thread_created" });
     binding = store.transitionBinding(binding.id, { type: "activate" });
     await lifecycleEvents.publish(createdEvent);
-    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: topic.topicId });
+    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId });
     return binding;
   }
 
@@ -195,8 +195,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       replacement = handoff.replacement;
       this.options.wakeRetiredPaneCleanup?.();
       scheduler.wake({ kind: "binding-runtime-changed", bindingId: binding.id });
-      await this.publish(replacement.id, "BindingCreated", "lark", { title, workspaceId: replacement.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId });
-      await this.publish(replacement.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: replacement.topicId! });
+      await this.publish(replacement.id, "BindingCreated", "lark", { title, workspaceId: replacement.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId });
+      await this.publish(replacement.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: replacement.topicId! });
       await this.reply(replacement.rootMessageId!, renderMessageRejectedCard(`已开启新会话：${pane.paneId}。旧 Herdr pane ${handoff.previous.paneId ?? "(unknown)"} 将在确认空闲后安全关闭。`));
       logger.info({ event: "binding-reset-completed", previousBindingId: handoff.previous.id, bindingId: replacement.id, paneId: pane.paneId, outcome: "active" }, "reset Lark topic to a new Herdr session");
       return true;
@@ -302,11 +302,11 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
         binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
         binding = store.transitionBinding(binding.id, { type: "runtime_started", runtime: pane.agentState });
       }
-      const activatedEvent = createBridgeEvent(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: "pending" });
+      const activatedEvent = createBridgeEvent(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: "pending" });
       const activeView = reduceTopicView(store.loadTopicView(binding.id) ?? initialTopicView(binding.id), activatedEvent);
       if (binding.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(renderProjectEntryCard(activeView), binding.id); store.recordBridgeMessage(topic.rootMessageId); binding = store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); binding = store.transitionBinding(binding.id, { type: "thread_created" }); }
       if (binding.provisioningCheckpoint === "thread_created") binding = store.transitionBinding(binding.id, { type: "activate" });
-      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: binding.topicId! }); return binding;
+      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: binding.topicId! }); return binding;
     } catch (error) { logger.warn({ event: "project-provisioning-paused", err: safeLogError(error), selectionId: selection.id, bindingId: binding.id, checkpoint: binding.provisioningCheckpoint, outcome: "retry_on_restart" }, "project provisioning paused at a durable checkpoint"); throw error; }
   }
 
@@ -321,7 +321,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async recoverDiscoveredBinding(binding: Binding): Promise<void> {
     if (!binding.paneId || !binding.projectId) return;
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; if (!project) return;
-    try { const pane = await this.requireMatchingPane(binding, binding.paneId); const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId }); const view = reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent); const topic = await this.options.lark.createTopic(renderProjectEntryCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" }); await this.options.lifecycleEvents.publish(createdEvent); await this.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning"); }
+    try { const pane = await this.requireMatchingPane(binding, binding.paneId); const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId }); const view = reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent); const topic = await this.options.lark.createTopic(renderProjectEntryCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" }); await this.options.lifecycleEvents.publish(createdEvent); await this.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning"); }
     catch (error) { this.options.logger.error({ event: "discovered-binding-recovery-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "retry_on_restart" }, "discovered-pane provisioning remains recoverable"); }
   }
 
@@ -361,7 +361,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${pane.paneId}`);
       const identified = this.options.store.updateBindingMetadata(binding.id, { ...paneIdentityPatch(pane), statusMessageId: binding.rootMessageId });
       const recovered = this.options.store.transitionBinding(identified.id, { type: "recover_failed", runtime: pane.agentState });
-      await this.publish(recovered.id, "BindingActivated", "lark", { paneId: pane.paneId, topicId: recovered.topicId! });
+      await this.publish(recovered.id, "BindingActivated", "lark", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: recovered.topicId! });
       return recovered;
     }
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
@@ -372,7 +372,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const handoff = this.options.store.cutoverResetCandidate({ oldBindingId: binding.replacesBindingId, newBindingId: binding.id, cleanupOperationId: randomUUID(), actorOpenId, expectedCwd: project.cwd });
     this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: handoff.previous.id });
     this.options.wakeRetiredPaneCleanup?.();
-    await this.publish(handoff.replacement.id, "BindingActivated", "lark", { paneId: pane.paneId, topicId: handoff.replacement.topicId! });
+    await this.publish(handoff.replacement.id, "BindingActivated", "lark", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: handoff.replacement.topicId! });
     return handoff.replacement;
   }
   private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> { await this.options.outbound.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, renderProjectSelectionStatusCard({ status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId } : {}) })); }

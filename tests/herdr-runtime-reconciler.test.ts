@@ -289,6 +289,22 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("projects a changed authoritative Herdr tab ID for the main card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const bus = new BridgeEventBus();
+    const observed: Array<{ type: string; payload: unknown }> = [];
+    bus.onBridgeEvent("tab-test", (event) => { observed.push(event); });
+    const pane = { paneId: "w1:p1", tabId: "w1:t1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
+
+    await reconciler.reconcile();
+
+    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ tabId: "w1:t1" });
+    store.close();
+  });
+
   it("does not regress Agent state from an older native state sequence", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

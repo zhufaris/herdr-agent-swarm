@@ -4,20 +4,20 @@ import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
-  bindingId: string; title: string; workspaceId: string; spaceName: string; paneId: string | null; phase: TopicViewPhase;
+  bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
-  return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", paneId: null, phase: "provisioning",
+  return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, phase: "provisioning",
     agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
   const base = { ...state, lastEventId: event.eventId };
   switch (event.type) {
-    case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, paneId: event.payload.paneId, phase: "provisioning" };
-    case "BindingActivated": return { ...base, paneId: event.payload.paneId, phase: "ready", notice: null };
+    case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, phase: "provisioning" };
+    case "BindingActivated": return { ...base, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, phase: "ready", notice: null };
     case "BindingRenamed": return { ...base, title: event.payload.title };
     case "BindingDraining": return { ...base, phase: "draining", notice: event.payload.reason };
     case "BindingArchived": return { ...base, phase: "archived", notice: event.payload.reason };
@@ -47,10 +47,11 @@ export function reduceTopicView(state: TopicViewState, event: BridgeEvent): Topi
       const answer = event.payload.answer === undefined ? state.answer : keepAnswerTail(event.payload.answer);
       const model = event.payload.model ?? state.model;
       const context = event.payload.context ?? state.context;
-      if (answer === state.answer && model === state.model && context === state.context) return state;
+      const tabId = event.payload.tabId ?? state.tabId;
+      if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId) return state;
       return event.payload.answer === undefined
-        ? { ...base, answer, model, context }
-        : { ...base, phase: "done", agentState: "done", answer, model, context, notice: null, activePromptId: null };
+        ? { ...base, answer, model, context, tabId }
+        : { ...base, phase: "done", agentState: "done", answer, model, context, tabId, notice: null, activePromptId: null };
     }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
