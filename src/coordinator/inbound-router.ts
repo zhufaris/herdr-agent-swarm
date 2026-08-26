@@ -13,6 +13,7 @@ import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
@@ -27,7 +28,7 @@ import type { StartupViewConvergerPort } from "./startup-view-converger.js";
 
 export interface InboundRouterPort {
   start(): Promise<void>;
-  stop(): Promise<void>;
+  stop(context?: ShutdownContext): Promise<void>;
   handleMessage(message: IncomingLarkMessage): Promise<void>;
   handleCardAction(action: IncomingLarkCardAction): Promise<void>;
 }
@@ -94,12 +95,14 @@ export class InboundRouter implements InboundRouterPort {
     await this.drainInboundMessages();
   }
 
-  async stop(): Promise<void> {
-    await this.options.lark.stop();
+  async stop(context?: ShutdownContext): Promise<void> {
     this.stopInboundSubscription?.();
     this.stopControlSubscription?.();
     this.options.modelSelection.shutdown();
-    await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(), ...(this.inboundDrain ? [this.inboundDrain] : [])]);
+    await Promise.allSettled([
+      this.options.lark.stop(), this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context),
+      ...(this.inboundDrain ? [this.inboundDrain] : [])
+    ]);
   }
 
   reconcileHerdrWorkspaces(workspaceIds?: readonly string[]): Promise<void> { return this.options.reconciler.requestReconciliation(workspaceIds); }

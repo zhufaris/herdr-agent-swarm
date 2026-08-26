@@ -10,6 +10,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 import { TurnSupervisor } from "./turn-supervisor.js";
 
@@ -26,7 +27,7 @@ export interface PromptRunWorkflowPort {
   snapshot(): PromptWorkerDiagnostics;
   activeTurn(bindingId: string): ActiveTurnSnapshot | null;
   isBindingBusy(bindingId: string): boolean;
-  stop(): Promise<void>;
+  stop(context?: ShutdownContext): Promise<void>;
 }
 
 interface PromptRunWorkflowOptions {
@@ -135,7 +136,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     return this.turns.has(bindingId) || this.workers.has(bindingId) || this.steeringWorkers.has(bindingId);
   }
 
-  async stop(): Promise<void> {
+  async stop(context?: ShutdownContext): Promise<void> {
     this.stopping = true;
     if (this.safetyTimer) clearInterval(this.safetyTimer);
     this.safetyTimer = null;
@@ -144,11 +145,21 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const pending = [...this.workers.values(), ...this.steeringWorkers.values()];
     if (!pending.length) return;
     const settled = Promise.allSettled(pending);
-    if (!await settlesWithin(settled, this.shutdownGraceMs)) {
-      this.options.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.turns.size(), graceMs: this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
+    let didSettle = false;
+    void settled.then(() => { didSettle = true; });
+    const abortObservers = () => {
+      this.options.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.turns.size(), graceMs: context?.remainingMs() ?? this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
       this.turns.abortAll((run) => {
         this.options.store.markPromptObservationDetached(run.promptId, "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。");
       });
+    };
+    if (context?.signal.aborted) abortObservers();
+    else if (context) {
+      await waitForSettlementOrAbort(settled, context.signal);
+      if (!didSettle) abortObservers();
+      await settled;
+    } else if (!await settlesWithin(settled, this.shutdownGraceMs)) {
+      abortObservers();
       await settled;
     }
   }
@@ -344,10 +355,21 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 }
 
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  if (timeoutMs <= 0) return Promise.resolve(false);
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
     timer.unref();
     void promise.then(() => { clearTimeout(timer); resolve(true); });
+  });
+}
+
+function waitForSettlementOrAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => { cleanup(); resolve(); };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(() => { cleanup(); resolve(); }, () => { cleanup(); resolve(); });
   });
 }
 
