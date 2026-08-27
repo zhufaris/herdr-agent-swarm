@@ -101,10 +101,8 @@ describe("TraexTranscriptReader", () => {
       { type: "function_call", id: "fc-missing-call", name: "ignored", arguments: "ignored arguments" }
     ]));
     const callOutput = await cursor.readDelta();
-    expect(callOutput).toContain("工具调用：`exec`\n\n```json");
-    expect(callOutput).toContain('"input": "opaque orchestration"');
-    expect(callOutput).not.toContain("```bash\nopaque orchestration");
-    expect(callOutput.match(/opaque orchestration/g)).toHaveLength(1);
+    expect(callOutput).toBe("▶ Command · exec");
+    expect(callOutput).not.toContain("opaque orchestration");
     expect(callOutput).not.toContain("ignored arguments");
 
     const result = { type: "function_call_output", id: "fco-1", call_id: "call-1", output: [{ type: "input_text", text: "fixture output" }] };
@@ -116,8 +114,8 @@ describe("TraexTranscriptReader", () => {
       result
     ]));
     const resultOutput = await cursor.readDelta();
-    expect(resultOutput).toContain("执行结果：\n\n```text\nfixture output\n```");
-    expect(resultOutput.match(/fixture output/g)).toHaveLength(1);
+    expect(resultOutput).toBe("✓ Command · 成功");
+    expect(resultOutput).not.toContain("fixture output");
     expect(resultOutput).not.toMatch(/unmatched output|malformed output|missing identity output/);
     await expect(cursor.readDelta()).resolves.toBe("");
   });
@@ -130,17 +128,17 @@ describe("TraexTranscriptReader", () => {
     await appendFile(path, fixtureRecords);
     const output = await cursor.readDelta();
     expect(output).toContain("Typed answer");
-    expect(output).toContain("工具调用：`exec`");
-    expect(output).toContain("```json\n{\n  \"input\": \"opaque orchestration\"\n}\n```");
-    expect(output).toContain("fixture output");
+    expect(output).toContain("▶ Command · exec");
+    expect(output).toContain("✓ Command · 成功");
+    expect(output).not.toMatch(/opaque orchestration|fixture output/);
   });
 
-  it("renders non-exec tool arguments as readable JSON", async () => {
+  it("renders non-exec tool arguments as a compact activity", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-json", call_id: "call-json", name: "read_file", arguments: '{"path":"src/main.ts","line":42}' }]));
 
-    await expect(cursor.readDelta()).resolves.toContain("工具调用：`read_file`\n\n```json\n{\n  \"path\": \"src/main.ts\",\n  \"line\": 42\n}\n```");
+    await expect(cursor.readDelta()).resolves.toBe("▶ Read · src/main.ts");
   });
 
   it("summarizes a skill load and suppresses its paired document output", async () => {
@@ -151,13 +149,13 @@ describe("TraexTranscriptReader", () => {
       arguments: JSON.stringify({ input: "const r = await tools.exec_command({cmd: \"sed -n '1,240p' /data00/home/alice/.trae/skills/brainstorming/SKILL.md\"}); text(r.output)" })
     }]));
 
-    await expect(cursor.readDelta()).resolves.toBe("已加载技能：brainstorming");
+    await expect(cursor.readDelta()).resolves.toBe("");
 
     await appendFile(path, mutation([{
       type: "function_call_output", id: "fco-skill", call_id: "call-skill",
       output: "---\nname: brainstorming\n---\n# Full private skill instructions"
     }]));
-    await expect(cursor.readDelta()).resolves.toBe("");
+    await expect(cursor.readDelta()).resolves.toBe("✓ Skill · brainstorming · 已加载");
   });
 
   it("summarizes distinct trusted skill paths in source order", async () => {
@@ -172,7 +170,7 @@ describe("TraexTranscriptReader", () => {
       ] })
     }]));
 
-    await expect(cursor.readDelta()).resolves.toBe("已加载技能：test\n已加载技能：plugin-guide");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
   it("does not treat untrusted or relative SKILL.md references as skill loads", async () => {
@@ -187,18 +185,19 @@ describe("TraexTranscriptReader", () => {
     ]));
 
     const output = await cursor.readDelta();
-    expect(output).not.toContain("已加载技能：");
-    expect(output).toContain("ordinary SKILL.md contents");
-    expect(output).toContain("temporary SKILL.md contents");
+    expect(output).not.toContain("✓ Skill ·");
+    expect(output).toContain("✓ Read · 已读取");
+    expect(output).not.toContain("ordinary SKILL.md contents");
+    expect(output).not.toContain("temporary SKILL.md contents");
     expect(output).toContain("The file is named SKILL.md.");
   });
 
-  it.each(["command", "cmd"])("renders an explicit exec.%s value as bash", async (field) => {
+  it.each(["command", "cmd"])("renders an explicit exec.%s value as a compact command", async (field) => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-" + field, call_id: "call-" + field, name: "exec", arguments: JSON.stringify({ [field]: "npm test" }) }]));
 
-    await expect(cursor.readDelta()).resolves.toContain("```bash\nnpm test\n```");
+    await expect(cursor.readDelta()).resolves.toBe("▶ Command · npm test");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {

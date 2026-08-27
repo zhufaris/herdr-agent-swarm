@@ -4,13 +4,13 @@ import { basename, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HerdrAgentSession } from "../domain/types.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult, TraexTranscriptReaderPort } from "../domain/ports.js";
+import { projectToolCall, projectToolResult, type ToolActivityDescriptor } from "./tool-activity-projector.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
-const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s\"'`]+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
 const envelopeSchema = z.object({
   type: z.string(),
@@ -40,11 +40,6 @@ const functionOutputSchema = z.object({
   call_id: z.string().min(1),
   output: z.unknown()
 }).passthrough();
-const functionOutputPartSchema = z.object({
-  type: z.enum(["input_text", "output_text"]),
-  text: z.string()
-}).passthrough();
-
 export interface TraexTranscriptReaderOptions {
   sessionsRoot?: string;
   maxReadBytes?: number;
@@ -85,7 +80,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
 
 class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   private readonly emittedItemIds = new Set<string>();
-  private readonly callsById = new Map<string, { name: string; suppressOutput: boolean }>();
+  private readonly callsById = new Map<string, ToolActivityDescriptor>();
 
   constructor(
     private readonly path: string,
@@ -147,23 +142,15 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const call = functionCallSchema.safeParse(item);
     if (call.success) {
       if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
-      const parsedArguments = parseArguments(call.data.arguments);
-      const skillNames = skillNamesFromArguments(parsedArguments);
+      const projected = projectToolCall(call.data.name, call.data.arguments);
       this.emittedItemIds.add(call.data.id);
-      this.callsById.set(call.data.call_id, { name: call.data.name, suppressOutput: skillNames.length > 0 });
-      if (skillNames.length > 0) return skillNames.map((name) => `已加载技能：${name}`).join("\n");
-      return renderFunctionCall(call.data.name, call.data.arguments);
+      this.callsById.set(call.data.call_id, projected.descriptor);
+      return projected.entry;
     }
     const result = functionOutputSchema.safeParse(item);
     if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
-    if (this.callsById.get(result.data.call_id)!.suppressOutput) {
-      this.emittedItemIds.add(result.data.id);
-      return "";
-    }
-    const output = renderFunctionOutput(result.data.output);
-    if (!output) return "";
     this.emittedItemIds.add(result.data.id);
-    return `执行结果：\n\n${fence(output.includes("diff --git") || output.includes("@@ ") ? "diff" : "text", output)}`;
+    return projectToolResult(this.callsById.get(result.data.call_id)!, result.data.output);
   }
 }
 
@@ -222,67 +209,6 @@ async function readFirstJsonLine(handle: Awaited<ReturnType<typeof open>>): Prom
     position += bytesRead;
   }
   return null;
-}
-
-function renderFunctionOutput(output: unknown): string {
-  if (typeof output === "string") return output.trim();
-  if (!Array.isArray(output)) return "";
-  return output
-    .map((part) => functionOutputPartSchema.safeParse(part))
-    .filter((part) => part.success)
-    .map((part) => part.data.text.trim())
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function renderFunctionCall(name: string, argumentsJson: string): string {
-  const parsed = parseArguments(argumentsJson);
-  const command = name === "exec" && parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? firstString(parsed as Record<string, unknown>, ["command", "cmd"])
-    : null;
-  if (command) return `工具调用：\`${name}\`\n\n${fence("bash", command)}`;
-  const formatted = parsed === null ? argumentsJson.trim() : JSON.stringify(parsed, null, 2);
-  return `工具调用：\`${name}\`\n\n${fence("json", formatted)}`;
-}
-
-function parseArguments(value: string): unknown {
-  try { return JSON.parse(value); } catch { return null; }
-}
-
-function skillNamesFromArguments(value: unknown): string[] {
-  const names = new Set<string>();
-  const visit = (current: unknown, depth: number): void => {
-    if (depth > 16) return;
-    if (typeof current === "string") {
-      for (const match of current.matchAll(TRUSTED_SKILL_PATH)) {
-        const segments = match[0].split("/");
-        const name = segments.at(-2);
-        if (name) names.add(name);
-      }
-      return;
-    }
-    if (Array.isArray(current)) {
-      for (const item of current) visit(item, depth + 1);
-      return;
-    }
-    if (current && typeof current === "object") {
-      for (const item of Object.values(current)) visit(item, depth + 1);
-    }
-  };
-  visit(value, 0);
-  return [...names];
-}
-
-function firstString(record: Record<string, unknown>, keys: string[]): string | null {
-  for (const key of keys) {
-    if (typeof record[key] === "string" && record[key].trim()) return record[key].trim();
-  }
-  return null;
-}
-
-function fence(language: string, value: string): string {
-  const safe = value.replaceAll("```", "` ` `");
-  return `\`\`\`${language}\n${safe}\n\`\`\``;
 }
 
 function redactSecrets(value: string): string {
