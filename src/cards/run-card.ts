@@ -132,12 +132,10 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, MAIN_CARD_PREVIEW_LIMIT)}` });
-  if (["ready", "queued", "running", "done", "error"].includes(input.phase)) elements.push({
+  const actions = mainCardActions(input);
+  if (actions.length) elements.push({
     tag: "action",
-    actions: [
-      ...(input.phase === "running" ? [{ tag: "button", text: { tag: "plain_text", content: "立即补充" }, type: "primary", value: { action: "open_supplement", bindingId: input.bindingId } }] : []),
-      { tag: "button", text: { tag: "plain_text", content: "更多操作" }, value: { action: "open_more_actions", bindingId: input.bindingId } }
-    ]
+    actions
   });
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
@@ -150,6 +148,16 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     },
     body: { elements }
   };
+}
+
+function mainCardActions(input: TopicViewState): object[] {
+  const button = (content: string, action: string, type?: "primary") => ({ tag: "button", text: { tag: "plain_text", content }, ...(type ? { type } : {}), value: { action, bindingId: input.bindingId } });
+  if (input.phase === "provisioning" || input.phase === "draining") return [];
+  if (input.phase === "archived") return [button("新建任务", "create_new_task", "primary")];
+  if (input.phase === "blocked") return [button("立即补充", "open_supplement", "primary"), button("恢复指引", "view_recovery"), button("更多操作", "open_more_actions")];
+  if (input.phase === "error" || input.phase === "orphaned") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
+  if (input.phase === "running") return [button("立即补充", "open_supplement", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
+  return [button("发送新任务", "create_new_task", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
 }
 
 export function renderRequestRunCard(input: RunCardView): object {
@@ -193,7 +201,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   ];
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  if (input.phase === "queued") elements.push({ tag: "button", text: { tag: "plain_text", content: "改为立即补充" }, type: "primary", value: { action: "convert_queued_prompt", bindingId: input.bindingId, targetPromptId: input.promptId } });
+  if (input.phase === "queued" && input.conversionParentPromptId) elements.push({ tag: "button", text: { tag: "plain_text", content: "改为立即补充" }, type: "primary", value: { action: "convert_queued_prompt", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.conversionParentPromptId, targetPromptId: input.promptId } });
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {

@@ -18,6 +18,16 @@ export function interactionToast(type: "success" | "warning" | "error", content:
   return { toast: { type, content } };
 }
 
+export function renderQueueSummaryCard(input: { queued: number }): object {
+  const content = input.queued > 0 ? "当前有 **" + input.queued + "** 条普通消息按 FIFO 等待。" : "当前没有排队任务。";
+  return { schema: "2.0", config: { update_multi: true, summary: { content: "任务队列" } }, header: { title: { tag: "plain_text", content: "任务队列" }, template: "blue" }, body: { elements: [{ tag: "markdown", content }] } };
+}
+
+export function renderInteractionGuidanceCard(input: { kind: "recovery" | "new_task"; message?: string | null }): object {
+  const recovery = input.kind === "recovery";
+  return { schema: "2.0", config: { update_multi: true, summary: { content: recovery ? "恢复指引" : "新建任务" } }, header: { title: { tag: "plain_text", content: recovery ? "恢复指引" : "新建任务" }, template: recovery ? "orange" : "blue" }, body: { elements: [{ tag: "markdown", content: recovery ? (input.message || "请根据当前卡片状态检查 Herdr Pane；如绑定异常，可由创建者在“更多操作”中重新连接或替换 Pane。") : "在群里发送一条新的顶层消息并 @Bot，描述任务后选择项目即可开始。" }] } };
+}
+
 export function renderMoreActionsCard(input: { bindingId: string; bindingGeneration: number; interactionId?: string; creator: boolean; lifecycle: string; attachment: string }): object {
   const actions: object[] = [button("刷新状态", "session_status", input)];
   if (input.creator) {

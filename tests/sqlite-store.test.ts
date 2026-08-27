@@ -527,7 +527,7 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "first **request**", queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, conversionParentPromptId: "parent-prompt", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "first **request**", queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z" });
     const accepted = store.acceptPrompt({
       prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" },
       view, rootMessageId: "m1", answerCard: { card: "answer" }
@@ -548,7 +548,7 @@ describe("SQLite store", () => {
     const [answerCreate] = store.listPendingOutboundReplies();
     store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1", "cardkit-1");
     expect(store.loadRunCard("p1")).toMatchObject({
-      larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
+      bindingGeneration: 3, conversionParentPromptId: "parent-prompt", larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
     });
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({
@@ -847,12 +847,14 @@ describe("SQLite store", () => {
       ALTER TABLE run_cards DROP COLUMN answer_draft;
       ALTER TABLE run_cards DROP COLUMN answer_segments_json;
       ALTER TABLE run_cards DROP COLUMN request_text;
+      ALTER TABLE run_cards DROP COLUMN conversion_parent_prompt_id;
+      ALTER TABLE run_cards DROP COLUMN binding_generation;
     `);
     legacy.close();
 
     store = new SqliteBindingStore(path);
     expect(store.loadRunCard("p1")).toMatchObject({
-      requestText: "legacy **request**", answer: "legacy answer", answerSegments: ["legacy answer"], answerDraft: "", answerDraftTransient: false
+      bindingGeneration: 1, conversionParentPromptId: null, requestText: "legacy **request**", answer: "legacy answer", answerSegments: ["legacy answer"], answerDraft: "", answerDraftTransient: false
     });
   });
 

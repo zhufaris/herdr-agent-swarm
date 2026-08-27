@@ -311,13 +311,47 @@ describe("run card", () => {
 
   it("gives blocked and orphaned topic cards a safe local recovery path", () => {
     for (const phase of ["blocked", "orphaned"] as const) {
-      const serialized = JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase, notice: "Inspect this state" }));
+      const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase, notice: "Inspect this state" });
+      const serialized = JSON.stringify(card);
+      const actions = mainCardCallbackActions(card);
       expect(serialized).toContain("Inspect this state");
       expect(serialized).toContain("已保留当前任务");
       expect(serialized).toContain("Herdr Pane");
       expect(serialized).toContain("自动重新同步");
       expect(serialized).not.toContain("重新发送");
-      expect(serialized).not.toContain('"tag":"button"');
+      expect(actions).toContain("view_recovery");
+      expect(actions).toContain("open_more_actions");
+      expect(actions.includes("open_supplement")).toBe(phase === "blocked");
+    }
+  });
+
+  it("renders the complete state-driven Main Card action matrix", () => {
+    const cases = [
+      { phase: "provisioning", queueDepth: 0, actions: [] },
+      { phase: "draining", queueDepth: 0, actions: [] },
+      { phase: "ready", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
+      { phase: "queued", queueDepth: 2, actions: ["create_new_task", "view_queue", "open_more_actions"] },
+      { phase: "done", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
+      { phase: "running", queueDepth: 0, actions: ["open_supplement", "open_more_actions"] },
+      { phase: "running", queueDepth: 2, actions: ["open_supplement", "view_queue", "open_more_actions"] },
+      { phase: "blocked", queueDepth: 0, actions: ["open_supplement", "view_recovery", "open_more_actions"] },
+      { phase: "error", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
+      { phase: "orphaned", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
+      { phase: "archived", queueDepth: 0, actions: ["create_new_task"] }
+    ] as const;
+
+    for (const entry of cases) {
+      const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: entry.phase, queueDepth: entry.queueDepth });
+      expect(mainCardCallbackActions(card), `${entry.phase} with queue ${entry.queueDepth}`).toEqual(entry.actions);
+    }
+  });
+
+  it("keeps creator-only controls out of the shared Main Card", () => {
+    const creatorOnlyActions = ["stop", "reset", "rename", "archive", "close_pane", "select_model", "reattach", "replace", "resume"];
+
+    for (const phase of ["ready", "running", "blocked", "error", "orphaned", "archived"] as const) {
+      const actions = mainCardCallbackActions(renderProjectEntryCard({ ...initialTopicView("b1"), phase, queueDepth: 2 }));
+      expect(actions).not.toEqual(expect.arrayContaining(creatorOnlyActions));
     }
   });
 
@@ -571,3 +605,12 @@ describe("run card", () => {
     expect(serialized).not.toContain("执行计划");
   });
 });
+
+function mainCardCallbackActions(card: object): string[] {
+  const elements = (card as { body: { elements: Array<{ tag?: string; actions?: Array<{ value?: { action?: string } }> }> } }).body.elements;
+  return elements
+    .filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions ?? [])
+    .map((action) => action.value?.action)
+    .filter((action): action is string => typeof action === "string");
+}

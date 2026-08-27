@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { interactionToast, renderMoreActionsCard, renderReattachInputCard, renderRenameInputCard, renderSupplementInputCard } from "../cards/interaction-card.js";
+import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard, renderSupplementInputCard } from "../cards/interaction-card.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { BindingStorePort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/types.js";
@@ -9,7 +9,7 @@ import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-wor
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 
 interface Options {
-  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "consumeCardInteraction" | "convertQueuedPromptToSteering" | "getBinding">;
+  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "consumeCardInteraction" | "convertQueuedPromptToSteering" | "getBinding" | "countPendingPrompts" | "loadTopicView">;
   paneControl: Pick<PaneControlWorkflowPort, "steer" | "stop">;
   sessionAdministration: SessionAdministrationWorkflowPort;
   provisioning: Pick<BindingProvisioningWorkflowPort, "reset" | "reattach" | "replace">;
@@ -33,6 +33,9 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (value.action === "submit_supplement") return this.submitSupplement(action, value);
     if (value.action === "convert_queued_prompt") return this.convertQueuedPrompt(action, value);
     if (value.action === "open_more_actions") return this.openMoreActions(action, value);
+    if (value.action === "view_queue") return this.viewQueue(action, value);
+    if (value.action === "view_recovery") return this.viewRecovery(action, value);
+    if (value.action === "create_new_task") return { card: renderInteractionGuidanceCard({ kind: "new_task" }) };
     if (value.action === "open_rename") return this.openRename(action, value);
     if (value.action === "open_reattach") return this.openReattach(action, value);
     if (typeof value.action === "string" && (value.action.startsWith("session_") || value.action === "submit_rename" || value.action === "submit_reattach")) return this.sessionControl(action, value);
@@ -72,13 +75,14 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
 
   private convertQueuedPrompt(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
     let interactionId = stringValue(value.interactionId); const bindingId = stringValue(value.bindingId); let generation = numberValue(value.bindingGeneration);
+    const capturedParentPromptId = stringValue(value.parentPromptId);
     let interaction = interactionId ? this.options.store.getCardInteraction(interactionId) : null;
     if (!interaction && bindingId) {
       const binding = this.options.store.getBinding(bindingId); const active = binding ? this.options.activeTurn(binding.id) : null;
       const targetPromptId = stringValue(value.targetPromptId);
-      if (!binding || !active || !targetPromptId || binding.lifecycle !== "active") return interactionToast("warning", "当前任务已结束，原消息仍按原顺序排队。");
-      interaction = this.options.store.createCardInteraction({ id: randomUUID(), bindingId, bindingGeneration: binding.generation, actorOpenId: action.operatorOpenId, actionKind: "convert_queued_prompt", parentPromptId: active.promptId, targetPromptId, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() });
-      interactionId = interaction.id; generation = binding.generation;
+      if (!binding || !active || !capturedParentPromptId || active.promptId !== capturedParentPromptId || !targetPromptId || generation === null || binding.generation !== generation || binding.lifecycle !== "active") return interactionToast("warning", "当前任务已结束，原消息仍按原顺序排队。");
+      interaction = this.options.store.createCardInteraction({ id: randomUUID(), bindingId, bindingGeneration: generation, actorOpenId: action.operatorOpenId, actionKind: "convert_queued_prompt", parentPromptId: capturedParentPromptId, targetPromptId, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() });
+      interactionId = interaction.id;
     }
     generation ??= interaction?.bindingGeneration ?? null;
     if (!interactionId || !bindingId || generation === null || !interaction?.parentPromptId || !interaction.targetPromptId) return interactionToast("warning", "转换入口已失效，原消息仍在队列中。");
@@ -100,6 +104,18 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     const binding = this.freshBinding(action, value, true);
     const interaction = stringValue(value.interactionId);
     return binding && interaction ? { card: renderRenameInputCard({ interactionId: interaction, bindingId: binding.id, bindingGeneration: binding.generation }) } : interactionToast("error", "只有会话创建者可以执行此操作。");
+  }
+
+  private viewQueue(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
+    const binding = this.freshBinding(action, value, false);
+    if (!binding) return interactionToast("warning", "会话状态已变化，请刷新后重试。");
+    return { card: renderQueueSummaryCard({ queued: this.options.store.countPendingPrompts(binding.id) }) };
+  }
+
+  private viewRecovery(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
+    const binding = this.freshBinding(action, value, false);
+    if (!binding) return interactionToast("warning", "会话状态已变化，请刷新后重试。");
+    return { card: renderInteractionGuidanceCard({ kind: "recovery", message: this.options.store.loadTopicView(binding.id)?.notice ?? null }) };
   }
 
   private openReattach(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {

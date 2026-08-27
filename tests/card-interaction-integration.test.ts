@@ -41,12 +41,31 @@ describe("card interactions", () => {
   it("atomically converts a queued prompt and preserves it when the parent has ended", async () => {
     const h = harness();
     h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
-    const value = { action: "convert_queued_prompt", bindingId: "b1", targetPromptId: "queued" };
+    const value = { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" };
     const converted = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value });
     expect(converted?.toast?.type).toBe("success"); expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "steering", parentPromptId: "parent" }); expect(h.wakeSteering).toHaveBeenCalledWith("b1", "parent");
     h.store.enqueuePrompt({ id: "queued-2", bindingId: "b1", larkMessageId: "queued-message-2", actorOpenId: "member", body: "later" }); h.end();
     const stale = await h.workflow.handle({ messageId: "answer-2", chatId: "chat", operatorOpenId: "member", value: { ...value, targetPromptId: "queued-2" } });
     expect(stale?.toast?.type).toBe("warning"); expect(h.store.getPrompt("queued-2")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" }); h.store.close();
+  });
+
+  it("never converts an old queued card into a newer active turn", async () => {
+    const h = harness();
+    h.store.enqueuePrompt({ id: "queued-old", bindingId: "b1", larkMessageId: "queued-old-message", actorOpenId: "member", body: "old follow-up" });
+    h.end();
+    h.store.updatePrompt("parent", "delivered");
+    h.store.enqueuePrompt({ id: "new-parent", bindingId: "b1", larkMessageId: "new-parent-message", actorOpenId: "member", body: "new work" });
+    h.store.updatePrompt("new-parent", "running");
+    const workflow = new CardInteractionWorkflow({
+      store: h.store, paneControl: { steer: h.steer, stop: vi.fn(async () => true) },
+      sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) },
+      provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) },
+      activeTurn: () => ({ promptId: "new-parent", paneId: "w1:p1" }), wakeSteering: h.wakeSteering
+    });
+    const result = await workflow.handle({ messageId: "old-answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued-old" } });
+    expect(result?.toast?.type).toBe("warning");
+    expect(h.store.getPrompt("queued-old")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" });
+    expect(h.wakeSteering).not.toHaveBeenCalled(); h.store.close();
   });
 
   it("shows management controls only to the creator and rejects forged callbacks", async () => {

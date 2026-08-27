@@ -22,6 +22,8 @@ export interface MainCardLiveStatus {
 export interface RunCardView {
   promptId: string;
   bindingId: string;
+  bindingGeneration: number;
+  conversionParentPromptId: string | null;
   larkMessageId: string | null;
   answerMessageId: string | null;
   answerCardId: string | null;
@@ -62,10 +64,10 @@ export type RunCardChange =
 
 export function createQueuedRunCard(input: {
   promptId: string; bindingId: string; title: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
-  queuePosition: number; occurredAt: string;
+  queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null;
 }): RunCardView {
   return {
-    promptId: input.promptId, bindingId: input.bindingId, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
+    promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
