@@ -145,6 +145,7 @@ export class HerdrCliAdapter implements HerdrPort {
     if (!initial.traexProcess) {
       await this.runner.run(this.executable, [
         "pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode,
+        "--dangerously-bypass-hook-trust",
         "-c", sessionHookOverride(SESSION_REPORTER_PATH)
       ], this.commandTimeoutMs);
     }
@@ -506,7 +507,10 @@ export class HerdrCliAdapter implements HerdrPort {
 
 function sessionHookOverride(reporterPath: string): string {
   const command = `node ${shellQuote(reporterPath)}`;
-  return `hooks.SessionStart=[{matcher="startup|resume|clear",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+  const override = `hooks.SessionStart=[{matcher="startup|resume|clear",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+  // `herdr pane run` passes its command through the pane shell, so quote the
+  // complete TOML override as one shell argument rather than only its command.
+  return shellQuote(override);
 }
 
 function shellQuote(value: string): string {

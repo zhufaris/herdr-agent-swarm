@@ -266,7 +266,7 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "/usr/local/bin/traex"))
       .resolves.toBeUndefined();
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "run")).toEqual([
-      ["pane", "run", "w1:p1", "/usr/local/bin/traex", "--permission-mode", "auto", "-c", expect.stringContaining("hooks.SessionStart")]
+      ["pane", "run", "w1:p1", "/usr/local/bin/traex", "--permission-mode", "auto", "--dangerously-bypass-hook-trust", "-c", expect.stringMatching(/^'hooks\.SessionStart=\[\{matcher=\"startup\|resume\|clear\"/)]
     ]);
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "process-info")).toHaveLength(2);
   });
