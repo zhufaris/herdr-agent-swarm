@@ -43,6 +43,10 @@ interface PromptRunWorkflowOptions {
   transcriptReader?: TraexTranscriptReaderPort;
 }
 
+type TurnOutputSource =
+  | { mode: "terminal"; fallbackReason: string }
+  | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[] };
+
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
   private readonly steeringWorkers = new Map<string, Promise<void>>();
@@ -219,21 +223,18 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         await this.refreshQueuePositions(bindingId);
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
-        this.options.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
-        let transcript = await this.openTranscript(binding);
-        let outputMode: "typed" | "terminal" = transcript ? "typed" : "terminal";
-        const typedAnswer: string[] = [];
+        let outputSource = await this.openTranscript(binding);
+        this.options.logger.info({
+          event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth,
+          outputMode: outputSource.mode, ...(outputSource.mode === "terminal" ? { fallbackReason: outputSource.fallbackReason } : {}), outcome: "running"
+        }, "TraeX turn started");
         const before = await this.options.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource, output }) => {
           if (!this.isBindingActive(bindingId)) return;
-          const typed = await this.readTypedDelta(transcript, binding, prompt.id);
-          if (typed.failed) {
-            transcript = null;
-            if (typedAnswer.length === 0) outputMode = "terminal";
-          }
-          if (typed.delta) typedAnswer.push(typed.delta);
-          const parsed = outputMode === "typed"
+          const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
+          outputSource = typed.source;
+          const parsed = outputSource.mode === "typed"
             ? { delta: typed.delta, update: "append" as const, model: null, context: null }
             : parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
@@ -252,13 +253,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(bindingId, prompt.id, state);
         binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
-        const finalTyped = await this.readTypedDelta(transcript, binding, prompt.id);
-        if (finalTyped.delta) typedAnswer.push(finalTyped.delta);
+        const finalTyped = await this.readTypedDelta(outputSource, binding, prompt.id);
+        outputSource = finalTyped.source;
         if (finalTyped.delta) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: finalTyped.delta, answerUpdate: "append", progressEvents: [] });
-        const answer = extractFinalTraexAnswer(await this.options.herdr.readOutput(paneId, 240));
-        const streamed = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
-        const finalAnswer = typedAnswer.join("\n\n") || streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。";
-        binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(answer), occurredAt: new Date().toISOString() });
+        const terminalAnswer = outputSource.mode === "terminal" ? extractFinalTraexAnswer(await this.options.herdr.readOutput(paneId, 240)) : "";
+        const streamed = outputSource.mode === "terminal" ? this.options.store.loadRunCard(prompt.id)?.answer ?? "" : "";
+        const sourceAnswer = outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : streamed || terminalAnswer;
+        const finalAnswer = sourceAnswer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。";
+        binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
         await this.refreshQueuePositions(bindingId);
@@ -344,26 +346,35 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     return binding?.state === "active" && binding.lifecycle === "active";
   }
 
-  private async openTranscript(binding: Binding): Promise<TraexTranscriptCursorPort | null> {
-    if (!this.options.transcriptReader) return null;
+  private async openTranscript(binding: Binding): Promise<TurnOutputSource> {
+    if (!this.options.transcriptReader) return { mode: "terminal", fallbackReason: "transcript_not_found" };
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
       : null;
     try {
-      return await this.options.transcriptReader.open(session);
+      const result = await this.options.transcriptReader.open(session);
+      return result.mode === "typed"
+        ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [] }
+        : { mode: "terminal", fallbackReason: result.reason };
     } catch (error) {
-      this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "terminal_fallback" }, "could not open typed TraeX transcript");
-      return null;
+      this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, fallbackReason: "transcript_validation_failed", outcome: "terminal_fallback" }, "could not open typed TraeX transcript");
+      return { mode: "terminal", fallbackReason: "transcript_validation_failed" };
     }
   }
 
-  private async readTypedDelta(cursor: TraexTranscriptCursorPort | null, binding: Binding, promptId: string): Promise<{ delta: string; failed: boolean }> {
-    if (!cursor) return { delta: "", failed: false };
+  private async readTypedDelta(source: TurnOutputSource, binding: Binding, promptId: string): Promise<{ source: TurnOutputSource; delta: string }> {
+    if (source.mode === "terminal") return { source, delta: "" };
     try {
-      return { delta: await cursor.readDelta(), failed: false };
+      const delta = await source.cursor.readDelta();
+      if (delta) {
+        source.chunks.push(delta);
+        source.emitted = true;
+      }
+      return { source, delta };
     } catch (error) {
-      this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, outcome: "terminal_fallback" }, "typed TraeX transcript became unavailable");
-      return { delta: "", failed: true };
+      const outcome = source.emitted ? "terminal_fallback_suppressed" : "terminal_fallback";
+      this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, fallbackReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
+      return { source: source.emitted ? source : { mode: "terminal", fallbackReason: "transcript_read_failed" }, delta: "" };
     }
   }
 
