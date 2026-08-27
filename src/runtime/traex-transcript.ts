@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HerdrAgentSession } from "../domain/types.js";
-import type { TraexTranscriptCursorPort, TraexTranscriptReaderPort } from "../domain/ports.js";
+import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult, TraexTranscriptReaderPort } from "../domain/ports.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
@@ -15,26 +15,32 @@ const envelopeSchema = z.object({
   payload: z.unknown()
 }).passthrough();
 const sessionMetaSchema = z.object({ id: z.string() }).passthrough();
-const agentMessageSchema = z.object({
-  type: z.literal("agent_message"),
-  message: z.string(),
-  phase: z.string().optional()
+const historyMutationSchema = z.object({
+  operation: z.literal("append"),
+  items: z.array(z.unknown())
 }).passthrough();
-const commandEndSchema = z.object({
-  type: z.literal("exec_command_end"),
-  command: z.array(z.string()).min(1),
-  stdout: z.string().optional().default(""),
-  stderr: z.string().optional().default("")
+const messageItemSchema = z.object({
+  type: z.literal("message"),
+  id: z.string().min(1),
+  role: z.string(),
+  content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough())
 }).passthrough();
-const patchChangeSchema = z.object({
-  type: z.enum(["add", "update", "delete"]),
-  content: z.string().optional(),
-  unified_diff: z.string().optional(),
-  move_path: z.string().nullable().optional()
+const functionCallSchema = z.object({
+  type: z.literal("function_call"),
+  id: z.string().min(1),
+  call_id: z.string().min(1),
+  name: z.string(),
+  arguments: z.string()
 }).passthrough();
-const patchEndSchema = z.object({
-  type: z.literal("patch_apply_end"),
-  changes: z.record(patchChangeSchema)
+const functionOutputSchema = z.object({
+  type: z.literal("function_call_output"),
+  id: z.string().min(1),
+  call_id: z.string().min(1),
+  output: z.unknown()
+}).passthrough();
+const functionOutputPartSchema = z.object({
+  type: z.enum(["input_text", "output_text"]),
+  text: z.string()
 }).passthrough();
 
 export interface TraexTranscriptReaderOptions {
@@ -54,22 +60,31 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? DEFAULT_MAX_RENDERED_DELTA_CHARS;
   }
 
-  async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptCursorPort | null> {
-    if (!session || session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) return null;
+  async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
+    if (!session) return { mode: "terminal", reason: "missing_session_identity" };
+    if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) {
+      return { mode: "terminal", reason: "unsupported_session_identity" };
+    }
     try {
       const paths = await findExactTranscriptPaths(this.sessionsRoot, session.value);
-      if (paths.length !== 1) return null;
+      if (paths.length === 0) return { mode: "terminal", reason: "transcript_not_found" };
+      if (paths.length > 1) return { mode: "terminal", reason: "ambiguous_transcript" };
       const path = paths[0]!;
-      if (!await containsMatchingSessionMeta(path, session.value)) return null;
+      if (!await containsMatchingSessionMeta(path, session.value)) {
+        return { mode: "terminal", reason: "transcript_validation_failed" };
+      }
       const file = await stat(path);
-      return new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars);
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars) };
     } catch {
-      return null;
+      return { mode: "terminal", reason: "transcript_validation_failed" };
     }
   }
 }
 
 class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
+  private readonly emittedItemIds = new Set<string>();
+  private readonly callsById = new Map<string, { name: string }>();
+
   constructor(
     private readonly path: string,
     private offset: number,
@@ -103,11 +118,43 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     for (const line of complete.toString("utf8").split("\n")) {
       if (!line.trim()) continue;
       const envelope = envelopeSchema.parse(JSON.parse(line));
-      if (envelope.type !== "event_msg") continue;
-      const rendered = renderEvent(envelope.payload);
-      if (rendered) blocks.push(rendered);
+      if (envelope.type !== "history_mutation") continue;
+      const mutation = historyMutationSchema.safeParse(envelope.payload);
+      if (!mutation.success) continue;
+      for (const item of mutation.data.items) {
+        const rendered = this.renderItem(item);
+        if (rendered) blocks.push(rendered);
+      }
     }
-    return boundMarkdown(blocks.join("\n\n"), this.maxRenderedDeltaChars);
+    return boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars);
+  }
+
+  private renderItem(item: unknown): string {
+    const message = messageItemSchema.safeParse(item);
+    if (message.success) {
+      if (message.data.role !== "assistant" || this.emittedItemIds.has(message.data.id)) return "";
+      const output = message.data.content
+        .filter((part) => part.type === "output_text" && part.text !== undefined)
+        .map((part) => part.text!.trim())
+        .filter(Boolean)
+        .join("\n\n");
+      if (!output) return "";
+      this.emittedItemIds.add(message.data.id);
+      return output;
+    }
+    const call = functionCallSchema.safeParse(item);
+    if (call.success) {
+      if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
+      this.emittedItemIds.add(call.data.id);
+      this.callsById.set(call.data.call_id, { name: call.data.name });
+      return fence("tool", `${call.data.name}\n${call.data.arguments}`);
+    }
+    const result = functionOutputSchema.safeParse(item);
+    if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
+    const output = renderFunctionOutput(result.data.output);
+    if (!output) return "";
+    this.emittedItemIds.add(result.data.id);
+    return fence("text", output);
   }
 }
 
@@ -156,45 +203,15 @@ async function containsMatchingSessionMeta(path: string, sessionId: string): Pro
   return false;
 }
 
-function renderEvent(payload: unknown): string {
-  const assistant = agentMessageSchema.safeParse(payload);
-  if (assistant.success) return redactSecrets(assistant.data.message.trim());
-  const command = commandEndSchema.safeParse(payload);
-  if (command.success) {
-    const blocks = [fence("bash", renderCommand(command.data.command))];
-    if (command.data.stdout.trim()) blocks.push(fence("text", redactSecrets(command.data.stdout.trimEnd())));
-    if (command.data.stderr.trim()) blocks.push(fence("text", redactSecrets(command.data.stderr.trimEnd())));
-    return blocks.join("\n\n");
-  }
-  const patch = patchEndSchema.safeParse(payload);
-  if (patch.success) {
-    const changes = Object.entries(patch.data.changes).map(([path, change]) => renderPatch(path, change)).filter(Boolean);
-    return changes.length > 0 ? fence("diff", redactSecrets(changes.join("\n"))) : "";
-  }
-  return "";
-}
-
-function renderCommand(argv: string[]): string {
-  if (argv.length >= 3 && (argv[0] === "/bin/bash" || argv[0] === "bash" || argv[0] === "/bin/sh" || argv[0] === "sh") && argv[1] === "-lc") return redactSecrets(argv[2]!);
-  return redactSecrets(argv.map(shellQuote).join(" "));
-}
-
-function shellQuote(value: string): string {
-  return /^[a-zA-Z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\"'\"'`)}'`;
-}
-
-function renderPatch(path: string, change: z.infer<typeof patchChangeSchema>): string {
-  if (change.unified_diff?.trim()) {
-    const diff = change.unified_diff.trimEnd();
-    return /^(?:---|diff --git) /m.test(diff) ? diff : `--- a/${path}\n+++ b/${change.move_path ?? path}\n${diff}`;
-  }
-  if (change.type === "add" && change.content !== undefined) return `--- /dev/null\n+++ b/${path}\n${prefixLines(change.content, "+")}`;
-  if (change.type === "delete" && change.content !== undefined) return `--- a/${path}\n+++ /dev/null\n${prefixLines(change.content, "-")}`;
-  return "";
-}
-
-function prefixLines(value: string, prefix: string): string {
-  return value.split("\n").map((line) => `${prefix}${line}`).join("\n");
+function renderFunctionOutput(output: unknown): string {
+  if (typeof output === "string") return output.trim();
+  if (!Array.isArray(output)) return "";
+  return output
+    .map((part) => functionOutputPartSchema.safeParse(part))
+    .filter((part) => part.success)
+    .map((part) => part.data.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function fence(language: string, value: string): string {
