@@ -350,7 +350,8 @@ entry capped at 4,000 characters. Running asynchronous results use
 `▶ <Type> · 仍在运行`. Calls are classified as Skill, Read, Search, Edit,
 Command, Wait, Agent, or the generic Tool fallback from their declared name and
 bounded structured fields; displayed targets are single-line, redacted, and at
-most 160 characters.
+most 160 characters. Command targets are rendered as Markdown inline code;
+other activity targets remain plain text.
 
 Absolute `SKILL.md` reads under configured TraeX, agent, or plugin skill roots
 are deferred until their exact result arrives. A successful load emits only

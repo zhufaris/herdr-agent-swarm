@@ -23,7 +23,12 @@ export function projectToolCall(name: string, argumentsJson: string): ProjectedT
     return { descriptor: { category: "Skill", target: skillNames.join(", "), skillNames }, entry: "" };
   }
   const descriptor = describeCall(name, parsed);
-  return { descriptor, entry: "▶ " + descriptor.category + " · " + descriptor.target };
+  return { descriptor, entry: renderCallEntry(descriptor) };
+}
+
+function renderCallEntry(descriptor: ToolActivityDescriptor): string {
+  const target = descriptor.category === "Command" ? "`" + descriptor.target + "`" : descriptor.target;
+  return "▶ " + descriptor.category + " · " + target;
 }
 
 export function projectToolResult(descriptor: ToolActivityDescriptor, output: unknown): string {

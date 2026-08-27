@@ -101,7 +101,7 @@ describe("TraexTranscriptReader", () => {
       { type: "function_call", id: "fc-missing-call", name: "ignored", arguments: "ignored arguments" }
     ]));
     const callOutput = await cursor.readDelta();
-    expect(callOutput).toBe("▶ Command · exec");
+    expect(callOutput).toBe("▶ Command · `exec`");
     expect(callOutput).not.toContain("opaque orchestration");
     expect(callOutput).not.toContain("ignored arguments");
 
@@ -128,7 +128,7 @@ describe("TraexTranscriptReader", () => {
     await appendFile(path, fixtureRecords);
     const output = await cursor.readDelta();
     expect(output).toContain("Typed answer");
-    expect(output).toContain("▶ Command · exec");
+    expect(output).toContain("▶ Command · `exec`");
     expect(output).toContain("✓ Command · 成功");
     expect(output).not.toMatch(/opaque orchestration|fixture output/);
   });
@@ -197,7 +197,7 @@ describe("TraexTranscriptReader", () => {
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-" + field, call_id: "call-" + field, name: "exec", arguments: JSON.stringify({ [field]: "npm test" }) }]));
 
-    await expect(cursor.readDelta()).resolves.toBe("▶ Command · npm test");
+    await expect(cursor.readDelta()).resolves.toBe("▶ Command · `npm test`");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {

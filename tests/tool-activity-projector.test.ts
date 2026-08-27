@@ -6,7 +6,7 @@ describe("tool activity projector", () => {
     ["read", "read_file", { path: "src/main.ts" }, "▶ Read · src/main.ts"],
     ["search", "search", { query: "renderAnswer", path: "src" }, "▶ Search · renderAnswer · src"],
     ["edit", "apply_patch", { path: "src/cards/run-card.ts" }, "▶ Edit · src/cards/run-card.ts"],
-    ["command", "exec_command", { cmd: "npm test" }, "▶ Command · npm test"],
+    ["command", "exec_command", { cmd: "npm test" }, "▶ Command · `npm test`"],
     ["wait", "wait", { session_id: 42 }, "▶ Wait · session 42"],
     ["agent", "collaboration__spawn_agent", { task_name: "review_parser", message: "private prompt" }, "▶ Agent · review_parser"],
     ["fallback", "future_tool", { payload: "private payload" }, "▶ Tool · future_tool"]
@@ -22,7 +22,7 @@ describe("tool activity projector", () => {
     const command = "const r = await tools.exec_command({cmd: '" + "x".repeat(300) + "'}); text(r.output);";
     const projected = projectToolCall("exec", JSON.stringify({ input: command }));
 
-    expect(projected.entry).toMatch(/^▶ Command · /);
+    expect(projected.entry).toMatch(/^▶ Command · `.*`$/);
     expect(projected.entry.length).toBeLessThanOrEqual(180);
   });
 
@@ -33,6 +33,12 @@ describe("tool activity projector", () => {
 
     expect(projected.entry).toContain("[REDACTED]");
     expect(projected.entry).not.toMatch(/top-secret|query-secret/);
+  });
+
+  it("neutralizes embedded backticks inside a command target", () => {
+    const projected = projectToolCall("exec_command", JSON.stringify({ cmd: "echo `date`" }));
+
+    expect(projected.entry).toBe("▶ Command · `echo \\`date\\``");
   });
 
   it("defers trusted skill loads and stores only distinct skill names", () => {
