@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fileURLToPath } from "node:url";
 import type { HerdrPort } from "../domain/ports.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
@@ -29,6 +30,7 @@ const snapshotSchema = z.object({
 });
 const nativeReadSchema = z.object({ read: z.object({ text: z.string() }).passthrough() }).passthrough();
 const PROCESS_INFO_CONCURRENCY = 4;
+const SESSION_REPORTER_PATH = fileURLToPath(new URL("../cli/report-traex-session.js", import.meta.url));
 
 interface HerdrNativeRequestClient {
   request(method: string, params: object, timeoutMs: number): Promise<unknown>;
@@ -141,7 +143,10 @@ export class HerdrCliAdapter implements HerdrPort {
     const initial = await this.observeRuntime(paneId);
     if (initial.composerReady) return;
     if (!initial.traexProcess) {
-      await this.runner.run(this.executable, ["pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode], this.commandTimeoutMs);
+      await this.runner.run(this.executable, [
+        "pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode,
+        "-c", sessionHookOverride(SESSION_REPORTER_PATH)
+      ], this.commandTimeoutMs);
     }
     await this.waitUntilTraexComposer(paneId);
   }
@@ -497,6 +502,15 @@ export class HerdrCliAdapter implements HerdrPort {
     const envelope = envelopeSchema.parse(JSON.parse(stdout));
     return envelope.result;
   }
+}
+
+function sessionHookOverride(reporterPath: string): string {
+  const command = `node ${shellQuote(reporterPath)}`;
+  return `hooks.SessionStart=[{matcher="startup|resume|clear",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, operation: (item: T) => Promise<R>): Promise<R[]> {
