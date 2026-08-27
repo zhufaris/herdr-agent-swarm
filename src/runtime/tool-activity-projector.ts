@@ -29,19 +29,27 @@ export function projectToolCall(name: string, argumentsJson: string): ProjectedT
 export function projectToolResult(descriptor: ToolActivityDescriptor, output: unknown): string {
   const normalized = normalizeOutput(output);
   const status = explicitStatus(output, normalized);
+  if (descriptor.category === "Wait") {
+    if (status.kind !== "failed") return "";
+    return renderFailure("✗ 等待后台任务完成 · " + status.summary, normalized);
+  }
   const target = renderTarget(descriptor);
   if (status.kind === "running") return "… " + descriptor.category + " · " + target + " · 运行中";
   if (status.kind === "failed") {
-    const detail = failureTail(normalized);
     const heading = "✗ " + descriptor.category + " · " + target + " · " + status.summary;
-    if (!detail) return heading;
-    const prefix = heading + "\n\n```text\n";
-    const suffix = "\n```";
-    const room = Math.max(0, FAILURE_DETAIL_LIMIT - prefix.length - suffix.length);
-    return prefix + detail.slice(-room) + suffix;
+    return renderFailure(heading, normalized);
   }
   const summary = successSummary(descriptor, normalized);
   return "✓ " + descriptor.category + " · " + target + (summary ? " · " + summary : "");
+}
+
+function renderFailure(heading: string, output: string): string {
+  const detail = failureTail(output);
+  if (!detail) return heading;
+  const prefix = heading + "\n\n```text\n";
+  const suffix = "\n```";
+  const room = Math.max(0, FAILURE_DETAIL_LIMIT - prefix.length - suffix.length);
+  return prefix + detail.slice(-room) + suffix;
 }
 
 function renderTarget(descriptor: ToolActivityDescriptor): string {

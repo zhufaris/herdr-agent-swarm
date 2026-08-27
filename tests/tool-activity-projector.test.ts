@@ -52,13 +52,29 @@ describe("tool activity projector", () => {
     ["read_file", { path: "src/main.ts" }, "✓ Read · src/main.ts"],
     ["search", { query: "renderAnswer", path: "src" }, "✓ Search · renderAnswer · src"],
     ["apply_patch", { path: "src/cards/run-card.ts" }, "✓ Edit · src/cards/run-card.ts"],
-    ["wait", { session_id: 42 }, "✓ Wait · session 42"],
     ["collaboration__spawn_agent", { task_name: "review_parser" }, "✓ Agent · review_parser"],
     ["future_tool", {}, "✓ Tool · future_tool"]
   ])("renders a unified successful result row for %s", (name, args, expected) => {
     const { descriptor } = projectToolCall(name, JSON.stringify(args));
 
     expect(projectToolResult(descriptor, "Script completed")).toBe(expected);
+  });
+
+  it.each([
+    ["write_stdin", { session_id: 263 }],
+    ["wait", { cell_id: "296" }]
+  ])("suppresses successful internal wait results for %s", (name, args) => {
+    const { descriptor } = projectToolCall(name, JSON.stringify(args));
+
+    expect(projectToolResult(descriptor, JSON.stringify({ exit_code: 0 }))).toBe("");
+  });
+
+  it("renders one semantic redacted fallback for a failed wait", () => {
+    const { descriptor } = projectToolCall("write_stdin", JSON.stringify({ session_id: 263 }));
+    const result = projectToolResult(descriptor, "Process exited with code 1\nTOKEN=secret\nconnection closed");
+
+    expect(result).toContain("✗ 等待后台任务完成 · exit 1");
+    expect(result).not.toMatch(/write_stdin|session 263|secret/);
   });
 
   it("defers trusted skill loads and stores only distinct skill names", () => {

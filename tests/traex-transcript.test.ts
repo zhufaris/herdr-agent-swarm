@@ -203,17 +203,17 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readDelta()).resolves.toBe("✓ Command · `npm test`");
   });
 
-  it("appends a terminal result after a running result for the same call", async () => {
+  it("suppresses repeated internal wait results for the same call", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-running", call_id: "call-running", name: "write_stdin", arguments: JSON.stringify({ session_id: 263 }) }]));
     await expect(cursor.readDelta()).resolves.toBe("");
 
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-running", call_id: "call-running", output: JSON.stringify({ session_id: 263, output: "private partial output" }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("… Wait · session 263 · 运行中");
+    await expect(cursor.readDelta()).resolves.toBe("");
 
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-complete", call_id: "call-running", output: JSON.stringify({ exit_code: 0, output: "private final output" }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("✓ Wait · session 263");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {
