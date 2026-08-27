@@ -101,6 +101,7 @@ const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEve
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   wakeOutbound: () => outboundWork.wake(),
+  convergeAnswer: (promptId) => answerPages.converge(promptId),
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
   isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
   worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)

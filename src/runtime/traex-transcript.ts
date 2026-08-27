@@ -9,6 +9,7 @@ import { projectToolCall, projectToolResult, type ToolActivityDescriptor } from 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
+const DEFAULT_MAX_DISCOVERY_ENTRIES = 100_000;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 
@@ -44,17 +45,21 @@ export interface TraexTranscriptReaderOptions {
   sessionsRoot?: string;
   maxReadBytes?: number;
   maxRenderedDeltaChars?: number;
+  maxDiscoveryEntries?: number;
 }
 
 export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   private readonly sessionsRoot: string;
   private readonly maxReadBytes: number;
   private readonly maxRenderedDeltaChars: number;
+  private readonly maxDiscoveryEntries: number;
+  private readonly pathsBySessionId = new Map<string, string>();
 
   constructor(options: TraexTranscriptReaderOptions = {}) {
     this.sessionsRoot = resolve(options.sessionsRoot ?? resolve(homedir(), ".trae/cli/sessions"));
     this.maxReadBytes = options.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
     this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? DEFAULT_MAX_RENDERED_DELTA_CHARS;
+    this.maxDiscoveryEntries = options.maxDiscoveryEntries ?? DEFAULT_MAX_DISCOVERY_ENTRIES;
   }
 
   async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
@@ -63,13 +68,24 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       return { mode: "terminal", reason: "unsupported_session_identity" };
     }
     try {
-      const paths = await findExactTranscriptPaths(this.sessionsRoot, session.value);
+      const cachedPath = this.pathsBySessionId.get(session.value);
+      if (cachedPath) {
+        if (await isValidTranscriptPath(this.sessionsRoot, cachedPath, session.value)) {
+          const file = await stat(cachedPath);
+          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars) };
+        }
+        this.pathsBySessionId.delete(session.value);
+      }
+      const discovery = await findExactTranscriptPaths(this.sessionsRoot, session.value, this.maxDiscoveryEntries);
+      if (discovery.exhausted) return { mode: "terminal", reason: "transcript_validation_failed" };
+      const paths = discovery.paths;
       if (paths.length === 0) return { mode: "terminal", reason: "transcript_not_found" };
       if (paths.length > 1) return { mode: "terminal", reason: "ambiguous_transcript" };
       const path = paths[0]!;
       if (!await containsMatchingSessionMeta(path, session.value)) {
         return { mode: "terminal", reason: "transcript_validation_failed" };
       }
+      this.pathsBySessionId.set(session.value, path);
       const file = await stat(path);
       return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars) };
     } catch {
@@ -154,25 +170,48 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   }
 }
 
-async function findExactTranscriptPaths(root: string, sessionId: string): Promise<string[]> {
+interface TranscriptDiscoveryResult {
+  paths: string[];
+  exhausted: boolean;
+}
+
+async function findExactTranscriptPaths(root: string, sessionId: string, maxEntries: number): Promise<TranscriptDiscoveryResult> {
   const rootPath = await realpath(root);
   const matches: string[] = [];
+  const state = { visited: 0, stopped: false, exhausted: false };
   const visit = async (directory: string): Promise<void> => {
+    if (state.stopped || state.exhausted) return;
     const entries = await opendir(directory);
     for await (const entry of entries) {
+      if (state.stopped || state.exhausted) break;
+      if (state.visited >= maxEntries) { state.exhausted = true; break; }
+      state.visited += 1;
       const path = resolve(directory, entry.name);
       if (entry.isDirectory()) await visit(path);
       else if (entry.isFile() && basename(path).endsWith(`-${sessionId}.jsonl`)) matches.push(path);
-      if (matches.length > 1) return;
+      if (matches.length > 1) state.stopped = true;
     }
   };
   await visit(rootPath);
+  if (state.exhausted) return { paths: matches, exhausted: true };
   for (const path of matches) {
     const resolvedPath = await realpath(path);
     const child = relative(rootPath, resolvedPath);
-    if (child.startsWith(`..${sep}`) || child === "..") return [];
+    if (child.startsWith(`..${sep}`) || child === "..") return { paths: [], exhausted: false };
   }
-  return matches;
+  return { paths: matches, exhausted: false };
+}
+
+async function isValidTranscriptPath(root: string, path: string, sessionId: string): Promise<boolean> {
+  try {
+    const rootPath = await realpath(root);
+    const resolvedPath = await realpath(path);
+    const child = relative(rootPath, resolvedPath);
+    if (child.startsWith(`..${sep}`) || child === ".." || !basename(resolvedPath).endsWith(`-${sessionId}.jsonl`)) return false;
+    return await containsMatchingSessionMeta(resolvedPath, sessionId);
+  } catch {
+    return false;
+  }
 }
 
 async function containsMatchingSessionMeta(path: string, sessionId: string): Promise<boolean> {

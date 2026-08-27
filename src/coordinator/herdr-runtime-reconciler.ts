@@ -20,6 +20,7 @@ interface HerdrRuntimeReconcilerOptions {
     enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "answer", card: object): Promise<void>;
   };
   wakeOutbound?: () => void;
+  convergeAnswer?(promptId: string): Promise<void>;
   logger: Logger;
   discoverPane(pane: HerdrPane, project: ProjectConfig): Promise<Binding>;
   scheduler: PromptWorkScheduler;
@@ -308,6 +309,12 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     if (result.outcome === "orphaned") {
       if (result.outboxReserved) this.options.wakeOutbound?.();
       await this.publish(binding.id, "BindingOrphaned", { reason });
+      for (const promptId of result.updatedPromptIds) {
+        try { await this.options.convergeAnswer?.(promptId); }
+        catch (error) {
+          this.options.logger.warn({ event: "orphan-answer-convergence-failed", err: safeLogError(error), bindingId: binding.id, promptId, outcome: "deferred" }, "failed to converge an orphaned prompt Answer");
+        }
+      }
     }
     return result.binding ?? binding;
   }

@@ -1640,7 +1640,16 @@ export class SqliteBindingStore implements BindingStorePort {
       const view = this.loadRunCard(input.promptId);
       if (!page || !view || page.state !== "finished" || page.card_id !== input.cardId || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
       const key = `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`;
-      if (this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) { this.database.exec("COMMIT"); return "waiting"; }
+      const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
+      if (existing) {
+        if (existing.state === "dead_letter" || existing.state === "dismissed") {
+          const timestamp = now();
+          this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+            .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
+          this.database.exec("COMMIT"); return "reserved";
+        }
+        this.database.exec("COMMIT"); return "waiting";
+      }
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
       this.database.exec("COMMIT"); return "reserved";
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }

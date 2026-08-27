@@ -557,6 +557,62 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("converges delivered Answer cards after orphaning their prompts", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const runningView = createQueuedRunCard({ promptId: "running", bindingId: "b1", title: "task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "2026-08-27T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "running", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "run" }, view: runningView, rootMessageId: "root", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-running", "card-running");
+    store.markPromptDispatched("running");
+    const convergeAnswer = vi.fn(async () => {});
+    const reconciler = fixture(
+      store,
+      { async listAllPanes() { return []; }, async readOutput() { return ""; } } as unknown as HerdrPort,
+      undefined,
+      pino({ enabled: false }),
+      new BridgeEventBus(),
+      undefined,
+      convergeAnswer
+    );
+
+    await reconciler.reconcile();
+
+    expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", answerCardId: "card-running" });
+    expect(convergeAnswer).toHaveBeenCalledOnce();
+    expect(convergeAnswer).toHaveBeenCalledWith("running");
+    store.close();
+  });
+
+  it("continues orphan Answer convergence after one prompt fails", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    for (const promptId of ["first", "second"]) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: "task", workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-08-27T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, `answer-${promptId}`, `card-${promptId}`);
+    }
+    store.markPromptDispatched("first");
+    const convergeAnswer = vi.fn(async (promptId: string) => { if (promptId === "first") throw new Error("temporary convergence failure"); });
+    const reconciler = fixture(
+      store,
+      { async listAllPanes() { return []; }, async readOutput() { return ""; } } as unknown as HerdrPort,
+      undefined,
+      pino({ enabled: false }),
+      new BridgeEventBus(),
+      undefined,
+      convergeAnswer
+    );
+
+    await expect(reconciler.reconcile()).resolves.toBeUndefined();
+
+    expect(convergeAnswer.mock.calls.map(([promptId]) => promptId)).toEqual(["first", "second"]);
+    expect(store.loadRunCard("first")).toMatchObject({ phase: "failed" });
+    expect(store.loadRunCard("second")).toMatchObject({ phase: "failed" });
+    store.close();
+  });
+
   it("falls back to workspace pane discovery when the authoritative snapshot is unavailable", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -637,12 +693,13 @@ function fixture(
   discoverPane: ConstructorParameters<typeof HerdrRuntimeReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); },
   logger = pino({ enabled: false }),
   lifecycleEvents = new BridgeEventBus(),
-  wakeOutbound?: () => void
+  wakeOutbound?: () => void,
+  convergeAnswer?: (promptId: string) => Promise<void>
 ) {
   return new HerdrRuntimeReconciler({
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     store, herdr, lifecycleEvents,
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
-    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, wakeOutbound
+    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, wakeOutbound, convergeAnswer
   });
 }

@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, chmod, cp, mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -271,6 +271,52 @@ describe("TraexTranscriptReader", () => {
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
       mode: "terminal",
       reason: "ambiguous_transcript"
+    });
+  });
+
+  it("reuses a validated cached path without rescanning unrelated directories", async () => {
+    const { root } = await createTranscript();
+    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+    await expect(reader.open(session())).resolves.toMatchObject({ mode: "typed" });
+    const blocked = join(root, "blocked");
+    await mkdir(blocked);
+    await chmod(blocked, 0o000);
+
+    await expect(reader.open(session())).resolves.toMatchObject({ mode: "typed" });
+
+    await chmod(blocked, 0o700);
+  });
+
+  it("evicts a missing cached path and discovers its replacement", async () => {
+    const { root, path } = await createTranscript();
+    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+    await expect(reader.open(session())).resolves.toMatchObject({ mode: "typed" });
+    const replacement = join(root, "replacement", `rollout-replacement-${sessionId}.jsonl`);
+    await mkdir(dirname(replacement), { recursive: true });
+    await rename(path, replacement);
+
+    await expect(reader.open(session())).resolves.toMatchObject({ mode: "typed" });
+  });
+
+  it("stops discovery globally after the second exact match", async () => {
+    const root = await createRoot();
+    for (const name of ["first", "second"]) {
+      await writeFile(join(root, `${name}-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`);
+    }
+    await mkdir(join(root, "unvisited"));
+    await writeFile(join(root, "unvisited", "extra-entry"), "ignored");
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root, maxDiscoveryEntries: 2 }).open(session())).resolves.toEqual({
+      mode: "terminal", reason: "ambiguous_transcript"
+    });
+  });
+
+  it("falls back safely when transcript discovery exhausts its entry budget", async () => {
+    const { root } = await createTranscript();
+    await writeFile(join(root, "unrelated"), "ignored");
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root, maxDiscoveryEntries: 1 }).open(session())).resolves.toEqual({
+      mode: "terminal", reason: "transcript_validation_failed"
     });
   });
 

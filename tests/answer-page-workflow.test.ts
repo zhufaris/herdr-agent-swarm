@@ -83,4 +83,54 @@ describe("AnswerPageWorkflow", () => {
     expect(store.listAnswerPages("p1")[0]).toMatchObject({ state: "finished", sequence: 2 });
     store.close();
   });
+
+  it("reopens a dead-lettered final folded-card update in place", async () => {
+    const store = readyStore();
+    const code = Array.from({ length: 81 }, (_, index) => `output line ${index}`).join("\n");
+    const answer = `\`\`\`text\n${code}\n\`\`\``;
+    const content = `⏳ 已接收请求\n\n${answer}`;
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
+    const page = store.getActiveAnswerPage("p1")!;
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content })).toBe("reserved");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    await workflow.converge("p1");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    await workflow.converge("p1");
+    const original = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDeadLetter(original.id, "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" });
+    const latestAnswer = `${answer}\n\nlatest terminal state`;
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answer: latestAnswer, answerSegments: [answer, "latest terminal state"], viewVersion: 3 });
+
+    await workflow.converge("p1");
+
+    const [reopened] = store.listPendingOutboundReplies();
+    expect(reopened).toMatchObject({
+      id: original.id, state: "pending", attemptCount: 0, error: null, failureClass: null, httpStatus: null, larkErrorCode: null, deadLetteredAt: null, autoRecoveryCount: 0, viewVersion: 3
+    });
+    expect(reopened!.payload).not.toBe(original.payload);
+    expect(reopened!.payload).toContain("latest terminal state");
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ id: original.id })]);
+    store.close();
+  });
+
+  it("reopens a dismissed final folded-card update in place", async () => {
+    const store = readyStore();
+    const answer = `\`\`\`text\n${Array.from({ length: 81 }, (_, index) => `output line ${index}`).join("\n")}\n\`\`\``;
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
+    const page = store.getActiveAnswerPage("p1")!;
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content: `⏳ 已接收请求\n\n${answer}` })).toBe("reserved");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    await workflow.converge("p1");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    await workflow.converge("p1");
+    const original = store.listPendingOutboundReplies()[0]!;
+    store.database.prepare("UPDATE outbound_replies SET state = 'dismissed', error = 'superseded', attempt_count = 3 WHERE id = ?").run(original.id);
+
+    await workflow.converge("p1");
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: original.id, state: "pending", attemptCount: 0, error: null })]);
+    store.close();
+  });
 });
