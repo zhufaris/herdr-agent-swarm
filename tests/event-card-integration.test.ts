@@ -272,9 +272,14 @@ describe("event-driven card projection", () => {
     await vi.waitFor(() => expect(streamed.length).toBeGreaterThanOrEqual(2));
 
     expect(streamed[0]).toMatch(/^⏳ 已接收请求\n\n```bash\n/);
-    for (const page of streamed) {
+    for (const [index, page] of streamed.entries()) {
       expect(page).toMatch(/```bash\n/);
-      expect(page).toMatch(/\n```$/);
+      expect(page.length).toBeLessThanOrEqual(ANSWER_STREAM_PAGE_LIMIT);
+      if (index < streamed.length - 1) {
+        expect(page).toMatch(/\n```\n\n… 本页接近显示上限/);
+      } else {
+        expect(page).toMatch(/\n```$/);
+      }
     }
     expect(store.loadRunCard("p1")?.answer).toBe(answer);
 

@@ -8,6 +8,8 @@ import { renderLarkMarkdownPage } from "./lark-markdown.js";
  * continuation/recovery protocol.
  */
 export const ANSWER_STREAM_PAGE_LIMIT = 9_000;
+const CONTINUATION_WARNING = "… 本页接近显示上限，后续内容将继续显示在下一张 Answer Card。";
+const CONTINUATION_SUFFIX = `\n\n${CONTINUATION_WARNING}`;
 
 interface RenderedAnswerStreamPage {
   page: string;
@@ -22,7 +24,10 @@ export function answerStreamContent(view: RunCardView): string {
 
 /** Builds a render-safe page without changing the canonical Answer stream. */
 export function renderAnswerStreamPage(content: string, pageStart: number, limit = ANSWER_STREAM_PAGE_LIMIT): RenderedAnswerStreamPage {
-  return renderLarkMarkdownPage(content, pageStart, limit);
+  const rendered = renderLarkMarkdownPage(content, pageStart, limit);
+  if (rendered.nextPageStart === null || limit <= CONTINUATION_SUFFIX.length) return rendered;
+  const bounded = renderLarkMarkdownPage(content, pageStart, limit - CONTINUATION_SUFFIX.length);
+  return { page: `${bounded.page}${CONTINUATION_SUFFIX}`, nextPageStart: bounded.nextPageStart };
 }
 
 export function splitAnswerStreamPage(content: string, limit = ANSWER_STREAM_PAGE_LIMIT): { page: string; remainder: string } {

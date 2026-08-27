@@ -250,7 +250,7 @@ function foldFinalAnswerContent(content: string): FinalAnswerElement[] {
       tag: "collapsible_panel",
       expanded: false,
       border: { color: "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: foldedCodeTitle(block.language, lineCount) } },
+      header: { title: { tag: "plain_text", content: foldedCodeTitle(block.language, lineCount, block.code.length) } },
       elements: [{ tag: "markdown", content: block.source }]
     };
   });
@@ -275,11 +275,23 @@ function splitFinalAnswerBlocks(content: string): Array<{ kind: "markdown"; cont
   return result.filter((block) => block.kind === "code" || block.content.length > 0);
 }
 
-function foldedCodeTitle(language: string, lineCount: number): string {
-  const label = language === "ts" || language === "typescript" ? "TypeScript"
-    : language === "js" || language === "javascript" ? "JavaScript"
-      : language === "json" ? "JSON" : language ? language : "代码块";
-  return language ? `${label} 代码（已折叠 +${lineCount} 行）` : `代码块（已折叠 +${lineCount} 行）`;
+function foldedCodeTitle(language: string, lineCount: number, characterCount: number): string {
+  return `${fencedBlockLabel(language)} · ${lineCount} 行 · ${characterCount} 字符`;
+}
+
+function fencedBlockLabel(language: string): string {
+  const normalized = language.toLowerCase();
+  if (["bash", "sh", "shell", "zsh"].includes(normalized)) return "命令";
+  if (normalized === "text") return "执行输出";
+  if (["diff", "patch"].includes(normalized)) return "变更 Diff";
+  if (["json", "yaml", "yml", "toml", "ini", "conf"].includes(normalized)) return "配置 / JSON";
+  const languages: Record<string, string> = {
+    c: "C", cpp: "C++", csharp: "C#", cs: "C#", css: "CSS", dart: "Dart", go: "Go",
+    html: "HTML", java: "Java", javascript: "JavaScript", js: "JavaScript", jsx: "JSX", kotlin: "Kotlin",
+    lua: "Lua", php: "PHP", py: "Python", python: "Python", r: "R", ruby: "Ruby", rust: "Rust",
+    scala: "Scala", sql: "SQL", swift: "Swift", ts: "TypeScript", tsx: "TSX", typescript: "TypeScript", xml: "XML"
+  };
+  return languages[normalized] ? `${languages[normalized]} 代码` : "代码块";
 }
 
 export function renderHelpCard(): object {

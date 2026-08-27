@@ -403,6 +403,17 @@ source offsets. Synthetic table, diff, and continuation fences count
 toward the 9,000-character rendered limit, while `source_start` always remains an
 offset into the unmodified canonical Answer. This keeps live delivery and restart
 recovery deterministic even when normalization changes the displayed length.
+When a live page has canonical continuation content, its render copy reserves
+space for a short next-card notice. The notice is not persisted as answer text,
+and continuation advances from the source offset returned by the same bounded
+Markdown renderer.
+
+After `stream_finish`, the existing final `card_update` may replace a finished
+Answer page with a structured snapshot. Complete fenced blocks over 80 lines or
+6,000 code characters become independent collapsed panels with semantic labels
+for commands, execution output, diffs, configuration, or known code languages.
+Short and malformed fences remain Markdown; active, frozen, and failed pages are
+not upgraded through this completed-page path.
 
 Compact Main Card and initial Answer Card previews may instead retain the start
 and end of oversized content around a deterministic omission marker. This is a

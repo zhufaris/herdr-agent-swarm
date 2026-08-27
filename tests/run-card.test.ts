@@ -309,7 +309,7 @@ describe("run card", () => {
 
     expect(card.body.elements).toContainEqual(expect.objectContaining({ tag: "markdown", content: "结论" }));
     expect(card.body.elements).toContainEqual(expect.objectContaining({ tag: "markdown", content: "尾部说明" }));
-    expect(JSON.stringify(card)).toContain("TypeScript 代码（已折叠 +81 行）");
+    expect(JSON.stringify(card)).toContain("TypeScript 代码 · 81 行");
     expect(JSON.stringify(card)).toContain('\"expanded\":false');
     expect(JSON.stringify(card)).toContain("const line80 = 80;");
   });
@@ -318,9 +318,39 @@ describe("run card", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fold JSON", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
     const longJson = `{\"data\":\"${"x".repeat(6_001)}\"}`;
     const folded = JSON.stringify(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: `\`\`\`json\n${longJson}\n\`\`\`` }));
-    expect(folded).toContain("JSON 代码（已折叠 +1 行）");
+    expect(folded).toContain("配置 / JSON");
+    expect(folded).toContain("1 行");
+    expect(folded).toContain("字符");
     expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst short = true;\n```" })).toBeNull();
     expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst incomplete = true;" })).toBeNull();
+  });
+
+  it("gives each oversized completed fence a semantic panel title", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Semantic panels", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const long = Array.from({ length: 81 }, (_, index) => `line-${index}`).join("\n");
+    const content = [
+      "说明", "", `\`\`\`bash\n${long}\n\`\`\``, "", `\`\`\`text\n${long}\n\`\`\``, "",
+      `\`\`\`diff\n${long}\n\`\`\``, "", `\`\`\`json\n${long}\n\`\`\``, "", `\`\`\`ts\n${long}\n\`\`\``
+    ].join("\n");
+    const card = renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: content }) as any;
+    const titles = card.body.elements.filter((element: { tag: string }) => element.tag === "collapsible_panel")
+      .map((element: { header: { title: { content: string } } }) => element.header.title.content);
+
+    expect(titles).toEqual(expect.arrayContaining([
+      expect.stringContaining("命令"), expect.stringContaining("执行输出"), expect.stringContaining("变更 Diff"),
+      expect.stringContaining("配置 / JSON"), expect.stringContaining("TypeScript 代码")
+    ]));
+    expect(titles.every((title: string) => title.includes("81 行") && title.includes("字符"))).toBe(true);
+    expect(card.body.elements).toContainEqual(expect.objectContaining({ tag: "markdown", content: "说明" }));
+  });
+
+  it("uses a generic title for an unknown oversized fence language", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Unknown fence", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const code = Array.from({ length: 81 }, (_, index) => `line-${index}`).join("\n");
+    const card = JSON.stringify(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: `\`\`\`made-up\n${code}\n\`\`\`` }));
+
+    expect(card).toContain("代码块 · 81 行");
+    expect(card).not.toContain("made-up 代码");
   });
 
   it("renders a conversational answer with compact metadata and arbitrary continuation pages", () => {

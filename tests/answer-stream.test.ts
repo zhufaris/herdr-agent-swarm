@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage, splitAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { renderLarkMarkdownPage } from "../src/runtime/lark-markdown.js";
 
 describe("Answer stream pagination", () => {
   it("uses a 9,000-character default page limit", () => {
@@ -8,6 +9,32 @@ describe("Answer stream pagination", () => {
 
   it("keeps short content on one card", () => {
     expect(splitAnswerStreamPage("Working\nDone", 28_000)).toEqual({ page: "Working\nDone", remainder: "" });
+  });
+
+  it("adds a render-only continuation warning without changing the canonical boundary", () => {
+    const content = `${"first".repeat(30)}\n${"second".repeat(40)}`;
+    const result = renderAnswerStreamPage(content, 0, 200);
+    const warning = "… 本页接近显示上限，后续内容将继续显示在下一张 Answer Card。";
+    const expected = renderLarkMarkdownPage(content, 0, 200 - warning.length - 2);
+
+    expect(result.nextPageStart).not.toBeNull();
+    expect(result.page).toBe(`${expected.page}\n\n${warning}`);
+    expect(result.nextPageStart).toBe(expected.nextPageStart);
+    expect(content.slice(result.nextPageStart!)).toContain("second");
+    expect(result.page.length).toBeLessThanOrEqual(200);
+  });
+
+  it("reserves warning space when the canonical page would otherwise fill the limit", () => {
+    const result = renderAnswerStreamPage("x".repeat(ANSWER_STREAM_PAGE_LIMIT + 1), 0);
+
+    expect(result.page).toContain("本页接近显示上限");
+    expect(result.page.length).toBeLessThanOrEqual(ANSWER_STREAM_PAGE_LIMIT);
+    expect(result.nextPageStart).toBeGreaterThan(0);
+    expect(result.nextPageStart).toBeLessThan(ANSWER_STREAM_PAGE_LIMIT);
+  });
+
+  it("does not add a continuation warning to a complete page", () => {
+    expect(renderAnswerStreamPage("Working\nDone", 0, 80).page).not.toContain("本页接近显示上限");
   });
 
   it("splits at the latest newline before the CardKit limit without losing text", () => {

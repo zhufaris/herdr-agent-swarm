@@ -59,8 +59,8 @@ describe("AnswerPageWorkflow", () => {
 
   it("upgrades a finished terminal page with folded code exactly once", async () => {
     const store = readyStore();
-    const code = Array.from({ length: 81 }, (_, index) => `const line${index} = ${index};`).join("\n");
-    const answer = `\`\`\`ts\n${code}\n\`\`\``;
+    const code = Array.from({ length: 81 }, (_, index) => `output line ${index}`).join("\n");
+    const answer = `\`\`\`text\n${code}\n\`\`\``;
     const content = `⏳ 已接收请求\n\n${answer}`;
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
     const page = store.getActiveAnswerPage("p1")!;
@@ -76,7 +76,8 @@ describe("AnswerPageWorkflow", () => {
     await workflow.converge("p1");
     const [upgrade] = store.listPendingOutboundReplies();
     expect(upgrade).toMatchObject({ kind: "card_update", cardRole: "answer", rootMessageId: "answer-1" });
-    expect(upgrade?.payload).toContain("TypeScript 代码（已折叠 +81 行）");
+    expect(upgrade?.payload).toContain("执行输出");
+    expect(upgrade?.payload).toContain("81 行");
     await workflow.converge("p1");
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
     expect(store.listAnswerPages("p1")[0]).toMatchObject({ state: "finished", sequence: 2 });
