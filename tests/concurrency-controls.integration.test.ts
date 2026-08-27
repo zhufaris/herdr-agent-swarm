@@ -340,8 +340,98 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "terminal-e1", messageId: "terminal-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "terminal work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nterminal answer` }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nterminal answer` }), { timeout: 4_000 });
     expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "terminal", fallbackReason: "missing_session_identity" }));
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("waits for a first-turn session report before locking output to terminal fallback", async () => {
+    const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
+    let store!: SqliteBindingStore;
+    const opens: Array<string | null> = [];
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open(session) {
+        opens.push(session?.value ?? null);
+        if (!session) {
+          store.recordReportedTraexSession({ bindingId: "b1", paneId: "w1:p1", generation: 1, sessionId, reportedAt: "2026-08-27T17:24:41.778Z" });
+          return { mode: "terminal", reason: "missing_session_identity" };
+        }
+        expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
+        let read = false;
+        return { mode: "typed", cursor: { async readDelta() { if (read) return ""; read = true; return "authoritative JSONL answer"; } } };
+      }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
+        await onDispatched?.();
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ terminal fallback text" });
+        return "done";
+      },
+      async readOutput() { return "◆ terminal fallback text\n────────"; }, async renamePane() {}
+    };
+    store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const { logger, records } = collectingLogger();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "late-session-e1", messageId: "late-session-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
+
+    expect(opens).toEqual([null, sessionId]);
+    expect(store.listRunCards("b1")[0]!.answer).toBe("authoritative JSONL answer");
+    expect(store.listRunCards("b1")[0]!.answer).not.toContain(TERMINAL_FALLBACK_WARNING);
+    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("waits for a first-turn transcript to appear after its session identity is known", async () => {
+    const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
+    let opens = 0;
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open(session) {
+        opens += 1;
+        expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
+        if (opens === 1) return { mode: "terminal", reason: "transcript_not_found" };
+        let read = false;
+        return { mode: "typed", cursor: { async readDelta() { if (read) return ""; read = true; return "JSONL created after session report"; } } };
+      }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
+        await onDispatched?.();
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ terminal fallback text" });
+        return "done";
+      },
+      async readOutput() { return "◆ terminal fallback text\n────────"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const { logger, records } = collectingLogger();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", reportedTraexSessionId: sessionId });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "late-transcript-e1", messageId: "late-transcript-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
+
+    expect(opens).toBe(2);
+    expect(store.listRunCards("b1")[0]!.answer).toBe("JSONL created after session report");
+    expect(store.listRunCards("b1")[0]!.answer).not.toContain(TERMINAL_FALLBACK_WARNING);
+    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });

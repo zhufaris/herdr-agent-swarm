@@ -48,6 +48,8 @@ type TurnOutputSource =
   | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[] };
 
 const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
+const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
+const TRANSCRIPT_IDENTITY_POLL_MS = 50;
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -225,7 +227,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         await this.refreshQueuePositions(bindingId);
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
-        let outputSource = await this.openTranscript(binding);
+        let outputSource = await this.acquireTranscript(binding, abortController.signal);
         this.options.logger.info({
           event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth,
           outputMode: outputSource.mode, ...(outputSource.mode === "terminal" ? { fallbackReason: outputSource.fallbackReason } : {}), outcome: "running"
@@ -378,6 +380,31 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, fallbackReason: "transcript_validation_failed", outcome: "terminal_fallback" }, "could not open typed TraeX transcript");
       return { mode: "terminal", fallbackReason: "transcript_validation_failed", warningPublished: false };
     }
+  }
+
+  private async acquireTranscript(binding: Binding, signal: AbortSignal): Promise<TurnOutputSource> {
+    const startedAt = Date.now();
+    let current = binding;
+    let source = await this.openTranscript(current);
+    const canRetry = () => source.mode === "terminal" && (
+      source.fallbackReason === "missing_session_identity" ||
+      source.fallbackReason === "transcript_not_found" && Boolean(this.options.transcriptReader) && Boolean(current.reportedTraexSessionId || current.agentSessionValue)
+    );
+    if (!canRetry() || current.hasCompletedTurn) return source;
+    const deadline = Date.now() + FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS;
+    while (Date.now() < deadline) {
+      current = this.options.store.getBinding(binding.id) ?? current;
+      if (current.reportedTraexSessionId || current.agentSessionValue) {
+        source = await this.openTranscript(current);
+        if (source.mode === "typed") {
+          this.options.logger.info({ event: "traex-transcript-source-upgraded", bindingId: binding.id, paneId: binding.paneId, waitedMs: Date.now() - startedAt, outcome: "typed" }, "acquired delayed TraeX session identity before prompt dispatch");
+          return source;
+        }
+        if (!canRetry()) return source;
+      }
+      await abortableWait(Math.min(TRANSCRIPT_IDENTITY_POLL_MS, Math.max(1, deadline - Date.now())), signal);
+    }
+    return source;
   }
 
   private async readTypedDelta(source: TurnOutputSource, binding: Binding, promptId: string): Promise<{ source: TurnOutputSource; observation: TraexTranscriptObservation }> {
