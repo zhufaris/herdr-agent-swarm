@@ -13,7 +13,7 @@ import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { answerStreamContent } from "../runtime/answer-stream.js";
 
-const ANSWER_STREAM_INTERVAL_MS = 1_500;
+const ANSWER_STREAM_INTERVAL_MS = 750;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 400;
 
 export class ConversationViewProjector {

@@ -14,6 +14,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
   if (page.state !== "active") return { type: "wait" };
   const content = answerStreamContent(view);
   const rendered = renderAnswerStreamPage(content, page.sourceStart, ANSWER_STREAM_PAGE_LIMIT);
+  if (facts.continuationPending) return { type: "wait" };
   if (facts.latestContent?.state === "pending") return { type: "wait" };
   if (facts.latestContent?.state === "dead_letter") {
     const nextPageIndex = page.pageIndex + 1;
@@ -31,7 +32,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
   }
   if (facts.latestContent?.content !== rendered.page) return { type: "stream-content", content: rendered.page };
   if (rendered.nextPageStart !== null) {
-    if (facts.finishPending || facts.continuationPending) return { type: "wait" };
+    if (facts.finishPending) return { type: "wait" };
     const nextPageIndex = page.pageIndex + 1;
     return {
       type: "continue", currentSummary: `回答将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex,
