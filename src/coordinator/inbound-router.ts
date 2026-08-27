@@ -73,7 +73,7 @@ export class InboundRouter implements InboundRouterPort {
   }
 
   async start(): Promise<void> {
-    const { config, store, herdr, lark, logger, promptRun, reconciler, modelSelection, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
+    const { config, store, herdr, lark, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
     this.startupRecovery = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();

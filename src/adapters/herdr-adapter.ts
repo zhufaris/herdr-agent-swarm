@@ -625,11 +625,6 @@ function paneCommandOutput(before: string, after: string, command: string): stri
     .join("\n").trim());
 }
 
-function isInteractiveModelSelector(command: string, output: string): boolean {
-  return normalizePromptEcho(command) === normalizePromptEcho("/model") &&
-    /Select Model and Effort/i.test(output) && /esc to go back/i.test(output);
-}
-
 function isInteractiveModelModeSelector(output: string): boolean {
   return /Select Model and Mode/i.test(output) && /esc to go back/i.test(output);
 }

@@ -315,13 +315,13 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     if (!this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) return;
     const previous = this.observedTerminalOutputs.get(paneId) ?? "";
     this.observedTerminalOutputs.set(paneId, output);
-    if (!this.options.isBindingBusy(binding.id)) await this.publishTerminalTelemetry(binding, output, fingerprint);
+    if (!this.options.isBindingBusy(binding.id)) await this.publishTerminalTelemetry(binding, output);
     if (outputFingerprint(extractFinalTraexAnswer(output)) === binding.lastOutputFingerprint) return;
     const answer = extractTraexAnswer(extractNewOutput(previous, output));
     if (answer) await this.publish(binding.id, "PaneOutputObserved", { answer });
   }
 
-  private async publishTerminalTelemetry(binding: Binding, output: string, fingerprint = outputFingerprint(output)): Promise<void> {
+  private async publishTerminalTelemetry(binding: Binding, output: string): Promise<void> {
     const telemetry = parseTerminalStreamDelta("", output, "");
     if (!telemetry.model && !telemetry.context) return;
     await this.publish(binding.id, "PaneOutputObserved", {

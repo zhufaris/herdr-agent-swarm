@@ -312,7 +312,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   private async recoverProjectSelection(selection: ProjectSelection): Promise<void> {
-    const { store, config, outbound, logger } = this.options;
+    const { store, outbound, logger } = this.options;
     const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) ?? null : null;
     if (!selection.bindingId || !project) { store.failProjectSelection(selection.id, "Interrupted before recoverable project identity was persisted"); return; }
     try { const binding = await this.createSelectedProject(selection, project, false); store.completeProjectSelection(selection.id, binding.id); if (selection.selectorMessageId) await this.publishSelectionSuccess(selection.id, selection.selectorMessageId, project, binding); logger.info({ event: "project-selection-recovered", selectionId: selection.id, bindingId: binding.id, paneId: binding.paneId, outcome: "completed" }, "resumed interrupted project provisioning"); }

@@ -20,11 +20,11 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   private readonly mainCardWorkflow: MainCardWorkflowPort;
 
   constructor(
-    private readonly config: Pick<BridgeConfig, "projects">,
+    config: Pick<BridgeConfig, "projects">,
     private readonly store: PromptAcceptanceStore,
     private readonly outbound: OutboundIntentPort,
     private readonly outboundWork: OutboundWorkNotifier,
-    private readonly answerPages?: AnswerPageWorkflowPort,
+    answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
     private readonly logger?: Pick<Logger, "warn">
   ) {

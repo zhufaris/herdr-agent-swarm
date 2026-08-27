@@ -3,7 +3,6 @@ import type { Logger } from "pino";
 import { renderModelModeCard, renderModelResultCard } from "../cards/model-card.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
-import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
 import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation, ProjectConfig } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -63,7 +62,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   }
 
   async runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean> {
-    const target = name ?? "list"; const { store, herdr, config } = this.options;
+    const target = name ?? "list"; const { store, herdr } = this.options;
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") { await this.reject(message, "这个话题没有可切换模型的活动 TraeX Pane。"); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "inactive_binding" }); return false; }
     if (!herdr.runPaneCommand) { await this.reject(message, "当前 Herdr adapter 不支持模型切换。"); store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "unsupported" }); return false; }
     const accepted = this.acceptControl({ message, binding, kind: "model", ...(name === null ? {} : { payload: name }) });
@@ -72,7 +71,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   }
 
   async selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void> {
-    const { store, herdr, config, outbound, logger } = this.options; const binding = store.getBinding(bindingId);
+    const { store, herdr, outbound } = this.options; const binding = store.getBinding(bindingId);
     if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
     if (!herdr.beginPaneModelSelection || !herdr.runPaneCommand) {
       await outbound.enqueueCardUpdate(binding.id, action.messageId, `model:${binding.id}:${model}:unsupported`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: "当前 Herdr adapter 不支持模型切换。", switched: false }));
@@ -86,7 +85,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   }
 
   async selectModelMode(action: IncomingLarkCardAction, bindingId: string, operationId: string, mode: string): Promise<void> {
-    const { store, herdr, config, outbound } = this.options;
+    const { store, herdr, config } = this.options;
     const binding = store.getBinding(bindingId);
     const operation = store.getPaneControlOperation(operationId);
     if (!binding?.paneId || binding.chatId !== action.chatId || !operation || operation.bindingId !== binding.id || operation.kind !== "model" || operation.state !== "applied") return;
@@ -235,7 +234,6 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
     });
     this.options.outboundWork.wake();
   }
-  private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card); }
 }
 
 function uniqueProjectsByWorkspace(projects: readonly ProjectConfig[]): Map<string, ProjectConfig | null> {
@@ -251,4 +249,3 @@ function hasNativeAgentSession(binding: Binding): boolean { return Boolean(bindi
 function expiredModelModeDetail(pending: { model: string; modes: string[]; expiresAt: string }): string { return JSON.stringify({ phase: "expired", model: pending.model, modes: pending.modes, expiresAt: pending.expiresAt }); }
 class StaleModelModeError extends Error { constructor() { super("Binding identity changed before model mode input"); } }
 class ExpiredModelModeError extends Error { constructor() { super("Model mode selection expired before input"); } }
-function isApprovalPrompt(output: string): boolean { return /\b(?:approve|approval|required|allow this|waiting for user)\b|等待.*(?:批准|确认|用户)/iu.test(output); }

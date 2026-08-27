@@ -296,9 +296,6 @@ function agentTitle(title: string): string {
   return boundedTitle(title);
 }
 function boundedTitle(title: string): string { return truncate(title.replace(/\s+/g, " " ).trim() || "未命名任务", 64); }
-function requestStatusLabel(phase: RunCardView["phase"]): string {
-  return { queued: "已排队", running: "运行中", blocked: "等待处理", completed: "已完成", failed: "失败" }[phase];
-}
 function requestSummaryLabel(phase: RunCardView["phase"]): string {
   return { queued: "排队中", running: "执行中", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
 }

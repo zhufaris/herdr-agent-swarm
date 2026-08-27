@@ -5,7 +5,7 @@ import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
-import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
+import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";

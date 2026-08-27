@@ -18,7 +18,7 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
   constructor(private readonly options: Options) {}
 
   async listSpaces(message: IncomingLarkMessage): Promise<void> {
-    const { config, herdr, store, logger, outbound } = this.options;
+    const { config, herdr, store, logger } = this.options;
     const panesByWorkspace = new Map<string, HerdrPane[]>(); const errors = new Map<string, string>();
     await Promise.all([...new Set(config.projects.map((project) => project.workspaceId))].map(async (workspaceId) => {
       try { panesByWorkspace.set(workspaceId, await herdr.listPanes(workspaceId)); } catch (error) { const safe = safeLogError(error); errors.set(workspaceId, safe.message); logger.warn({ event: "space-directory-workspace-failed", err: safe, workspaceId, outcome: "partial" }, "workspace unavailable while building space directory"); }
