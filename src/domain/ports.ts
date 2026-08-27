@@ -52,8 +52,19 @@ export interface TraexTranscriptCursorPort {
   readDelta(): Promise<string>;
 }
 
+export type TraexTranscriptFallbackReason =
+  | "missing_session_identity"
+  | "unsupported_session_identity"
+  | "transcript_not_found"
+  | "ambiguous_transcript"
+  | "transcript_validation_failed";
+
+export type TraexTranscriptOpenResult =
+  | { mode: "typed"; cursor: TraexTranscriptCursorPort }
+  | { mode: "terminal"; reason: TraexTranscriptFallbackReason };
+
 export interface TraexTranscriptReaderPort {
-  open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptCursorPort | null>;
+  open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
 }
 
 export interface BindingStorePort {

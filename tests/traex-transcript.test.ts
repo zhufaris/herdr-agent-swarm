@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import type { HerdrAgentSession } from "../src/domain/types.js";
+import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult } from "../src/domain/ports.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
 
 const sessionId = "01a03eb1-c193-7531-83c0-e6c6f70143d4";
@@ -14,93 +16,190 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function createTranscript(id = sessionId): Promise<{ root: string; path: string }> {
+async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "traex-transcript-"));
   roots.push(root);
+  return root;
+}
+
+async function createTranscript(options: { id?: string; useFixture?: boolean; metadata?: unknown } = {}): Promise<{ root: string; path: string }> {
+  const id = options.id ?? sessionId;
+  const root = await createRoot();
   const path = join(root, "2026", "08", "26", `rollout-2026-08-26T15-30-31-${id}.jsonl`);
   await mkdir(dirname(path), { recursive: true });
-  if (id === sessionId) await cp(fixture, path);
-  else await writeFile(path, `${JSON.stringify({ type: "session_meta", payload: { id } })}\n`);
+  if (options.useFixture) await cp(fixture, path);
+  else await writeFile(path, `${JSON.stringify(options.metadata ?? { type: "session_meta", payload: { id } })}\n`);
   return { root, path };
 }
 
-function event(payload: object): string {
-  return `${JSON.stringify({ timestamp: "2026-08-26T16:00:00.000Z", type: "event_msg", payload })}\n`;
+function session(overrides: Partial<HerdrAgentSession> = {}): HerdrAgentSession {
+  return { source: "herdr-lark-bridge:traex", agent: "traex", kind: "id", value: sessionId, ...overrides };
+}
+
+function mutation(items: unknown[], operation = "append"): string {
+  return `${JSON.stringify({ type: "history_mutation", payload: { operation, items } })}\n`;
+}
+
+async function expectTyped(result: TraexTranscriptOpenResult): Promise<TraexTranscriptCursorPort> {
+  expect(result.mode).toBe("typed");
+  if (result.mode !== "typed") throw new Error(`Expected typed transcript, received ${result.reason}`);
+  return result.cursor;
 }
 
 describe("TraexTranscriptReader", () => {
-  it("opens only one exact UUID transcript whose session metadata agrees", async () => {
-    const { root, path } = await createTranscript();
-    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+  it("opens one exact UUID transcript whose session metadata agrees", async () => {
+    const { root } = await createTranscript();
 
-    await expect(reader.open({ source: "herdr-lark-bridge:traex", agent: "traex", kind: "id", value: sessionId })).resolves.not.toBeNull();
-    await expect(reader.open({ source: "herdr-lark-bridge:traex", agent: "traex", kind: "path", value: path })).resolves.toBeNull();
-    await expect(reader.open({ source: "herdr-lark-bridge:traex", agent: "traex", kind: "id", value: "latest" })).resolves.toBeNull();
-
-    const duplicate = join(root, "duplicate", `rollout-copy-${sessionId}.jsonl`);
-    await mkdir(dirname(duplicate), { recursive: true });
-    await cp(path, duplicate);
-    await expect(reader.open({ source: "herdr-lark-bridge:traex", agent: "traex", kind: "id", value: sessionId })).resolves.toBeNull();
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toMatchObject({ mode: "typed" });
   });
 
-  it("rejects a filename match whose session metadata has a different identity", async () => {
+  it("emits only assistant output_text parts in source order", async () => {
     const { root, path } = await createTranscript();
-    await writeFile(path, `${JSON.stringify({ type: "session_meta", payload: { id: "11a03eb1-c193-7531-83c0-e6c6f70143d4" } })}\n`);
-    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open({ source: "bridge", agent: "traex", kind: "id", value: sessionId })).resolves.toBeNull();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([
+      { type: "message", id: "assistant-1", role: "assistant", content: [
+        { type: "reasoning", text: "private reasoning" },
+        { type: "output_text", text: "First answer" },
+        { type: "output_text", text: "Second answer" }
+      ] },
+      { type: "message", id: "assistant-1", role: "assistant", content: [{ type: "output_text", text: "duplicate assistant output" }] },
+      { type: "message", id: "", role: "assistant", content: [{ type: "output_text", text: "empty item identity" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "missing item identity" }] },
+      { type: "message", id: "developer-1", role: "developer", content: [{ type: "output_text", text: "developer instruction" }] },
+      { type: "message", id: "system-1", role: "system", content: [{ type: "output_text", text: "system instruction" }] },
+      { type: "message", id: "user-1", role: "user", content: [{ type: "output_text", text: "user prompt" }] }
+    ]));
+
+    const output = await cursor.readDelta();
+    expect(output).toBe("First answer\n\nSecond answer");
+    expect(output).not.toMatch(/private reasoning|duplicate assistant output|empty item identity|missing item identity|developer instruction|system instruction|user prompt/);
   });
 
-  it("starts at EOF and emits complete appended records once", async () => {
+  it("buffers partial records and emits complete appended items once", async () => {
     const { root, path } = await createTranscript();
-    const cursor = await new TraexTranscriptReader({ sessionsRoot: root }).open({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
-    expect(cursor).not.toBeNull();
-    await expect(cursor!.readDelta()).resolves.toBe("");
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const first = mutation([{ type: "message", id: "msg-first", role: "assistant", content: [{ type: "output_text", text: "first" }] }]);
+    const second = mutation([{ type: "message", id: "msg-second", role: "assistant", content: [{ type: "output_text", text: "second" }] }]);
 
-    const complete = event({ type: "agent_message", message: "**Typed** answer", phase: "commentary" });
-    const partial = event({ type: "agent_message", message: "second record", phase: "final_answer" });
-    await appendFile(path, complete + partial.slice(0, -1));
-    await expect(cursor!.readDelta()).resolves.toBe("**Typed** answer");
-    await expect(cursor!.readDelta()).resolves.toBe("");
+    await appendFile(path, first + second.slice(0, -1));
+    await expect(cursor.readDelta()).resolves.toBe("first");
+    await expect(cursor.readDelta()).resolves.toBe("");
     await appendFile(path, "\n");
-    await expect(cursor!.readDelta()).resolves.toBe("second record");
-    await expect(cursor!.readDelta()).resolves.toBe("");
+    await expect(cursor.readDelta()).resolves.toBe("second");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
-  it("renders explicit command, output, and patch fields without interpreting exec JavaScript", async () => {
+  it("pairs cross-record tool results and suppresses duplicate or invalid identities", async () => {
     const { root, path } = await createTranscript();
-    const cursor = await new TraexTranscriptReader({ sessionsRoot: root }).open({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
-    await appendFile(path, [
-      event({ type: "exec_command_end", call_id: "call-1", command: ["/bin/bash", "-lc", "git diff -- src/main.ts"], stdout: "one\ntwo\n", stderr: "warning\n", exit_code: 0, status: "completed" }),
-      event({ type: "patch_apply_end", call_id: "call-2", success: true, stdout: "Success", stderr: "", changes: { "src/main.ts": { type: "update", unified_diff: "@@ -1 +1 @@\n-old\n+new", move_path: null } } }),
-      `${JSON.stringify({ type: "history_mutation", payload: { items: [{ type: "function_call", name: "exec", arguments: "echo must-not-render" }] } })}\n`,
-      event({ type: "reasoning", text: "private chain of thought" }),
-      event({ type: "future_event", command: ["rm", "-rf", "/"] })
-    ].join(""));
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const call = { type: "function_call", id: "fc-1", call_id: "call-1", name: "exec", arguments: '{"input":"opaque orchestration"}' };
 
-    const output = await cursor!.readDelta();
-    expect(output).toContain("```bash\ngit diff -- src/main.ts\n```");
-    expect(output).toContain("```text\none\ntwo\n```");
-    expect(output).toContain("```text\nwarning\n```");
-    expect(output).toContain("```diff\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old\n+new\n```");
-    expect(output).not.toMatch(/must-not-render|chain of thought|rm -rf/);
+    await appendFile(path, mutation([
+      call,
+      call,
+      { type: "function_call", id: "fc-empty-call", call_id: "", name: "ignored", arguments: "ignored arguments" },
+      { type: "function_call", id: "fc-missing-call", name: "ignored", arguments: "ignored arguments" }
+    ]));
+    const callOutput = await cursor.readDelta();
+    expect(callOutput).toContain("```tool\nexec\n{\"input\":\"opaque orchestration\"}\n```");
+    expect(callOutput.match(/opaque orchestration/g)).toHaveLength(1);
+    expect(callOutput).not.toContain("ignored arguments");
+
+    const result = { type: "function_call_output", id: "fco-1", call_id: "call-1", output: [{ type: "input_text", text: "fixture output" }] };
+    await appendFile(path, mutation([
+      { type: "function_call_output", id: "fco-unmatched", call_id: "call-unknown", output: "unmatched output" },
+      { type: "function_call_output", id: "fco-empty-call", call_id: "", output: "malformed output" },
+      { type: "function_call_output", id: "fco-missing-call", output: "missing identity output" },
+      result,
+      result
+    ]));
+    const resultOutput = await cursor.readDelta();
+    expect(resultOutput).toContain("```text\nfixture output\n```");
+    expect(resultOutput.match(/fixture output/g)).toHaveLength(1);
+    expect(resultOutput).not.toMatch(/unmatched output|malformed output|missing identity output/);
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
-  it("redacts secrets and bounds rendered deltas", async () => {
+  it("uses the sanitized task-jz33 history_mutation records as typed input", async () => {
     const { root, path } = await createTranscript();
-    const cursor = await new TraexTranscriptReader({ sessionsRoot: root, maxRenderedDeltaChars: 240 }).open({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
-    await appendFile(path, event({ type: "exec_command_end", call_id: "secret", command: ["curl", "-H", "Authorization: Bearer top-secret", "https://x.test?access_token=query-secret"], stdout: `TOKEN=plain-secret\n${"x".repeat(500)}`, stderr: "", exit_code: 0 }));
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const fixtureRecords = (await readFile(fixture, "utf8")).trimEnd().split("\n").slice(1).join("\n") + "\n";
 
-    const output = await cursor!.readDelta();
-    expect(output).not.toMatch(/top-secret|query-secret|plain-secret/);
+    await appendFile(path, fixtureRecords);
+    const output = await cursor.readDelta();
+    expect(output).toContain("Typed answer");
+    expect(output).toContain("exec");
+    expect(output).toContain('{"input":"opaque orchestration"}');
+    expect(output).toContain("fixture output");
+  });
+
+  it("redacts secrets and bounds rendered typed deltas", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root, maxRenderedDeltaChars: 240 }).open(session()));
+    await appendFile(path, mutation([{
+      type: "message",
+      id: "secret-message",
+      role: "assistant",
+      content: [{ type: "output_text", text: `Authorization: Bearer top-secret\nTOKEN=plain-secret\n${"x".repeat(500)}` }]
+    }]));
+
+    const output = await cursor.readDelta();
+    expect(output).not.toMatch(/top-secret|plain-secret/);
     expect(output).toContain("[REDACTED]");
     expect(output.length).toBeLessThanOrEqual(240);
   });
 
-  it("uses the sanitized task-jz33 fixture without exposing its historical exec arguments", async () => {
+  it("returns missing_session_identity when Herdr has no native session", async () => {
+    const root = await createRoot();
+    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+
+    await expect(reader.open(null)).resolves.toEqual({ mode: "terminal", reason: "missing_session_identity" });
+    await expect(reader.open(undefined)).resolves.toEqual({ mode: "terminal", reason: "missing_session_identity" });
+  });
+
+  it.each([
+    ["a non-TraeX agent", { agent: "other" }],
+    ["a path identity", { kind: "path" as const }],
+    ["a malformed ID", { value: "latest" }]
+  ])("returns unsupported_session_identity for %s", async (_label, overrides) => {
+    const root = await createRoot();
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session(overrides))).resolves.toEqual({
+      mode: "terminal",
+      reason: "unsupported_session_identity"
+    });
+  });
+
+  it("returns transcript_not_found when no filename matches", async () => {
+    const root = await createRoot();
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
+      mode: "terminal",
+      reason: "transcript_not_found"
+    });
+  });
+
+  it("returns ambiguous_transcript when multiple filenames match", async () => {
     const { root, path } = await createTranscript();
-    const cursor = await new TraexTranscriptReader({ sessionsRoot: root }).open({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
-    const baseline = await readFile(path, "utf8");
-    expect(baseline).toContain("must-not-render");
-    await appendFile(path, event({ type: "agent_message", message: "fixture continuation", phase: "commentary" }));
-    await expect(cursor!.readDelta()).resolves.toBe("fixture continuation");
+    const duplicate = join(root, "duplicate", `rollout-copy-${sessionId}.jsonl`);
+    await mkdir(dirname(duplicate), { recursive: true });
+    await cp(path, duplicate);
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
+      mode: "terminal",
+      reason: "ambiguous_transcript"
+    });
+  });
+
+  it.each([
+    ["mismatched", { type: "session_meta", payload: { id: "11a03eb1-c193-7531-83c0-e6c6f70143d4" } }],
+    ["malformed", { type: "session_meta", payload: { id: 42 } }]
+  ])("returns transcript_validation_failed for %s session metadata", async (_label, metadata) => {
+    const { root } = await createTranscript({ metadata });
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
+      mode: "terminal",
+      reason: "transcript_validation_failed"
+    });
   });
 });
