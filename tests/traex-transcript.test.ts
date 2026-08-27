@@ -143,6 +143,56 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readDelta()).resolves.toContain("工具调用：`read_file`\n\n```json\n{\n  \"path\": \"src/main.ts\",\n  \"line\": 42\n}\n```");
   });
 
+  it("summarizes a skill load and suppresses its paired document output", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{
+      type: "function_call", id: "fc-skill", call_id: "call-skill", name: "exec",
+      arguments: JSON.stringify({ input: "const r = await tools.exec_command({cmd: \"sed -n '1,240p' /data00/home/alice/.trae/skills/brainstorming/SKILL.md\"}); text(r.output)" })
+    }]));
+
+    await expect(cursor.readDelta()).resolves.toBe("已加载技能：brainstorming");
+
+    await appendFile(path, mutation([{
+      type: "function_call_output", id: "fco-skill", call_id: "call-skill",
+      output: "---\nname: brainstorming\n---\n# Full private skill instructions"
+    }]));
+    await expect(cursor.readDelta()).resolves.toBe("");
+  });
+
+  it("summarizes distinct trusted skill paths in source order", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{
+      type: "function_call", id: "fc-skills", call_id: "call-skills", name: "read_files",
+      arguments: JSON.stringify({ paths: [
+        "/data00/home/alice/.agents/skills/test/SKILL.md",
+        "/data00/home/alice/.trae/plugins/cache/package/1.0.0/skills/plugin-guide/SKILL.md",
+        "/data00/home/alice/.agents/skills/test/SKILL.md"
+      ] })
+    }]));
+
+    await expect(cursor.readDelta()).resolves.toBe("已加载技能：test\n已加载技能：plugin-guide");
+  });
+
+  it("does not treat untrusted or relative SKILL.md references as skill loads", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([
+      { type: "function_call", id: "fc-relative", call_id: "call-relative", name: "read_file", arguments: JSON.stringify({ path: "docs/SKILL.md" }) },
+      { type: "function_call_output", id: "fco-relative", call_id: "call-relative", output: "ordinary SKILL.md contents" },
+      { type: "function_call", id: "fc-temp", call_id: "call-temp", name: "read_file", arguments: JSON.stringify({ path: "/tmp/demo/SKILL.md" }) },
+      { type: "function_call_output", id: "fco-temp", call_id: "call-temp", output: "temporary SKILL.md contents" },
+      { type: "message", id: "assistant-skill-prose", role: "assistant", content: [{ type: "output_text", text: "The file is named SKILL.md." }] }
+    ]));
+
+    const output = await cursor.readDelta();
+    expect(output).not.toContain("已加载技能：");
+    expect(output).toContain("ordinary SKILL.md contents");
+    expect(output).toContain("temporary SKILL.md contents");
+    expect(output).toContain("The file is named SKILL.md.");
+  });
+
   it.each(["command", "cmd"])("renders an explicit exec.%s value as bash", async (field) => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

@@ -348,7 +348,12 @@ with its earlier call. Reasoning, developer, system, and user messages; unmatche
 or malformed results; metadata; and unknown items are ignored. Top-level
 `event_msg` records are not Answer-content authority. In particular, the bridge
 does not parse JavaScript orchestration strings to infer shell commands or
-patches. `TRAEX_SESSIONS_ROOT` selects the transcript root and defaults to
+patches. One narrower projection rule recognizes absolute `SKILL.md` reads under
+configured TraeX, agent, or plugin skill roots: the call becomes a concise
+`已加载技能：<name>` line and only its exact `call_id` result is suppressed.
+Ordinary file reads, relative or untrusted paths, assistant prose, and tool
+results that merely mention `SKILL.md` retain the generic rendering above.
+`TRAEX_SESSIONS_ROOT` selects the transcript root and defaults to
 `~/.trae/cli/sessions`.
 
 Each turn selects one Answer source mode before dispatch. An exact, validated

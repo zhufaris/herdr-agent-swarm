@@ -10,6 +10,7 @@ const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
+const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s\"'`]+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
 const envelopeSchema = z.object({
   type: z.string(),
@@ -84,7 +85,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
 
 class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   private readonly emittedItemIds = new Set<string>();
-  private readonly callsById = new Map<string, { name: string }>();
+  private readonly callsById = new Map<string, { name: string; suppressOutput: boolean }>();
 
   constructor(
     private readonly path: string,
@@ -146,12 +147,19 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const call = functionCallSchema.safeParse(item);
     if (call.success) {
       if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
+      const parsedArguments = parseArguments(call.data.arguments);
+      const skillNames = skillNamesFromArguments(parsedArguments);
       this.emittedItemIds.add(call.data.id);
-      this.callsById.set(call.data.call_id, { name: call.data.name });
+      this.callsById.set(call.data.call_id, { name: call.data.name, suppressOutput: skillNames.length > 0 });
+      if (skillNames.length > 0) return skillNames.map((name) => `已加载技能：${name}`).join("\n");
       return renderFunctionCall(call.data.name, call.data.arguments);
     }
     const result = functionOutputSchema.safeParse(item);
     if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
+    if (this.callsById.get(result.data.call_id)!.suppressOutput) {
+      this.emittedItemIds.add(result.data.id);
+      return "";
+    }
     const output = renderFunctionOutput(result.data.output);
     if (!output) return "";
     this.emittedItemIds.add(result.data.id);
@@ -239,6 +247,30 @@ function renderFunctionCall(name: string, argumentsJson: string): string {
 
 function parseArguments(value: string): unknown {
   try { return JSON.parse(value); } catch { return null; }
+}
+
+function skillNamesFromArguments(value: unknown): string[] {
+  const names = new Set<string>();
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > 16) return;
+    if (typeof current === "string") {
+      for (const match of current.matchAll(TRUSTED_SKILL_PATH)) {
+        const segments = match[0].split("/");
+        const name = segments.at(-2);
+        if (name) names.add(name);
+      }
+      return;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1);
+      return;
+    }
+    if (current && typeof current === "object") {
+      for (const item of Object.values(current)) visit(item, depth + 1);
+    }
+  };
+  visit(value, 0);
+  return [...names];
 }
 
 function firstString(record: Record<string, unknown>, keys: string[]): string | null {
