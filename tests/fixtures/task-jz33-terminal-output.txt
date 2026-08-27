@@ -1,7 +1,0 @@
-◆ Edited scripts/render_domain.py (+20 -3)
-    145 +        *_table(
-    146 +            ["Relationship", "Count"],
-    147 ⋮
-    180 -        return old_value
-◆ Ran uv run pytest -q tests/test_render.py
-  └ 11 passed in 0.44s
