@@ -366,6 +366,7 @@ export interface ProjectSelection {
   rootMessageId: string;
   actorOpenId: string;
   requestedTitle: string | null;
+  initialPromptText: string | null;
   selectedProjectId: string | null;
   bindingId: string | null;
   state: ProjectSelectionState;

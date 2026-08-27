@@ -7,7 +7,7 @@ import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-e
 import type { BridgeEvent } from "../domain/events.js";
 import type { InboundStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
-import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, StartupRecoveryDiagnostics } from "../domain/types.js";
+import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, ProjectSelection, StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
@@ -95,6 +95,7 @@ export class InboundRouter implements InboundRouterPort {
     this.stopInboundSubscription = inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
     await lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
     await this.runStartupStage("provisioning", () => provisioning.recover());
+    await this.runStartupStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
     await this.drainInboundMessages();
     this.startupRecovery = { ...this.startupRecovery, state: this.startupRecovery.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
   }
@@ -154,7 +155,27 @@ export class InboundRouter implements InboundRouterPort {
       return;
     }
     const selection = parseProjectAction(action.value);
-    if (selection) await this.options.provisioning.completeSelection(action, selection.selectionId, selection.projectId);
+    if (selection) {
+      const completed = await this.options.provisioning.completeSelection(action, selection.selectionId, selection.projectId);
+      if (completed) await this.enqueueInitialProjectPrompt(completed.binding, completed.selection);
+    }
+  }
+
+  private async recoverInitialProjectPrompts(): Promise<void> {
+    for (const selection of this.options.store.listCompletedProjectSelectionsWithInitialPrompt()) {
+      if (!selection.bindingId) continue;
+      const binding = this.options.store.getBinding(selection.bindingId);
+      if (binding) await this.enqueueInitialProjectPrompt(binding, selection);
+    }
+  }
+
+  private async enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void> {
+    if (!selection.initialPromptText) return;
+    await this.enqueue(binding, {
+      eventId: `project-selection:${selection.id}`, messageId: selection.commandMessageId, chatId: selection.chatId,
+      topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: selection.actorOpenId,
+      text: selection.initialPromptText, mentionsBot: true, isRootMessage: false
+    });
   }
 
   private async drainInboundMessages(): Promise<void> {
@@ -194,7 +215,7 @@ export class InboundRouter implements InboundRouterPort {
       else if (command?.kind === "replace") { if (!binding || binding.attachment !== "orphaned") { await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected"; } else await this.options.provisioning.replace(binding, message.actorOpenId); }
       else if (command?.kind === "resume") disposition = await this.options.sessionAdministration.resume(message, binding) ? "command_completed" : "rejected";
       else if (binding?.state === "active" && binding.lifecycle === "active") { await this.enqueue(binding, message); disposition = "prompt_queued"; }
-      else if (message.isRootMessage && message.mentionsBot) { const created = await this.options.provisioning.createRoot(message, deriveTopicTitle(message.text)); await this.enqueue(created, message, message.text); disposition = "prompt_queued"; }
+      else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
       else { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
     } catch (error) { this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed"); throw error; }
     this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");

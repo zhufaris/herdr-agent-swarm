@@ -119,11 +119,12 @@ export interface BindingStorePort {
   claimRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null;
   updateRetiredPaneCleanup(id: string, state: RetiredPaneCleanupOperation["state"], detail?: string | null): RetiredPaneCleanupOperation | null;
   completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null;
-  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection;
+  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection;
   getProjectSelection(id: string): ProjectSelection | null;
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;
   recoverProcessingProjectSelections(): number;
   listProcessingProjectSelections(): ProjectSelection[];
+  listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[];
   linkProjectSelectionBinding(id: string, bindingId: string): ProjectSelection;
   pauseProjectSelection(id: string, error: string): ProjectSelection;
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
@@ -224,7 +225,7 @@ export interface BindingStorePort {
 
 export type InboundStore = Pick<BindingStorePort,
   | "claimNextInboundMessage" | "findBindingByLarkScope" | "isBridgeMessage" | "markInboundMessageAccepted"
-  | "recordInboundMessage" | "recoverProcessingInboundMessages" | "releaseInboundMessage"
+  | "recordInboundMessage" | "recoverProcessingInboundMessages" | "releaseInboundMessage" | "listCompletedProjectSelectionsWithInitialPrompt" | "getBinding"
 >;
 
 export type LeaseStore = Pick<BindingStorePort,

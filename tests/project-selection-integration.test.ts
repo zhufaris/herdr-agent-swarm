@@ -10,6 +10,48 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project selection flow", () => {
+  it("requires an explicit project click before dispatching a natural-language root request", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
+    const created: string[] = [];
+    const prompts: string[] = [];
+    const selectorCards: object[] = [];
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "task-topic", rootMessageId: "task-root" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card" }; },
+      async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane() { created.push("created"); return { paneId: "w1:p1", workspaceId: "w1", cwd: "/work/alpha", label: "task", agentState: "idle", foregroundExecutables: [] }; },
+      async observeRuntime() { return { pane: { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/work/alpha", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
+      async startTraex() {}, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "natural-e1", messageId: "natural-m1", chatId: "chat", topicId: "natural-topic", rootMessageId: "natural-m1", actorOpenId: "user-1", text: "帮我排查登录超时", mentionsBot: true, isRootMessage: true });
+    await publisher.drain();
+    expect(created).toEqual([]);
+    expect(prompts).toEqual([]);
+    expect(store.listBindings()).toEqual([]);
+    const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
+    expect(store.getProjectSelection(value.selectionId)).toMatchObject({ requestedTitle: "帮我排查登录超时", initialPromptText: "帮我排查登录超时" });
+
+    await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
+    await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
+    await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
+    expect(created).toEqual(["created"]);
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1" });
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
   it("explains where to continue when a message targets an archived or unbound topic", async () => {
     const cards: Array<{ rootMessageId: string; card: object }> = [];
     const lark: LarkPort = {

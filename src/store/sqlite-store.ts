@@ -306,14 +306,14 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; expiresAt: string; card: object }): ProjectSelection {
+  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
       if (existing) { this.database.exec("COMMIT"); return mapProjectSelection(existing); }
       const timestamp = now();
-      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
-        .run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.expiresAt, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
+        .run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.expiresAt, timestamp, timestamp);
       this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, ?, 'pending', 0, ?, ?, ?)`)
         .run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), `message:${input.rootMessageId}`, timestamp, timestamp, timestamp);
       this.database.exec("COMMIT");
@@ -354,6 +354,10 @@ export class SqliteBindingStore implements BindingStorePort {
 
   listProcessingProjectSelections(): ProjectSelection[] {
     return (this.database.prepare("SELECT * FROM project_selections WHERE state = 'processing' ORDER BY created_at").all() as ProjectSelectionRow[]).map(mapProjectSelection);
+  }
+
+  listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[] {
+    return (this.database.prepare("SELECT * FROM project_selections WHERE state = 'completed' AND initial_prompt_text IS NOT NULL ORDER BY created_at").all() as ProjectSelectionRow[]).map(mapProjectSelection);
   }
 
   linkProjectSelectionBinding(id: string, bindingId: string): ProjectSelection {
@@ -1799,7 +1803,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
       CREATE TABLE IF NOT EXISTS project_selections(
         id TEXT PRIMARY KEY, command_message_id TEXT UNIQUE NOT NULL, selector_message_id TEXT, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,
-        requested_title TEXT, selected_project_id TEXT, binding_id TEXT REFERENCES bindings(id), state TEXT NOT NULL CHECK(state IN ('pending','processing','completed','failed','expired')),
+        requested_title TEXT, initial_prompt_text TEXT, selected_project_id TEXT, binding_id TEXT REFERENCES bindings(id), state TEXT NOT NULL CHECK(state IN ('pending','processing','completed','failed','expired')),
         error TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS pane_close_requests(
@@ -2136,6 +2140,8 @@ export class SqliteBindingStore implements BindingStorePort {
   private ensureProjectSelectionColumns(): void {
     const bindingColumns = this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>;
     if (!bindingColumns.some((column) => column.name === "project_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN project_id TEXT");
+    const selectionColumns = this.database.prepare("PRAGMA table_info(project_selections)").all() as Array<{ name: string }>;
+    if (!selectionColumns.some((column) => column.name === "initial_prompt_text")) this.database.exec("ALTER TABLE project_selections ADD COLUMN initial_prompt_text TEXT");
     const outboundColumns = this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
     if (!outboundColumns.some((column) => column.name === "selection_id")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN selection_id TEXT");
   }

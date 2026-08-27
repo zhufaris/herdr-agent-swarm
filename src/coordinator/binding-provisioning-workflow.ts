@@ -14,8 +14,8 @@ import { safeLogError } from "../runtime/safe-error.js";
 
 export interface BindingProvisioningWorkflowPort {
   createRoot(message: IncomingLarkMessage, title: string): Promise<Binding>;
-  selectProject(message: IncomingLarkMessage, requestedTitle: string | null): Promise<void>;
-  completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<void>;
+  selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
+  completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null>;
   attach(message: IncomingLarkMessage, spaceName: string, paneReference: string): Promise<boolean>;
   reset(message: IncomingLarkMessage, binding: Binding | null, requestedTitle: string | null): Promise<boolean>;
   reattach(binding: Binding, paneId: string, actorOpenId: string): Promise<void>;
@@ -89,17 +89,17 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     }
   }
 
-  async selectProject(message: IncomingLarkMessage, requestedTitle: string | null): Promise<void> {
+  async selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null = null): Promise<void> {
     const selectionId = randomUUID();
     this.options.store.createProjectSelection({
       id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId,
-      rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle,
+      rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText,
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: renderProjectSelectorCard({ selectionId, projects: this.options.config.projects })
     });
     this.options.outboundWork.wake();
   }
 
-  async completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<void> {
+  async completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {
     const { store, config, outbound, logger } = this.options;
     const claim = store.claimProjectSelection({
       selectionId, projectId, messageId: action.messageId, chatId: action.chatId, actorOpenId: action.operatorOpenId,
@@ -107,32 +107,37 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     });
     logger.info({ event: "project-selection-decided", selectionId, projectId, messageId: action.messageId, outcome: claim.outcome }, "processed project selection action");
     store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${selectionId}:${projectId}`, outcome: claim.outcome });
-    if (!claim.selection || claim.outcome === "missing" || claim.outcome === "invalid" || claim.outcome === "unauthorized" || claim.outcome === "processing") return;
+    if (!claim.selection || claim.outcome === "missing" || claim.outcome === "invalid" || claim.outcome === "unauthorized" || claim.outcome === "processing") return null;
     if (claim.outcome === "expired") {
       await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:expired`, renderProjectSelectionStatusCard({ status: "expired", message: "请重新发送 /swarm new。" }));
-      return;
+      return null;
     }
     const selection = claim.selection;
     if (claim.outcome === "completed") {
       const binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
       const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) : undefined;
-      if (binding && project) await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
-      return;
+      if (binding && project) {
+        await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
+        return { binding, selection };
+      }
+      return null;
     }
     const project = this.projectsById.get(projectId);
-    if (!project) return;
+    if (!project) return null;
     await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:processing`, renderProjectSelectionStatusCard({ status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) }));
     try {
       const binding = await this.createSelectedProject(selection, project, true);
-      store.completeProjectSelection(selection.id, binding.id);
+      const completedSelection = store.completeProjectSelection(selection.id, binding.id);
       await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
       store.audit({ actorOpenId: action.operatorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
+      return { binding, selection: completedSelection };
     } catch (error) {
       store.pauseProjectSelection(selection.id, errorMessage(error));
       await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:recoverable`, renderProjectSelectionStatusCard({
         status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: provisioningRecoveryMessage(error)
       }));
       logger.error({ event: "project-selection-paused", err: safeLogError(error), selectionId, projectId, outcome: "retry_on_restart" }, "project selection paused at a recoverable checkpoint");
+      return null;
     }
   }
 
