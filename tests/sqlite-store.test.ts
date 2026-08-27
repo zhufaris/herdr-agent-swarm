@@ -17,6 +17,34 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("persists creator identity and consumes scoped card interactions once", () => {
+    store = new SqliteBindingStore(":memory:");
+    const binding = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
+    expect(binding.creatorOpenId).toBe("creator");
+    store.createCardInteraction({ id: "i1", bindingId: "b1", bindingGeneration: 1, actorOpenId: "user", actionKind: "supplement", parentPromptId: null, targetPromptId: null, expiresAt: "2099-01-01T00:00:00.000Z" });
+
+    expect(store.consumeCardInteraction({ id: "i1", actorOpenId: "other", bindingId: "b1", bindingGeneration: 1, now: "2026-08-27T00:00:00.000Z", resultCode: "ok" }).outcome).toBe("unauthorized");
+    expect(store.consumeCardInteraction({ id: "i1", actorOpenId: "user", bindingId: "b1", bindingGeneration: 2, now: "2026-08-27T00:00:00.000Z", resultCode: "ok" }).outcome).toBe("stale");
+    expect(store.consumeCardInteraction({ id: "i1", actorOpenId: "user", bindingId: "b1", bindingGeneration: 1, now: "2026-08-27T00:00:00.000Z", resultCode: "ok" })).toMatchObject({ outcome: "consumed", interaction: { resultCode: "ok" } });
+    expect(store.consumeCardInteraction({ id: "i1", actorOpenId: "user", bindingId: "b1", bindingGeneration: 1, now: "2026-08-27T00:00:00.000Z", resultCode: "ignored" })).toMatchObject({ outcome: "duplicate", interaction: { resultCode: "ok" } });
+  });
+
+  it("atomically converts a queued prompt only for its captured active parent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "parent", workspaceId: "w1", paneId: "w1:p1", requestText: "parent", queuePosition: 1, occurredAt: "2026-08-27T00:00:00.000Z" });
+    const queuedView = createQueuedRunCard({ promptId: "queued", bindingId: "b1", title: "queued", workspaceId: "w1", paneId: "w1:p1", requestText: "queued", queuePosition: 1, occurredAt: "2026-08-27T00:00:01.000Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "parent" }, view: parentView, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("parent", "running");
+    store.markPromptDispatched("parent");
+    store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m-queued", actorOpenId: "u1", body: "queued" }, view: queuedView, rootMessageId: "root", answerCard: {} });
+    store.createCardInteraction({ id: "convert", bindingId: "b1", bindingGeneration: 1, actorOpenId: "u1", actionKind: "convert_queued_prompt", parentPromptId: "parent", targetPromptId: "queued", expiresAt: "2099-01-01T00:00:00.000Z" });
+
+    expect(store.convertQueuedPromptToSteering({ interactionId: "convert", actorOpenId: "u1", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued", now: "2026-08-27T00:00:02.000Z" })).toMatchObject({ outcome: "converted" });
+    expect(store.getPrompt("queued")).toMatchObject({ dispatchKind: "steering", parentPromptId: "parent", state: "queued", body: "queued" });
+    expect(store.convertQueuedPromptToSteering({ interactionId: "convert", actorOpenId: "u1", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued", now: "2026-08-27T00:00:03.000Z" }).outcome).toBe("duplicate");
+  });
   it("atomically projects changed runtime output with its fingerprint and main-card intent", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

@@ -139,6 +139,7 @@ export interface LarkCardActionResult {
 
 export interface Binding {
   id: string;
+  creatorOpenId: string | null;
   projectId: string | null;
   workspaceId: string;
   chatId: string;
@@ -175,6 +176,14 @@ export interface Binding {
   lastActivityAt: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export type CardInteractionActionKind = "supplement" | "convert_queued_prompt" | "more_actions" | "session_control";
+export type CardInteractionState = "active" | "claimed" | "consumed" | "expired";
+export interface CardInteraction {
+  id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind;
+  parentPromptId: string | null; targetPromptId: string | null; state: CardInteractionState; expiresAt: string;
+  resultCode: string | null; createdAt: string; claimedAt: string | null; consumedAt: string | null;
 }
 
 export type BindingMetadataPatch = Partial<Pick<Binding,

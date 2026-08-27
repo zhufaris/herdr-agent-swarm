@@ -66,7 +66,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = store.createPendingBinding({
       id: randomUUID(), projectId: project.id, workspaceId: project.workspaceId, chatId: message.chatId,
-      topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title
+      topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title, creatorOpenId: message.actorOpenId
     });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
     try {
@@ -292,7 +292,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const paneTitle = selection.requestedTitle ?? randomPaneName();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
-    if (!binding) { binding = store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title }); store.linkProjectSelectionBinding(selection.id, binding.id); await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null }); }
+    if (!binding) { binding = store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title, creatorOpenId: selection.actorOpenId }); store.linkProjectSelectionBinding(selection.id, binding.id); await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null }); }
     try {
       let pane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
       if (binding.paneId && !pane) throw new Error(`Provisioned Herdr pane ${binding.paneId} no longer exists`);

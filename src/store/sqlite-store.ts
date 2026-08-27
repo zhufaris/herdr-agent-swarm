@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -14,16 +14,16 @@ import { transitionSession, type AttachmentState, type SessionLifecycle, type Se
 import { normalizeLarkCardElementIds } from "../runtime/lark-card-id.js";
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
-import { mapAnswerPage, mapBinding, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
+import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
 
 const FENCED_TABLES = [
   "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
-  "project_selections", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
+  "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
-  id: "id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
+  id: "id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
     rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id", reportedTraexSessionId: "reported_traex_session_id", reportedTraexSessionAt: "reported_traex_session_at",
   agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value",
   title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
@@ -168,14 +168,65 @@ export class SqliteBindingStore implements BindingStorePort {
       .run(messageId, now());
   }
 
-  createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string }): Binding {
+  createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding {
     const timestamp = now();
     this.database.prepare(`
       INSERT INTO bindings(
-        id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
-    `).run(input.id, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
+        id, creator_open_id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
+    `).run(input.id, input.creatorOpenId ?? null, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
     return this.requireBinding(input.id);
+  }
+
+  createCardInteraction(input: { id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind; parentPromptId: string | null; targetPromptId: string | null; expiresAt: string }): CardInteraction {
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO card_interactions(id, binding_id, binding_generation, actor_open_id, action_kind, parent_prompt_id, target_prompt_id, state, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)` )
+      .run(input.id, input.bindingId, input.bindingGeneration, input.actorOpenId, input.actionKind, input.parentPromptId, input.targetPromptId, input.expiresAt, timestamp);
+    return this.getCardInteraction(input.id)!;
+  }
+
+  getCardInteraction(id: string): CardInteraction | null {
+    const row = this.database.prepare("SELECT * FROM card_interactions WHERE id = ?").get(id) as CardInteractionRow | undefined;
+    return row ? mapCardInteraction(row) : null;
+  }
+
+  consumeCardInteraction(input: { id: string; actorOpenId: string; bindingId: string; bindingGeneration: number; now: string; resultCode: string }): { outcome: "consumed" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getCardInteraction(input.id);
+      if (!current) { this.database.exec("COMMIT"); return { outcome: "missing", interaction: null }; }
+      if (current.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", interaction: current }; }
+      if (current.state === "consumed") { this.database.exec("COMMIT"); return { outcome: "duplicate", interaction: current }; }
+      if (current.expiresAt <= input.now) { this.database.prepare("UPDATE card_interactions SET state = 'expired' WHERE id = ?").run(input.id); this.database.exec("COMMIT"); return { outcome: "expired", interaction: this.getCardInteraction(input.id) }; }
+      if (current.bindingId !== input.bindingId || current.bindingGeneration !== input.bindingGeneration) { this.database.exec("COMMIT"); return { outcome: "stale", interaction: current }; }
+      this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = ?, consumed_at = ? WHERE id = ? AND state = 'active'").run(input.resultCode, input.now, input.id);
+      this.database.exec("COMMIT");
+      return { outcome: "consumed", interaction: this.getCardInteraction(input.id) };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  convertQueuedPromptToSteering(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; targetPromptId: string; now: string }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const interaction = this.getCardInteraction(input.interactionId);
+      if (!interaction) { this.database.exec("COMMIT"); return { outcome: "missing", interaction: null }; }
+      if (interaction.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", interaction }; }
+      if (interaction.state === "consumed") { this.database.exec("COMMIT"); return { outcome: "duplicate", interaction }; }
+      if (interaction.expiresAt <= input.now) { this.database.prepare("UPDATE card_interactions SET state = 'expired' WHERE id = ?").run(input.interactionId); this.database.exec("COMMIT"); return { outcome: "expired", interaction: this.getCardInteraction(input.interactionId) }; }
+      const binding = this.getBinding(input.bindingId);
+      const parent = this.getPrompt(input.parentPromptId);
+      const target = this.getPrompt(input.targetPromptId);
+      const matches = interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
+        && interaction.parentPromptId === input.parentPromptId && interaction.targetPromptId === input.targetPromptId
+        && binding?.generation === input.bindingGeneration && binding.lifecycle === "active"
+        && parent?.bindingId === input.bindingId && parent.state === "running"
+        && target?.bindingId === input.bindingId && target.state === "queued" && target.dispatchKind === "turn";
+      if (!matches) { this.database.exec("COMMIT"); return { outcome: "stale", interaction }; }
+      this.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'steering', parent_prompt_id = ?, updated_at = ? WHERE id = ?").run(input.parentPromptId, input.now, input.targetPromptId);
+      this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = 'converted', consumed_at = ? WHERE id = ?").run(input.now, input.interactionId);
+      this.database.exec("COMMIT");
+      return { outcome: "converted", interaction: this.getCardInteraction(input.interactionId) };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
@@ -1708,7 +1759,7 @@ export class SqliteBindingStore implements BindingStorePort {
         expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS bindings(
-        id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
+        id TEXT PRIMARY KEY, creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
         root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, reported_traex_session_id TEXT, reported_traex_session_at TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
@@ -1724,6 +1775,13 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS inbound_messages_pending ON inbound_messages(state, created_at);
       CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id);
       CREATE TABLE IF NOT EXISTS bridge_messages(message_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS card_interactions(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
+        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control')),
+        parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
+        expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS card_interactions_expiry ON card_interactions(state, expires_at);
       CREATE TABLE IF NOT EXISTS prompt_jobs(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
         actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
@@ -1803,6 +1861,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
+    this.ensureBindingCreatorColumn();
     this.ensureAgentSessionColumns();
     this.ensureReportedTraexSessionColumns();
     this.ensureBindingResetColumns();
@@ -2043,6 +2102,20 @@ export class SqliteBindingStore implements BindingStorePort {
         provisioning_checkpoint = CASE WHEN state IN ('active','archived','orphaned') THEN 'activated' WHEN pane_id IS NOT NULL THEN 'pane_created' ELSE provisioning_checkpoint END,
         archived_at = CASE WHEN state = 'archived' THEN COALESCE(archived_at, updated_at) ELSE archived_at END,
         last_activity_at = COALESCE(last_activity_at, updated_at);
+    `);
+  }
+
+  private ensureBindingCreatorColumn(): void {
+    const columns = this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "creator_open_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN creator_open_id TEXT");
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS card_interactions(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
+        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control')),
+        parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
+        expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS card_interactions_expiry ON card_interactions(state, expires_at);
     `);
   }
 
