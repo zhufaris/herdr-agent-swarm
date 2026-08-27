@@ -34,7 +34,13 @@ interface Options {
   outboundWork: OutboundWorkNotifier;
   scheduler: PromptWorkScheduler;
   wakeRetiredPaneCleanup?: () => void;
+  sessionReporter?: { environment(bindingId: string, generation: number): Record<string, string> };
   logger: Logger;
+}
+
+function paneCreationOptions(bindingId: string, generation: number, projectId: string, title: string, reporter: Options["sessionReporter"]): import("../domain/types.js").HerdrPaneCreationOptions {
+  const environment = reporter?.environment(bindingId, generation);
+  return { bindingId, generation, projectId, placement: "dedicated-tab", title, ...(environment ? { environment } : {}) };
 }
 
 export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowPort {
@@ -64,7 +70,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
     try {
-      const pane = await herdr.createPane(binding.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
+      const pane = await herdr.createPane(binding.workspaceId, project.cwd, paneCreationOptions(binding.id, binding.generation, project.id, paneTitle, this.options.sessionReporter));
       binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
       binding = store.transitionBinding(binding.id, { type: "pane_created" });
       await herdr.startTraex(pane.paneId, config.traex.executable);
@@ -176,7 +182,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (!candidate.created && replacement.provisioningCheckpoint === "selected") throw new Error("Reset candidate may already have created a pane; inspect the Space and attach the surviving pane instead of retrying creation");
       let pane = replacement.paneId ? await herdr.getPane(replacement.paneId) : null;
       if (replacement.provisioningCheckpoint === "selected") {
-        pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: replacement.id, generation: replacement.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
+        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(replacement.id, replacement.generation, project.id, paneTitle, this.options.sessionReporter));
         replacement = store.updateBindingMetadata(replacement.id, paneIdentityPatch(pane));
         replacement = store.transitionBinding(replacement.id, { type: "pane_created" });
       }
@@ -271,7 +277,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
     const existingPane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
     const paneTitle = existingPane?.label?.trim() || binding.title.split(" / ").at(-1) || project.displayName;
-    const pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation + 1, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
+    const nextGeneration = binding.generation + 1;
+    const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle, this.options.sessionReporter));
     await herdr.startTraex(pane.paneId, config.traex.executable);
     const startedPane = await this.requireStartedPane(project, pane.paneId, pane.terminalId ?? null);
     const next = store.transitionBinding(store.attachBindingPane(binding.id, startedPane, true).id, { type: "pane_observed", runtime: startedPane.agentState });
@@ -292,7 +299,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (pane && binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${binding.paneId}`);
       if (binding.provisioningCheckpoint === "selected") {
         if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
-        pane = await herdr.createPane(project.workspaceId, project.cwd, { bindingId: binding.id, generation: binding.generation, projectId: project.id, placement: "dedicated-tab", title: paneTitle });
+        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, binding.generation, project.id, paneTitle, this.options.sessionReporter));
         binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane)); binding = store.transitionBinding(binding.id, { type: "pane_created" });
       }
       if (!pane && binding.paneId) pane = await herdr.getPane(binding.paneId);

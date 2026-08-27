@@ -229,7 +229,7 @@ describe("coordinator concurrency controls", () => {
     ];
     const transcriptReader: TraexTranscriptReaderPort = {
       async open(session) {
-        expect(session).toMatchObject({ agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+        expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
         return { mode: "typed", cursor: { async readDelta() { return deltas.shift() ?? ""; } } };
       }
     };
@@ -253,7 +253,7 @@ describe("coordinator concurrency controls", () => {
     const { logger, records } = collectingLogger();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 30_000, scheduler, undefined, transcriptReader);
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr-lark-bridge:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", reportedTraexSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4", reportedTraexSessionAt: "2026-08-27T12:00:00.000Z" });
 
     await coordinator.start();
     const terminalReadsBeforePrompt = terminalReads;

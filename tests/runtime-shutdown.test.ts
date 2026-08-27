@@ -116,4 +116,32 @@ describe("bridge runtime shutdown", () => {
     expect(calls).toEqual(["projector", "publisher", "health", "coordinator:settled", "fence", "lease", "store"]);
     vi.useRealTimers();
   });
+
+  it("retains SQLite ownership until the session reporter settles", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let settleReporter!: () => void;
+    const reporter = new Promise<void>((resolve) => { settleReporter = resolve; });
+    const runtime = new BridgeRuntimeShutdown({
+      traexSessionReporter: { async stop() { calls.push("reporter:start"); await reporter; calls.push("reporter:end"); } },
+      coordinator: { async stop() { calls.push("coordinator"); } },
+      projector: { async stop() { calls.push("projector"); } },
+      publisher: { async stop() { calls.push("publisher"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, warn() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
+    });
+
+    const shutdown = runtime.shutdown("SIGTERM");
+    await vi.advanceTimersByTimeAsync(70);
+    expect(calls).not.toContain("fence");
+    expect(calls).not.toContain("lease");
+    expect(calls).not.toContain("store");
+
+    settleReporter();
+    await shutdown;
+    expect(calls.slice(-4)).toEqual(["reporter:end", "fence", "lease", "store"]);
+    vi.useRealTimers();
+  });
 });

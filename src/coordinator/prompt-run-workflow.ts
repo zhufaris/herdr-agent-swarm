@@ -348,7 +348,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   private async openTranscript(binding: Binding): Promise<TurnOutputSource> {
     if (!this.options.transcriptReader) return { mode: "terminal", fallbackReason: "transcript_not_found" };
-    const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+    const session = binding.reportedTraexSessionId
+      ? { source: "bridge", agent: "traex", kind: "id" as const, value: binding.reportedTraexSessionId }
+      : binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
       : null;
     try {

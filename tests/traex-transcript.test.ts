@@ -101,7 +101,9 @@ describe("TraexTranscriptReader", () => {
       { type: "function_call", id: "fc-missing-call", name: "ignored", arguments: "ignored arguments" }
     ]));
     const callOutput = await cursor.readDelta();
-    expect(callOutput).toContain("```tool\nexec\n{\"input\":\"opaque orchestration\"}\n```");
+    expect(callOutput).toContain("工具调用：`exec`\n\n```json");
+    expect(callOutput).toContain('"input": "opaque orchestration"');
+    expect(callOutput).not.toContain("```bash\nopaque orchestration");
     expect(callOutput.match(/opaque orchestration/g)).toHaveLength(1);
     expect(callOutput).not.toContain("ignored arguments");
 
@@ -114,7 +116,7 @@ describe("TraexTranscriptReader", () => {
       result
     ]));
     const resultOutput = await cursor.readDelta();
-    expect(resultOutput).toContain("```text\nfixture output\n```");
+    expect(resultOutput).toContain("执行结果：\n\n```text\nfixture output\n```");
     expect(resultOutput.match(/fixture output/g)).toHaveLength(1);
     expect(resultOutput).not.toMatch(/unmatched output|malformed output|missing identity output/);
     await expect(cursor.readDelta()).resolves.toBe("");
@@ -128,9 +130,25 @@ describe("TraexTranscriptReader", () => {
     await appendFile(path, fixtureRecords);
     const output = await cursor.readDelta();
     expect(output).toContain("Typed answer");
-    expect(output).toContain("exec");
-    expect(output).toContain('{"input":"opaque orchestration"}');
+    expect(output).toContain("工具调用：`exec`");
+    expect(output).toContain("```json\n{\n  \"input\": \"opaque orchestration\"\n}\n```");
     expect(output).toContain("fixture output");
+  });
+
+  it("renders non-exec tool arguments as readable JSON", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{ type: "function_call", id: "fc-json", call_id: "call-json", name: "read_file", arguments: '{"path":"src/main.ts","line":42}' }]));
+
+    await expect(cursor.readDelta()).resolves.toContain("工具调用：`read_file`\n\n```json\n{\n  \"path\": \"src/main.ts\",\n  \"line\": 42\n}\n```");
+  });
+
+  it.each(["command", "cmd"])("renders an explicit exec.%s value as bash", async (field) => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{ type: "function_call", id: "fc-" + field, call_id: "call-" + field, name: "exec", arguments: JSON.stringify({ [field]: "npm test" }) }]));
+
+    await expect(cursor.readDelta()).resolves.toContain("```bash\nnpm test\n```");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {
@@ -201,5 +219,11 @@ describe("TraexTranscriptReader", () => {
       mode: "terminal",
       reason: "transcript_validation_failed"
     });
+  });
+
+  it("validates a session metadata record larger than the scan chunk", async () => {
+    const { root } = await createTranscript({ metadata: { type: "session_meta", payload: { id: sessionId, context: "x".repeat(300_000) } } });
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toMatchObject({ mode: "typed" });
   });
 });

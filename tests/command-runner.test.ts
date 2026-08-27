@@ -46,4 +46,14 @@ describe("command error redaction", () => {
     expect(error.message).not.toContain(secret);
     expect(JSON.stringify(error)).not.toContain(secret);
   });
+
+  it("never exposes the bridge session capability from pane environment arguments", () => {
+    const capability = "a".repeat(64);
+    const environment = "HERDR_BRIDGE_SESSION_CAPABILITY=" + capability;
+    const error = new CommandError("herdr", ["tab", "create", "--env", environment], "failed with " + environment + " and " + capability, false);
+
+    expect(error.args).toEqual(["tab", "create", "--env", "HERDR_BRIDGE_SESSION_CAPABILITY=[REDACTED]"]);
+    expect(error.message).not.toContain(capability);
+    expect(JSON.stringify(error)).not.toContain(capability);
+  });
 });

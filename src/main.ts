@@ -1,5 +1,6 @@
 import pino from "pino";
 import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { HerdrCliAdapter } from "./adapters/herdr-adapter.js";
 import { LarkSdkAdapter } from "./adapters/lark-adapter.js";
 import { loadConfig, validateProjectDirectories } from "./config.js";
@@ -38,6 +39,7 @@ import { MainCardWorkflow } from "./coordinator/main-card-workflow.js";
 import { WorktreeNameResolver } from "./runtime/worktree-name-resolver.js";
 import { safeLogError } from "./runtime/safe-error.js";
 import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
+import { TraexSessionReporter } from "./runtime/traex-session-reporter.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
 const buildIdentity = loadBuildIdentity(fileURLToPath(new URL("./build-info.json", import.meta.url)), process.env.BRIDGE_EXPECTED_BUILD_ID);
@@ -49,6 +51,7 @@ const logger = pino({ level: config.logLevel, serializers: { err: safeLogError }
 ] });
 const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
+const traexSessionReporter = new TraexSessionReporter(join(dirname(config.databasePath), "traex-session-reporter.sock"), store, logger);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
 const worktreeNameResolver = new WorktreeNameResolver(runner, config.commandTimeoutMs);
@@ -88,7 +91,7 @@ const projector = new ConversationViewProjector(bus, store, outbound, channelPub
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
-const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
+const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), sessionReporter: traexSessionReporter, logger });
 const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
 const paneControl = new PaneControlWorkflow({ store, herdr, outbound, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
 const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound, logger });
@@ -112,10 +115,11 @@ try {
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
+  await traexSessionReporter.start();
   sqliteIntegrity.start();
   await sqliteIntegrity.run();
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, sqliteIntegrity, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => { outboxRetention.stop(); await sqliteIntegrity.stop(); return shutdown.shutdown(signal); };
   lease.start(() => stopRuntime("lease-lost").then(() => { process.exitCode = 1; }));
@@ -134,6 +138,6 @@ try {
   outboxRetention.stop();
   await sqliteIntegrity.stop();
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
-  else { await Promise.all([herdrEventInbox?.stop(), herdrSocketSubscriber?.stop()]); lease.release(); store.close(); }
+  else { await Promise.all([herdrEventInbox?.stop(), herdrSocketSubscriber?.stop(), traexSessionReporter.stop()]); lease.release(); store.close(); }
   process.exitCode = 1;
 }

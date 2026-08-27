@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { z } from "zod";
 
@@ -7,17 +6,10 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const inputSchema = z.object({
   hook_event_name: z.literal("SessionStart"),
   session_id: z.string().regex(SESSION_ID),
-  source: z.string().min(1).max(64).optional()
+  source: z.enum(["startup", "resume"]).optional()
 }).passthrough();
 
-interface SessionReportRequest {
-  id: string;
-  method: "pane.report_agent_session";
-  params: {
-    pane_id: string; source: string; agent: string; seq: number;
-    agent_session_id: string; session_start_source: string;
-  };
-}
+interface SessionReportRequest { paneId: string; bindingId: string; generation: number; sessionId: string; source: string; capability: string }
 
 type SocketSender = (socketPath: string, request: SessionReportRequest) => Promise<void>;
 
@@ -28,18 +20,14 @@ export async function reportTraexSession(
 ): Promise<"reported" | "dropped"> {
   if (Buffer.byteLength(rawInput) > MAX_INPUT_BYTES || environment.HERDR_ENV !== "1") return "dropped";
   const paneId = environment.HERDR_PANE_ID;
-  const socketPath = environment.HERDR_SOCKET_PATH;
-  if (!paneId || !socketPath) return "dropped";
+  const socketPath = environment.HERDR_BRIDGE_SESSION_SOCKET;
+  const capability = environment.HERDR_BRIDGE_SESSION_CAPABILITY;
+  const bindingId = environment.HERDR_BRIDGE_BINDING_ID;
+  const generation = Number(environment.HERDR_BRIDGE_GENERATION);
+  if (!paneId || !socketPath || !capability || !bindingId || !Number.isInteger(generation) || generation <= 0) return "dropped";
   const parsed = inputSchema.safeParse(parseJson(rawInput));
   if (!parsed.success) return "dropped";
-  await send(socketPath, {
-    id: `herdr-lark-bridge:session:${randomUUID()}`,
-    method: "pane.report_agent_session",
-    params: {
-      pane_id: paneId, source: "herdr-lark-bridge:traex", agent: "traex", seq: Date.now(),
-      agent_session_id: parsed.data.session_id, session_start_source: parsed.data.source ?? "startup"
-    }
-  });
+  await send(socketPath, { paneId, bindingId, generation, sessionId: parsed.data.session_id, source: parsed.data.source ?? "startup", capability });
   return "reported";
 }
 

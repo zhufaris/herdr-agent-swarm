@@ -46,7 +46,7 @@ export class CommandError extends Error {
     options?: unknown
   ) {
     const safeArgs = redactCommandArgs(args);
-    const safeMessage = redactKnownValues(message, args.filter((_, index) => safeArgs[index] === "[REDACTED]"));
+    const safeMessage = redactKnownValues(message, sensitiveCommandArgValues(args));
     super(`Command failed: ${executable} ${safeArgs.join(" " )}: ${safeMessage}`, { cause: options });
     this.name = "CommandError";
     this.args = safeArgs;
@@ -57,7 +57,23 @@ function redactCommandArgs(args: string[]): string[] {
   const safe = [...args];
   if (safe[0] === "pane" && safe[1] === "send-text" && safe.length > 3) safe[3] = "[REDACTED]";
   if (safe[0] === "agent" && safe[1] === "prompt" && safe.length > 3) safe[3] = "[REDACTED]";
+  for (let index = 0; index < safe.length - 1; index += 1) {
+    if (safe[index] !== "--env") continue;
+    if (/^HERDR_BRIDGE_SESSION_CAPABILITY=/.test(safe[index + 1]!)) safe[index + 1] = "HERDR_BRIDGE_SESSION_CAPABILITY=[REDACTED]";
+  }
   return safe;
+}
+
+function sensitiveCommandArgValues(args: string[]): string[] {
+  const values: string[] = [];
+  if (args[0] === "pane" && args[1] === "send-text" && args.length > 3) values.push(args[3]!);
+  if (args[0] === "agent" && args[1] === "prompt" && args.length > 3) values.push(args[3]!);
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] !== "--env") continue;
+    const match = /^HERDR_BRIDGE_SESSION_CAPABILITY=(.*)$/.exec(args[index + 1]!);
+    if (match) values.push(args[index + 1]!, match[1]!);
+  }
+  return values;
 }
 
 function redactKnownValues(message: string, values: string[]): string {

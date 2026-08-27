@@ -9,6 +9,7 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
+const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 
 const envelopeSchema = z.object({
   type: z.string(),
@@ -147,14 +148,14 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
       this.emittedItemIds.add(call.data.id);
       this.callsById.set(call.data.call_id, { name: call.data.name });
-      return fence("tool", `${call.data.name}\n${call.data.arguments}`);
+      return renderFunctionCall(call.data.name, call.data.arguments);
     }
     const result = functionOutputSchema.safeParse(item);
     if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
     const output = renderFunctionOutput(result.data.output);
     if (!output) return "";
     this.emittedItemIds.add(result.data.id);
-    return fence("text", output);
+    return `执行结果：\n\n${fence(output.includes("diff --git") || output.includes("@@ ") ? "diff" : "text", output)}`;
   }
 }
 
@@ -181,26 +182,38 @@ async function findExactTranscriptPaths(root: string, sessionId: string): Promis
 
 async function containsMatchingSessionMeta(path: string, sessionId: string): Promise<boolean> {
   const handle = await open(path, "r");
-  let content: Buffer;
   try {
-    const file = await handle.stat();
-    const buffer = Buffer.alloc(Math.min(file.size, SESSION_META_SCAN_BYTES));
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    content = buffer.subarray(0, bytesRead);
+    const content = await readFirstJsonLine(handle);
+    if (!content) return false;
+    const envelope = envelopeSchema.safeParse(JSON.parse(content));
+    if (!envelope.success || envelope.data.type !== "session_meta") return false;
+    const metadata = sessionMetaSchema.safeParse(envelope.data.payload);
+    return metadata.success && metadata.data.id === sessionId;
   } finally {
     await handle.close();
   }
-  for (const line of content.toString("utf8").split("\n")) {
-    if (!line.trim()) continue;
-    let record: unknown;
-    try { record = JSON.parse(line); } catch { return false; }
-    const envelope = envelopeSchema.safeParse(record);
-    if (!envelope.success) return false;
-    if (envelope.data.type !== "session_meta") continue;
-    const metadata = sessionMetaSchema.safeParse(envelope.data.payload);
-    return metadata.success && metadata.data.id === sessionId;
-  }
   return false;
+}
+
+async function readFirstJsonLine(handle: Awaited<ReturnType<typeof open>>): Promise<string | null> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let position = 0;
+  while (total < SESSION_META_MAX_BYTES) {
+    const buffer = Buffer.alloc(Math.min(SESSION_META_SCAN_BYTES, SESSION_META_MAX_BYTES - total));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) break;
+    const chunk = buffer.subarray(0, bytesRead);
+    const newline = chunk.indexOf(0x0a);
+    if (newline >= 0) {
+      chunks.push(chunk.subarray(0, newline));
+      return Buffer.concat(chunks).toString("utf8").trim();
+    }
+    chunks.push(chunk);
+    total += bytesRead;
+    position += bytesRead;
+  }
+  return null;
 }
 
 function renderFunctionOutput(output: unknown): string {
@@ -212,6 +225,27 @@ function renderFunctionOutput(output: unknown): string {
     .map((part) => part.data.text.trim())
     .filter(Boolean)
     .join("\n\n");
+}
+
+function renderFunctionCall(name: string, argumentsJson: string): string {
+  const parsed = parseArguments(argumentsJson);
+  const command = name === "exec" && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? firstString(parsed as Record<string, unknown>, ["command", "cmd"])
+    : null;
+  if (command) return `工具调用：\`${name}\`\n\n${fence("bash", command)}`;
+  const formatted = parsed === null ? argumentsJson.trim() : JSON.stringify(parsed, null, 2);
+  return `工具调用：\`${name}\`\n\n${fence("json", formatted)}`;
+}
+
+function parseArguments(value: string): unknown {
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    if (typeof record[key] === "string" && record[key].trim()) return record[key].trim();
+  }
+  return null;
 }
 
 function fence(language: string, value: string): string {

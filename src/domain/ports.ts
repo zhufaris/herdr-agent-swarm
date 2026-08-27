@@ -113,6 +113,7 @@ export interface BindingStorePort {
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[];
   updateBinding(id: string, patch: Partial<Binding>): Binding;
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding;
+  recordReportedTraexSession(input: { bindingId: string; paneId: string; generation: number; sessionId: string; reportedAt: string }): "recorded" | "duplicate" | "rejected";
   transitionBinding(id: string, transition: SessionTransition): Binding;
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication;
   checkpointRuntimeOutput(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; fingerprint: string }): boolean;

@@ -320,7 +320,10 @@ replacing the whole Lark message. The original Lark message remains the request
 record.
 
 For bridge-started TraeX processes, a process-local `SessionStart` hook reports
-the native session ID to Herdr. `PromptRunWorkflow` opens the corresponding
+the native session ID to the bridge private capability-authenticated Unix
+socket, which persists the identity in SQLite. Only `startup` and `resume` are
+accepted; a new bridge-owned session uses `/swarm reset` rather than local
+`/clear`. `PromptRunWorkflow` opens the corresponding
 transcript at EOF before dispatch, but only when exactly one filename matches
 the UUID and its `session_meta` record carries the same ID. It reads complete
 newline-terminated records from a byte cursor. `history_mutation.payload.items`
@@ -362,7 +365,7 @@ Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity remain in terminal mode for their lifetime. A
 fresh bridge-created pane, or a pane explicitly reset through the bridge,
 becomes eligible for typed mode only after its managed `SessionStart` hook has
-registered the exact TraeX UUID with Herdr. The bridge never matches a transcript
+registered the exact TraeX UUID in SQLite. The bridge never matches a transcript
 from cwd, timestamps, titles, or newest-file order, and it does not automatically
 restart or replace existing panes to enable typed output.
 

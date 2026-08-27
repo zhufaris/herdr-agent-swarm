@@ -113,7 +113,8 @@ export class HerdrCliAdapter implements HerdrPort {
 
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> {
     const identityArgs = options ? [
-      "--env", `HERDR_BRIDGE_BINDING_ID=${options.bindingId}`, "--env", `HERDR_BRIDGE_GENERATION=${options.generation}`, "--env", `HERDR_PROJECT_ID=${options.projectId}`
+      "--env", `HERDR_BRIDGE_BINDING_ID=${options.bindingId}`, "--env", `HERDR_BRIDGE_GENERATION=${options.generation}`, "--env", `HERDR_PROJECT_ID=${options.projectId}`,
+      ...Object.entries(options.environment ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`])
     ] : [];
     if (options?.placement === "dedicated-tab") {
       const result = await this.json([
@@ -507,7 +508,7 @@ export class HerdrCliAdapter implements HerdrPort {
 
 function sessionHookOverride(reporterPath: string): string {
   const command = `node ${shellQuote(reporterPath)}`;
-  const override = `hooks.SessionStart=[{matcher="startup|resume|clear",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+  const override = `hooks.SessionStart=[{matcher="startup|resume",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
   // `herdr pane run` passes its command through the pane shell, so quote the
   // complete TOML override as one shell argument rather than only its command.
   return shellQuote(override);
