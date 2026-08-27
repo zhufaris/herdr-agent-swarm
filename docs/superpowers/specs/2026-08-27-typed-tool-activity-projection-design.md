@@ -12,19 +12,24 @@ recognition remains useful, but becomes one policy in the general projector.
 
 ## Display protocol
 
-Assistant `output_text` remains unchanged. Tool activity uses at most two compact
-entries because Answer delivery is append-only and cannot replace an earlier
-running line:
+Assistant `output_text` remains unchanged. Ordinary tool calls are silent until
+their paired result arrives, then use one consistent field order:
 
-- call: `▶ <Type> · <Target>`
-- successful result: `✓ <Type> · <Summary>`
-- failed result: `✗ <Type> · <Summary>` followed by a fenced tail of at most 20
-  non-empty output lines; the entire failure detail is capped at 4,000
-  characters after redaction.
+- successful result: `✓ <Type> · <Target> [· <Useful summary>]`
+- running result: `… <Type> · <Target> · 运行中`
+- failed result: `✗ <Type> · <Target> · <Failure summary>` followed by a fenced
+  tail of at most 20 non-empty output lines; the entire failure detail is capped
+  at 4,000 characters after redaction.
+
+Because Answer delivery is append-only, a tool that first reports a running
+result and later completes may produce two entries. No initial call entry is
+emitted, so ordinary synchronous tools produce exactly one activity line.
 
 No successful tool result includes raw stdout, file contents, JSON payloads,
-patch bodies, agent listings, or test logs. Unknown tools use `Tool` as the type,
-their declared tool name as the target, and `已完成` as the successful summary.
+patch bodies, agent listings, or test logs. Generic completion words such as
+`成功`, `已完成`, and `已读取` are omitted because the leading `✓` already carries
+that meaning. Unknown tools use `Tool` as the type and their declared tool name
+as the target.
 
 ## Tool categories
 
@@ -32,22 +37,23 @@ Classification uses the declared function name plus structured arguments. It
 may inspect nested command-wrapper text for known tool invocations, but never
 executes or evaluates it.
 
-| Category | Call target | Successful summary |
+| Category | Result target | Optional successful summary |
 | --- | --- | --- |
-| Skill | distinct skill directory names | no call line; result emits `✓ Skill · <names> · 已加载` |
-| Read | bounded basename or relative path | `已读取 · N 行` when count is available, otherwise `已读取` |
-| Search | bounded query and optional scope | `发现 N 条` when count is available, otherwise `搜索完成` |
-| Edit | bounded path list | `已更新` or `N 个文件已更新` |
-| Command | bounded command label rendered as Markdown inline code | `成功` plus parsed test/build counts when available |
-| Wait | bounded session or task label | `已完成` or `仍在运行` |
-| Agent | bounded agent/task name | `已启动`, `已完成`, or `状态已更新` |
-| Tool | declared function name | `已完成` |
+| Skill | distinct skill directory names | none |
+| Read | bounded basename or relative path | line count when available |
+| Search | bounded query and optional scope | match count when available |
+| Edit | bounded path list | changed-file count when available |
+| Command | bounded command label rendered as Markdown inline code | test/build facts when available |
+| Wait | bounded session or task label | none |
+| Agent | bounded agent/task name | meaningful terminal state when available |
+| Tool | declared function name | none |
 
 Targets are single-line, Markdown-escaped, and capped at 160 characters. Command
 targets alone are wrapped as Markdown inline code, for example
-<code>▶ Command · `npm test`</code>; other categories remain plain text. A
+<code>✓ Command · `npm test`</code>; other categories remain plain text. A
 command target prefers the inner `exec_command.cmd`; otherwise it
-uses the declared function name. Embedded backticks are escaped before wrapping.
+uses the neutral fallback `command`, never the wrapper name `exec`. Embedded
+backticks are escaped before wrapping.
 Targets must not show environment values, prompt bodies, authorization tokens,
 or full serialized arguments.
 
@@ -62,8 +68,8 @@ string. It derives status only from explicit structured evidence:
 - known collaboration result status fields.
 
 An explicit non-zero exit code, failed/error status, or `Script failed` is a
-failure. An explicit running session is non-terminal and renders `仍在运行`.
-All other matched results are treated as successful completion. The projector
+failure. An explicit running session is non-terminal and renders the same stored
+target followed by `运行中`. All other matched results are treated as successful completion. The projector
 does not infer failure from arbitrary words such as “error” inside file content
 or test source.
 
@@ -75,8 +81,8 @@ compact facts:
 - generated build identity;
 - changed-file counts from patch or edit results.
 
-If no recognizer matches, the summary is `成功`. These recognizers never copy
-the surrounding output.
+If no recognizer matches, no summary field is appended. These recognizers never
+copy the surrounding output.
 
 ## Skill policy
 
@@ -88,7 +94,7 @@ absolute path ending in `/SKILL.md` beneath one of these roots:
 - `/data00/home/<user>/.trae/plugins/`
 
 The projector emits no call entry. When the exact paired result arrives it emits
-one successful Skill entry containing distinct skill names in source order. It
+one `✓ Skill · <names>` entry containing distinct skill names in source order. It
 does not retain, summarize, truncate, count, fence, or otherwise render any part
 of the skill output. A failed skill read emits the normal failed Skill entry and
 the bounded diagnostic tail, because failure details are operational rather than
@@ -98,8 +104,8 @@ skill contents.
 
 Create `src/runtime/tool-activity-projector.ts` as a pure deep module. Its public
 surface accepts a function call, produces a stored projection descriptor plus an
-optional call entry, and accepts that descriptor with a function result to
-produce the result entry. It owns argument traversal, tool classification,
+empty call entry, and accepts that descriptor with a function result to produce
+the result entry. It owns argument traversal, tool classification,
 target bounding, result normalization, explicit status detection, compact
 summary extraction, failure-tail selection, Markdown escaping, and final
 per-entry bounds.
@@ -115,9 +121,11 @@ so secrets cannot influence retained boundaries.
 
 ## Ordering and lifecycle
 
-- Non-skill calls emit a compact call entry immediately.
-- A matched result emits one compact result entry.
-- Skill calls emit nothing until the matched result.
+- All calls store a compact descriptor but emit no Answer content.
+- A matched terminal result emits one compact result entry containing the stored
+  target.
+- A running result emits one running entry; a later terminal result may append a
+  completion entry for the same target.
 - Duplicate item IDs and duplicate call IDs remain suppressed.
 - Unmatched, malformed, and unknown transcript items remain ignored.
 - Call descriptors remain available across `readDelta()` calls.
@@ -128,6 +136,8 @@ so secrets cannot influence retained boundaries.
 
 - Raw successful tool output never enters the canonical Answer after this
   projector.
+- Ordinary synchronous tools emit one activity line rather than separate call
+  and result lines.
 - Assistant output is not summarized, truncated by this policy, or reclassified.
 - Failure detail is limited to the last 20 non-empty lines and 4,000 characters.
 - Skill output is never retained on success.
