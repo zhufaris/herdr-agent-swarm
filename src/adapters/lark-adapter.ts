@@ -1,8 +1,9 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
+import { z } from "zod";
 import type { LarkPort } from "../domain/ports.js";
-import type { IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
+import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/types.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
@@ -37,7 +38,7 @@ export class LarkSdkAdapter implements LarkPort {
     });
   }
 
-  async start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<void>): Promise<void> {
+  async start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<LarkCardActionResult | void>): Promise<void> {
     const dispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data) => {
         const normalized = normalizeMessage(data, this.options.botOpenId);
@@ -47,7 +48,7 @@ export class LarkSdkAdapter implements LarkPort {
       "card.action.trigger": async (data: lark.RawCardActionEvent) => {
         const normalized = normalizeCardActionEvent(data);
         if (!normalized || normalized.chatId !== this.options.chatId || !onCardAction) return;
-        await onCardAction(normalized);
+        return onCardAction(normalized);
       }
     });
     await this.wsClient.start({ eventDispatcher: dispatcher });
@@ -235,8 +236,18 @@ export function normalizeCardActionEvent(data: lark.RawCardActionEvent): Incomin
   if (!messageId || !chatId || !operatorOpenId || data.action?.value === undefined) return null;
   return {
     messageId, chatId, operatorOpenId, value: data.action.value,
-    ...(typeof data.action.option === "string" ? { option: data.action.option } : {})
+    ...(typeof data.action.option === "string" ? { option: data.action.option } : {}),
+    ...normalizeFormValues((data.action as { form_value?: unknown }).form_value)
   };
+}
+
+const CardFormValuesSchema = z.record(z.unknown());
+
+function normalizeFormValues(value: unknown): { formValues: Record<string, string> } | object {
+  const parsed = CardFormValuesSchema.safeParse(value);
+  if (!parsed.success) return {};
+  const formValues = Object.fromEntries(Object.entries(parsed.data).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  return Object.keys(formValues).length ? { formValues } : {};
 }
 
 function requireMessageId(value: string | undefined): string {

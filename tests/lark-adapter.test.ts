@@ -10,6 +10,7 @@ const streamContent = vi.fn();
 const updateSettings = vi.fn();
 const updateCardEntity = vi.fn();
 let clientOptions: Record<string, unknown> | undefined;
+let registeredHandlers: Record<string, (data: unknown) => Promise<unknown>> = {};
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
     constructor(options: Record<string, unknown>) { clientOptions = options; }
@@ -18,7 +19,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
   },
   defaultHttpInstance: { request: vi.fn(), get: vi.fn(), delete: vi.fn(), head: vi.fn(), options: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn() },
   WSClient: class { async start() {} close() {} },
-  EventDispatcher: class { register() { return this; } }
+  EventDispatcher: class { register(handlers: Record<string, (data: unknown) => Promise<unknown>>) { registeredHandlers = handlers; return this; } }
 }));
 
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
@@ -27,6 +28,7 @@ beforeEach(() => {
   createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
   createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset(); updateCardEntity.mockReset();
   clientOptions = undefined;
+  registeredHandlers = {};
 });
 
 describe("Lark streaming Answer cards", () => {
@@ -272,5 +274,22 @@ describe("Lark card action normalization", () => {
     })).toMatchObject({
       messageId: "om_model", option: "GPT-5.6-Terra", value: { action: "select_model", bindingId: "binding-1" }
     });
+  });
+
+  it("normalizes string form values and drops non-string input", () => {
+    expect(normalizeCardActionEvent({
+      context: { open_message_id: "om_form", open_chat_id: "oc_1" }, operator: { open_id: "ou_1" },
+      action: { tag: "button", value: { action: "submit_supplement" }, form_value: { supplement: "add tests", ignored: { secret: true } } }
+    } as never)).toMatchObject({ formValues: { supplement: "add tests" } });
+  });
+
+  it("returns Toast and card responses from the registered long-connection callback", async () => {
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    await adapter.start(async () => undefined, async () => ({ toast: { type: "success", content: "已加入当前执行" }, card: { schema: "2.0" } }));
+
+    await expect(registeredHandlers["card.action.trigger"]!({
+      context: { open_message_id: "om_1", open_chat_id: "chat" }, operator: { open_id: "ou_1" },
+      action: { value: { action: "submit_supplement" }, form_value: { supplement: "add tests" } }
+    })).resolves.toEqual({ toast: { type: "success", content: "已加入当前执行" }, card: { schema: "2.0" } });
   });
 });

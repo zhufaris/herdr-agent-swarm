@@ -129,6 +129,12 @@ export interface IncomingLarkCardAction {
   operatorOpenId: string;
   value: unknown;
   option?: string | null;
+  formValues?: Record<string, string>;
+}
+
+export interface LarkCardActionResult {
+  toast?: { type: "success" | "warning" | "error"; content: string };
+  card?: object;
 }
 
 export interface Binding {
