@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
@@ -450,7 +450,6 @@ export class SqliteBindingStore implements BindingStorePort {
         && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
       const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
       if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) {
-        binding = this.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
         this.database.exec("COMMIT");
         return { outcome: "terminal_identity_changed", binding };
       }
@@ -475,6 +474,59 @@ export class SqliteBindingStore implements BindingStorePort {
         AND lifecycle IN ('active', 'draining') AND attachment != 'orphaned'
     `).run(input.fingerprint, now(), input.bindingId, input.expectedPaneId, input.expectedGeneration);
     return Number(result.changes) === 1;
+  }
+
+  checkpointRuntimeOutputWithProjection(input: RuntimeOutputProjectionInput): RuntimeOutputProjectionResult {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const binding = this.requireBinding(input.bindingId);
+      if (!this.matchesRuntimeFence(binding, input.expectedPaneId, input.expectedGeneration)) { this.database.exec("COMMIT"); return { outcome: "stale", view: null, outboxReserved: false }; }
+      const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
+      if (current.viewVersion > input.view.viewVersion) { this.database.exec("COMMIT"); return { outcome: "stale", view: current, outboxReserved: false }; }
+      if (binding.lastOutputFingerprint === input.fingerprint) { this.database.exec("COMMIT"); return { outcome: "unchanged", view: current, outboxReserved: false }; }
+      this.database.prepare("UPDATE bindings SET last_output_fingerprint = ?, updated_at = ? WHERE id = ?").run(input.fingerprint, now(), input.bindingId);
+      this.saveTopicView(input.view);
+      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.card);
+      this.database.exec("COMMIT");
+      return { outcome: "projected", view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  orphanBindingWithProjection(input: OrphanBindingProjectionInput): OrphanBindingProjectionResult {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      let binding = this.requireBinding(input.bindingId);
+      if (binding.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration) { this.database.exec("COMMIT"); return { outcome: "stale", binding: null, view: null, updatedPromptIds: [], outboxReserved: false }; }
+      if (binding.attachment === "orphaned") { this.database.exec("COMMIT"); return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
+      const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
+      if (current.viewVersion > input.view.viewVersion) { this.database.exec("COMMIT"); return { outcome: "stale", binding, view: current, updatedPromptIds: [], outboxReserved: false }; }
+      binding = this.transitionBinding(input.bindingId, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
+      if (binding.attachment !== "orphaned") { this.database.exec("COMMIT"); return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
+      this.database.prepare(`
+        UPDATE prompt_jobs SET
+          state = CASE state WHEN 'queued' THEN 'cancelled' ELSE 'failed' END,
+          observation_state = 'completed', error = ?, updated_at = ?
+        WHERE binding_id = ? AND state IN ('running', 'queued')
+      `).run(input.reason, input.occurredAt, input.bindingId);
+      const updatedPromptIds: string[] = [];
+      let answerOutboxReserved = false;
+      for (const view of this.listRunCardsByPhases(input.bindingId, ["running", "blocked", "queued"])) {
+        const next = { ...view, phase: "failed" as const, notice: input.reason, finishedAt: input.occurredAt, queuePosition: 0, viewVersion: view.viewVersion + 1, updatedAt: input.occurredAt };
+        this.saveRunCard(next);
+        updatedPromptIds.push(next.promptId);
+        if (!next.answerCardId && next.answerMessageId) {
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(input.renderRunCard(next)) });
+          answerOutboxReserved = true;
+        } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${next.promptId}:answer`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
+          answerOutboxReserved = true;
+        }
+      }
+      this.saveTopicView(input.view);
+      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
+      this.database.exec("COMMIT");
+      return { outcome: "orphaned", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds, outboxReserved: answerOutboxReserved || reservation === "reserved" };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding {
@@ -1430,22 +1482,33 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.saveTopicView(view);
-      const current = this.loadTopicView(view.bindingId);
-      if (!current || current.viewVersion !== view.viewVersion) { this.database.exec("COMMIT"); return "waiting"; }
-      const binding = this.requireBinding(view.bindingId);
-      if (current.viewVersion <= current.deliveredVersion) { this.database.exec("COMMIT"); return "current"; }
-      const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND COALESCE(view_version, 0) >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
-      if (existingCurrent) { this.database.exec("COMMIT"); return "waiting"; }
-      if (!binding.statusMessageId) {
-        const pending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
-        if (pending) { this.database.exec("COMMIT"); return "waiting"; }
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
-      } else {
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
-      }
+      const outcome = this.reserveMainCardInTransaction(view, rootMessageId, card);
       this.database.exec("COMMIT");
-      return "reserved";
+      return outcome;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private matchesRuntimeFence(binding: Binding, expectedPaneId: string, expectedGeneration: number): boolean {
+    return binding.paneId === expectedPaneId && binding.generation === expectedGeneration
+      && (binding.lifecycle === "active" || binding.lifecycle === "draining") && binding.attachment !== "orphaned";
+  }
+
+  private reserveMainCardInTransaction(view: TopicViewState, rootMessageId: string | null, card: object): MainCardReservationOutcome {
+    if (!rootMessageId) return "current";
+    const current = this.loadTopicView(view.bindingId);
+    if (!current || current.viewVersion !== view.viewVersion) return "waiting";
+    const binding = this.requireBinding(view.bindingId);
+    if (current.viewVersion <= current.deliveredVersion) return "current";
+    const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND COALESCE(view_version, 0) >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
+    if (existingCurrent) return "waiting";
+    if (!binding.statusMessageId) {
+      const pending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
+      if (pending) return "waiting";
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+    } else {
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
+    }
+    return "reserved";
   }
 
   saveRunCard(view: RunCardView): RunCardView {
@@ -1568,6 +1631,19 @@ export class SqliteBindingStore implements BindingStorePort {
       });
       return "reserved";
     });
+  }
+
+  reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const page = this.database.prepare("SELECT state, card_id, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; card_id: string | null; message_id: string | null } | undefined;
+      const view = this.loadRunCard(input.promptId);
+      if (!page || !view || page.state !== "finished" || page.card_id !== input.cardId || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
+      const key = `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`;
+      if (this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) { this.database.exec("COMMIT"); return "waiting"; }
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
+      this.database.exec("COMMIT"); return "reserved";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   private reserveAnswerPageIntent(promptId: string, pageIndex: number, reserve: (page: AnswerPage, view: RunCardView) => AnswerPageReservationOutcome): AnswerPageReservationOutcome {

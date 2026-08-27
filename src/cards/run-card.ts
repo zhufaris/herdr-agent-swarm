@@ -1,7 +1,7 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView, RunProgressEvent } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
-import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
+import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
@@ -26,6 +26,15 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
   archived: { label: "已归档", icon: "□", color: "grey" },
   orphaned: { label: "绑定异常", icon: "!", color: "orange" }
 };
+
+const MAIN_CARD_PREVIEW_LIMIT = 2_000;
+const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
+const CODE_FOLD_LINE_LIMIT = 80;
+const CODE_FOLD_CHARACTER_LIMIT = 6_000;
+
+interface TopicCardRenderOptions {
+  lastActivityAt?: string | null;
+}
 
 export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }): object {
   return {
@@ -74,7 +83,7 @@ export function renderAttachStatusCard(input: { spaceName: string; paneId: strin
   };
 }
 
-export function renderRunCard(input: TopicViewState): object {
+export function renderRunCard(input: TopicViewState, options: TopicCardRenderOptions = {}): object {
   const view = STATE_VIEW[input.phase];
   const elements: object[] = [
     { tag: "markdown", content: verticalMetrics(input) },
@@ -86,18 +95,18 @@ export function renderRunCard(input: TopicViewState): object {
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**执行进度**\n🧠 正在分析请求" });
 
   if (input.answer?.trim()) {
-    elements.push({ tag: "markdown", content: `**最近输出**\n\n${truncateLarkMarkdownTail(input.answer.trim(), 2_000)}` });
+    elements.push({ tag: "markdown", content: `**最近输出**\n\n${truncateLarkMarkdownMiddle(input.answer.trim(), MAIN_CARD_PREVIEW_LIMIT)}` });
   } else if (input.phase === "blocked") {
-    elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
+    elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   } else if (input.phase === "error" || input.phase === "orphaned") {
-    elements.push(callout(input.phase === "error" ? "red" : "orange", input.notice ?? "请检查 bridge 日志与 Herdr pane。"));
+    elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请检查 bridge 日志与 Herdr pane。"));
   } else if (input.phase === "running") {
     elements.push({ tag: "markdown", content: "正在等待 TraeX 完成。本卡片会在状态变化时更新。" });
   } else if (input.phase === "queued") {
     elements.push({ tag: "markdown", content: "消息已进入该话题的 FIFO 队列。" });
   }
 
-  elements.push({ tag: "markdown", content: `${view.icon} ${view.label} · ${input.title}` });
+  elements.push({ tag: "markdown", content: `${topicStateLine(input, options)} · ${input.title}` });
 
   return {
     schema: "2.0",
@@ -111,23 +120,25 @@ export function renderRunCard(input: TopicViewState): object {
   };
 }
 
-export function renderProjectEntryCard(input: TopicViewState): object {
+export function renderProjectEntryCard(input: TopicViewState, options: TopicCardRenderOptions = {}): object {
   const view = STATE_VIEW[input.phase];
   const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
   const progress = input.recentProgress ?? [];
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable
     ? null
-    : latestLines(visibleAnswer, 20) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
+    : visibleAnswer.length > MAIN_CARD_PREVIEW_LIMIT
+      ? visibleAnswer
+      : latestLines(visibleAnswer, 20) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
   const elements: object[] = [
     { tag: "markdown", content: verticalMetrics(input) },
     { tag: "hr" }
   ];
   elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (progress.length) elements.push(...renderProgressTimeline(progress, input.phase));
-  if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
-  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownTail(preview, 2_500)}` });
-  elements.push({ tag: "markdown", content: `${view.icon} ${view.label}` });
+  if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
+  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, MAIN_CARD_PREVIEW_LIMIT)}` });
+  elements.push({ tag: "markdown", content: topicStateLine(input, options) });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
@@ -148,7 +159,7 @@ export function renderRequestRunCard(input: RunCardView): object {
     { tag: "hr" },
     { tag: "markdown", content: conversationalMetadata(input, duration) }
   ];
-  if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr panel 并完成所需交互。"));
+  if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   return {
     schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
@@ -166,7 +177,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   const prose = stripNativeTraexStatus(answer);
   const stepProgress = progressSummary(input.progressEvents);
   const baseContent = prose
-    ? truncateLarkMarkdownTail(normalizeLarkPreview(prose), 12_000)
+    ? normalizeLarkPreview(prose)
     : input.phase === "running" && stepProgress.total > 0
       ? `TraeX 正在执行 · ${stepProgress.done}/${stepProgress.total}`
     : input.phase === "running" ? "⏳ 已接收请求"
@@ -174,12 +185,12 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
         : input.phase === "completed" ? "本次未产生可展示的回答。"
           : input.phase === "failed" ? "本次未产生可展示的回答。"
             : "暂无回答。";
-  const content = options.initialContent ?? baseContent;
+  const content = options.initialContent ?? truncateLarkMarkdownMiddle(baseContent, ANSWER_CARD_PREVIEW_LIMIT);
   const elements: object[] = [
     { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
     ...renderProgressTimeline(input.progressEvents, input.phase)
   ];
-  if (input.phase === "blocked") elements.push(callout("orange", input.notice ?? "TraeX 正在等待用户处理。请查看对应 Herdr pane 并完成所需交互。"));
+  if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
@@ -197,6 +208,25 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   };
 }
 
+export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string }): object | null {
+  const elements = foldFinalAnswerContent(options.initialContent);
+  if (!elements.some((element) => element.tag === "collapsible_panel")) return null;
+  const pageNumber = options.pageNumber ?? 1;
+  return {
+    schema: "2.0",
+    config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
+    header: {
+      title: { tag: "plain_text", content: pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成" },
+      subtitle: { tag: "plain_text", content: boundedTitle(input.title) },
+      template: "green"
+    },
+    body: { elements: [
+      { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
+      ...elements
+    ] }
+  };
+}
+
 function progressSummary(events: readonly RunProgressEvent[]): { done: number; total: number } {
   let done = 0;
   let total = 0;
@@ -206,6 +236,50 @@ function progressSummary(events: readonly RunProgressEvent[]): { done: number; t
     if (event.state === "done") done += 1;
   }
   return { done, total };
+}
+
+type FinalAnswerElement = { tag: string; [key: string]: unknown };
+
+function foldFinalAnswerContent(content: string): FinalAnswerElement[] {
+  const blocks = splitFinalAnswerBlocks(content);
+  return blocks.map((block) => {
+    if (block.kind === "markdown") return { tag: "markdown", content: block.content };
+    const lineCount = block.code.length === 0 ? 0 : block.code.split("\n").length;
+    if (lineCount <= CODE_FOLD_LINE_LIMIT && block.code.length <= CODE_FOLD_CHARACTER_LIMIT) return { tag: "markdown", content: block.source };
+    return {
+      tag: "collapsible_panel",
+      expanded: false,
+      border: { color: "grey", corner_radius: "6px" },
+      header: { title: { tag: "plain_text", content: foldedCodeTitle(block.language, lineCount) } },
+      elements: [{ tag: "markdown", content: block.source }]
+    };
+  });
+}
+
+function splitFinalAnswerBlocks(content: string): Array<{ kind: "markdown"; content: string } | { kind: "code"; source: string; language: string; code: string }> {
+  const lines = content.split("\n");
+  const result: Array<{ kind: "markdown"; content: string } | { kind: "code"; source: string; language: string; code: string }> = [];
+  let markdown: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const opening = /^```([^`]*)$/.exec(lines[index]!);
+    if (!opening) { markdown.push(lines[index]!); index += 1; continue; }
+    const closingIndex = lines.findIndex((line, candidate) => candidate > index && line === "```");
+    if (closingIndex < 0) { markdown.push(...lines.slice(index)); break; }
+    if (markdown.length) { result.push({ kind: "markdown", content: markdown.join("\n").trim() }); markdown = []; }
+    const language = opening[1]!.trim();
+    const code = lines.slice(index + 1, closingIndex).join("\n");
+    result.push({ kind: "code", source: lines.slice(index, closingIndex + 1).join("\n"), language, code });
+    index = closingIndex + 1;
+  }
+  if (markdown.length) result.push({ kind: "markdown", content: markdown.join("\n").trim() });
+  return result.filter((block) => block.kind === "code" || block.content.length > 0);
+}
+
+function foldedCodeTitle(language: string, lineCount: number): string {
+  const label = language === "ts" || language === "typescript" ? "TypeScript"
+    : language === "js" || language === "javascript" ? "JavaScript"
+      : language === "json" ? "JSON" : language ? language : "代码块";
+  return language ? `${label} 代码（已折叠 +${lineCount} 行）` : `代码块（已折叠 +${lineCount} 行）`;
 }
 
 export function renderHelpCard(): object {
@@ -304,7 +378,32 @@ function conversationalMetadata(input: RunCardView, duration: string | null, pag
   const details = input.phase === "queued"
     ? `队列第 ${input.queuePosition} 位`
     : duration ? `用时 ${duration}` : null;
-  return [`${state.icon} ${state.label}`, `Pane \`${escapeCode(input.paneId ?? "provisioning")}\``, details, pageNumber && pageNumber > 1 ? `第 ${pageNumber} 页` : null].filter(Boolean).join("  ·  " );
+  const outputState = outputStateLabel(input.phase);
+  const updated = relativeTime(input.updatedAt);
+  return [outputState, `${state.icon} ${state.label}`, `Pane \`${escapeCode(input.paneId ?? "provisioning")}\``, details, pageNumber && pageNumber > 1 ? `第 ${pageNumber} 页` : null, updated ? `最后更新 ${updated}` : null].filter(Boolean).join("  ·  " );
+}
+function outputStateLabel(phase: RunCardView["phase"]): string | null {
+  return phase === "running" ? "实时更新中" : phase === "completed" ? "最终结果" : null;
+}
+function topicStateLine(input: TopicViewState, options: TopicCardRenderOptions): string {
+  const view = STATE_VIEW[input.phase];
+  const updated = relativeTime(options.lastActivityAt);
+  return [`${view.icon} ${view.label}`, updated ? `最后更新 ${updated}` : null].filter(Boolean).join("  ·  " );
+}
+function relativeTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
+  if (seconds < 60) return "刚刚";
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)} 小时前`;
+  if (seconds < 604_800) return `${Math.floor(seconds / 86_400)} 天前`;
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+function safeRecoveryNotice(diagnostic: string | null | undefined): string {
+  const guidance = "桥已保留当前任务并停止自动派发。请前往对应 Herdr Pane 完成审批或检查 TraeX；处理后桥会自动重新同步。";
+  return diagnostic?.trim() ? `${diagnostic.trim()}\n\n${guidance}` : guidance;
 }
 function formatRunDuration(input: RunCardView): string | null {
   if (!input.startedAt || !input.finishedAt) return null;

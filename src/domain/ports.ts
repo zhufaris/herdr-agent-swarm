@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -117,6 +117,8 @@ export interface BindingStorePort {
   transitionBinding(id: string, transition: SessionTransition): Binding;
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication;
   checkpointRuntimeOutput(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; fingerprint: string }): boolean;
+  checkpointRuntimeOutputWithProjection(input: RuntimeOutputProjectionInput): RuntimeOutputProjectionResult;
+  orphanBindingWithProjection(input: OrphanBindingProjectionInput): OrphanBindingProjectionResult;
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
   attachBindingPane(id: string, pane: HerdrPane, replacement: boolean): Binding;
   findBindingByTopic(topicId: string): Binding | null;
@@ -161,6 +163,7 @@ export interface BindingStorePort {
   reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
   reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
   reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
+  reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome;
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];
@@ -239,11 +242,12 @@ export type PromptRunStore = Pick<BindingStorePort,
 export type RuntimeReconciliationStore = Pick<BindingStorePort,
   | "applyRuntimeObservation"
   | "checkpointRuntimeOutput"
+  | "checkpointRuntimeOutputWithProjection"
   | "countPendingPrompts"
   | "findBindingByPane"
+  | "loadTopicView"
   | "listBindingsByState"
-  | "listRunCardsByPhases"
-  | "saveRunCard"
+  | "orphanBindingWithProjection"
   | "transitionBinding"
   | "updateBindingMetadata"
 >;
@@ -270,7 +274,7 @@ export type OperationsStore = Pick<BindingStorePort,
   | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBindingMetadata"
 >;
 
-export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish" | "reserveAnswerRebuild">;
+export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "listAnswerPages" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish" | "reserveAnswerRebuild" | "reserveFinalAnswerCardUpdate">;
 export type MainCardStore = Pick<BindingStorePort, "getBinding" | "loadTopicView" | "reserveMainCard" | "saveTopicView">;
 
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;

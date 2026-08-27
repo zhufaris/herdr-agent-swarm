@@ -196,6 +196,31 @@ describe("Lark channel publisher", () => {
     await publisher.stop(); store.close();
   });
 
+  it("retries a failed final folded Answer Card update without recreating the answer", async () => {
+    let fail = true;
+    const updateCard = vi.fn(async () => { if (fail) throw new Error("temporary"); });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard }), pino({ enabled: false }));
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
+
+    store.enqueueOutboundReply({
+      id: "final-fold", idempotencyKey: "answer-final-fold:p1:0:cardkit-1", bindingId: "b1", promptId: "p1", viewVersion: 9, cardRole: "answer",
+      rootMessageId: "answer-1", kind: "card_update", payload: JSON.stringify({ schema: "2.0", body: { elements: [{ tag: "collapsible_panel" }] } })
+    });
+
+    await publisher.requestScan();
+    expect(store.listPendingOutboundReplies()).toMatchObject([{ id: "final-fold", kind: "card_update", rootMessageId: "answer-1" }]);
+    fail = false;
+    await publisher.requestScan(true);
+
+    expect(updateCard).toHaveBeenCalledTimes(2);
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'final-fold'").get()).toEqual({ state: "delivered" });
+    store.close();
+  });
+
   it("signals the projector after a continuation card succeeds on retry", async () => {
     let fail = true;
     const created = vi.fn(async () => {

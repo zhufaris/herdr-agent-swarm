@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderModelResultCard } from "../src/cards/model-card.js";
-import { renderAttachStatusCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
+import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 
 describe("run card", () => {
+  afterEach(() => vi.useRealTimers());
+
   it("renders attach success without a navigation button when no topic URL exists", () => {
     const card = JSON.stringify(renderAttachStatusCard({ spaceName: "datasage_semantic_knowledge", paneId: "w5:p3G" }));
 
@@ -93,12 +95,23 @@ describe("run card", () => {
     expect((card as { header: Record<string, unknown> }).header).not.toHaveProperty("ud_icon");
     expect(serialized).not.toContain('"tag":"note"');
     expect(serialized).toContain("等待用户处理");
-    expect(serialized).toContain("查看对应 Herdr panel");
+    expect(serialized).toContain("前往对应 Herdr Pane");
     expect(serialized).not.toContain("终端审批");
     expect(serialized).toContain("SPACE");
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).not.toContain("WORKSPACE");
     expect(serialized).not.toContain('**WORKSPACE**\n`wG`');
+  });
+
+  it("shows optional main-card relative activity time without changing topic state", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-27T12:03:00Z"));
+    const view = initialTopicView("b1");
+
+    expect(JSON.stringify(renderProjectEntryCard(view, { lastActivityAt: "2026-08-27T12:00:00Z" }))).toContain("最后更新 3 分钟前");
+    expect(JSON.stringify(renderProjectEntryCard(view))).not.toContain("最后更新");
+    expect(JSON.stringify(renderProjectEntryCard(view, { lastActivityAt: "not-a-date" }))).not.toContain("最后更新");
+    expect(view).not.toHaveProperty("updatedAt");
   });
 
   it("shows the newest compact answer preview and recent activity on the group project entry card", () => {
@@ -119,9 +132,22 @@ describe("run card", () => {
     expect(serialized).toContain("QUEUE");
     expect(serialized).toContain("最新消息");
     expect(serialized).toContain("newest conclusion");
-    expect(serialized).not.toContain("old answer");
+    expect(serialized).toContain("old answer");
     expect(serialized).toContain("✓ 🛠️ changed secret.ts");
     expect(serialized).toContain("过程轨迹");
+  });
+
+  it("keeps both ends of a long JSON message in main-card previews without mutating state", () => {
+    const answer = ["{", "  \"head-field\": true,", ...Array.from({ length: 180 }, (_, index) => `  \"middle-${index}\": ${index},`), "  \"tail-field\": true", "}"].join("\n");
+    const input = { ...initialTopicView("b1"), phase: "done" as const, answer };
+
+    for (const card of [renderRunCard(input), renderProjectEntryCard(input)]) {
+      const serialized = JSON.stringify(card);
+      expect(serialized).toContain("head-field");
+      expect(serialized).toContain("tail-field");
+      expect(serialized).toContain("已省略中间");
+    }
+    expect(input.answer).toBe(answer);
   });
 
   it("does not render subagent console status in the project card preview", () => {
@@ -204,7 +230,24 @@ describe("run card", () => {
     expect(card).toMatchObject({ header: { template: "orange" } });
     expect(serialized).toContain("等待用户处理");
     expect(serialized).toContain("请选择目标环境。");
+    expect(serialized).toContain("已保留当前任务");
+    expect(serialized).toContain("Herdr Pane");
+    expect(serialized).toContain("自动重新同步");
+    expect(serialized).not.toContain("重新发送");
+    expect(serialized).not.toContain('"tag":"button"');
     expect(serialized).not.toContain("终端审批");
+  });
+
+  it("gives blocked and orphaned topic cards a safe local recovery path", () => {
+    for (const phase of ["blocked", "orphaned"] as const) {
+      const serialized = JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase, notice: "Inspect this state" }));
+      expect(serialized).toContain("Inspect this state");
+      expect(serialized).toContain("已保留当前任务");
+      expect(serialized).toContain("Herdr Pane");
+      expect(serialized).toContain("自动重新同步");
+      expect(serialized).not.toContain("重新发送");
+      expect(serialized).not.toContain('"tag":"button"');
+    }
   });
 
   it("keeps failed topic and request cards red", () => {
@@ -247,6 +290,39 @@ describe("run card", () => {
     expect(createQueuedRunCard({ promptId: "3f0cea75-c8cd-41f0-8fca-87d402b2a2a1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" }).answerElementId).toBe("element_cbb6cb5f9c09");
   });
 
+  it("shows relative freshness and live or final output state on request cards", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-27T12:03:00Z"));
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Freshness", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-27T12:00:00Z" });
+    const running = { ...queued, phase: "running" as const, updatedAt: "2026-08-27T12:00:00Z" };
+    const completed = { ...running, phase: "completed" as const, updatedAt: "2026-08-27T12:02:00Z" };
+
+    expect(JSON.stringify(renderRequestRunCard(running))).toContain("最后更新 3 分钟前");
+    expect(JSON.stringify(renderRequestAnswerCard(running))).toContain("实时更新中");
+    expect(JSON.stringify(renderRequestAnswerCard(completed))).toContain("最终结果");
+  });
+
+  it("folds only oversized complete code blocks in a final Answer Card", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fold code", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const typescript = Array.from({ length: 81 }, (_, index) => `const line${index} = ${index};`).join("\n");
+    const card = renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: `结论\n\n\`\`\`ts\n${typescript}\n\`\`\`\n\n尾部说明` }) as any;
+
+    expect(card.body.elements).toContainEqual(expect.objectContaining({ tag: "markdown", content: "结论" }));
+    expect(card.body.elements).toContainEqual(expect.objectContaining({ tag: "markdown", content: "尾部说明" }));
+    expect(JSON.stringify(card)).toContain("TypeScript 代码（已折叠 +81 行）");
+    expect(JSON.stringify(card)).toContain('\"expanded\":false');
+    expect(JSON.stringify(card)).toContain("const line80 = 80;");
+  });
+
+  it("folds long one-line JSON but leaves short and malformed fences as Markdown", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fold JSON", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const longJson = `{\"data\":\"${"x".repeat(6_001)}\"}`;
+    const folded = JSON.stringify(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: `\`\`\`json\n${longJson}\n\`\`\`` }));
+    expect(folded).toContain("JSON 代码（已折叠 +1 行）");
+    expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst short = true;\n```" })).toBeNull();
+    expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst incomplete = true;" })).toBeNull();
+  });
+
   it("renders a conversational answer with compact metadata and arbitrary continuation pages", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", workspaceId: "w1", paneId: "w1:p9", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
     const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
@@ -254,7 +330,7 @@ describe("run card", () => {
 
     expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "Explain rollout" } });
     expect(card).toMatchObject({ config: { streaming_mode: false }, header: { title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, template: "green" } });
-    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
+    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "最终结果  ·  ✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
     expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });
     expect(JSON.stringify(card)).not.toContain("older page");
@@ -350,8 +426,22 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     expect(serialized).not.toContain("Keep this request beginning");
     expect(serialized).toContain("newest conclusion");
-    expect(serialized).not.toContain("old answer");
-    expect(serialized).toContain("较早内容已省略");
+    expect(serialized).toContain("old answer");
+    expect(serialized).toContain("已省略中间");
+  });
+
+  it("keeps both ends of a long initial Answer Card render while preserving supplied page content", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large JSON", workspaceId: "w1", paneId: "p1", requestText: "show", queuePosition: 0, occurredAt: "now" });
+    const answer = ["{", "  \"head-field\": true,", ...Array.from({ length: 600 }, (_, index) => `  \"middle-${index}\": ${index},`), "  \"tail-field\": true", "}"].join("\n");
+    const card = renderRequestAnswerCard({ ...view, phase: "completed", answer }) as { body: { elements: Array<{ content?: string; element_id?: string }> } };
+    const content = card.body.elements.find((element) => element.element_id)?.content ?? "";
+    expect(content).toContain("head-field");
+    expect(content).toContain("tail-field");
+    expect(content).toContain("已省略中间");
+    expect(content.length).toBeLessThanOrEqual(9_000);
+    expect(answer).toContain("middle-599");
+
+    expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed", answer }, { initialContent: "canonical page content" }))).toContain("canonical page content");
   });
 
   it("renders stable answer segments followed by only the current draft", () => {

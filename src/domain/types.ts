@@ -387,6 +387,42 @@ export interface RuntimeObservation {
   evidenceSource: "structured" | "recent" | "visible" | "process" | "none";
 }
 
+export interface RuntimeOutputProjectionInput {
+  bindingId: string;
+  expectedPaneId: string;
+  expectedGeneration: number;
+  fingerprint: string;
+  view: import("./topic-view.js").TopicViewState;
+  rootMessageId: string | null;
+  card: object;
+}
+
+export interface RuntimeOutputProjectionResult {
+  outcome: "projected" | "unchanged" | "stale";
+  view: import("./topic-view.js").TopicViewState | null;
+  outboxReserved: boolean;
+}
+
+export interface OrphanBindingProjectionInput {
+  bindingId: string;
+  expectedPaneId: string;
+  expectedGeneration: number;
+  occurredAt: string;
+  reason: string;
+  view: import("./topic-view.js").TopicViewState;
+  rootMessageId: string | null;
+  mainCard: object;
+  renderRunCard(view: import("./run-card-view.js").RunCardView): object;
+}
+
+export interface OrphanBindingProjectionResult {
+  outcome: "orphaned" | "unchanged" | "stale";
+  binding: Binding | null;
+  view: import("./topic-view.js").TopicViewState | null;
+  updatedPromptIds: string[];
+  outboxReserved: boolean;
+}
+
 export type RuntimeObservationApplication =
   | { outcome: "applied"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionMismatch: boolean }
   | { outcome: "terminal_identity_changed"; binding: Binding }

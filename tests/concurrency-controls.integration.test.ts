@@ -115,7 +115,8 @@ describe("coordinator concurrency controls", () => {
     expect(calls).toEqual([["running", "blocked", "queued"]]);
     expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", queuePosition: 0 });
     expect(store.loadRunCard("blocked")).toMatchObject({ phase: "failed", queuePosition: 0 });
-    expect(store.loadRunCard("queued")).toMatchObject({ phase: "blocked", queuePosition: 1 });
+    expect(store.loadRunCard("queued")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.getPrompt("queued")).toMatchObject({ state: "cancelled", observationState: "completed" });
     expect(store.loadRunCard("done")).toMatchObject({ phase: "completed", viewVersion: 1 });
     await coordinator.stop(); await publisher.stop(); store.close();
   });

@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
-import { renderRequestAnswerCard } from "../cards/run-card.js";
+import { renderFinalAnswerCard, renderRequestAnswerCard } from "../cards/run-card.js";
+import { answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { planAnswerPage } from "../domain/answer-page-plan.js";
 import type { AnswerPageStore } from "../domain/ports.js";
 
@@ -25,7 +26,8 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
   private async convergeOnce(promptId: string): Promise<void> {
     const view = this.store.loadRunCard(promptId);
     const page = this.store.getActiveAnswerPage(promptId);
-    if (!view?.answerCardId || !page?.cardId) return;
+    if (!view?.answerCardId) return;
+    if (!page?.cardId) { this.reserveFinalFoldedCard(view); return; }
     const plan = planAnswerPage(view, page, this.store.getAnswerPageDeliveryFacts(promptId, page.pageIndex));
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
     if (plan.type === "stream-content") outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content });
@@ -49,6 +51,16 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
       });
     }
     if (outcome === "reserved") this.wakeOutbound();
+    this.reserveFinalFoldedCard(view);
     if (plan.type !== "wait") this.logger?.debug({ event: "answer-page-converged", promptId, bindingId: view.bindingId, pageIndex: page.pageIndex, action: plan.type, outcome }, "planned durable Answer page delivery");
+  }
+
+  private reserveFinalFoldedCard(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>): void {
+    if (view.phase !== "completed") return;
+    const finished = this.store.listAnswerPages(view.promptId).at(-1);
+    if (!finished || finished.state !== "finished" || !finished.cardId || !finished.messageId) return;
+    const content = renderAnswerStreamPage(answerStreamContent(view), finished.sourceStart).page;
+    const card = renderFinalAnswerCard(view, { pageNumber: finished.pageIndex + 1, initialContent: content });
+    if (card && this.store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: finished.pageIndex, cardId: finished.cardId, messageId: finished.messageId, card }) === "reserved") this.wakeOutbound();
   }
 }

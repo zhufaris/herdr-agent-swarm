@@ -56,4 +56,30 @@ describe("AnswerPageWorkflow", () => {
     expect(wake).toHaveBeenCalledOnce();
     store.close();
   });
+
+  it("upgrades a finished terminal page with folded code exactly once", async () => {
+    const store = readyStore();
+    const code = Array.from({ length: 81 }, (_, index) => `const line${index} = ${index};`).join("\n");
+    const answer = `\`\`\`ts\n${code}\n\`\`\``;
+    const content = `⏳ 已接收请求\n\n${answer}`;
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
+    const page = store.getActiveAnswerPage("p1")!;
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content })).toBe("reserved");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    const workflow = new AnswerPageWorkflow(store, vi.fn());
+
+    await workflow.converge("p1");
+    const [finish] = store.listPendingOutboundReplies();
+    expect(finish).toMatchObject({ kind: "stream_finish" });
+    store.markOutboundReplyDelivered(finish!.id, "card-1");
+
+    await workflow.converge("p1");
+    const [upgrade] = store.listPendingOutboundReplies();
+    expect(upgrade).toMatchObject({ kind: "card_update", cardRole: "answer", rootMessageId: "answer-1" });
+    expect(upgrade?.payload).toContain("TypeScript 代码（已折叠 +81 行）");
+    await workflow.converge("p1");
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(store.listAnswerPages("p1")[0]).toMatchObject({ state: "finished", sequence: 2 });
+    store.close();
+  });
 });

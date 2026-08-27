@@ -17,6 +17,58 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("atomically projects changed runtime output with its fingerprint and main-card intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", generation: 1, state: "active", lifecycle: "active", attachment: "attached" });
+    const view = { ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "done" as const, agentState: "done" as const, answer: "safe final answer", model: "GPT-5.6", context: "12K tokens", viewVersion: 1 };
+
+    const projected = store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, fingerprint: "fp-1", view, rootMessageId: "root", card: {} });
+
+    expect(projected).toMatchObject({ outcome: "projected" });
+    expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: "fp-1" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "safe final answer", model: "GPT-5.6", context: "12K tokens" });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]);
+
+    expect(store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, fingerprint: "fp-1", view, rootMessageId: "root", card: {} })).toMatchObject({ outcome: "unchanged" });
+    expect(store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 2, fingerprint: "fp-2", view: { ...view, answer: "stale", viewVersion: 2 }, rootMessageId: "root", card: {} })).toMatchObject({ outcome: "stale" });
+    expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: "fp-1" });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+  });
+
+  it("atomically projects a confirmed missing pane across binding, run cards, and card intents", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", generation: 1, state: "active", lifecycle: "active", attachment: "attached" });
+    const seed = (promptId: string, phase: "running" | "blocked" | "queued", answerMessageId: string | null) => {
+      const queued = createQueuedRunCard({ promptId, bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-08-27T00:00:00.000Z" });
+      store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `${promptId}-message`, actorOpenId: "u1", body: promptId }, view: { ...queued, phase, answerMessageId, viewVersion: phase === "queued" ? 1 : 2 }, rootMessageId: "root", answerCard: {} });
+    };
+    seed("running", "running", "answer-running");
+    seed("blocked", "blocked", "answer-blocked");
+    seed("queued", "queued", null);
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id IN ('running', 'blocked')").run();
+    const pendingBeforeOrphan = store.listPendingOutboundReplies().length;
+    const view = { ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "orphaned" as const, notice: "Herdr pane w1:p1 no longer exists", viewVersion: 1 };
+
+    const result = store.orphanBindingWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, occurredAt: "2026-08-27T00:01:00.000Z", reason: "Herdr pane w1:p1 no longer exists", view, rootMessageId: "root", mainCard: {}, renderRunCard: (run) => ({ phase: run.phase }) });
+
+    expect(result).toMatchObject({ outcome: "orphaned", updatedPromptIds: ["blocked", "queued", "running"] });
+    expect(store.getBinding("b1")).toMatchObject({ state: "orphaned", attachment: "orphaned" });
+    expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.loadRunCard("blocked")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.loadRunCard("queued")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.getPrompt("running")).toMatchObject({ state: "failed", observationState: "completed" });
+    expect(store.getPrompt("blocked")).toMatchObject({ state: "failed", observationState: "completed" });
+    expect(store.getPrompt("queued")).toMatchObject({ state: "cancelled", observationState: "completed" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "orphaned" });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.kind === "card_update" && reply.cardRole === "answer")).toHaveLength(2);
+    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "queued" && reply.kind === "stream_card_create")?.payload).toContain('\"phase\":\"failed\"');
+
+    expect(store.orphanBindingWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, occurredAt: "2026-08-27T00:01:01.000Z", reason: "Herdr pane w1:p1 no longer exists", view, rootMessageId: "root", mainCard: {}, renderRunCard: () => ({}) })).toMatchObject({ outcome: "unchanged" });
+    expect(store.listPendingOutboundReplies()).toHaveLength(pendingBeforeOrphan + 3);
+  });
+
   it("reports a healthy database through the bounded integrity seam", () => {
     store = new SqliteBindingStore(":memory:");
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeLarkMarkdown, normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
+import { normalizeLarkMarkdown, normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown, truncateLarkMarkdownMiddle, truncateLarkMarkdownTail } from "../src/runtime/lark-markdown.js";
 
 describe("Lark Markdown normalization", () => {
   it("preserves supported document structure and closes a streaming fence in the rendered copy", () => {
@@ -85,6 +85,39 @@ describe("Lark Markdown normalization", () => {
     expect(result).toContain("**new result**");
     expect(result).not.toContain("bad()");
     expect(result.length).toBeLessThanOrEqual(80);
+  });
+
+  it("keeps both JSON ends with a bounded middle omission marker", () => {
+    const source = [
+      "{", "  \"first\": true,",
+      ...Array.from({ length: 80 }, (_, index) => `  \"middle-${index}\": ${index},`),
+      "  \"last\": true", "}"
+    ].join("\n");
+
+    const result = truncateLarkMarkdownMiddle(source, 180);
+
+    expect(result).toContain('\"first\": true');
+    expect(result).toContain('\"last\": true');
+    expect(result).toMatch(/… 已省略中间 \d+ 行 \/ \d+ 字符 …/);
+    expect(result.length).toBeLessThanOrEqual(180);
+  });
+
+  it("keeps short middle previews unchanged and makes progress through long lines", () => {
+    expect(truncateLarkMarkdownMiddle("short", 5)).toBe("short");
+    const result = truncateLarkMarkdownMiddle("x".repeat(400), 80);
+    expect(result).toContain("已省略中间");
+    expect(result.startsWith("x")).toBe(true);
+    expect(result.endsWith("x")).toBe(true);
+    expect(result.length).toBeLessThanOrEqual(80);
+  });
+
+  it("keeps fenced Markdown balanced when the omitted range crosses block boundaries", () => {
+    const source = `${"prose".repeat(80)}\n\`\`\`json\n${"x".repeat(100)}\n\`\`\``;
+    const result = truncateLarkMarkdownMiddle(source, 120);
+
+    expect(result.match(/```/g) ?? []).toHaveLength(2);
+    expect(result).toContain("已省略中间");
+    expect(result.length).toBeLessThanOrEqual(120);
   });
 
   it("unwraps narrow terminal prose while preserving Markdown blocks", () => {

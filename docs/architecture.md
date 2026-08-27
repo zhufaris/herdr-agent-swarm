@@ -236,9 +236,16 @@ change during the target decomposition without changing these steps.
    dispatch is treated as uncertain and is never replayed automatically.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
    process evidence provide bounded fallbacks where Herdr reports `unknown`.
-6. The coordinator publishes process-local lifecycle events. Card projection
-   materializes run-card and topic views, then records Lark work in the outbox.
-   The outbox is durable; full lifecycle-event replay is not yet available.
+6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
+   process-local lifecycle events. For reconciler-observed terminal output, the
+   fingerprint, sanitized desired TopicView, and Main Card delivery intent are
+   one transaction. For a confirmed missing pane, the binding, affected prompt
+   jobs and run cards, desired TopicView, and applicable delivery intents are one
+   transaction. Queued work is cancelled and running work is failed rather than
+   replayed. `BridgeEventBus` and the post-commit outbox wake-up are best-effort
+   low-latency hints over durable SQLite state; the event bus is not a
+   recovery record and full lifecycle-event replay is not required for these
+   transitions.
 7. The publisher delivers outbox work, retaining retries and dead letters. A
    delivery failure never repeats a submitted TraeX prompt.
 
@@ -300,7 +307,11 @@ view and runtime batches, one binding or pane failure does not stop later items.
 4. Use native Agent identity and structured state first. Read bounded terminal
    output for changed revisions, final answers, interactive TraeX selectors, or
    the `unknown` fallback.
-5. Update binding state, publish lifecycle events, and wake eligible queues.
+5. Startup terminal reads establish a baseline and do not replace an already
+   durable answer with historical scrollback. Commit reconciler-owned visible transitions before publishing lifecycle events
+   or waking eligible queues. A stale pane/generation or stale desired view
+   rejects the observation without advancing its fingerprint or lifecycle state,
+   so a later reconciliation can recompute from current SQLite state.
 
 Event-driven reconciliation is scoped to affected workspaces. It emits targeted
 `binding-runtime-changed` and `prompt-ready` hints only when observed state and
@@ -393,6 +404,12 @@ toward the 9,000-character rendered limit, while `source_start` always remains a
 offset into the unmodified canonical Answer. This keeps live delivery and restart
 recovery deterministic even when normalization changes the displayed length.
 
+Compact Main Card and initial Answer Card previews may instead retain the start
+and end of oversized content around a deterministic omission marker. This is a
+render-only copy: canonical `RunCardView.answer`, SQLite state, fingerprints, and
+`answer_pages.source_start` remain unchanged. It is not Answer pagination and
+does not alter frozen pages, continuation creation, or CardKit stream sequences.
+
 The `answer_pages` table records each page's message/CardKit/element identity,
 source offset, sequence, and `creating`, `active`, `frozen`, or `finished` state.
 It is the lifecycle authority and target validation uses its active page. The
@@ -417,9 +434,11 @@ check whether a newer persisted version arrived while the prior card was in
 flight.
 
 Startup compares `viewVersion` with `deliveredVersion` and recreates only missing
-intent. It does not emit timestamp-keyed unconditional updates. A lost in-process
-wake-up may delay delivery, but cannot lose the desired Main Card state or cause
-the corresponding TraeX work to run again.
+intent. It does not re-read terminal scrollback or replay a TraeX prompt to
+reconstruct a reconciler projection, and it does not emit timestamp-keyed
+unconditional updates. A lost in-process wake-up may delay delivery, but cannot
+lose the desired Main Card state or cause the corresponding TraeX work to run
+again.
 
 ## Lark delivery
 

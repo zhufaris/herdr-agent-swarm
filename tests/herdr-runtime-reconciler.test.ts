@@ -4,6 +4,8 @@ import { HerdrRuntimeReconciler } from "../src/coordinator/herdr-runtime-reconci
 import type { HerdrPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { initialTopicView } from "../src/domain/topic-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("HerdrRuntimeReconciler", () => {
@@ -24,6 +26,20 @@ describe("HerdrRuntimeReconciler", () => {
     await vi.waitFor(() => expect(readOutput).toHaveBeenCalledTimes(5));
     release.get("w1:p5")!();
     await capture;
+    store.close();
+  });
+
+  it("captures non-empty startup scrollback without replacing the durable topic answer", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    store.saveTopicView({ ...initialTopicView("b1"), phase: "done", answer: "durable answer", viewVersion: 4 });
+    const reconciler = fixture(store, { async readOutput() { return "◆ historical scrollback\n────────\nGPT-5.6-Sol · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort);
+
+    await reconciler.captureBaselines();
+
+    expect(store.loadTopicView("b1")).toMatchObject({ answer: "durable answer", model: "GPT-5.6-Sol", context: "31.1K tokens", viewVersion: 5 });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]);
     store.close();
   });
 
@@ -178,6 +194,23 @@ describe("HerdrRuntimeReconciler", () => {
 
     expect(readOutput).toHaveBeenCalledTimes(2);
     expect(answers).toEqual(["first local answer", "second local answer"]);
+    store.close();
+  });
+
+  it("persists changed terminal output without requiring a process-local view projector", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const wakeOutbound = vi.fn();
+    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return "◆ durable local answer\n────────"; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), new BridgeEventBus(), wakeOutbound);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: expect.any(String) });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "durable local answer" });
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]));
+    expect(wakeOutbound).toHaveBeenCalledOnce();
     store.close();
   });
 
@@ -478,6 +511,52 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("atomically projects orphan state after repeated workspace discovery failures", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "run" }, view, rootMessageId: "root", answerCard: {} });
+    const herdr = { async listAllPanes() { throw new Error("snapshot unavailable"); }, async listPanes() { throw new Error("workspace unavailable"); } } as unknown as HerdrPort;
+    const reconciler = fixture(store, herdr);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ attachment: "orphaned" });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "cancelled" });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "orphaned" });
+    store.close();
+  });
+
+  it("persists a missing-pane orphan projection without a process-local view projector", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const runningView = createQueuedRunCard({ promptId: "running", bindingId: "b1", title: "task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "2026-08-27T00:00:00.000Z" });
+    const queuedView = createQueuedRunCard({ promptId: "queued", bindingId: "b1", title: "task", workspaceId: "w1", paneId: "w1:p1", requestText: "queue", queuePosition: 2, occurredAt: "2026-08-27T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "running", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "run" }, view: runningView, rootMessageId: "root", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "queue" }, view: queuedView, rootMessageId: "root", answerCard: {} });
+    store.saveRunCard({ ...runningView, phase: "running", answerMessageId: "answer-running", viewVersion: 2 });
+    store.saveRunCard({ ...queuedView, phase: "queued", viewVersion: 1 });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'running'").run();
+    const reconciler = fixture(store, { async listAllPanes() { return []; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), new BridgeEventBus());
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ state: "orphaned", attachment: "orphaned" });
+    expect(store.loadRunCard("running")).toMatchObject({ phase: "failed" });
+    expect(store.loadRunCard("queued")).toMatchObject({ phase: "failed" });
+    expect(store.getPrompt("running")).toMatchObject({ state: "failed", observationState: "completed" });
+    expect(store.getPrompt("queued")).toMatchObject({ state: "cancelled", observationState: "completed" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "orphaned" });
+    const replyCount = store.listPendingOutboundReplies().length;
+    await reconciler.reconcile();
+    expect(store.listPendingOutboundReplies()).toHaveLength(replyCount);
+    store.close();
+  });
+
   it("falls back to workspace pane discovery when the authoritative snapshot is unavailable", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -557,12 +636,13 @@ function fixture(
   herdr: HerdrPort,
   discoverPane: ConstructorParameters<typeof HerdrRuntimeReconciler>[0]["discoverPane"] = async () => { throw new Error("not used"); },
   logger = pino({ enabled: false }),
-  lifecycleEvents = new BridgeEventBus()
+  lifecycleEvents = new BridgeEventBus(),
+  wakeOutbound?: () => void
 ) {
   return new HerdrRuntimeReconciler({
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     store, herdr, lifecycleEvents,
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
-    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, wakeOutbound
   });
 }

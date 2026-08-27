@@ -109,6 +109,48 @@ export function truncateLarkMarkdownTail(source: string, maxLength: number): str
   return `${prefix}${tail}`.slice(0, maxLength);
 }
 
+/** Normalizes first, then keeps both ends around a bounded omission marker. */
+export function truncateLarkMarkdownMiddle(source: string, maxLength: number): string {
+  const normalized = normalizeLarkMarkdown(source);
+  const limit = Math.max(0, maxLength);
+  if (normalized.length <= limit) return normalized;
+  if (limit === 0) return "";
+
+  const markerFor = (characters: number, lines: number) => `… 已省略中间 ${lines} 行 / ${characters} 字符 …`;
+  let headLength = Math.max(1, Math.floor(limit / 4));
+  let tailLength = Math.max(1, Math.floor(limit / 4));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const omittedStart = headLength;
+    const omittedEnd = Math.max(omittedStart, normalized.length - tailLength);
+    const omitted = normalized.slice(omittedStart, omittedEnd);
+    const marker = markerFor(omitted.length, omitted ? omitted.split("\n").length : 0);
+    const separator = "\n\n";
+    const available = limit - marker.length - separator.length * 2;
+    if (available < 2) return normalized.slice(0, limit);
+    const nextHeadLength = Math.max(1, Math.floor(available / 2));
+    const nextTailLength = Math.max(1, available - nextHeadLength);
+    if (nextHeadLength === headLength && nextTailLength === tailLength) {
+      let headEnd = preferredHeadEnd(normalized, headLength);
+      let tailStart = preferredTailStart(normalized, normalized.length - tailLength);
+      for (let repair = 0; repair < 16 && headEnd < tailStart; repair += 1) {
+        const head = renderMarkdownRange(normalized, 0, headEnd).trimEnd();
+        const tail = renderMarkdownRange(normalized, tailStart, normalized.length).trimStart();
+        const hidden = normalized.slice(headEnd, tailStart);
+        const finalMarker = markerFor(hidden.length, hidden ? hidden.split("\n").length : 0);
+        const result = `${head}${separator}${finalMarker}${separator}${tail}`;
+        if (result.length <= limit) return result;
+        const overflow = result.length - limit;
+        headEnd = Math.max(1, headEnd - Math.ceil(overflow / 2));
+        tailStart = Math.min(normalized.length - 1, tailStart + Math.floor(overflow / 2));
+      }
+      return truncateLarkMarkdown(normalized, limit);
+    }
+    headLength = nextHeadLength;
+    tailLength = nextTailLength;
+  }
+  return normalized.slice(0, limit);
+}
+
 /** Removes terminal-width wrapping from prose without flattening Markdown blocks. */
 export function normalizeLarkPreview(source: string): string {
   const lines = normalizeLarkMarkdown(source).split("\n");
@@ -141,6 +183,18 @@ export function normalizeLarkPreview(source: string): string {
   }
   flushProse();
   return output.join("\n");
+}
+
+function preferredHeadEnd(source: string, length: number): number {
+  const exact = source.slice(0, length);
+  const boundary = exact.lastIndexOf("\n");
+  return boundary > 0 && boundary >= Math.floor(length / 2) ? boundary + 1 : exact.length;
+}
+
+function preferredTailStart(source: string, start: number): number {
+  const exact = source.slice(start);
+  const boundary = exact.indexOf("\n");
+  return boundary >= 0 && boundary < Math.floor(exact.length / 2) ? start + boundary + 1 : start;
 }
 
 function normalizeProse(source: string): string {

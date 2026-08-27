@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { renderRequestAnswerCard } from "../cards/run-card.js";
+import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { ProjectConfig, Binding, HerdrPane } from "../domain/types.js";
@@ -8,7 +8,8 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { extractFinalTraexAnswer, parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
+import { parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
+import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -18,6 +19,7 @@ interface HerdrRuntimeReconcilerOptions {
   channelPublisher: {
     enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "answer", card: object): Promise<void>;
   };
+  wakeOutbound?: () => void;
   logger: Logger;
   discoverPane(pane: HerdrPane, project: ProjectConfig): Promise<Binding>;
   scheduler: PromptWorkScheduler;
@@ -66,12 +68,12 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     await forEachConcurrent(bindings, BASELINE_READ_CONCURRENCY, async (binding) => {
       try {
         const output = cleanTerminalOutput(await this.options.herdr.readOutput(binding.paneId!, 240));
-        if (output && !this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: binding.paneId!, expectedGeneration: binding.generation, fingerprint: outputFingerprint(output) })) return;
-        this.observedTerminalOutputs.set(binding.paneId!, output);
-        if (output && !this.options.isBindingBusy(binding.id)) await this.publishTerminalTelemetry(binding, output);
+        if (output) await this.persistBaselineOutput(binding, binding.paneId!, binding.generation, output);
       } catch (error) {
-        const next = this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: isPaneMissing(error), orphanThreshold: 2 });
-        if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", { reason: `Unable to read Herdr pane ${binding.paneId}: ${errorMessage(error)}` });
+        const reason = `Unable to read Herdr pane ${binding.paneId}: ${errorMessage(error)}`;
+        const next = isPaneMissing(error)
+          ? await this.orphanMissingPane(binding, reason)
+          : this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
         this.options.logger.warn({ event: "binding-pane-probe-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment }, "failed to observe Herdr pane during startup");
       }
     });
@@ -156,9 +158,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       try {
         const workspacePanes = panesByWorkspace.get(binding.workspaceId);
         if (!workspacePanes) {
-          const next = this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
+          const next = binding.degradationCount + 1 >= 2
+            ? await this.orphanMissingPane(binding, `Herdr workspace ${binding.workspaceId} remained unavailable`)
+            : this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
           this.options.logger.warn({ event: "binding-pane-probe-failed", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment, reason: "workspace_unavailable" }, "could not observe binding because its workspace was unavailable");
-          if (next.attachment === "orphaned") await this.publish(binding.id, "BindingOrphaned", { reason: `Herdr workspace ${binding.workspaceId} remained unavailable` });
           continue;
         }
         if (binding.paneId && !paneIdsByWorkspace.get(binding.workspaceId)!.has(binding.paneId)) await this.orphanMissingPane(binding);
@@ -232,7 +235,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       const observation = this.options.store.applyRuntimeObservation({ bindingId: existing.id, expectedPaneId: pane.paneId, expectedGeneration: existing.generation, pane });
       if (observation.outcome === "stale_binding") continue;
       if (observation.outcome === "terminal_identity_changed") {
-        await this.publish(existing.id, "BindingOrphaned", { reason: `Herdr pane ${pane.paneId} terminal identity changed` });
+        await this.orphanMissingPane(existing, `Herdr pane ${pane.paneId} terminal identity changed`);
         continue;
       }
       existing = observation.binding;
@@ -293,32 +296,68 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     }));
   }
 
-  private async orphanMissingPane(binding: Binding): Promise<void> {
-    this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
+  private async orphanMissingPane(binding: Binding, reason = `Herdr pane ${binding.paneId} no longer exists`): Promise<Binding> {
     const occurredAt = new Date().toISOString();
-    for (const view of this.options.store.listRunCardsByPhases(binding.id, ["running", "blocked", "queued"])) {
-      const terminal = view.phase === "running" || view.phase === "blocked";
-      const next = terminal
-        ? { ...view, phase: "failed" as const, notice: `Herdr pane ${binding.paneId} no longer exists`, finishedAt: occurredAt, queuePosition: 0, viewVersion: view.viewVersion + 1, updatedAt: occurredAt }
-        : { ...view, phase: "blocked" as const, notice: `Herdr pane ${binding.paneId} no longer exists，请恢复绑定后重试。`, viewVersion: view.viewVersion + 1, updatedAt: occurredAt };
-      this.options.store.saveRunCard(next);
-      if (!next.answerCardId && next.answerMessageId) await this.options.channelPublisher.enqueueRunCardUpdate(next.bindingId, next.promptId, next.answerMessageId, next.viewVersion, "answer", renderRequestAnswerCard(next));
+    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
+    const event = createBridgeEvent(binding.id, "BindingOrphaned", "herdr", { reason });
+    const view = reduceTopicView(current, event);
+    const result = this.options.store.orphanBindingWithProjection({
+      bindingId: binding.id, expectedPaneId: binding.paneId!, expectedGeneration: binding.generation, occurredAt, reason,
+      view, rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt }), renderRunCard: renderRequestAnswerCard
+    });
+    if (result.outcome === "orphaned") {
+      if (result.outboxReserved) this.options.wakeOutbound?.();
+      await this.publish(binding.id, "BindingOrphaned", { reason });
     }
-    await this.publish(binding.id, "BindingOrphaned", { reason: `Herdr pane ${binding.paneId} no longer exists` });
+    return result.binding ?? binding;
   }
 
   private async publishChangedLocalOutput(binding: Binding, paneId: string, generation: number): Promise<void> {
     const output = cleanTerminalOutput(await this.options.herdr.readOutput(paneId, 240));
     if (!output) return;
+    await this.persistChangedLocalOutput(binding, paneId, generation, output);
+  }
+
+  private async persistBaselineOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {
+    const fingerprint = outputFingerprint(output);
+    const telemetry = parseTerminalStreamDelta("", output, "");
+    const payload = { ...(telemetry.model ? { model: telemetry.model } : {}), ...(telemetry.context ? { context: telemetry.context } : {}) };
+    if (!payload.model && !payload.context) {
+      if (this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) this.observedTerminalOutputs.set(paneId, output);
+      return;
+    }
+    const event = createBridgeEvent(binding.id, "PaneOutputObserved", "herdr", payload);
+    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
+    const view = reduceTopicView(current, event);
+    const result = this.options.store.checkpointRuntimeOutputWithProjection({
+      bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint, view,
+      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt })
+    });
+    if (result.outcome !== "projected") return;
+    this.observedTerminalOutputs.set(paneId, output);
+    if (result.outboxReserved) this.options.wakeOutbound?.();
+    await this.publish(binding.id, "PaneOutputObserved", payload);
+  }
+
+  private async persistChangedLocalOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {
     const fingerprint = outputFingerprint(output);
     if (fingerprint === binding.lastOutputFingerprint) return;
-    if (!this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) return;
+    if (this.options.isBindingBusy(binding.id)) return;
     const previous = this.observedTerminalOutputs.get(paneId) ?? "";
-    this.observedTerminalOutputs.set(paneId, output);
-    if (!this.options.isBindingBusy(binding.id)) await this.publishTerminalTelemetry(binding, output);
-    if (outputFingerprint(extractFinalTraexAnswer(output)) === binding.lastOutputFingerprint) return;
     const answer = extractTraexAnswer(extractNewOutput(previous, output));
-    if (answer) await this.publish(binding.id, "PaneOutputObserved", { answer });
+    const telemetry = parseTerminalStreamDelta("", output, "");
+    const payload = { ...(answer ? { answer } : {}), ...(telemetry.model ? { model: telemetry.model } : {}), ...(telemetry.context ? { context: telemetry.context } : {}) };
+    const event = createBridgeEvent(binding.id, "PaneOutputObserved", "herdr", payload);
+    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
+    const view = reduceTopicView(current, event);
+    const result = this.options.store.checkpointRuntimeOutputWithProjection({
+      bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint, view,
+      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt })
+    });
+    if (result.outcome !== "projected") return;
+    this.observedTerminalOutputs.set(paneId, output);
+    if (result.outboxReserved) this.options.wakeOutbound?.();
+    await this.publish(binding.id, "PaneOutputObserved", payload);
   }
 
   private async publishTerminalTelemetry(binding: Binding, output: string): Promise<void> {

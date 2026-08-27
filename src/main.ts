@@ -100,6 +100,7 @@ const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound, o
 const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
+  wakeOutbound: () => outboundWork.wake(),
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
   isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
   worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
