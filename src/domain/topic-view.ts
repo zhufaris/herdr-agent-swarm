@@ -6,17 +6,19 @@ export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
+  activityAt: string | null;
   viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
   const next = reduceTopicViewSnapshot(state, event);
-  return updateTopicView(state, next);
+  const updated = updateTopicView(state, next);
+  return updated === state ? state : { ...updated, activityAt: event.occurredAt };
 }
 
 export function updateTopicView(state: TopicViewState, patch: Partial<TopicViewState>): TopicViewState {
@@ -84,7 +86,7 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
     ...state, phase, queueDepth: run.queuePosition, answer: run.answer ? keepAnswerTail(run.answer) : null, notice: run.notice,
     activePromptId: run.phase === "running" || run.phase === "blocked" ? run.promptId : null,
     agentState: run.phase === "running" ? "working" : run.phase === "blocked" ? "blocked" : run.phase === "completed" ? "done" : state.agentState,
-    recentProgress: run.progressEvents
+    recentProgress: run.progressEvents, activityAt: run.updatedAt
   });
 }
 

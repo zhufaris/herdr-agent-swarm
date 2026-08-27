@@ -76,6 +76,21 @@ describe("topic view reducer", () => {
     expect(duplicate).toBe(started);
   });
 
+  it("uses the latest visible event time as durable Main Card activity time", () => {
+    const started = reduceTopicView(initialTopicView("b1"), {
+      ...event("TurnStarted", { promptId: "p1", queueDepth: 1 }),
+      occurredAt: "2026-08-27T12:00:00Z"
+    });
+    expect(started.activityAt).toBe("2026-08-27T12:00:00Z");
+
+    const duplicate = reduceTopicView(started, {
+      ...event("TurnStarted", { promptId: "p1", queueDepth: 1 }),
+      eventId: "duplicate", occurredAt: "2026-08-27T12:05:00Z"
+    });
+    expect(duplicate).toBe(started);
+    expect(duplicate.activityAt).toBe("2026-08-27T12:00:00Z");
+  });
+
   it("keeps complete current-turn progress and the latest 2500 answer characters", () => {
     let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     for (let index = 0; index < 9; index += 1) {

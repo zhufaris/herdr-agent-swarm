@@ -103,15 +103,14 @@ describe("run card", () => {
     expect(serialized).not.toContain('**WORKSPACE**\n`wG`');
   });
 
-  it("shows optional main-card relative activity time without changing topic state", () => {
+  it("shows the durable Main Card activity time from topic state", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-27T12:03:00Z"));
-    const view = initialTopicView("b1");
+    const view = { ...initialTopicView("b1"), activityAt: "2026-08-27T12:00:00Z" };
 
-    expect(JSON.stringify(renderProjectEntryCard(view, { lastActivityAt: "2026-08-27T12:00:00Z" }))).toContain("最后更新 3 分钟前");
-    expect(JSON.stringify(renderProjectEntryCard(view))).not.toContain("最后更新");
-    expect(JSON.stringify(renderProjectEntryCard(view, { lastActivityAt: "not-a-date" }))).not.toContain("最后更新");
-    expect(view).not.toHaveProperty("updatedAt");
+    expect(JSON.stringify(renderProjectEntryCard(view))).toContain("最后更新 3 分钟前");
+    expect(JSON.stringify(renderProjectEntryCard({ ...view, activityAt: null }))).not.toContain("最后更新");
+    expect(JSON.stringify(renderProjectEntryCard({ ...view, activityAt: "not-a-date" }))).not.toContain("最后更新");
   });
 
   it("shows the newest compact answer preview and recent activity on the group project entry card", () => {

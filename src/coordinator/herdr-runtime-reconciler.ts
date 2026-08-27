@@ -303,7 +303,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.orphanBindingWithProjection({
       bindingId: binding.id, expectedPaneId: binding.paneId!, expectedGeneration: binding.generation, occurredAt, reason,
-      view, rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt }), renderRunCard: renderRequestAnswerCard
+      view, rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view), renderRunCard: renderRequestAnswerCard
     });
     if (result.outcome === "orphaned") {
       if (result.outboxReserved) this.options.wakeOutbound?.();
@@ -331,7 +331,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.checkpointRuntimeOutputWithProjection({
       bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint, view,
-      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt })
+      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view)
     });
     if (result.outcome !== "projected") return;
     this.observedTerminalOutputs.set(paneId, output);
@@ -352,7 +352,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.checkpointRuntimeOutputWithProjection({
       bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint, view,
-      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt })
+      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view)
     });
     if (result.outcome !== "projected") return;
     this.observedTerminalOutputs.set(paneId, output);

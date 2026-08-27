@@ -32,10 +32,6 @@ const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 const CODE_FOLD_LINE_LIMIT = 80;
 const CODE_FOLD_CHARACTER_LIMIT = 6_000;
 
-interface TopicCardRenderOptions {
-  lastActivityAt?: string | null;
-}
-
 export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }): object {
   return {
     schema: "2.0",
@@ -83,7 +79,7 @@ export function renderAttachStatusCard(input: { spaceName: string; paneId: strin
   };
 }
 
-export function renderRunCard(input: TopicViewState, options: TopicCardRenderOptions = {}): object {
+export function renderRunCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
   const elements: object[] = [
     { tag: "markdown", content: verticalMetrics(input) },
@@ -106,7 +102,7 @@ export function renderRunCard(input: TopicViewState, options: TopicCardRenderOpt
     elements.push({ tag: "markdown", content: "消息已进入该话题的 FIFO 队列。" });
   }
 
-  elements.push({ tag: "markdown", content: `${topicStateLine(input, options)} · ${input.title}` });
+  elements.push({ tag: "markdown", content: `${topicStateLine(input)} · ${input.title}` });
 
   return {
     schema: "2.0",
@@ -120,7 +116,7 @@ export function renderRunCard(input: TopicViewState, options: TopicCardRenderOpt
   };
 }
 
-export function renderProjectEntryCard(input: TopicViewState, options: TopicCardRenderOptions = {}): object {
+export function renderProjectEntryCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
   const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
   const progress = input.recentProgress ?? [];
@@ -138,7 +134,7 @@ export function renderProjectEntryCard(input: TopicViewState, options: TopicCard
   if (progress.length) elements.push(...renderProgressTimeline(progress, input.phase));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, MAIN_CARD_PREVIEW_LIMIT)}` });
-  elements.push({ tag: "markdown", content: topicStateLine(input, options) });
+  elements.push({ tag: "markdown", content: topicStateLine(input) });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
@@ -397,9 +393,9 @@ function conversationalMetadata(input: RunCardView, duration: string | null, pag
 function outputStateLabel(phase: RunCardView["phase"]): string | null {
   return phase === "running" ? "实时更新中" : phase === "completed" ? "最终结果" : null;
 }
-function topicStateLine(input: TopicViewState, options: TopicCardRenderOptions): string {
+function topicStateLine(input: TopicViewState): string {
   const view = STATE_VIEW[input.phase];
-  const updated = relativeTime(options.lastActivityAt);
+  const updated = relativeTime(input.activityAt);
   return [`${view.icon} ${view.label}`, updated ? `最后更新 ${updated}` : null].filter(Boolean).join("  ·  " );
 }
 function relativeTime(value: string | null | undefined): string | null {

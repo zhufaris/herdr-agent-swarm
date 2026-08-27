@@ -396,7 +396,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       await this.options.bus.publish(event);
       return;
     }
-    this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt }) });
+    this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) });
     this.options.outboundWork.wake();
     await this.options.bus.publish(event);
   }

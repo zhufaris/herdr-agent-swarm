@@ -33,7 +33,7 @@ export class MainCardWorkflow implements MainCardWorkflowPort {
       if (desired) this.store.saveTopicView(desired);
       return;
     }
-    const outcome = this.store.reserveMainCard(view, binding.rootMessageId, renderProjectEntryCard(view, { lastActivityAt: binding.lastActivityAt }));
+    const outcome = this.store.reserveMainCard(view, binding.rootMessageId, renderProjectEntryCard(view));
     this.logger?.debug({ event: "main-card-converged", bindingId, viewVersion: view.viewVersion, outcome }, "converged Main Card delivery");
     if (outcome === "reserved") this.wake();
   }
