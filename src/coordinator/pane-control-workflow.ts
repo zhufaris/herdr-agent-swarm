@@ -6,7 +6,7 @@ import { renderMessageRejectedCard } from "../cards/run-card.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 
 interface Options { store: Pick<OperationsStore, "acceptPaneControlOperation" | "audit" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getBinding" | "listBindings" | "listRecoverablePaneControlOperations">; herdr: Pick<HerdrPort, "readOutput" | "sendEscape" | "steerPrompt">; outbound: Pick<OutboundIntentPort, "enqueueCard">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
-export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean>; }
+export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean>; }
 
 export class PaneControlWorkflow implements PaneControlWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -36,10 +36,10 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
     return true;
   }
 
-  async steer(message: IncomingLarkMessage, binding: Binding | null, text: string): Promise<boolean> {
+  async steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean> {
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
     const active = this.options.activeTurn(binding.id);
-    if (!active || active.paneId !== binding.paneId || !this.options.herdr.steerPrompt) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/swarm steer` 未进入任务队列。"); return false; }
+    if (!active || active.paneId !== binding.paneId || (expectedParentPromptId && active.promptId !== expectedParentPromptId) || !this.options.herdr.steerPrompt) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/swarm steer` 未进入任务队列。"); return false; }
     const accepted = this.accept({ message, binding, kind: "steer", payload: text, parentPromptId: active.promptId });
     if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
     return true;

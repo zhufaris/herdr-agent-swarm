@@ -132,6 +132,13 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, MAIN_CARD_PREVIEW_LIMIT)}` });
+  if (["ready", "queued", "running", "done", "error"].includes(input.phase)) elements.push({
+    tag: "action",
+    actions: [
+      ...(input.phase === "running" ? [{ tag: "button", text: { tag: "plain_text", content: "立即补充" }, type: "primary", value: { action: "open_supplement", bindingId: input.bindingId } }] : []),
+      { tag: "button", text: { tag: "plain_text", content: "更多操作" }, value: { action: "open_more_actions", bindingId: input.bindingId } }
+    ]
+  });
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
@@ -186,6 +193,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   ];
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
+  if (input.phase === "queued") elements.push({ tag: "button", text: { tag: "plain_text", content: "改为立即补充" }, type: "primary", value: { action: "convert_queued_prompt", bindingId: input.bindingId, targetPromptId: input.promptId } });
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {
@@ -326,7 +334,14 @@ export function renderHelpCard(): object {
     header: { title: { tag: "plain_text", content: "HerdrSwarm" }, template: "blue" },
     body: { elements: [
       { tag: "markdown", content: [
-        "**HerdrSwarm：从飞书协调 Herdr 中的 TraeX pane**", "",
+        "**直接开始**",
+        "@机器人 描述任务 → 选择项目 → 自动开始。",
+        "话题里的普通消息始终按 FIFO 排队；需要插入当前任务时，点“立即补充”。", "",
+        "**紧急操作**",
+        "`/swarm stop` 停止当前任务 · `/swarm status` 刷新状态"
+      ].join("\n") },
+      { tag: "collapsible_panel", expanded: false, header: { title: { tag: "plain_text", content: "高级命令与恢复" } }, elements: [
+      { tag: "markdown", content: [
         "`/swarm new [标题]`  选择项目并创建 TraeX pane",
         "`/swarm reset [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
         "`/swarm stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
@@ -347,7 +362,8 @@ export function renderHelpCard(): object {
         "`/swarm resume`  验证后恢复已归档会话",
         "`/swarm help`  显示本卡片", "",
         "只有 `/swarm …` 会由 HerdrSwarm 处理；其它 slash 命令会原样提交给 TraeX。"
-      ].join("\n") },
+      ].join("\n") }
+      ] },
       { tag: "markdown", content: "高风险审批必须在 Herdr 终端完成" }
     ] }
   };

@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../../src/config.js";
 import { BindingProvisioningWorkflow } from "../../src/coordinator/binding-provisioning-workflow.js";
+import { CardInteractionWorkflow } from "../../src/coordinator/card-interaction-workflow.js";
 import { HerdrRuntimeReconciler } from "../../src/coordinator/herdr-runtime-reconciler.js";
 import { InboundRouter } from "../../src/coordinator/inbound-router.js";
 import { ModelSelectionWorkflow } from "../../src/coordinator/model-selection-workflow.js";
@@ -47,6 +48,7 @@ export function createTestRouter(
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
+  const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), wakeSteering: (bindingId, parentPromptId) => scheduler.wake({ kind: "steering-ready", bindingId, parentPromptId }) });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
@@ -54,6 +56,6 @@ export function createTestRouter(
   });
   return new InboundRouter({
     config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
+    promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
   });
 }

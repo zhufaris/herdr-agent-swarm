@@ -230,6 +230,16 @@ change during the target decomposition without changing these steps.
    Explicit `/swarm steer <text>` is the separate priority steering command; it injects
    into the same supervised active turn, bypasses queued ordinary prompts, and
    never falls back to the ordinary FIFO.
+   A natural-language root mention first persists a project selection and its
+   original text. Only an explicit project callback provisions the binding; the
+   original message ID is then reused as the prompt idempotency key, including
+   startup recovery after selection completion.
+   Main/Answer Card callbacks carry only binding and prompt identity. The focused
+   card-interaction workflow reloads SQLite state, checks binding generation,
+   creator or operator scope, expiry, and the captured parent turn before
+   delegating to existing workflows. Supplement input is operator-scoped and
+   single-use. Queued-to-steering conversion is one SQLite transaction; if the
+   captured parent is no longer running, the queued prompt is unchanged.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
    Herdr unchanged through the native Agent prompt command when available; the
    bridge adds no hidden prompt suffix. If Herdr reports `agent_prompt_stalled`,
