@@ -8,6 +8,8 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
+const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
+
 describe("coordinator concurrency controls", () => {
   it("continues startup after a recoverable view convergence stage fails", async () => {
     const store = new SqliteBindingStore(":memory:");
@@ -212,7 +214,7 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "final answer" }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nfinal answer` }));
 
     const promptId = store.listRunCards("b1")[0]!.promptId;
     expect(store.getPrompt(promptId)).toMatchObject({ state: "delivered", observationState: "completed", error: null });
@@ -265,8 +267,51 @@ describe("coordinator concurrency controls", () => {
     expect(answer).toContain("```bash\nnpm test\n```");
     expect(answer).toContain("```diff");
     expect(answer).not.toMatch(/fake terminal|misleading terminal/);
+    expect(answer).not.toContain(TERMINAL_FALLBACK_WARNING);
     expect(terminalReads - terminalReadsBeforePrompt).toBe(1);
     expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "typed" }));
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("routes one typed observation to independent Answer and Main Card projections", async () => {
+    let reads = 0;
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "typed", cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          reads += 1;
+          return reads === 1 ? {
+            answerDelta: "Visible answer",
+            mainStatus: { statusTitle: "Verifying deployment", tokenCount: 1_234, planSteps: [
+              { key: "plan:0", label: "Run checks", state: "active" as const }
+            ] }
+          } : { answerDelta: "" };
+        }
+      } }; }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) { await onDispatched?.(); await onObservation?.({ state: "working", stateSource: "herdr", output: "ignored terminal" }); return "done"; },
+      async readOutput() { return "ignored terminal"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const observed: Extract<BridgeEvent, { type: "TurnOutputObserved" }>[] = [];
+    bus.onBridgeEvent("observation-test", (item) => { if (item.type === "TurnOutputObserved") observed.push(item); });
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", reportedTraexSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "split-e1", messageId: "split-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "split output", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
+    expect(observed[0]?.payload.observation.answer).toMatchObject({ snapshot: "Visible answer", toolActivities: [] });
+    expect(observed[0]?.payload.observation.main.status).toMatchObject({ statusTitle: "Verifying deployment", tokenCount: 1_234, planSteps: [{ key: "plan:0", kind: "step", state: "active" }] });
+    expect(store.listRunCards("b1")[0]!.answer).toBe("Visible answer");
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
@@ -295,7 +340,7 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "terminal-e1", messageId: "terminal-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "terminal work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "terminal answer" }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nterminal answer` }));
     expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "terminal", fallbackReason: "missing_session_identity" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
@@ -326,8 +371,41 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "fallback-e1", messageId: "fallback-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "fallback work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "safe terminal fallback" }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nsafe terminal fallback` }));
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", fallbackReason: "transcript_read_failed", outcome: "terminal_fallback" }));
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("keeps one fallback warning when a terminal redraw replaces the active answer", async () => {
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "terminal", reason: "transcript_not_found" }; }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
+        await onDispatched?.();
+        await onObservation?.({ state: "working", stateSource: "herdr", output: `◆ ${"old terminal line\n".repeat(2500)}` });
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ replacement terminal answer" });
+        return "done";
+      },
+      async readOutput() { return "◆ replacement terminal answer\n────────"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "redraw-e1", messageId: "redraw-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "redraw work", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
+    const answer = store.listRunCards("b1")[0]!.answer;
+    expect(answer).toBe(`${TERMINAL_FALLBACK_WARNING}\n\nreplacement terminal answer`);
+    expect(answer.split(TERMINAL_FALLBACK_WARNING)).toHaveLength(2);
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });

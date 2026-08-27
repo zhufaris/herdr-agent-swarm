@@ -722,10 +722,10 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const legacy = initialTopicView("b1") as Partial<ReturnType<typeof initialTopicView>>;
-    delete legacy.worktreeName; delete legacy.recentProgress; delete legacy.viewVersion; delete legacy.deliveredVersion;
+    delete legacy.worktreeName; delete legacy.recentProgress; delete legacy.liveStatus; delete legacy.viewVersion; delete legacy.deliveredVersion;
     store.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES (?, ?, ?)").run("b1", JSON.stringify(legacy), "now");
     const normalized = store.loadTopicView("b1")!;
-    expect(normalized).toMatchObject({ worktreeName: null, recentProgress: [], viewVersion: 1, deliveredVersion: 0 });
+    expect(normalized).toMatchObject({ worktreeName: null, recentProgress: [], liveStatus: null, viewVersion: 1, deliveredVersion: 0 });
     expect(store.reserveMainCard(normalized, "root-1", { version: 1 })).toBe("reserved");
     const [reply] = store.listPendingOutboundReplies();
 

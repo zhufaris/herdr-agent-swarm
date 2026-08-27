@@ -50,6 +50,24 @@ export interface HerdrPort {
 
 export interface TraexTranscriptCursorPort {
   readDelta(): Promise<string>;
+  readObservation?(): Promise<TraexTranscriptObservation>;
+}
+
+export interface TraexTranscriptPlanStep {
+  key: string;
+  label: string;
+  state: "pending" | "active" | "done";
+}
+
+export interface TraexTranscriptMainStatus {
+  statusTitle?: string;
+  planSteps?: TraexTranscriptPlanStep[];
+  tokenCount?: number;
+}
+
+export interface TraexTranscriptObservation {
+  answerDelta: string;
+  mainStatus?: TraexTranscriptMainStatus;
 }
 
 export type TraexTranscriptFallbackReason =

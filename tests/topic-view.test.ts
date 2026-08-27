@@ -37,6 +37,33 @@ describe("topic view reducer", () => {
     expect(observed).toMatchObject({ model: "GPT-5.6-Sol", context: "31.1K tokens" });
   });
 
+  it("projects Main Card live status independently from Answer Card output", () => {
+    const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    const observed = reduceTopicView(running, event("TurnOutputObserved", {
+      promptId: "p1", observation: { answer: { snapshot: "Public answer only", toolActivities: [{ key: "tool", kind: "test", label: "npm test", state: "done" }] }, main: { status: { statusTitle: "Running focused verification", elapsedSeconds: 177, tokenCount: 4_570, planSteps: [
+        { key: "plan:0", kind: "step", label: "Inspect state", state: "done" },
+        { key: "plan:1", kind: "step", label: "Deploy bridge", state: "active" }
+      ] } } }
+    }));
+
+    expect(observed.answer).toBe("Public answer only");
+    expect(observed.recentProgress).toEqual([expect.objectContaining({ key: "tool" })]);
+    expect(observed.liveStatus).toEqual({
+      statusTitle: "Running focused verification", elapsedSeconds: 177, tokenCount: 4_570,
+      planSteps: [expect.objectContaining({ key: "plan:0" }), expect.objectContaining({ key: "plan:1" })]
+    });
+  });
+
+  it("keeps completed live status for the Main Card and clears it only for a new turn", () => {
+    let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    view = reduceTopicView(view, event("TurnOutputObserved", { promptId: "p1", observation: { answer: { snapshot: "", toolActivities: [] }, main: { status: { statusTitle: "Finishing verification" } } } }));
+    view = reduceTopicView(view, event("TurnCompleted", { promptId: "p1", answer: "Done", queueDepth: 0 }));
+    expect(view.liveStatus?.statusTitle).toBe("Finishing verification");
+
+    view = reduceTopicView(view, event("TurnStarted", { promptId: "p2", queueDepth: 1 }));
+    expect(view.liveStatus).toBeNull();
+  });
+
   it("keeps a running main card running when reconciliation observes more terminal output", () => {
     const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     const observed = reduceTopicView(running, event("PaneOutputObserved", { answer: "still working" }));

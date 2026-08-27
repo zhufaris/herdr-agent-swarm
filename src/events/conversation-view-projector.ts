@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
-import type { BridgeEvent } from "../domain/events.js";
+import { normalizeTurnOutputObservation, type BridgeEvent } from "../domain/events.js";
 import type { AnswerPageStore, MainCardStore, OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
 import type { AnswerPageWorkflowPort } from "../coordinator/answer-page-workflow.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
@@ -145,7 +145,10 @@ function runCardChange(event: BridgeEvent): RunCardChange | null {
     case "SteeringStarted": return { type: "started", occurredAt: event.occurredAt };
     case "SteeringDelivered": return { type: "steering-delivered", occurredAt: event.occurredAt, notice: "已加入当前执行" };
     case "SteeringFailed": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.error };
-    case "TurnOutputObserved": return { type: "output", occurredAt: event.occurredAt, answerSnapshot: event.payload.answerSnapshot, ...(event.payload.previousAnswerSnapshot === undefined ? {} : { previousAnswerSnapshot: event.payload.previousAnswerSnapshot }), ...(event.payload.answerUpdate === undefined ? {} : { answerUpdate: event.payload.answerUpdate }), progressEvents: event.payload.progressEvents.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(event.payload.hasProgressSnapshot === undefined ? {} : { hasProgressSnapshot: event.payload.hasProgressSnapshot }) };
+    case "TurnOutputObserved": {
+      const answer = normalizeTurnOutputObservation(event.payload).answer;
+      return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };
+    }
     case "AgentStateChanged": return event.payload.state === "blocked"
       ? { type: "blocked", occurredAt: event.occurredAt, notice: "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。" }
       : event.payload.state === "working" ? { type: "started", occurredAt: event.occurredAt } : null;

@@ -12,6 +12,13 @@ export interface RunProgressEvent {
   occurredAt: string;
 }
 
+export interface MainCardLiveStatus {
+  statusTitle: string | null;
+  planSteps: RunProgressEvent[];
+  elapsedSeconds: number | null;
+  tokenCount: number | null;
+}
+
 export interface RunCardView {
   promptId: string;
   bindingId: string;

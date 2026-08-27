@@ -23,7 +23,7 @@ transaction by itself.
 | Concern | Authority | Why |
 | --- | --- | --- |
 | Pane identity, terminal identity, native Agent session reference, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
-| Typed assistant text and paired tool call/result content for an active turn | Exactly identified TraeX JSONL transcript | `history_mutation.payload.items` contains upstream typed fields; the bridge never guesses code boundaries from terminal layout. |
+| Typed turn output, live status heading, structured plan, and token counters for an active turn | Exactly identified TraeX JSONL transcript | The transcript is parsed once into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
 | Process lifecycle | user systemd service | The plugin controls the service; the application does not manage PID files. |
@@ -248,6 +248,20 @@ change during the target decomposition without changing these steps.
    transitions.
 7. The publisher delivers outbox work, retaining retries and dead letters. A
    delivery failure never repeats a submitted TraeX prompt.
+
+### Turn output projection
+
+`PromptRunWorkflow` and passive `HerdrRuntimeReconciler` observations normalize
+their source into `TurnOutputObservation`. The active-turn JSONL path is
+authoritative; terminal parsing remains a bounded fallback. One observation has
+two explicit consumer payloads: `answer` supplies answer text and tool activity
+to `RunCardView`, while `main` supplies the status heading, plan snapshot, model,
+context, elapsed time, and reliable token usage to `TopicViewState`. The two
+cards retain independent persistence, versioning, pagination, and delivery. No
+renderer recovers one card's state by parsing the other card's text. Reasoning
+events contribute only their bounded leading heading; reasoning prose is never
+projected. A finished Answer page receives one final non-streaming green card
+update and is not subsequently patched.
 
 Interrupted running prompts are detached instead of replayed. On restart the
 bridge observes the surviving pane and resumes delivery or marks the situation

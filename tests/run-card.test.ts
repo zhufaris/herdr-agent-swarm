@@ -69,23 +69,24 @@ describe("run card", () => {
     });
     const serialized = JSON.stringify(card);
 
-    expect(serialized).toContain("MODEL");
     expect(serialized).toContain("GPT-5.6-Sol");
-    expect(serialized).toContain("CONTEXT");
-    expect(serialized).toContain("31.1K tokens");
+    expect(serialized).toContain("context `31.1K tokens`");
   });
 
   it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
     const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
-    const cards = [renderRunCard(input), renderProjectEntryCard(input)] as Array<{ body: { elements: Array<{ tag: string; content?: string }> } }> ;
+    const runCard = renderRunCard(input) as { body: { elements: Array<{ tag: string; content?: string }> } };
+    const projectCard = renderProjectEntryCard(input) as { body: { elements: Array<{ tag: string; content?: string }> } };
 
-    for (const card of cards) {
-      expect(card.body.elements[0]).toMatchObject({
-        tag: "markdown",
-        content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
-      });
-      expect(card.body.elements.some((element) => element.tag === "column_set")).toBe(false);
-    }
+    expect(runCard.body.elements[0]).toMatchObject({
+      tag: "markdown",
+      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
+    });
+    expect(projectCard.body.elements.at(-1)).toMatchObject({
+      tag: "markdown",
+      content: "`datasage` · `w5:t1` · `w5:p3G`\n`GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+    });
+    expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
   });
 
   it("renders CardKit 2.0 from a projected state", () => {
@@ -108,9 +109,77 @@ describe("run card", () => {
     vi.setSystemTime(new Date("2026-08-27T12:03:00Z"));
     const view = { ...initialTopicView("b1"), activityAt: "2026-08-27T12:00:00Z" };
 
-    expect(JSON.stringify(renderProjectEntryCard(view))).toContain("最后更新 3 分钟前");
+    expect(JSON.stringify(renderProjectEntryCard(view))).toContain("3 分钟前更新");
     expect(JSON.stringify(renderProjectEntryCard({ ...view, activityAt: null }))).not.toContain("最后更新");
     expect(JSON.stringify(renderProjectEntryCard({ ...view, activityAt: "not-a-date" }))).not.toContain("最后更新");
+  });
+
+  it("renders a dedicated Main Card status bar with the complete plan and reliable metrics", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", liveStatus: {
+        statusTitle: "Considering package installation", elapsedSeconds: 177, tokenCount: 4_570,
+        planSteps: [
+          { key: "plan:0", kind: "step", label: "确认部署版本", state: "done", occurredAt: "now" },
+          { key: "plan:1", kind: "step", label: "重试失败 run", state: "active", occurredAt: "now" },
+          { key: "plan:2", kind: "step", label: "核验发布结果", state: "pending", occurredAt: "now" }
+        ]
+      }
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("当前进展 · 1/3");
+    expect(serialized).toContain("Considering package installation");
+    expect(serialized).toContain("2m 57s · ↑ 4.57K tokens");
+    expect(serialized).toContain("✔ 确认部署版本");
+    expect(serialized).toContain("■ 重试失败 run");
+    expect(serialized).toContain("◻ 核验发布结果");
+  });
+
+  it("makes live work the primary Main Card section and moves runtime identity to the footer", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), title: "Deploy Query Log", phase: "running",
+      spaceName: "datasage", tabId: "w5:t2", paneId: "w5:p4E", worktreeName: "feat/query-log",
+      model: "GPT-5.4", context: "36%", queueDepth: 0, activityAt: "2026-08-27T12:00:00Z",
+      answer: "line-1\nline-2\nline-3\nline-4\nline-5\nline-6",
+      liveStatus: {
+        statusTitle: "Checking deployment state", elapsedSeconds: 177, tokenCount: 4_570,
+        planSteps: [
+          { key: "plan:0", kind: "step", label: "确认部署版本", state: "done", occurredAt: "now" },
+          { key: "plan:1", kind: "step", label: "重试失败 run", state: "active", occurredAt: "now" }
+        ]
+      },
+      recentProgress: [
+        { key: "plan:0", kind: "step", label: "确认部署版本", state: "done", occurredAt: "now" },
+        { key: "tool:1", kind: "test", label: "检查服务状态", state: "active", occurredAt: "now" }
+      ]
+    });
+    const elements = (card as { body: { elements: Array<{ tag: string; content?: string; header?: { title?: { content?: string } } }> } }).body.elements;
+    const serialized = JSON.stringify(card);
+    const liveIndex = elements.findIndex((element) => element.header?.title?.content === "当前进展 · 1/2");
+    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("最近活动"));
+    const previewIndex = elements.findIndex((element) => element.content?.startsWith("**最新消息**"));
+    const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
+
+    expect(liveIndex).toBeGreaterThanOrEqual(0);
+    expect(activityIndex).toBeGreaterThan(liveIndex);
+    expect(previewIndex).toBeGreaterThan(activityIndex);
+    expect(footerIndex).toBe(elements.length - 1);
+    expect(serialized).not.toContain("**当前工作**");
+    expect(serialized.match(/确认部署版本/g)).toHaveLength(1);
+    expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-3", "line-4", "line-5", "line-6"]);
+    expect(serialized).toContain("`GPT-5.4` · context `36%` · queue `0`");
+    expect(serialized).toContain("worktree `feat/query-log`");
+  });
+
+  it("keeps the legacy current-work fallback when no live status exists", () => {
+    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running" }))).toContain("**当前工作**");
+  });
+
+  it("renders a frozen Answer Card green even when no code block needs folding", () => {
+    const view = { ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "start" }), phase: "completed" as const, answer: "short answer", finishedAt: "done" };
+    expect(renderFinalAnswerCard(view, { initialContent: "short answer" })).toMatchObject({
+      config: { streaming_mode: false }, header: { template: "green" }
+    });
   });
 
   it("shows the newest compact answer preview and recent activity on the group project entry card", () => {
@@ -128,24 +197,27 @@ describe("run card", () => {
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).toContain("wD:p9");
     expect(serialized).toContain("TraeX 正在处理");
-    expect(serialized).toContain("QUEUE");
+    expect(serialized).toContain("queue `2`");
     expect(serialized).toContain("最新消息");
     expect(serialized).toContain("newest conclusion");
     expect(serialized).toContain("old answer");
     expect(serialized).toContain("✓ 🛠️ changed secret.ts");
-    expect(serialized).toContain("过程轨迹");
+    expect(serialized).toContain("最近活动");
   });
 
   it("keeps both ends of a long JSON message in main-card previews without mutating state", () => {
     const answer = ["{", "  \"head-field\": true,", ...Array.from({ length: 180 }, (_, index) => `  \"middle-${index}\": ${index},`), "  \"tail-field\": true", "}"].join("\n");
     const input = { ...initialTopicView("b1"), phase: "done" as const, answer };
 
-    for (const card of [renderRunCard(input), renderProjectEntryCard(input)]) {
-      const serialized = JSON.stringify(card);
-      expect(serialized).toContain("head-field");
-      expect(serialized).toContain("tail-field");
-      expect(serialized).toContain("已省略中间");
-    }
+    const runCard = JSON.stringify(renderRunCard(input));
+    expect(runCard).toContain("head-field");
+    expect(runCard).toContain("tail-field");
+    expect(runCard).toContain("已省略中间");
+
+    const projectCard = JSON.stringify(renderProjectEntryCard(input));
+    expect(projectCard).not.toContain("head-field");
+    expect(projectCard).toContain("tail-field");
+    expect(projectCard).toContain("middle-178");
     expect(input.answer).toBe(answer);
   });
 
@@ -177,7 +249,7 @@ describe("run card", () => {
     expect(progress.length).toBeLessThanOrEqual(220);
   });
 
-  it("shows the three newest tool activities and up to twenty latest answer lines on the project card", () => {
+  it("shows the three newest tool activities and up to four latest answer lines on the project card", () => {
     const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
@@ -198,7 +270,7 @@ describe("run card", () => {
     expect(serialized).toContain("🔎 检查调用位置");
     expect(serialized).toContain("读取旧配置");
     expect(serialized).toContain("查看完整过程（1）");
-    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-20));
+    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-4));
     expect(serialized).not.toContain("**项目任务**");
   });
 
@@ -320,8 +392,8 @@ describe("run card", () => {
     expect(folded).toContain("配置 / JSON");
     expect(folded).toContain("1 行");
     expect(folded).toContain("字符");
-    expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst short = true;\n```" })).toBeNull();
-    expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst incomplete = true;" })).toBeNull();
+    expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst short = true;\n```" })).toMatchObject({ header: { template: "green" } });
+    expect(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "```ts\nconst incomplete = true;" })).toMatchObject({ header: { template: "green" } });
   });
 
   it("gives each oversized completed fence a semantic panel title", () => {

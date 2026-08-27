@@ -328,8 +328,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private async persistBaselineOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {
     const fingerprint = outputFingerprint(output);
     const telemetry = parseTerminalStreamDelta("", output, "");
-    const payload = { ...(telemetry.model ? { model: telemetry.model } : {}), ...(telemetry.context ? { context: telemetry.context } : {}) };
-    if (!payload.model && !payload.context) {
+    const observation = terminalObservation("", telemetry.model, telemetry.context);
+    const payload = { observation };
+    if (!observation.main.model && !observation.main.context) {
       if (this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) this.observedTerminalOutputs.set(paneId, output);
       return;
     }
@@ -353,7 +354,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const previous = this.observedTerminalOutputs.get(paneId) ?? "";
     const answer = extractTraexAnswer(extractNewOutput(previous, output));
     const telemetry = parseTerminalStreamDelta("", output, "");
-    const payload = { ...(answer ? { answer } : {}), ...(telemetry.model ? { model: telemetry.model } : {}), ...(telemetry.context ? { context: telemetry.context } : {}) };
+    const payload = { observation: terminalObservation(answer ?? "", telemetry.model, telemetry.context) };
     const event = createBridgeEvent(binding.id, "PaneOutputObserved", "herdr", payload);
     const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
     const view = reduceTopicView(current, event);
@@ -370,15 +371,19 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private async publishTerminalTelemetry(binding: Binding, output: string): Promise<void> {
     const telemetry = parseTerminalStreamDelta("", output, "");
     if (!telemetry.model && !telemetry.context) return;
-    await this.publish(binding.id, "PaneOutputObserved", {
-      ...(telemetry.model ? { model: telemetry.model } : {}),
-      ...(telemetry.context ? { context: telemetry.context } : {})
-    });
+    await this.publish(binding.id, "PaneOutputObserved", { observation: terminalObservation("", telemetry.model, telemetry.context) });
   }
 
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
   }
+}
+
+function terminalObservation(answer: string, model?: string, context?: string): NonNullable<Extract<BridgeEvent, { type: "PaneOutputObserved" }>["payload"]["observation"]> {
+  return {
+    answer: { snapshot: answer, toolActivities: [] },
+    main: { ...(model ? { model } : {}), ...(context ? { context } : {}) }
+  };
 }
 
 function workspaceCwdKey(workspaceId: string, cwd: string | null): string {

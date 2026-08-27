@@ -123,24 +123,22 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable
     ? null
-    : visibleAnswer.length > MAIN_CARD_PREVIEW_LIMIT
-      ? visibleAnswer
-      : latestLines(visibleAnswer, 20) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
-  const elements: object[] = [
-    { tag: "markdown", content: verticalMetrics(input) },
-    { tag: "hr" }
-  ];
-  elements.push({ tag: "markdown", content: projectWorkSummary(input) });
-  if (progress.length) elements.push(...renderProgressTimeline(progress, input.phase));
+    : latestLines(visibleAnswer, 4) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
+  const elements: object[] = [];
+  if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
+  if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
+  const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
+  const recentActivity = progress.filter((event) => !planKeys.has(event.key));
+  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, MAIN_CARD_PREVIEW_LIMIT)}` });
-  elements.push({ tag: "markdown", content: topicStateLine(input) });
+  elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
     header: {
       title: { tag: "plain_text", content: agentTitle(input.title) },
-      subtitle: { tag: "plain_text", content: "HERDR PROJECT" },
+      subtitle: { tag: "plain_text", content: `HERDR PROJECT · ${view.label}` },
       template: view.color
     },
     body: { elements }
@@ -206,7 +204,6 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
 
 export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string }): object | null {
   const elements = foldFinalAnswerContent(options.initialContent);
-  if (!elements.some((element) => element.tag === "collapsible_panel")) return null;
   const pageNumber = options.pageNumber ?? 1;
   return {
     schema: "2.0",
@@ -221,6 +218,38 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
       ...elements
     ] }
   };
+}
+
+function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, phase: TopicViewPhase): object[] {
+  const metadata = [formatElapsed(status.elapsedSeconds), formatTokenCount(status.tokenCount)].filter(Boolean).join(" · " );
+  const title = status.statusTitle ? `◈ **${escapeMarkdown(truncate(status.statusTitle, 160))}**` : "◈ **TraeX 正在处理**";
+  const lines = status.planSteps.map((step) => `${{ pending: "◻", active: "■", done: "✔", failed: "✕" }[step.state]} ${escapeMarkdown(truncate(step.label, 300))}`);
+  const done = lines.filter((line) => line.startsWith("✔")).length;
+  const content: object[] = [{ tag: "markdown", content: [title, metadata].filter(Boolean).join("\n") }];
+  if (lines.length && lines.length <= 6) content.push({ tag: "markdown", content: lines.join("\n") });
+  if (lines.length > 6) content.push({
+    tag: "collapsible_panel", expanded: false,
+    header: { title: { tag: "plain_text", content: `完整计划 · ${done}/${lines.length}` } },
+    elements: [{ tag: "markdown", content: lines.join("\n") }]
+  });
+  return [{
+    tag: "collapsible_panel", expanded: true, border: { color: phase === "done" ? "green" : phase === "error" || phase === "blocked" ? "orange" : "blue", corner_radius: "6px" },
+    header: { title: { tag: "plain_text", content: lines.length ? `当前进展 · ${done}/${lines.length}` : "当前进展" } },
+    elements: content
+  }];
+}
+
+function formatElapsed(seconds: number | null): string | null {
+  if (seconds === null) return null;
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return [hours ? `${hours}h` : null, minutes ? `${minutes}m` : null, `${remainder}s`].filter(Boolean).join(" " );
+}
+
+function formatTokenCount(tokens: number | null): string | null {
+  if (tokens === null) return null;
+  return `↑ ${tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 1 : 2)}K` : tokens} tokens`;
 }
 
 function progressSummary(events: readonly RunProgressEvent[]): { done: number; total: number } {
@@ -360,6 +389,14 @@ function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "pa
   ];
   const runtime = metrics.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
   return [identity, runtime, `**WORKTREE**  \`${escapeCode(truncate(input.worktreeName ?? "—", 64))}\``].join("\n");
+}
+
+function runtimeFooter(input: TopicViewState): string {
+  const identity = [input.spaceName, input.tabId, input.paneId].filter(Boolean).map((value) => `\`${escapeCode(value!)}\``).join(" · " );
+  const runtime = [input.model ? `\`${escapeCode(input.model)}\`` : null, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
+  const updated = relativeTime(input.activityAt);
+  const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
+  return [identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
 }
 
 function callout(color: string, content: string): object {

@@ -9,6 +9,8 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
+const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
+
 describe("Herdr discovery", () => {
   it("logs an unchanged skipped pane once and reports when it becomes routable", async () => {
     let cwd = "/unregistered";
@@ -91,8 +93,8 @@ describe("Herdr discovery", () => {
     const stopObserver = bus.onBridgeEvent("test-observer", (event) => {
       if (event.type === "AgentStateChanged" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted") events.push(event.type + (event.type === "AgentStateChanged" ? `:${event.payload.state}` : ""));
       if (event.type === "TurnOutputObserved") {
-        answerSnapshots.push(event.payload.answerSnapshot);
-        answerUpdates.push(event.payload.answerUpdate ?? "replace");
+        answerSnapshots.push(event.payload.observation.answer.snapshot);
+        answerUpdates.push(event.payload.observation.answer.update ?? "replace");
       }
     });
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
@@ -107,9 +109,9 @@ describe("Herdr discovery", () => {
     expect(events.filter((event) => event === "AgentStateChanged:working")).toHaveLength(1);
     expect(events.filter((event) => event === "TurnOutputObserved")).toHaveLength(4);
     expect(events.filter((event) => event === "AgentStateChanged:done")).toHaveLength(1);
-    expect(answerSnapshots).toEqual(["✧ Working", "◆ Ran first", "◆ Ran second", "◆ done"]);
+    expect(answerSnapshots).toEqual([`${TERMINAL_FALLBACK_WARNING}\n\n✧ Working`, "◆ Ran first", "◆ Ran second", "◆ done"]);
     expect(answerUpdates).toEqual(["append", "append", "append", "append"]);
-    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe("✧ Working\n\n◆ Ran first\n\n◆ Ran second\n\n◆ done");
+    expect(store.listRunCards(store.listBindings()[0]!.id)[0]?.answer).toBe(`${TERMINAL_FALLBACK_WARNING}\n\n✧ Working\n\n◆ Ran first\n\n◆ Ran second\n\n◆ done`);
     expect(submittedPrompts).toEqual(["run"]);
     const completedBeforeReconcile = events.filter((event) => event === "TurnCompleted").length;
     const doneBeforeReconcile = events.filter((event) => event === "AgentStateChanged:done").length;
@@ -375,7 +377,7 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: "thread reply", larkMessageId: "request-card-1", answerMessageId: "request-card-1" }));
+    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: expect.stringContaining("thread reply"), larkMessageId: "request-card-1", answerMessageId: "request-card-1" }));
     await vi.waitFor(() => expect(updates.some((update) => update.messageId === "request-card-1" && JSON.stringify(update.card).includes("thread reply"))).toBe(true));
     expect(cards).toHaveLength(1);
     expect(updates.some((update) => JSON.stringify(update.card).includes("HERDR REQUEST"))).toBe(false);
@@ -445,7 +447,7 @@ describe("Herdr discovery", () => {
     releaseApproval();
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toBe("second");
-    await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: "◆ answer 2" }));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: expect.stringContaining("◆ answer 2") }));
     expect(replies).toEqual([]);
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();

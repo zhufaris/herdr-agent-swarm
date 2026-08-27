@@ -57,6 +57,27 @@ describe("AnswerPageWorkflow", () => {
     store.close();
   });
 
+  it("updates a short frozen Answer Card to green exactly once after stream finish", async () => {
+    const store = readyStore();
+    const content = "⏳ 已接收请求\n\ndone";
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "done", answerSegments: ["done"], viewVersion: 2 });
+    const page = store.getActiveAnswerPage("p1")!;
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content })).toBe("reserved");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    const workflow = new AnswerPageWorkflow(store, vi.fn());
+
+    await workflow.converge("p1");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    await workflow.converge("p1");
+
+    const [update] = store.listPendingOutboundReplies();
+    expect(update).toMatchObject({ kind: "card_update", cardRole: "answer", rootMessageId: "answer-1" });
+    expect(update?.payload).toContain('\"template\":\"green\"');
+    await workflow.converge("p1");
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    store.close();
+  });
+
   it("upgrades a finished terminal page with folded code exactly once", async () => {
     const store = readyStore();
     const code = Array.from({ length: 81 }, (_, index) => `output line ${index}`).join("\n");

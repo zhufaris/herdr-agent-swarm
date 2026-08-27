@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { renderProjectEntryCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, PromptRunStore, TraexTranscriptCursorPort, TraexTranscriptReaderPort } from "../domain/ports.js";
+import type { HerdrPort, PromptRunStore, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -44,8 +44,10 @@ interface PromptRunWorkflowOptions {
 }
 
 type TurnOutputSource =
-  | { mode: "terminal"; fallbackReason: string }
+  | { mode: "terminal"; fallbackReason: string; warningPublished: boolean }
   | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[] };
+
+const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -235,10 +237,20 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
           outputSource = typed.source;
           const parsed = outputSource.mode === "typed"
-            ? { delta: typed.delta, update: "append" as const, model: null, context: null }
+            ? { delta: typed.observation.answerDelta, update: "append" as const, model: null, context: null }
             : parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
-          if (parsed.delta || parsed.model || parsed.context) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [], ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.context ? { context: parsed.context } : {}) });
+          const answerSnapshot = outputSource.mode === "terminal"
+            ? terminalFallbackSnapshot(parsed.delta, parsed.update, outputSource.warningPublished)
+            : parsed.delta;
+          if (outputSource.mode === "terminal" && answerSnapshot) outputSource.warningPublished = true;
+          const mainStatus = typed.observation.mainStatus ? toMainStatus(typed.observation.mainStatus, startedAt) : undefined;
+          if (answerSnapshot || mainStatus || parsed.model || parsed.context) await this.publish(bindingId, "TurnOutputObserved", "herdr", {
+            promptId: prompt.id, observation: {
+              answer: { snapshot: answerSnapshot, update: parsed.update, toolActivities: [] },
+              main: { ...(mainStatus ? { status: mainStatus } : {}), ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.context ? { context: parsed.context } : {}) }
+            }
+          });
           const previousState = binding.lastAgentState;
           if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
           if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
@@ -255,10 +267,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
         const finalTyped = await this.readTypedDelta(outputSource, binding, prompt.id);
         outputSource = finalTyped.source;
-        if (finalTyped.delta) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: finalTyped.delta, answerUpdate: "append", progressEvents: [] });
+        const finalMainStatus = finalTyped.observation.mainStatus ? toMainStatus(finalTyped.observation.mainStatus, startedAt) : undefined;
+        if (finalTyped.observation.answerDelta || finalMainStatus) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, observation: {
+          answer: { snapshot: finalTyped.observation.answerDelta, update: "append", toolActivities: [] },
+          main: { ...(finalMainStatus ? { status: finalMainStatus } : {}) }
+        } });
         const terminalAnswer = outputSource.mode === "terminal" ? extractFinalTraexAnswer(await this.options.herdr.readOutput(paneId, 240)) : "";
         const streamed = outputSource.mode === "terminal" ? this.options.store.loadRunCard(prompt.id)?.answer ?? "" : "";
-        const sourceAnswer = outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : streamed || terminalAnswer;
+        const sourceAnswer = outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : withTerminalFallbackWarning(streamed || terminalAnswer);
         const finalAnswer = sourceAnswer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。";
         binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(bindingId) });
@@ -347,7 +363,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private async openTranscript(binding: Binding): Promise<TurnOutputSource> {
-    if (!this.options.transcriptReader) return { mode: "terminal", fallbackReason: "transcript_not_found" };
+    if (!this.options.transcriptReader) return { mode: "terminal", fallbackReason: "transcript_not_found", warningPublished: false };
     const session = binding.reportedTraexSessionId
       ? { source: "bridge", agent: "traex", kind: "id" as const, value: binding.reportedTraexSessionId }
       : binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
@@ -357,26 +373,28 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       const result = await this.options.transcriptReader.open(session);
       return result.mode === "typed"
         ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [] }
-        : { mode: "terminal", fallbackReason: result.reason };
+        : { mode: "terminal", fallbackReason: result.reason, warningPublished: false };
     } catch (error) {
       this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, fallbackReason: "transcript_validation_failed", outcome: "terminal_fallback" }, "could not open typed TraeX transcript");
-      return { mode: "terminal", fallbackReason: "transcript_validation_failed" };
+      return { mode: "terminal", fallbackReason: "transcript_validation_failed", warningPublished: false };
     }
   }
 
-  private async readTypedDelta(source: TurnOutputSource, binding: Binding, promptId: string): Promise<{ source: TurnOutputSource; delta: string }> {
-    if (source.mode === "terminal") return { source, delta: "" };
+  private async readTypedDelta(source: TurnOutputSource, binding: Binding, promptId: string): Promise<{ source: TurnOutputSource; observation: TraexTranscriptObservation }> {
+    if (source.mode === "terminal") return { source, observation: { answerDelta: "" } };
     try {
-      const delta = await source.cursor.readDelta();
-      if (delta) {
-        source.chunks.push(delta);
+      const observation = source.cursor.readObservation
+        ? await source.cursor.readObservation()
+        : { answerDelta: await source.cursor.readDelta() };
+      if (observation.answerDelta) {
+        source.chunks.push(observation.answerDelta);
         source.emitted = true;
       }
-      return { source, delta };
+      return { source, observation };
     } catch (error) {
       const outcome = source.emitted ? "terminal_fallback_suppressed" : "terminal_fallback";
       this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, fallbackReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
-      return { source: source.emitted ? source : { mode: "terminal", fallbackReason: "transcript_read_failed" }, delta: "" };
+      return { source: source.emitted ? source : { mode: "terminal", fallbackReason: "transcript_read_failed", warningPublished: false }, observation: { answerDelta: "" } };
     }
   }
 
@@ -404,6 +422,29 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
   }
+}
+
+function toMainStatus(status: TraexTranscriptMainStatus, startedAt: number): NonNullable<Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["observation"]["main"]["status"]> {
+  return {
+    ...(status.statusTitle ? { statusTitle: status.statusTitle } : {}),
+    ...(status.planSteps ? { planSteps: status.planSteps.map((step) => ({ ...step, kind: "step" as const })) } : {}),
+    elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)),
+    ...(status.tokenCount !== undefined ? { tokenCount: status.tokenCount } : {})
+  };
+}
+
+function terminalFallbackSnapshot(delta: string, update: "append" | "replace" | "replace-status" | "replace-all", warningPublished: boolean): string {
+  if (!delta) return "";
+  return !warningPublished || update === "replace-all" ? withTerminalFallbackWarning(delta) : delta;
+}
+
+function withTerminalFallbackWarning(answer: string): string {
+  const content = answer
+    .split(TERMINAL_FALLBACK_WARNING)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  return content ? `${TERMINAL_FALLBACK_WARNING}\n\n${content}` : TERMINAL_FALLBACK_WARNING;
 }
 
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {

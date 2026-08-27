@@ -186,7 +186,7 @@ describe("HerdrRuntimeReconciler", () => {
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
     const bus = new BridgeEventBus();
     const answers: string[] = [];
-    bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved" && "answer" in event.payload) answers.push(event.payload.answer); });
+    bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved" && event.payload.observation?.answer.snapshot) answers.push(event.payload.observation.answer.snapshot); });
     const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
 
     await reconciler.reconcile();
@@ -318,7 +318,7 @@ describe("HerdrRuntimeReconciler", () => {
 
     await reconciler.reconcile();
 
-    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ model: "GPT-5.6-Terra", context: "31.1K tokens" });
+    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ observation: { main: { model: "GPT-5.6-Terra", context: "31.1K tokens" } } });
     store.close();
   });
 

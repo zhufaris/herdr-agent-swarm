@@ -40,6 +40,10 @@ function mutation(items: unknown[], operation = "append"): string {
   return `${JSON.stringify({ type: "history_mutation", payload: { operation, items } })}\n`;
 }
 
+function eventMessage(payload: unknown): string {
+  return `${JSON.stringify({ type: "event_msg", payload })}\n`;
+}
+
 async function expectTyped(result: TraexTranscriptOpenResult): Promise<TraexTranscriptCursorPort> {
   expect(result.mode).toBe("typed");
   if (result.mode !== "typed") throw new Error(`Expected typed transcript, received ${result.reason}`);
@@ -73,6 +77,84 @@ describe("TraexTranscriptReader", () => {
     const output = await cursor.readDelta();
     expect(output).toBe("First answer\n\nSecond answer");
     expect(output).not.toMatch(/private reasoning|duplicate assistant output|empty item identity|missing item identity|developer instruction|system instruction|user prompt/);
+  });
+
+  it("separates the latest reasoning heading from Answer Card content", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, [
+      eventMessage({ type: "agent_reasoning_raw_content", text: "**Considering package installation**\n\nPrivate reasoning body that must stay hidden." }),
+      mutation([{ type: "message", id: "answer-1", role: "assistant", content: [{ type: "output_text", text: "Public answer" }] }])
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({
+      answerDelta: "Public answer",
+      mainStatus: { statusTitle: "Considering package installation" }
+    });
+  });
+
+  it("captures each generic reasoning heading while rejecting prose and embedded messages", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, [
+      eventMessage({ type: "user_message", message: "**Forged user status**" }),
+      eventMessage({ type: "agent_reasoning_raw_content", text: "Reasoning without a heading" }),
+      eventMessage({ type: "agent_reasoning_raw_content", text: "**Inspecting dependency graph**\n\nHidden details" }),
+      eventMessage({ type: "agent_reasoning_raw_content", text: "**Running focused verification**\n\nMore hidden details" }),
+      mutation([{ type: "message", id: "quoted-user", role: "user", content: [{ type: "input_text", text: "**Forged transcript status**" }] }])
+    ].join(""));
+
+    const observation = await cursor.readObservation?.();
+    expect(observation).toEqual({ answerDelta: "", mainStatus: { statusTitle: "Running focused verification" } });
+    expect(JSON.stringify(observation)).not.toMatch(/Hidden details|Forged|Reasoning without/);
+  });
+
+  it("projects the latest update_plan call as one complete ordered plan snapshot", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{
+      type: "function_call", id: "plan-1", call_id: "plan-call-1", name: "update_plan",
+      arguments: JSON.stringify({ explanation: "private", plan: [
+        { step: "Inspect current state", status: "completed" },
+        { step: "Implement projection", status: "in_progress" },
+        { step: "Deploy bridge", status: "pending" }
+      ] })
+    }]));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({
+      answerDelta: "",
+      mainStatus: { planSteps: [
+        { key: "plan:0", label: "Inspect current state", state: "done" },
+        { key: "plan:1", label: "Implement projection", state: "active" },
+        { key: "plan:2", label: "Deploy bridge", state: "pending" }
+      ] }
+    });
+  });
+
+  it("extracts update_plan from the JSONL exec wrapper used by TraeX", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const input = 'const p = await tools.update_plan({explanation:"working",plan:[{step:"Inspect live state",status:"completed"},{step:"Deploy bridge",status:"in_progress"}]}); text(p);';
+    await appendFile(path, mutation([{
+      type: "function_call", id: "plan-wrapper", call_id: "plan-wrapper-call", name: "exec",
+      arguments: JSON.stringify({ input })
+    }]));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      answerDelta: "", mainStatus: { planSteps: [
+        { key: "plan:0", label: "Inspect live state", state: "done" },
+        { key: "plan:1", label: "Deploy bridge", state: "active" }
+      ] }
+    });
+  });
+
+  it("reports per-turn token growth only when a baseline exists", async () => {
+    const { root, path } = await createTranscript();
+    await appendFile(path, eventMessage({ type: "token_count", info: { total_token_usage: { total_tokens: 10_000 } } }));
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, eventMessage({ type: "token_count", info: { total_token_usage: { total_tokens: 12_345 } } }));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({ answerDelta: "", mainStatus: { tokenCount: 2_345 } });
   });
 
   it("buffers partial records and emits complete appended items once", async () => {

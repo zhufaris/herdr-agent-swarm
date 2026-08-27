@@ -4,7 +4,7 @@ type TimelinePhase = string;
 
 const VISIBLE_EVENT_COUNT = 3;
 
-export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase): object[] {
+export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string } = {}): object[] {
   if (!events.length) return [];
   const visible = events.slice(-VISIBLE_EVENT_COUNT);
   const earlier = events.slice(0, -VISIBLE_EVENT_COUNT);
@@ -18,9 +18,15 @@ export function renderProgressTimeline(events: RunProgressEvent[], phase: Timeli
   }
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: timelineColor(phase), corner_radius: "6px" },
-    header: { title: { tag: "plain_text", content: timelineTitle(events, phase) } },
+    header: { title: { tag: "plain_text", content: options.title ? activityTitle(options.title, events, phase) : timelineTitle(events, phase) } },
     elements
   }];
+}
+
+function activityTitle(title: string, events: RunProgressEvent[], phase: TimelinePhase): string {
+  if (phase === "blocked" || phase === "failed" || phase === "error") return `${title} · 需要处理 · ${events.length} 项`;
+  if (phase === "running") return `${title} · ${events.length} 项`;
+  return `${title} · ${events.length} 项`;
 }
 
 function timelineTitle(events: RunProgressEvent[], phase: TimelinePhase): string {

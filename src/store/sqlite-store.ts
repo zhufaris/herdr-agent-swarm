@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { BindingStorePort } from "../domain/ports.js";
 import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
+import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
 import { initialTopicView, mirrorRunCardToTopic } from "../domain/topic-view.js";
@@ -1475,7 +1476,7 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!row) return null;
     const stored = JSON.parse(row.state_json) as Partial<TopicViewState>;
     const view = { ...initialTopicView(bindingId), ...stored, bindingId };
-    return { ...view, recentProgress: Array.isArray(view.recentProgress) ? view.recentProgress : [], viewVersion: Number.isInteger(stored.viewVersion) ? stored.viewVersion! : 1, deliveredVersion: Number.isInteger(stored.deliveredVersion) ? stored.deliveredVersion! : 0 };
+    return { ...view, recentProgress: Array.isArray(view.recentProgress) ? view.recentProgress : [], liveStatus: normalizeLiveStatus(view.liveStatus), viewVersion: Number.isInteger(stored.viewVersion) ? stored.viewVersion! : 1, deliveredVersion: Number.isInteger(stored.deliveredVersion) ? stored.deliveredVersion! : 0 };
   }
 
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome {
@@ -2324,6 +2325,19 @@ export class SqliteBindingStore implements BindingStorePort {
 }
 
 function now(): string { return new Date().toISOString(); }
+function normalizeLiveStatus(value: unknown): MainCardLiveStatus | null {
+  if (!isRecord(value)) return null;
+  const statusTitle = typeof value.statusTitle === "string" ? value.statusTitle : null;
+  const elapsedSeconds = typeof value.elapsedSeconds === "number" && Number.isFinite(value.elapsedSeconds) && value.elapsedSeconds >= 0 ? Math.floor(value.elapsedSeconds) : null;
+  const tokenCount = typeof value.tokenCount === "number" && Number.isFinite(value.tokenCount) && value.tokenCount >= 0 ? Math.floor(value.tokenCount) : null;
+  const planSteps = Array.isArray(value.planSteps) ? value.planSteps.filter((step): step is MainCardLiveStatus["planSteps"][number] => {
+    if (!isRecord(step)) return false;
+    return typeof step.key === "string" && step.kind === "step" && typeof step.label === "string"
+      && ["pending", "active", "done", "failed"].includes(String(step.state)) && typeof step.occurredAt === "string";
+  }) : [];
+  return statusTitle || planSteps.length || elapsedSeconds !== null || tokenCount !== null
+    ? { statusTitle, planSteps, elapsedSeconds, tokenCount } : null;
+}
 function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
 function retryAt(attempt: number, explicitDelayMs?: number): string {
   const exponential = Math.min(60_000, 1_000 * 2 ** (attempt - 1));

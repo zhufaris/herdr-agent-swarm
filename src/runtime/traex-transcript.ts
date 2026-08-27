@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HerdrAgentSession } from "../domain/types.js";
-import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult, TraexTranscriptReaderPort } from "../domain/ports.js";
+import type { TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort } from "../domain/ports.js";
 import { projectToolCall, projectToolResult, type ToolActivityDescriptor } from "./tool-activity-projector.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -41,6 +41,20 @@ const functionOutputSchema = z.object({
   call_id: z.string().min(1),
   output: z.unknown()
 }).passthrough();
+const reasoningEventSchema = z.object({
+  type: z.literal("agent_reasoning_raw_content"),
+  text: z.string()
+}).passthrough();
+const tokenCountEventSchema = z.object({
+  type: z.literal("token_count"),
+  info: z.object({ total_token_usage: z.object({ total_tokens: z.number().int().nonnegative() }).passthrough() }).passthrough()
+}).passthrough();
+const planArgumentsSchema = z.object({
+  plan: z.array(z.object({
+    step: z.string(),
+    status: z.enum(["pending", "in_progress", "completed"])
+  })).max(100)
+}).passthrough();
 export interface TraexTranscriptReaderOptions {
   sessionsRoot?: string;
   maxReadBytes?: number;
@@ -72,7 +86,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       if (cachedPath) {
         if (await isValidTranscriptPath(this.sessionsRoot, cachedPath, session.value)) {
           const file = await stat(cachedPath);
-          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars) };
+          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(cachedPath, file.size, this.maxReadBytes)) };
         }
         this.pathsBySessionId.delete(session.value);
       }
@@ -87,7 +101,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       }
       this.pathsBySessionId.set(session.value, path);
       const file = await stat(path);
-      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars) };
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(path, file.size, this.maxReadBytes)) };
     } catch {
       return { mode: "terminal", reason: "transcript_validation_failed" };
     }
@@ -102,14 +116,19 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     private readonly path: string,
     private offset: number,
     private readonly maxReadBytes: number,
-    private readonly maxRenderedDeltaChars: number
+    private readonly maxRenderedDeltaChars: number,
+    private readonly tokenBaseline: number | null
   ) {}
 
   async readDelta(): Promise<string> {
+    return (await this.readObservation()).answerDelta;
+  }
+
+  async readObservation(): Promise<TraexTranscriptObservation> {
     const file = await stat(this.path);
     if (file.size < this.offset) throw new Error("TraeX transcript was truncated");
     const available = file.size - this.offset;
-    if (available === 0) return "";
+    if (available === 0) return { answerDelta: "" };
     const length = Math.min(available, this.maxReadBytes);
     const handle = await open(this.path, "r");
     let bytesRead = 0;
@@ -123,23 +142,50 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const lastNewline = chunk.lastIndexOf(0x0a);
     if (lastNewline < 0) {
       if (available > this.maxReadBytes) throw new Error("TraeX transcript record exceeds the read limit");
-      return "";
+      return { answerDelta: "" };
     }
     const complete = chunk.subarray(0, lastNewline + 1);
     this.offset += complete.length;
     const blocks: string[] = [];
+    let statusTitle: string | undefined;
+    let planSteps: TraexTranscriptPlanStep[] | undefined;
+    let tokenCount: number | undefined;
     for (const line of complete.toString("utf8").split("\n")) {
       if (!line.trim()) continue;
       const envelope = envelopeSchema.parse(JSON.parse(line));
+      if (envelope.type === "event_msg") {
+        const reasoning = reasoningEventSchema.safeParse(envelope.payload);
+        if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
+        const tokens = tokenCountEventSchema.safeParse(envelope.payload);
+        if (tokens.success && this.tokenBaseline !== null && tokens.data.info.total_token_usage.total_tokens >= this.tokenBaseline) {
+          tokenCount = tokens.data.info.total_token_usage.total_tokens - this.tokenBaseline;
+        }
+        continue;
+      }
       if (envelope.type !== "history_mutation") continue;
       const mutation = historyMutationSchema.safeParse(envelope.payload);
       if (!mutation.success) continue;
       for (const item of mutation.data.items) {
+        const plan = parsePlanSnapshot(item);
+        if (plan) {
+          planSteps = plan;
+          const call = functionCallSchema.safeParse(item);
+          if (call.success) this.emittedItemIds.add(call.data.id);
+          continue;
+        }
         const rendered = this.renderItem(item);
         if (rendered) blocks.push(rendered);
       }
     }
-    return boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars);
+    const mainStatus: TraexTranscriptMainStatus = {
+      ...(statusTitle ? { statusTitle } : {}),
+      ...(planSteps ? { planSteps } : {}),
+      ...(tokenCount !== undefined ? { tokenCount } : {})
+    };
+    return {
+      answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars),
+      ...(Object.keys(mainStatus).length ? { mainStatus } : {})
+    };
   }
 
   private renderItem(item: unknown): string {
@@ -160,6 +206,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
       const projected = projectToolCall(call.data.name, call.data.arguments);
       this.emittedItemIds.add(call.data.id);
+      if (call.data.name === "update_plan") return "";
       this.callsById.set(call.data.call_id, projected.descriptor);
       return projected.entry;
     }
@@ -167,6 +214,72 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
     this.emittedItemIds.add(result.data.id);
     return projectToolResult(this.callsById.get(result.data.call_id)!, result.data.output);
+  }
+}
+
+function extractStatusTitle(text: string): string | null {
+  const match = /^\s*\*\*([^*\n]+)\*\*/.exec(text);
+  if (!match) return null;
+  const title = match[1]!.replace(/\s+/g, " " ).trim();
+  if (!title) return null;
+  return title.slice(0, 160);
+}
+
+function parsePlanSnapshot(item: unknown): TraexTranscriptPlanStep[] | null {
+  const call = functionCallSchema.safeParse(item);
+  if (!call.success) return null;
+  try {
+    const outer = JSON.parse(call.data.arguments) as unknown;
+    const parsed = call.data.name === "update_plan"
+      ? planArgumentsSchema.safeParse(outer)
+      : call.data.name === "exec" ? parseWrappedPlan(outer) : null;
+    if (!parsed) return null;
+    if (!parsed.success) return null;
+    const states = { pending: "pending", in_progress: "active", completed: "done" } as const;
+    return parsed.data.plan.map((step, index) => ({
+      key: `plan:${index}`,
+      label: step.step.replace(/\s+/g, " " ).trim().slice(0, 300) || "未命名步骤",
+      state: states[step.status]
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function parseWrappedPlan(value: unknown): ReturnType<typeof planArgumentsSchema.safeParse> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = (value as Record<string, unknown>).input;
+  if (typeof input !== "string" || !/tools\.update_plan\s*\(/.test(input)) return null;
+  const steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> = [];
+  const pattern = /step\s*:\s*("(?:\\.|[^"\\])*")\s*,\s*status\s*:\s*"(pending|in_progress|completed)"/g;
+  for (const match of input.matchAll(pattern)) {
+    try { steps.push({ step: JSON.parse(match[1]!) as string, status: match[2]! as "pending" | "in_progress" | "completed" }); }
+    catch { return null; }
+  }
+  return steps.length ? planArgumentsSchema.safeParse({ plan: steps }) : null;
+}
+
+async function latestTokenCount(path: string, end: number, maxBytes: number): Promise<number | null> {
+  if (end <= 0) return null;
+  const start = Math.max(0, end - maxBytes);
+  const handle = await open(path, "r");
+  const buffer = Buffer.alloc(end - start);
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    const source = buffer.subarray(0, bytesRead).toString("utf8");
+    const lines = source.split("\n");
+    if (start > 0) lines.shift();
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        const envelope = envelopeSchema.safeParse(JSON.parse(lines[index]!));
+        if (!envelope.success || envelope.data.type !== "event_msg") continue;
+        const tokens = tokenCountEventSchema.safeParse(envelope.data.payload);
+        if (tokens.success) return tokens.data.info.total_token_usage.total_tokens;
+      } catch {}
+    }
+    return null;
+  } finally {
+    await handle.close();
   }
 }
 

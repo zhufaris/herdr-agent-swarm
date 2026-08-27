@@ -1,18 +1,20 @@
 import type { AgentState } from "./types.js";
 import type { BridgeEvent } from "./events.js";
-import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
+import { normalizeTurnOutputObservation } from "./events.js";
+import type { MainCardLiveStatus, RunCardView, RunProgressEvent } from "./run-card-view.js";
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
+  liveStatus: MainCardLiveStatus | null;
   activityAt: string | null;
   viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, liveStatus: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
@@ -41,29 +43,33 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
     case "PromptCancelled": return state;
     case "SteeringQueued": return state;
     case "RunQueuePositionChanged": return state;
-    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [] };
+    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [], liveStatus: null };
     case "SteeringStarted":
     case "SteeringDelivered":
     case "SteeringFailed": return state;
     case "TurnOutputObserved": {
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
-      const answer = keepAnswerTail(event.payload.answerSnapshot);
-      const recentProgress = event.payload.hasProgressSnapshot
-        ? stampProgress(event.payload.progressEvents, event.occurredAt)
-        : mergeProgress(base.recentProgress ?? [], event.payload.progressEvents, event.occurredAt);
-      const model = event.payload.model ?? state.model;
-      const context = event.payload.context ?? state.context;
-      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
-      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, model, context };
+      const observation = normalizeTurnOutputObservation(event.payload);
+      const answer = keepAnswerTail(observation.answer.snapshot);
+      const recentProgress = observation.answer.hasToolActivitySnapshot
+        ? stampProgress(observation.answer.toolActivities, event.occurredAt)
+        : mergeProgress(base.recentProgress ?? [], observation.answer.toolActivities, event.occurredAt);
+      const model = observation.main.model ?? state.model;
+      const context = observation.main.context ?? state.context;
+      const liveStatus = mergeLiveStatus(state.liveStatus, observation.main.status, event.occurredAt);
+      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && sameLiveStatus(liveStatus, state.liveStatus) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
+      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, liveStatus, model, context };
     }
     case "PaneOutputObserved": {
-      const answer = event.payload.answer === undefined ? state.answer : keepAnswerTail(event.payload.answer);
-      const model = event.payload.model ?? state.model;
-      const context = event.payload.context ?? state.context;
+      const observation = event.payload.observation;
+      const observedAnswer = observation?.answer.snapshot || event.payload.answer;
+      const answer = observedAnswer === undefined ? state.answer : keepAnswerTail(observedAnswer);
+      const model = observation?.main.model ?? event.payload.model ?? state.model;
+      const context = observation?.main.context ?? event.payload.context ?? state.context;
       const tabId = event.payload.tabId ?? state.tabId;
       const worktreeName = event.payload.worktreeName ?? state.worktreeName;
       if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId && worktreeName === state.worktreeName) return state;
-      if (event.payload.answer !== undefined && state.activePromptId === null && state.phase !== "running" && state.phase !== "blocked") {
+      if (observedAnswer !== undefined && state.activePromptId === null && state.phase !== "running" && state.phase !== "blocked") {
         return { ...base, phase: "done", agentState: "done", answer, model, context, tabId, worktreeName, notice: null };
       }
       return { ...base, answer, model, context, tabId, worktreeName };
@@ -122,7 +128,25 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.phase === right.phase && left.agentState === right.agentState && left.queueDepth === right.queueDepth
     && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
     && left.model === right.model && left.context === right.context
+    && sameLiveStatus(left.liveStatus, right.liveStatus)
     && sameVisibleProgress(left.recentProgress, right.recentProgress);
+}
+
+function mergeLiveStatus(current: MainCardLiveStatus | null, update: Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["observation"]["main"]["status"], occurredAt: string): MainCardLiveStatus | null {
+  if (!update) return current;
+  return {
+    statusTitle: update.statusTitle === undefined ? current?.statusTitle ?? null : update.statusTitle,
+    planSteps: update.planSteps === undefined ? current?.planSteps ?? [] : stampProgress(update.planSteps, occurredAt),
+    elapsedSeconds: update.elapsedSeconds === undefined ? current?.elapsedSeconds ?? null : update.elapsedSeconds,
+    tokenCount: update.tokenCount === undefined ? current?.tokenCount ?? null : update.tokenCount
+  };
+}
+
+function sameLiveStatus(left: MainCardLiveStatus | null, right: MainCardLiveStatus | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.statusTitle === right.statusTitle && left.elapsedSeconds === right.elapsedSeconds && left.tokenCount === right.tokenCount
+    && sameVisibleProgress(left.planSteps, right.planSteps);
 }
 
 function keepAnswerTail(answer: string): string { return answer.slice(-2_500); }

@@ -1,5 +1,5 @@
 import type { AgentState, EventOrigin, IncomingLarkMessage } from "./types.js";
-import type { RunProgressEvent } from "./run-card-view.js";
+import type { MainCardLiveStatus, RunProgressEvent } from "./run-card-view.js";
 
 interface EventBase<T extends string, P> {
   eventId: string;
@@ -8,6 +8,43 @@ interface EventBase<T extends string, P> {
   origin: EventOrigin;
   occurredAt: string;
   payload: P;
+}
+
+export interface TurnOutputObservation {
+  answer: {
+    snapshot: string;
+    previousSnapshot?: string;
+    update?: "append" | "replace" | "replace-status" | "replace-all";
+    toolActivities: Omit<RunProgressEvent, "occurredAt">[];
+    hasToolActivitySnapshot?: boolean;
+  };
+  main: {
+    status?: Partial<Omit<MainCardLiveStatus, "planSteps">> & { planSteps?: Omit<RunProgressEvent, "occurredAt">[] };
+    model?: string;
+    context?: string;
+  };
+}
+
+export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObservation {
+  const value = payload as {
+    observation?: TurnOutputObservation; answerSnapshot?: string; previousAnswerSnapshot?: string; answerUpdate?: TurnOutputObservation["answer"]["update"];
+    progressEvents?: TurnOutputObservation["answer"]["toolActivities"]; hasProgressSnapshot?: boolean; mainStatus?: TurnOutputObservation["main"]["status"]; model?: string; context?: string;
+  };
+  if (value.observation) return value.observation;
+  return {
+    answer: {
+      snapshot: value.answerSnapshot ?? "",
+      ...(value.previousAnswerSnapshot === undefined ? {} : { previousSnapshot: value.previousAnswerSnapshot }),
+      ...(value.answerUpdate === undefined ? {} : { update: value.answerUpdate }),
+      toolActivities: value.progressEvents ?? [],
+      ...(value.hasProgressSnapshot === undefined ? {} : { hasToolActivitySnapshot: value.hasProgressSnapshot })
+    },
+    main: {
+      ...(value.mainStatus ? { status: value.mainStatus } : {}),
+      ...(value.model ? { model: value.model } : {}),
+      ...(value.context ? { context: value.context } : {})
+    }
+  };
 }
 
 export type BridgeEvent =
@@ -26,8 +63,8 @@ export type BridgeEvent =
   | EventBase<"SteeringDelivered", { promptId: string; parentPromptId: string }>
   | EventBase<"SteeringFailed", { promptId: string; parentPromptId: string; error: string }>
   | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number; promptId?: string }>
-  | EventBase<"TurnOutputObserved", { promptId: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: Omit<RunProgressEvent, "occurredAt">[]; hasProgressSnapshot?: boolean; model?: string; context?: string }>
-  | EventBase<"PaneOutputObserved", { answer?: string; model?: string; context?: string; tabId?: string | null; worktreeName?: string | null }>
+  | EventBase<"TurnOutputObserved", { promptId: string; observation: TurnOutputObservation }>
+  | EventBase<"PaneOutputObserved", { observation?: TurnOutputObservation; answer?: string; model?: string; context?: string; tabId?: string | null; worktreeName?: string | null }>
   | EventBase<"TurnCompleted", { promptId: string; answer: string; queueDepth: number }>
   | EventBase<"TurnFailed", { promptId: string; error: string; queueDepth: number }>;
 
