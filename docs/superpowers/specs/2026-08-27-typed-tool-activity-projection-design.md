@@ -38,15 +38,18 @@ executes or evaluates it.
 | Read | bounded basename or relative path | `已读取 · N 行` when count is available, otherwise `已读取` |
 | Search | bounded query and optional scope | `发现 N 条` when count is available, otherwise `搜索完成` |
 | Edit | bounded path list | `已更新` or `N 个文件已更新` |
-| Command | bounded command label | `成功` plus parsed test/build counts when available |
+| Command | bounded command label rendered as Markdown inline code | `成功` plus parsed test/build counts when available |
 | Wait | bounded session or task label | `已完成` or `仍在运行` |
 | Agent | bounded agent/task name | `已启动`, `已完成`, or `状态已更新` |
 | Tool | declared function name | `已完成` |
 
-Targets are single-line, Markdown-escaped, and capped at 160 characters. A
-command target prefers the inner `exec_command.cmd`; otherwise it uses the
-declared function name. It must not show environment values, prompt bodies,
-authorization tokens, or full serialized arguments.
+Targets are single-line, Markdown-escaped, and capped at 160 characters. Command
+targets alone are wrapped as Markdown inline code, for example
+<code>▶ Command · `npm test`</code>; other categories remain plain text. A
+command target prefers the inner `exec_command.cmd`; otherwise it
+uses the declared function name. Embedded backticks are escaped before wrapping.
+Targets must not show environment values, prompt bodies, authorization tokens,
+or full serialized arguments.
 
 ## Result status and summaries
 
