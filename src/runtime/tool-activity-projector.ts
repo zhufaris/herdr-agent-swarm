@@ -23,29 +23,29 @@ export function projectToolCall(name: string, argumentsJson: string): ProjectedT
     return { descriptor: { category: "Skill", target: skillNames.join(", "), skillNames }, entry: "" };
   }
   const descriptor = describeCall(name, parsed);
-  return { descriptor, entry: renderCallEntry(descriptor) };
-}
-
-function renderCallEntry(descriptor: ToolActivityDescriptor): string {
-  const target = descriptor.category === "Command" ? "`" + descriptor.target + "`" : descriptor.target;
-  return "▶ " + descriptor.category + " · " + target;
+  return { descriptor, entry: "" };
 }
 
 export function projectToolResult(descriptor: ToolActivityDescriptor, output: unknown): string {
   const normalized = normalizeOutput(output);
   const status = explicitStatus(output, normalized);
-  if (status.kind === "running") return "▶ " + descriptor.category + " · 仍在运行";
+  const target = renderTarget(descriptor);
+  if (status.kind === "running") return "… " + descriptor.category + " · " + target + " · 运行中";
   if (status.kind === "failed") {
     const detail = failureTail(normalized);
-    const heading = "✗ " + descriptor.category + " · " + status.summary;
+    const heading = "✗ " + descriptor.category + " · " + target + " · " + status.summary;
     if (!detail) return heading;
     const prefix = heading + "\n\n```text\n";
     const suffix = "\n```";
     const room = Math.max(0, FAILURE_DETAIL_LIMIT - prefix.length - suffix.length);
     return prefix + detail.slice(-room) + suffix;
   }
-  if (descriptor.category === "Skill") return "✓ Skill · " + descriptor.target + " · 已加载";
-  return "✓ " + descriptor.category + " · " + successSummary(descriptor, normalized);
+  const summary = successSummary(descriptor, normalized);
+  return "✓ " + descriptor.category + " · " + target + (summary ? " · " + summary : "");
+}
+
+function renderTarget(descriptor: ToolActivityDescriptor): string {
+  return descriptor.category === "Command" ? "`" + descriptor.target + "`" : descriptor.target;
 }
 
 function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
@@ -67,7 +67,7 @@ function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
     return descriptor("Edit", firstValue(record, ["path", "file", "filename"]) ?? name);
   }
   if (normalized === "exec_command" || normalized === "shell" || normalized === "bash" || normalized === "exec") {
-    return descriptor("Command", firstValue(record, ["cmd", "command"]) ?? name);
+    return descriptor("Command", firstValue(record, ["cmd", "command"]) ?? "command");
   }
   if (normalized === "wait" || normalized === "write_stdin" || normalized.includes("wait_agent")) {
     const session = firstValue(record, ["session_id", "cell_id", "target"]);
@@ -174,19 +174,17 @@ function successSummary(descriptor: ToolActivityDescriptor, output: string): str
     if (generic) return [generic[1] + " passed", generic[2] ? generic[2] + " failed" : "", generic[3] ? generic[3] + " skipped" : ""].filter(Boolean).join(" / ");
     const build = /generated\s+dist\/build-info\.json\s+\((sha256:[a-f0-9]+)\)/i.exec(output)?.[1];
     if (build) return "build " + build.slice(0, 15) + "…";
-    return "成功";
+    return "";
   }
   if (descriptor.category === "Read") {
     const lines = /(?:^|\n)(\d+)\s+lines?\b/i.exec(output)?.[1];
-    return lines ? "已读取 · " + lines + " 行" : "已读取";
+    return lines ? lines + " 行" : "";
   }
   if (descriptor.category === "Search") {
     const matches = /(?:found|matches?)\D{0,8}(\d+)/i.exec(output)?.[1];
-    return matches ? "发现 " + matches + " 条" : "搜索完成";
+    return matches ? matches + " 条" : "";
   }
-  if (descriptor.category === "Edit") return "已更新";
-  if (descriptor.category === "Agent") return "状态已更新";
-  return "已完成";
+  return "";
 }
 
 function failureTail(output: string): string {

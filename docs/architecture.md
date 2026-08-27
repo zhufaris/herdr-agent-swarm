@@ -340,14 +340,17 @@ the UUID and its `session_meta` record carries the same ID. It reads complete
 newline-terminated records from a byte cursor. `history_mutation.payload.items`
 in append mutations is the canonical typed Answer-content source. Assistant
 `message` items contribute only their ordered `output_text` parts. A
-`function_call` is projected into a compact typed activity such as
-`▶ Read · src/main.ts`; its exact paired `function_call_output` contributes only
-a deterministic completion summary such as `✓ Read · 已读取`. Successful tool
-stdout, file contents, serialized arguments, patch bodies, and agent payloads
-never enter the Answer. Explicit failures contribute `✗ <Type> · <Summary>` plus
-only the last 20 non-empty, redacted diagnostic lines, with the whole failure
-entry capped at 4,000 characters. Running asynchronous results use
-`▶ <Type> · 仍在运行`. Calls are classified as Skill, Read, Search, Edit,
+`function_call` stores a compact descriptor but emits no Answer content. Its
+exact paired `function_call_output` emits one consistently ordered row such as
+<code>✓ Command · `npm test` · 70 files / 680 tests passed</code> or
+`✓ Read · src/main.ts`. Generic completion words are omitted because `✓` already
+expresses success. Successful tool stdout, file contents, serialized arguments,
+patch bodies, and agent payloads never enter the Answer. Explicit failures
+contribute `✗ <Type> · <Target> · <Summary>` plus only the last 20 non-empty,
+redacted diagnostic lines, with the whole failure entry capped at 4,000
+characters. Running asynchronous results use
+`… <Type> · <Target> · 运行中`; a later terminal result may append its completion
+row because Answer delivery is append-only. Calls are classified as Skill, Read, Search, Edit,
 Command, Wait, Agent, or the generic Tool fallback from their declared name and
 bounded structured fields; displayed targets are single-line, redacted, and at
 most 160 characters. Command targets are rendered as Markdown inline code;
@@ -355,7 +358,7 @@ other activity targets remain plain text.
 
 Absolute `SKILL.md` reads under configured TraeX, agent, or plugin skill roots
 are deferred until their exact result arrives. A successful load emits only
-`✓ Skill · <name> · 已加载` and discards the skill document output completely; a
+`✓ Skill · <name>` and discards the skill document output completely; a
 failed load follows the same bounded diagnostic policy as other failures.
 Ordinary file reads, relative or untrusted paths, and assistant prose that
 mentions `SKILL.md` are not reclassified. Item IDs are deduplicated, and the

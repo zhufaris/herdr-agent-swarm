@@ -101,7 +101,7 @@ describe("TraexTranscriptReader", () => {
       { type: "function_call", id: "fc-missing-call", name: "ignored", arguments: "ignored arguments" }
     ]));
     const callOutput = await cursor.readDelta();
-    expect(callOutput).toBe("▶ Command · `exec`");
+    expect(callOutput).toBe("");
     expect(callOutput).not.toContain("opaque orchestration");
     expect(callOutput).not.toContain("ignored arguments");
 
@@ -114,7 +114,7 @@ describe("TraexTranscriptReader", () => {
       result
     ]));
     const resultOutput = await cursor.readDelta();
-    expect(resultOutput).toBe("✓ Command · 成功");
+    expect(resultOutput).toBe("✓ Command · `command`");
     expect(resultOutput).not.toContain("fixture output");
     expect(resultOutput).not.toMatch(/unmatched output|malformed output|missing identity output/);
     await expect(cursor.readDelta()).resolves.toBe("");
@@ -128,8 +128,8 @@ describe("TraexTranscriptReader", () => {
     await appendFile(path, fixtureRecords);
     const output = await cursor.readDelta();
     expect(output).toContain("Typed answer");
-    expect(output).toContain("▶ Command · `exec`");
-    expect(output).toContain("✓ Command · 成功");
+    expect(output).not.toContain("▶ Command");
+    expect(output).toContain("✓ Command · `command`");
     expect(output).not.toMatch(/opaque orchestration|fixture output/);
   });
 
@@ -138,7 +138,7 @@ describe("TraexTranscriptReader", () => {
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-json", call_id: "call-json", name: "read_file", arguments: '{"path":"src/main.ts","line":42}' }]));
 
-    await expect(cursor.readDelta()).resolves.toBe("▶ Read · src/main.ts");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
   it("summarizes a skill load and suppresses its paired document output", async () => {
@@ -155,7 +155,7 @@ describe("TraexTranscriptReader", () => {
       type: "function_call_output", id: "fco-skill", call_id: "call-skill",
       output: "---\nname: brainstorming\n---\n# Full private skill instructions"
     }]));
-    await expect(cursor.readDelta()).resolves.toBe("✓ Skill · brainstorming · 已加载");
+    await expect(cursor.readDelta()).resolves.toBe("✓ Skill · brainstorming");
   });
 
   it("summarizes distinct trusted skill paths in source order", async () => {
@@ -186,7 +186,8 @@ describe("TraexTranscriptReader", () => {
 
     const output = await cursor.readDelta();
     expect(output).not.toContain("✓ Skill ·");
-    expect(output).toContain("✓ Read · 已读取");
+    expect(output).toContain("✓ Read · docs/SKILL.md");
+    expect(output).toContain("✓ Read · /tmp/demo/SKILL.md");
     expect(output).not.toContain("ordinary SKILL.md contents");
     expect(output).not.toContain("temporary SKILL.md contents");
     expect(output).toContain("The file is named SKILL.md.");
@@ -197,7 +198,22 @@ describe("TraexTranscriptReader", () => {
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-" + field, call_id: "call-" + field, name: "exec", arguments: JSON.stringify({ [field]: "npm test" }) }]));
 
-    await expect(cursor.readDelta()).resolves.toBe("▶ Command · `npm test`");
+    await expect(cursor.readDelta()).resolves.toBe("");
+    await appendFile(path, mutation([{ type: "function_call_output", id: "fco-" + field, call_id: "call-" + field, output: "Script completed" }]));
+    await expect(cursor.readDelta()).resolves.toBe("✓ Command · `npm test`");
+  });
+
+  it("appends a terminal result after a running result for the same call", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{ type: "function_call", id: "fc-running", call_id: "call-running", name: "write_stdin", arguments: JSON.stringify({ session_id: 263 }) }]));
+    await expect(cursor.readDelta()).resolves.toBe("");
+
+    await appendFile(path, mutation([{ type: "function_call_output", id: "fco-running", call_id: "call-running", output: JSON.stringify({ session_id: 263, output: "private partial output" }) }]));
+    await expect(cursor.readDelta()).resolves.toBe("… Wait · session 263 · 运行中");
+
+    await appendFile(path, mutation([{ type: "function_call_output", id: "fco-complete", call_id: "call-running", output: JSON.stringify({ exit_code: 0, output: "private final output" }) }]));
+    await expect(cursor.readDelta()).resolves.toBe("✓ Wait · session 263");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {
