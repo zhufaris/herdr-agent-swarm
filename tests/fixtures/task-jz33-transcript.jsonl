@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-26T15:30:31.000Z","type":"session_meta","payload":{"id":"01a03eb1-c193-7531-83c0-e6c6f70143d4","cwd":"/workspace"}}
+{"timestamp":"2026-08-26T15:30:32.000Z","type":"history_mutation","payload":{"operation":"append","items":[{"type":"function_call","name":"exec","arguments":"const result = await tools.exec_command({cmd: \"echo must-not-render\"});"}]}}

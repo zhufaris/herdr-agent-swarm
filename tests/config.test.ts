@@ -59,6 +59,10 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, TRAEX_PERMISSION_MODE: "suggest" })).toThrow();
   });
 
+  it("supports an explicit TraeX transcript sessions root", () => {
+    expect(loadConfig({ ...requiredEnvironment, TRAEX_SESSIONS_ROOT: "/runtime/traex/sessions" }).traex.sessionsRoot).toBe("/runtime/traex/sessions");
+  });
+
   it("configures Lark request timeout independently from command execution", () => {
     expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000" }).lark.requestTimeoutMs).toBe(30_000);
     expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000", LARK_REQUEST_TIMEOUT_MS: "12000" })).toMatchObject({

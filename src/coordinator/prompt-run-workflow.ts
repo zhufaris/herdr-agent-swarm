@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { renderProjectEntryCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, PromptRunStore } from "../domain/ports.js";
+import type { HerdrPort, PromptRunStore, TraexTranscriptCursorPort, TraexTranscriptReaderPort } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -40,6 +40,7 @@ interface PromptRunWorkflowOptions {
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
+  transcriptReader?: TraexTranscriptReaderPort;
 }
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
@@ -219,11 +220,22 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         await this.refreshQueuePositions(bindingId);
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
         this.options.logger.info({ event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth, outcome: "running" }, "TraeX turn started");
+        let transcript = await this.openTranscript(binding);
+        let outputMode: "typed" | "terminal" = transcript ? "typed" : "terminal";
+        const typedAnswer: string[] = [];
         const before = await this.options.herdr.readOutput(paneId, 240);
         let previousObservation = before;
         const state = await this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource, output }) => {
           if (!this.isBindingActive(bindingId)) return;
-          const parsed = parseTerminalStreamDelta(previousObservation, output, prompt.body);
+          const typed = await this.readTypedDelta(transcript, binding, prompt.id);
+          if (typed.failed) {
+            transcript = null;
+            if (typedAnswer.length === 0) outputMode = "terminal";
+          }
+          if (typed.delta) typedAnswer.push(typed.delta);
+          const parsed = outputMode === "typed"
+            ? { delta: typed.delta, update: "append" as const, model: null, context: null }
+            : parseTerminalStreamDelta(previousObservation, output, prompt.body);
           previousObservation = output;
           if (parsed.delta || parsed.model || parsed.context) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: parsed.delta, answerUpdate: parsed.update, progressEvents: [], ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.context ? { context: parsed.context } : {}) });
           const previousState = binding.lastAgentState;
@@ -240,9 +252,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(bindingId, prompt.id, state);
         binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
+        const finalTyped = await this.readTypedDelta(transcript, binding, prompt.id);
+        if (finalTyped.delta) typedAnswer.push(finalTyped.delta);
+        if (finalTyped.delta) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, answerSnapshot: finalTyped.delta, answerUpdate: "append", progressEvents: [] });
         const answer = extractFinalTraexAnswer(await this.options.herdr.readOutput(paneId, 240));
         const streamed = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
-        const finalAnswer = streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。";
+        const finalAnswer = typedAnswer.join("\n\n") || streamed || answer || "TraeX 已完成，但没有可安全展示的文本输出。请查看 Herdr pane。";
         binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(answer), occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
@@ -327,6 +342,29 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private isBindingActive(bindingId: string): boolean {
     const binding = this.options.store.getBinding(bindingId);
     return binding?.state === "active" && binding.lifecycle === "active";
+  }
+
+  private async openTranscript(binding: Binding): Promise<TraexTranscriptCursorPort | null> {
+    if (!this.options.transcriptReader) return null;
+    const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+      ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
+      : null;
+    try {
+      return await this.options.transcriptReader.open(session);
+    } catch (error) {
+      this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "terminal_fallback" }, "could not open typed TraeX transcript");
+      return null;
+    }
+  }
+
+  private async readTypedDelta(cursor: TraexTranscriptCursorPort | null, binding: Binding, promptId: string): Promise<{ delta: string; failed: boolean }> {
+    if (!cursor) return { delta: "", failed: false };
+    try {
+      return { delta: await cursor.readDelta(), failed: false };
+    } catch (error) {
+      this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, outcome: "terminal_fallback" }, "typed TraeX transcript became unavailable");
+      return { delta: "", failed: true };
+    }
   }
 
   private async refreshQueuePositions(bindingId: string): Promise<void> {

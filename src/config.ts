@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { basename, isAbsolute } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
 import type { ProjectConfig } from "./domain/types.js";
 
@@ -39,6 +40,7 @@ const environmentSchema = z.object({
   HERDR_BIN: z.string().min(1).default("herdr"),
   TRAEX_BIN: z.string().min(1).default("traex"),
   TRAEX_PERMISSION_MODE: z.enum(["default", "bypass_permissions", "auto"]).default("auto"),
+  TRAEX_SESSIONS_ROOT: z.string().min(1).default(resolve(homedir(), ".trae/cli/sessions")),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   LARK_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
@@ -71,7 +73,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     projects: registry.projects,
     defaultProjectId: registry.defaultProjectId,
     projectsConfigPath: value.PROJECTS_CONFIG_PATH,
-    traex: { executable: value.TRAEX_BIN, permissionMode: value.TRAEX_PERMISSION_MODE },
+    traex: { executable: value.TRAEX_BIN, permissionMode: value.TRAEX_PERMISSION_MODE, sessionsRoot: value.TRAEX_SESSIONS_ROOT },
     databasePath: value.BRIDGE_DATABASE_PATH,
     http: { host: value.BRIDGE_HTTP_HOST, port: value.BRIDGE_HTTP_PORT },
     logLevel: value.LOG_LEVEL,

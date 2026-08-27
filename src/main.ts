@@ -37,6 +37,7 @@ import { AnswerPageWorkflow } from "./coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "./coordinator/main-card-workflow.js";
 import { WorktreeNameResolver } from "./runtime/worktree-name-resolver.js";
 import { safeLogError } from "./runtime/safe-error.js";
+import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
 const buildIdentity = loadBuildIdentity(fileURLToPath(new URL("./build-info.json", import.meta.url)), process.env.BRIDGE_EXPECTED_BUILD_ID);
@@ -82,9 +83,10 @@ const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }
 const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
 const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
 const sqliteIntegrity = new SqliteIntegrityAuditor(store, config.sqliteIntegrityAudit, logger);
+const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot });
 const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards);
 channelPublisher.connectPromptScheduler(scheduler);
-const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs });
+const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
 const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
 const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });

@@ -12,7 +12,7 @@ import { PaneClosureWorkflow } from "../../src/coordinator/pane-closure-workflow
 import { PromptRunWorkflow } from "../../src/coordinator/prompt-run-workflow.js";
 import { RetiredPaneCleanupWorkflow } from "../../src/coordinator/retired-pane-cleanup-workflow.js";
 import { StartupViewConverger } from "../../src/coordinator/startup-view-converger.js";
-import type { HerdrPort, LarkPort } from "../../src/domain/ports.js";
+import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
 import type { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
@@ -31,13 +31,14 @@ export function createTestRouter(
   logger: Logger,
   shutdownGraceMs = 30_000,
   scheduler: PromptWorkScheduler = new InProcessPromptWorkScheduler(logger),
-  inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier()
+  inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier(),
+  transcriptReader?: TraexTranscriptReaderPort
 ): InboundRouter {
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   outboundWork.subscribe(() => outbound.requestScan());
   const writer = new OutboundIntentWriter(store, outboundWork);
   outbound.connectPromptScheduler(scheduler);
-  const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs });
+  const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader });
   const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });

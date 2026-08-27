@@ -2,7 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
-import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
+import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
@@ -219,6 +219,112 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
+
+  it("streams typed transcript output and ignores misleading terminal code markers", async () => {
+    const deltas = [
+      "Typed **analysis**",
+      "```bash\nnpm test\n```\n\n```text\n12 tests passed\n```",
+      "```diff\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n```"
+    ];
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open(session) {
+        expect(session).toMatchObject({ agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+        return { async readDelta() { return deltas.shift() ?? ""; } };
+      }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
+        await onDispatched?.();
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "• Bash fake terminal command\nnot typed" });
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "+ fake terminal diff" });
+        return "done";
+      },
+      async readOutput() { return "◆ misleading terminal final\n────────"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const scheduler = undefined;
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, scheduler, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr-lark-bridge:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "typed-e1", messageId: "typed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do typed work", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
+    const answer = store.listRunCards("b1")[0]!.answer;
+    expect(answer).toContain("Typed **analysis**");
+    expect(answer).toContain("```bash\nnpm test\n```");
+    expect(answer).toContain("```diff");
+    expect(answer).not.toMatch(/fake terminal|misleading terminal/);
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("falls back to terminal output when typed transcript reading fails", async () => {
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { async readDelta() { throw new Error("transcript unavailable"); } }; }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
+        await onDispatched?.();
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ safe terminal fallback" });
+        return "done";
+      },
+      async readOutput() { return "◆ safe terminal fallback\n────────"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "bridge", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "fallback-e1", messageId: "fallback-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "fallback work", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "safe terminal fallback" }));
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("does not mix terminal text into an answer after typed output was established", async () => {
+    let reads = 0;
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { async readDelta() { reads += 1; if (reads === 1) return "authoritative typed answer"; throw new Error("transcript interrupted"); } }; }
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
+        await onDispatched?.();
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ first terminal screen" });
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ terminal after typed failure" });
+        return "done";
+      },
+      async readOutput() { return "◆ terminal final\n────────"; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "bridge", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "mixed-e1", messageId: "mixed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "typed then fail", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "authoritative typed answer" }));
+    expect(store.listRunCards("b1")[0]!.answer).not.toContain("terminal");
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
 });
 
 function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
@@ -246,7 +352,7 @@ function config(): BridgeConfig {
     lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
     herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
-    defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:",
+    defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex", permissionMode: "auto", sessionsRoot: "/tmp/traex-sessions" }, databasePath: ":memory:",
     http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
   };
 }

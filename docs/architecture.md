@@ -23,6 +23,7 @@ transaction by itself.
 | Concern | Authority | Why |
 | --- | --- | --- |
 | Pane identity, terminal identity, native Agent session reference, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
+| Typed assistant, command, output, and patch content for an active turn | Exactly identified TraeX JSONL transcript | The transcript contains upstream typed fields; the bridge never guesses code boundaries from terminal layout. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
 | Process lifecycle | user systemd service | The plugin controls the service; the application does not manage PID files. |
@@ -318,10 +319,22 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-Terminal observations are normalized before persistence or delivery. ANSI and
-terminal chrome, prompt echo, reasoning blocks, internal protocol markup, and
-secret values are removed or redacted. Overlapping terminal windows append only
-new visible material. When a terminal redraw has no reliable overlap, the active
+For bridge-started TraeX processes, a process-local `SessionStart` hook reports
+the native session ID to Herdr. `PromptRunWorkflow` opens the corresponding
+transcript at EOF before dispatch, but only when exactly one filename matches
+the UUID and its `session_meta` record carries the same ID. It reads complete
+newline-terminated records from a byte cursor. Explicit `agent_message`,
+`exec_command_end`, and `patch_apply_end` events render as Markdown, `bash`,
+`text`, and `diff` blocks. Reasoning, unknown events, and JavaScript carried in
+`history_mutation.function_call.arguments` are ignored. `TRAEX_SESSIONS_ROOT`
+selects the transcript root and defaults to `~/.trae/cli/sessions`.
+
+If exact identity, lookup, validation, or reading is unavailable, the turn falls
+back to terminal observations without failing or replaying the prompt. Terminal
+observations are normalized before persistence or delivery. ANSI and terminal
+chrome, prompt echo, reasoning blocks, internal protocol markup, and secret
+values are removed or redacted. Overlapping terminal windows append only new
+visible material. When a terminal redraw has no reliable overlap, the active
 transient terminal view is replaced with the new safe screen (`replace-all`),
 which prevents an entire redrawn terminal from being appended twice. Final
 TraeX answers then converge the card to the completed result.
