@@ -35,8 +35,9 @@ the prompt.
 
 ## Typed rendering
 
-The reader consumes `history_mutation.payload.items` and preserves source order.
-It emits only externally safe records:
+`history_mutation.payload.items` is the canonical typed-message source. The
+reader consumes append mutations in record and item order and emits only
+externally safe items:
 
 - assistant `message` items containing `output_text` become Markdown;
 - `function_call` items become a neutral `tool` block with the declared tool
@@ -46,29 +47,68 @@ It emits only externally safe records:
 - reasoning, developer/user/system messages, metadata, and unknown records are
   ignored.
 
-The reader must not parse JavaScript orchestration strings inside `exec` calls
-to infer shell commands or patches. A future native `command` or `patch` typed
-record may map directly to `bash` or `diff`, but only from explicit fields.
-Existing secret redaction and CardKit Markdown sanitization still apply.
+The cursor tracks emitted item IDs and pending calls for its lifetime. Repeated
+items are not emitted twice, and a `function_call_output` is rendered only with
+the matching call identity. A result that arrives in a later mutation remains
+paired with the earlier call. Missing, duplicate, or malformed identities are
+ignored rather than guessed.
+
+Top-level `event_msg` records are not the typed-message authority. They may be
+used later for independently specified lifecycle or progress projection, but
+must not duplicate content already represented by `history_mutation` items. In
+particular, the reader must not infer shell commands or patches from JavaScript
+or JSON strings inside an `exec` call. A future native command or patch item may
+map to a specialized block only from explicit typed fields. Existing secret
+redaction and CardKit Markdown sanitization still apply to every emitted field.
 
 ## Integration and fallback
 
-`PromptRunWorkflow` opens a transcript cursor before dispatch. On every runtime
-observation it prefers non-empty typed transcript deltas. If typed identity,
-file resolution, JSON parsing, or schema validation is unavailable, it uses the
-existing terminal delta path. Typed reader failures are logged and degrade only
-the current observer; they never fail or replay a TraeX prompt.
+`PromptRunWorkflow` opens a transcript cursor before dispatch and chooses one
+output mode for the turn. If the cursor opens, the turn is `typed`; otherwise it
+is `terminal`. Every turn-start log records the chosen mode. Terminal fallback
+records a bounded reason code such as `missing_session_identity`,
+`unsupported_session_identity`, `transcript_not_found`,
+`ambiguous_transcript`, or `transcript_validation_failed`. It does not include
+prompts, transcript content, or secrets.
 
-Final completion prefers accumulated typed Answer content, then accumulated
-terminal content, then the final terminal extraction. Existing SQLite, outbox,
-pagination, source offsets, frozen-page behavior, and prompt replay invariants
-do not change.
+On every runtime observation a typed turn reads the next complete mutation
+records. If reading fails before any typed content is published, the observer
+may switch once to terminal mode and records `transcript_read_failed`. If any
+typed content has already been published, terminal content is not mixed into
+the answer; the reader failure is logged and finalization uses the accumulated
+typed content. Typed reader failures never fail or replay a TraeX prompt.
+
+Final completion uses accumulated typed content for a typed turn. A terminal
+turn uses the accumulated terminal view and then final terminal extraction.
+Existing SQLite, outbox, pagination, source offsets, frozen-page behavior, and
+prompt replay invariants do not change.
+
+## Existing panes and rollout
+
+The bridge never guesses transcript identity from cwd, timestamps, titles, or
+the newest session file. Existing panes without a native session identity stay
+on terminal mode for their remaining lifetime. Newly created or explicitly
+reset panes receive the bridge-managed `SessionStart` hook, report the exact
+TraeX UUID through Herdr, and become eligible for typed mode on their next turn.
+No automatic restart or replacement of an existing pane is part of rollout.
+
+Operational verification must demonstrate both paths: an existing unidentified
+pane logs terminal mode with `missing_session_identity`, while a newly created
+or reset bridge-managed pane logs typed mode and streams content sourced from
+its exact JSONL transcript.
 
 ## Verification
 
-- unit tests cover identity validation, cursor behavior, partial JSONL records,
-  typed message/tool pairing, unknown records, and redaction;
+- unit tests use realistic `history_mutation` fixtures and cover identity
+  validation, cursor behavior, partial JSONL records, assistant message
+  rendering, cross-record tool/result pairing, duplicate suppression, unknown
+  records, and redaction;
 - adapter tests cover injected hook arguments and session reporting;
-- workflow integration tests cover typed-first rendering and terminal fallback;
-- a sanitized task-jz33 JSONL fixture covers real `exec` call/output shapes; and
+- workflow integration tests cover typed-only rendering, fallback before the
+  first typed emission, no mixed-source fallback after emission, and structured
+  mode/reason diagnostics;
+- a sanitized real JSONL fixture covers actual message, function call, and
+  function call output shapes;
+- a live smoke check covers one legacy pane and one newly created or reset pane;
+  and
 - the full Vitest suite, typecheck, and production build must pass.
