@@ -6,14 +6,14 @@ Make the Main Card read like a compact live status panel. A reader should see, i
 
 ## Selected direction
 
-Use the status-focused layout (option A). This is a presentation-only refinement of the existing `TopicViewState`; it does not change transcript capture, persistence, reconciliation, or the separation between Main Card and Answer Card projections.
+Use the status-focused layout (option A). The Main Card continues to use a bounded, Answer-derived tail stored in `TopicViewState`; it does not become canonical transcript storage and does not change reconciliation or the separation between Main Card and Answer Card projections.
 
 The card renders these sections from top to bottom:
 
 1. Header: task title, card lifecycle color, and concise current phase.
 2. Live work panel: dynamic status title, elapsed time, token count, and the complete plan.
 3. Recent activity: tool and progress events as secondary operational detail.
-4. Latest message: a two-to-four-line Answer preview when useful.
+4. Latest message: up to the latest 12 meaningful Answer lines when useful, bounded to 6,000 rendered characters.
 5. Runtime footer: space, tab, pane, model, context, queue depth, worktree, and last-update time.
 
 ## Live work panel
@@ -37,7 +37,9 @@ Remove the separate `当前工作 / TraeX 正在处理当前请求` block when l
 
 Rename the existing progress timeline presentation to `最近活动` and keep it visually secondary to the plan. Do not duplicate `update_plan` steps in this timeline.
 
-Limit `最新消息` to a compact tail preview of two to four meaningful lines. It remains an Answer-derived preview and must not become a source for Main Card state.
+Render `最新消息` from the latest 12 meaningful Answer lines, with an independent 6,000-character CardKit field budget. This gives the group-level card enough context for multi-step status and short code/log excerpts without turning it into the full Answer surface. If the selected lines exceed the character budget, retain useful content from both ends with the existing deterministic middle-omission marker.
+
+Retain the latest 9,000 Answer characters in the durable `TopicViewState` projection so the renderer has enough source text to populate the larger preview. This rolling tail is still a bounded display projection: it is not canonical Answer storage, must not drive answer-page offsets or recovery, and resets at the existing turn boundary. The separate remote-panel `最近输出` preview keeps its existing 2,000-character budget.
 
 Move runtime identity to the bottom. Render it as compact, muted rows:
 
@@ -59,6 +61,7 @@ Missing values are omitted where possible, avoiding rows dominated by em dashes.
 ## Safety and compatibility
 
 - Consume only `TopicViewState.liveStatus`, existing progress events, answer preview, and runtime metadata.
+- Bound the durable TopicView Answer tail at 9,000 characters and the project-entry `最新消息` field at 12 lines / 6,000 characters.
 - Do not parse status or plans from Answer text.
 - Do not render reasoning body, tool arguments, approval transcript, or hidden protocol content.
 - Do not change durable source offsets or Answer Card pagination.
@@ -66,4 +69,4 @@ Missing values are omitted where possible, avoiding rows dominated by em dashes.
 
 ## Verification
 
-Update focused card tests for ordering, de-duplication, compact runtime footer, status/plan markers, fallback behavior, and completed-state retention. Then run the complete test suite, typecheck, build, and `git diff --check` before deployment or the final feature commit.
+Update focused card tests for ordering, de-duplication, compact runtime footer, status/plan markers, fallback behavior, completed-state retention, and the 12-line / 6,000-character latest-message bounds. Update TopicView reducer tests to prove that it retains exactly the latest 9,000 characters without affecting current-turn progress. Then run the complete test suite, typecheck, build, and `git diff --check` before deployment or the final feature commit.

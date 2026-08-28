@@ -11,7 +11,8 @@ clear, deterministic summary.
 Before text enters a CardKit Markdown field, the renderer applies an
 independent presentation-only preview limit:
 
-- Main-card previews use a 2,000-character budget.
+- The remote-panel `最近输出` preview uses a 2,000-character budget.
+- The group project-entry card's `最新消息` preview uses a 6,000-character budget after selecting at most the latest 12 meaningful lines.
 - Answer-card content uses a 9,000-character budget.
 - Text at or below its budget is rendered unchanged.
 - Text over its budget keeps a head and tail. The middle is replaced by exactly
@@ -38,8 +39,9 @@ This is a pure rendering transform only. It runs after the bridge has selected
 the canonical answer/message text and before CardKit rendering. It must not
 change:
 
-- SQLite `RunCardView.answer`, answer segments, drafts, TopicView answer text,
-  prompt bodies, or terminal fingerprints;
+- SQLite `RunCardView.answer`, answer segments, drafts, prompt bodies, or terminal
+  fingerprints. `TopicViewState.answer` remains a non-canonical rolling display
+  projection and may retain the latest 9,000 characters for the Main Card;
 - answer-page source offsets, page lifecycle, continuation decisions, or
   CardKit stream sequence numbers;
 - outbox idempotency keys, durable view versions, or delivery/checkpoint
@@ -63,9 +65,12 @@ that have at least one omitted character.
 Wire that helper into the two presentation seams that already impose different
 budgets:
 
-1. `renderRunCard()` / `renderProjectEntryCard()` use the 2,000-character
-   main-card preview budget.
-2. `renderRequestAnswerCard()` uses the 9,000-character Answer-card preview
+1. `renderRunCard()` uses the 2,000-character remote-panel preview budget.
+2. `renderProjectEntryCard()` selects at most the latest 12 meaningful Answer
+   lines, then applies the 6,000-character project-entry preview budget. Its
+   source is the latest 9,000-character rolling tail in `TopicViewState`, not
+   canonical Answer content.
+3. `renderRequestAnswerCard()` uses the 9,000-character Answer-card preview
    budget only for the initial/non-streaming card body. It must not run inside
    `renderAnswerStreamPage()` or change `answer_pages.source_start`, because
    those source offsets refer to canonical Answer text.
@@ -77,8 +82,8 @@ one-field message JSON presentation; it is not an alternate pagination system.
 ## Error handling and edge cases
 
 - A budget that cannot fit at least one source character plus a complete marker
-  returns a bounded prefix rather than throwing. Production callers use 2,000
-  and 9,000, so this is a defensive pure-function rule.
+  returns a bounded prefix rather than throwing. Production callers use 2,000,
+  6,000, and 9,000, so this is a defensive pure-function rule.
 - Empty content remains empty. Newlines, whitespace, fenced JSON, ordinary
   prose, logs, and diff text all use the same deterministic algorithm.
 - The omitted marker is treated as display text, then passes through the normal
