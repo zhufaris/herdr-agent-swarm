@@ -102,6 +102,20 @@ describe("health server", () => {
     expect(await response.json()).toMatchObject({ status: "not_ready", components: { lease: { ok: false, held: false, error: "fence changed" } } });
   });
 
+  it("stays not ready until instance runtime reconciliation completes", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const runtime = { snapshot: vi.fn(() => ({ ready: false, lastError: "startup snapshot pending" })) };
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never, instanceRuntime: runtime, readinessTtlMs: 0,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+    expect(await (await fetch(`http://127.0.0.1:${port}/ready`)).json()).toMatchObject({ status: "not_ready", components: { instanceRuntime: { ok: false, error: "startup snapshot pending" } } });
+    runtime.snapshot.mockReturnValue({ ready: true, lastError: null });
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+  });
+
   it("degrades status for a long-lived cleanup without failing readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);

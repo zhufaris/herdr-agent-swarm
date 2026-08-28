@@ -7,8 +7,12 @@ import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "./agent-instance.js";
 import type { ControlActor } from "./commands.js";
 import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "./instance-turn.js";
+import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
 
 export interface InstanceStore {
+  createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest;
+  resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
+  consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch";
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
   getAgentInstance(id: string): AgentInstance | null;
   listAgentInstances(projectId: string): AgentInstance[];
@@ -16,6 +20,7 @@ export interface InstanceStore {
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
+  detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null;
   getWorkspaceLease(id: string): WorkspaceLease | null;
   updateWorkspaceLease(input: { id: string; expectedGeneration: number; state: WorkspaceLeaseState; cwd?: string; branch?: string | null; baseCommit?: string }): WorkspaceLease | null;
   createInstanceRemovalPlan(plan: InstanceRemovalPlan): InstanceRemovalPlan;

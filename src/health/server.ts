@@ -13,6 +13,7 @@ interface Readiness {
     database: ComponentState; projects: ComponentState; lark: ComponentState;
     lease: InstanceLeaseStatus & { ok: boolean };
     herdr: ComponentState & { workspaces: Array<{ workspaceId: string; ok: boolean; error?: string }> };
+    instanceRuntime?: ComponentState;
   };
 }
 
@@ -26,6 +27,7 @@ export function startHealthServer(options: {
   lifecycleEvents?: LifecycleEventDiagnostics;
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
+  instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } };
   herdrSocket?: { status(): HerdrSocketStatus };
   buildIdentity: BuildIdentity;
   readinessTtlMs?: number;
@@ -111,7 +113,7 @@ class ReadinessCache {
   }
 }
 
-async function inspectReadiness(options: { store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus } }): Promise<Readiness> {
+async function inspectReadiness(options: { store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus }; instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } } }): Promise<Readiness> {
   const database = check(() => options.store.listBindings());
   const projects = check(() => validateProjectDirectories(options.projects));
   const lark = options.lark.isReady() ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };
@@ -123,7 +125,9 @@ async function inspectReadiness(options: { store: HealthStore; herdr: HerdrPort;
   }));
   const failedWorkspace = workspaces.find((workspace) => !workspace.ok);
   const herdr = failedWorkspace ? { ok: false, error: "One or more Herdr workspaces are unavailable", workspaces } : { ok: true, workspaces };
-  const components = { database, projects, herdr, lark, lease };
+  const runtime = options.instanceRuntime?.snapshot();
+  const instanceRuntime = runtime ? { ok: runtime.ready, ...(runtime.ready ? {} : { error: runtime.lastError ?? "Instance runtime reconciliation has not completed" }) } : undefined;
+  const components = { database, projects, herdr, lark, lease, ...(instanceRuntime ? { instanceRuntime } : {}) };
   return { status: Object.values(components).every((component) => component.ok) ? "ready" : "not_ready", components };
 }
 

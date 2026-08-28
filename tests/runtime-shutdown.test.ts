@@ -88,6 +88,19 @@ describe("bridge runtime shutdown", () => {
     expect(contexts[0]!.remainingMs()).toBeLessThanOrEqual(1_000);
   });
 
+  it("stops instance reconciliation within the shared shutdown deadline before releasing SQLite", async () => {
+    const calls: string[] = [];
+    const runtime = new BridgeRuntimeShutdown({
+      instanceRuntime: { async stop() { calls.push("instance-runtime"); } },
+      coordinator: { async stop() { calls.push("coordinator"); } }, projector: { async stop() { calls.push("projector"); } }, publisher: { async stop() { calls.push("publisher"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } }, lease: { release() { calls.push("lease"); } }, store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, error() {} }
+    });
+    await runtime.shutdown("SIGTERM");
+    expect(calls.indexOf("instance-runtime")).toBeLessThan(calls.indexOf("fence"));
+    expect(calls.slice(-3)).toEqual(["fence", "lease", "store"]);
+  });
+
   it("aborts the shared context once at the global deadline and retains SQLite until a writer settles", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];

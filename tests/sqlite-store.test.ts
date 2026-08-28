@@ -17,6 +17,21 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("persists exact approval identity and consumes a matching grant once", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const identity = { actorId: "user-1", projectId: "project-a", instanceId: "i1", instanceGeneration: 1, actionFingerprint: "sha256:action", resourceScope: "repo/acme#new", policyVersion: "solo-agent-v1" };
+    const request = store.createApprovalRequest({ id: "request-1", ...identity, expiresAt: "2026-08-28T16:00:00.000Z" });
+    expect(request).toMatchObject({ ...identity, state: "pending", tier: "remote-confirmation" });
+
+    expect(store.resolveApprovalRequest({ requestId: request.id, actorId: "other", approved: true, now: "2026-08-28T15:00:00.000Z", grantId: "grant-x" }).outcome).toBe("unauthorized");
+    expect(store.resolveApprovalRequest({ requestId: request.id, actorId: "user-1", approved: true, now: "2026-08-28T15:00:00.000Z", grantId: "grant-1" })).toMatchObject({ outcome: "approved", grant: { id: "grant-1", ...identity, consumedAt: null } });
+    expect(store.resolveApprovalRequest({ requestId: request.id, actorId: "user-1", approved: true, now: "2026-08-28T15:01:00.000Z", grantId: "grant-2" }).outcome).toBe("duplicate");
+    expect(store.consumeApprovalGrant({ grantId: "grant-1", ...identity, actionFingerprint: "sha256:changed", now: "2026-08-28T15:02:00.000Z" })).toBe("mismatch");
+    expect(store.consumeApprovalGrant({ grantId: "grant-1", ...identity, now: "2026-08-28T15:02:00.000Z" })).toBe("consumed");
+    expect(store.consumeApprovalGrant({ grantId: "grant-1", ...identity, now: "2026-08-28T15:03:00.000Z" })).toBe("used");
+  });
+
   it("atomically creates and reads an agent instance with its workspace lease", () => {
     store = new SqliteBindingStore(":memory:");
 

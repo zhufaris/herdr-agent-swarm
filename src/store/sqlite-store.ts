@@ -20,9 +20,10 @@ import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheck
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "../domain/instance-turn.js";
+import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 
 const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "instance_operations", "instance_events", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "instance_operations", "instance_events", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
@@ -50,6 +51,64 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   close(): void { this.database.close(); }
+
+  createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest {
+    const instance = this.getAgentInstance(input.instanceId);
+    if (!instance || instance.projectId !== input.projectId || instance.generation !== input.instanceGeneration) throw new Error("Instance generation changed before approval request");
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO approval_requests(id, actor_id, project_id, instance_id, instance_generation, action_fingerprint, resource_scope, policy_version, tier, state, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'remote-confirmation', 'pending', ?, ?)`)
+      .run(input.id, input.actorId, input.projectId, input.instanceId, input.instanceGeneration, input.actionFingerprint, input.resourceScope, input.policyVersion, input.expiresAt, timestamp);
+    return this.getApprovalRequest(input.id)!;
+  }
+
+  resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const request = this.getApprovalRequest(input.requestId);
+      if (!request) { this.database.exec("COMMIT"); return { outcome: "missing", request: null, grant: null }; }
+      if (request.actorId !== input.actorId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", request, grant: null }; }
+      if (request.state !== "pending") { this.database.exec("COMMIT"); return { outcome: "duplicate", request, grant: this.getApprovalGrantByRequest(request.id) }; }
+      if (request.expiresAt <= input.now) {
+        this.database.prepare("UPDATE approval_requests SET state = 'expired', resolved_at = ? WHERE id = ? AND state = 'pending'").run(input.now, request.id);
+        const expired = this.getApprovalRequest(request.id); this.database.exec("COMMIT"); return { outcome: "expired", request: expired, grant: null };
+      }
+      const state = input.approved ? "approved" : "rejected";
+      this.database.prepare("UPDATE approval_requests SET state = ?, resolved_at = ? WHERE id = ? AND state = 'pending'").run(state, input.now, request.id);
+      if (input.approved) this.database.prepare(`INSERT INTO approval_grants(id, request_id, actor_id, project_id, instance_id, instance_generation, action_fingerprint, resource_scope, policy_version, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(input.grantId, request.id, request.actorId, request.projectId, request.instanceId, request.instanceGeneration, request.actionFingerprint, request.resourceScope, request.policyVersion, request.expiresAt, input.now);
+      const resolved = this.getApprovalRequest(request.id);
+      const grant = input.approved ? this.getApprovalGrant(input.grantId) : null;
+      this.database.exec("COMMIT"); return { outcome: state, request: resolved, grant };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch" {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const grant = this.getApprovalGrant(input.grantId);
+      if (!grant) { this.database.exec("COMMIT"); return "missing"; }
+      if (grant.consumedAt) { this.database.exec("COMMIT"); return "used"; }
+      if (grant.expiresAt <= input.now) { this.database.exec("COMMIT"); return "expired"; }
+      if (!approvalIdentityMatches(grant, input)) { this.database.exec("COMMIT"); return "mismatch"; }
+      const instance = this.getAgentInstance(input.instanceId);
+      if (!instance || instance.projectId !== input.projectId || instance.generation !== input.instanceGeneration) { this.database.exec("COMMIT"); return "mismatch"; }
+      const changed = this.database.prepare("UPDATE approval_grants SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").run(input.now, grant.id);
+      this.database.exec("COMMIT"); return changed.changes === 1 ? "consumed" : "used";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private getApprovalRequest(id: string): ApprovalRequest | null {
+    const row = this.database.prepare("SELECT * FROM approval_requests WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapApprovalRequest(row) : null;
+  }
+  private getApprovalGrant(id: string): ApprovalGrant | null {
+    const row = this.database.prepare("SELECT * FROM approval_grants WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapApprovalGrant(row) : null;
+  }
+  private getApprovalGrantByRequest(requestId: string): ApprovalGrant | null {
+    const row = this.database.prepare("SELECT * FROM approval_grants WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+    return row ? mapApprovalGrant(row) : null;
+  }
 
   activateWriteFence(ownerId: string, fencingToken: number): void {
     this.deactivateWriteFence();
@@ -182,6 +241,23 @@ export class SqliteBindingStore implements BindingStorePort {
     const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
       .run(input.desiredState, input.observedState, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
     return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+  }
+
+  detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const instance = this.getAgentInstance(input.instanceId);
+      if (!instance || instance.generation !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      const nextGeneration = input.expectedGeneration + 1;
+      this.database.prepare(`UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')`)
+        .run(input.reason, now(), instance.id, input.expectedGeneration);
+      this.database.prepare(`UPDATE instance_turns SET instance_generation = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'`)
+        .run(nextGeneration, now(), instance.id, input.expectedGeneration);
+      const changed = this.database.prepare(`UPDATE agent_instances SET generation = ?, observed_state = 'detached', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+        .run(nextGeneration, input.reason, now(), instance.id, input.expectedGeneration);
+      this.database.exec("COMMIT");
+      return changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   getWorkspaceLease(id: string): WorkspaceLease | null {
@@ -2180,6 +2256,15 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE IF NOT EXISTS instance_events(
         id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, turn_id TEXT REFERENCES instance_turns(id) ON DELETE SET NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS approval_requests(
+        id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL,
+        action_fingerprint TEXT NOT NULL, resource_scope TEXT NOT NULL, policy_version TEXT NOT NULL, tier TEXT NOT NULL CHECK(tier = 'remote-confirmation'),
+        state TEXT NOT NULL CHECK(state IN ('pending','approved','rejected','expired')), expires_at TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS approval_grants(
+        id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE REFERENCES approval_requests(id) ON DELETE CASCADE, actor_id TEXT NOT NULL, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL,
+        action_fingerprint TEXT NOT NULL, resource_scope TEXT NOT NULL, policy_version TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS conversation_targets(
         chat_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target_kind TEXT NOT NULL CHECK(target_kind IN ('primary','instance')), instance_id TEXT, instance_generation INTEGER, updated_at TEXT NOT NULL
       );
@@ -2835,6 +2920,20 @@ export class SqliteBindingStore implements BindingStorePort {
 }
 
 function now(): string { return new Date().toISOString(); }
+function approvalIdentityMatches(left: ApprovalIdentity, right: ApprovalIdentity): boolean {
+  return left.actorId === right.actorId && left.projectId === right.projectId && left.instanceId === right.instanceId
+    && left.instanceGeneration === right.instanceGeneration && left.actionFingerprint === right.actionFingerprint
+    && left.resourceScope === right.resourceScope && left.policyVersion === right.policyVersion;
+}
+function mapApprovalIdentity(row: Record<string, unknown>): ApprovalIdentity {
+  return { actorId: String(row.actor_id), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actionFingerprint: String(row.action_fingerprint), resourceScope: String(row.resource_scope), policyVersion: String(row.policy_version) };
+}
+function mapApprovalRequest(row: Record<string, unknown>): ApprovalRequest {
+  return { id: String(row.id), ...mapApprovalIdentity(row), tier: "remote-confirmation", state: String(row.state) as ApprovalRequest["state"], expiresAt: String(row.expires_at), createdAt: String(row.created_at), resolvedAt: row.resolved_at === null ? null : String(row.resolved_at) };
+}
+function mapApprovalGrant(row: Record<string, unknown>): ApprovalGrant {
+  return { id: String(row.id), requestId: String(row.request_id), ...mapApprovalIdentity(row), expiresAt: String(row.expires_at), consumedAt: row.consumed_at === null ? null : String(row.consumed_at), createdAt: String(row.created_at) };
+}
 function normalizeLiveStatus(value: unknown): MainCardLiveStatus | null {
   if (!isRecord(value)) return null;
   const statusTitle = typeof value.statusTitle === "string" ? value.statusTitle : null;

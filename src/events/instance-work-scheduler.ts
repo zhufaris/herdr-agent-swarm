@@ -3,14 +3,25 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 
 export class InstanceWorkScheduler {
   private readonly active = new Set<string>();
+  private readonly drains = new Set<Promise<void>>();
+  private stopping = false;
   constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry }) {}
 
-  wake(instanceId: string): void { queueMicrotask(() => { void this.drain(instanceId); }); }
+  wake(instanceId: string): void {
+    if (this.stopping) return;
+    queueMicrotask(() => {
+      if (this.stopping) return;
+      const drain = this.drain(instanceId);
+      this.drains.add(drain);
+      void drain.finally(() => this.drains.delete(drain));
+    });
+  }
   async drain(instanceId: string): Promise<void> {
+    if (this.stopping) return;
     if (this.active.has(instanceId)) return;
     this.active.add(instanceId);
     try {
-      while (true) {
+      while (!this.stopping) {
         const instance = this.options.store.getAgentInstance(instanceId);
         if (!instance?.runtimeRef) return;
         const turn = this.options.store.claimNextInstanceTurn(instance.id, instance.generation);
@@ -29,4 +40,5 @@ export class InstanceWorkScheduler {
       }
     } finally { this.active.delete(instanceId); }
   }
+  async stop(): Promise<void> { this.stopping = true; await Promise.allSettled([...this.drains]); }
 }

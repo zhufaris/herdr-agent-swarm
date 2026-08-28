@@ -11,6 +11,8 @@ interface ShutdownDependencies {
   traexSessionReporter?: { stop(): Promise<void> };
   herdrEventInbox?: { stop(): Promise<void> };
   herdrSocketSubscriber?: { stop(): Promise<void> };
+  instanceRuntime?: { stop(): Promise<void> };
+  instanceWorker?: { stop(): Promise<void> };
   coordinator: { stop(context?: ShutdownContext): Promise<void> };
   projector: { stop(context?: ShutdownContext): Promise<void> };
   publisher: { stop(context?: ShutdownContext): Promise<void> };
@@ -35,7 +37,7 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<void> {
-    const { herdrEventInbox, herdrSocketSubscriber, traexSessionReporter, coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+    const { herdrEventInbox, herdrSocketSubscriber, traexSessionReporter, instanceRuntime, instanceWorker, coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     const startedAt = Date.now();
     const budgetMs = this.dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     const { context, abort } = createShutdownContext(budgetMs);
@@ -54,6 +56,8 @@ export class BridgeRuntimeShutdown {
     if (herdrEventInbox) await this.stopComponent("herdrEventInbox", () => herdrEventInbox.stop(), context, logger, failures, timeouts);
     if (traexSessionReporter) writers.push({ component: "traexSessionReporter", ...(await this.stopComponent("traexSessionReporter", () => traexSessionReporter.stop(), context, logger, failures, timeouts)) });
     if (herdrSocketSubscriber) await this.stopComponent("herdrSocketSubscriber", () => herdrSocketSubscriber.stop(), context, logger, failures, timeouts);
+    if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
+    if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(), context, logger, failures, timeouts)) });
     writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "publisher", ...(await this.stopComponent("publisher", () => publisher.stop(context), context, logger, failures, timeouts)) });
