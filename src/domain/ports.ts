@@ -5,6 +5,8 @@ import type { SessionTransition } from "./pane-thread-lifecycle.js";
 import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "./agent-instance.js";
+import type { ControlActor } from "./commands.js";
+import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "./instance-turn.js";
 
 export interface InstanceStore {
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
@@ -20,6 +22,17 @@ export interface InstanceStore {
   getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null;
   consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
+  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean };
+  getInstanceTurn(id: string): InstanceTurn | null;
+  listInstanceTurns(instanceId: string): InstanceTurn[];
+  claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
+  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
+  completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
+  listInstanceEvents(instanceId: string, afterId?: number): InstanceEvent[];
+  countPendingInstanceTurns(instanceId: string): number;
+  acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean };
+  claimInstanceOperation(id: string, expectedGeneration: number): InstanceOperation | null;
+  updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null;
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
 }
 

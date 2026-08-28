@@ -1,5 +1,5 @@
 import type { AgentRuntimeRef } from "../../domain/agent-instance.js";
-import type { AgentCapabilities, AgentRuntimeDriver, DispatchReceipt } from "../../domain/agent-runtime.js";
+import type { AgentCapabilities, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
 import type { HerdrPort } from "../../domain/ports.js";
 import { safeLogError } from "../safe-error.js";
 
@@ -33,5 +33,17 @@ export class TraexDriver implements AgentRuntimeDriver {
       const reason = safeLogError(error).message;
       return dispatched ? { status: "delivery-uncertain", reason } : { status: "not-delivered", reason };
     }
+  }
+
+  async steer(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt> {
+    if (!this.herdr.steerPrompt) return { status: "unsupported" };
+    try { return await this.herdr.steerPrompt(runtime.paneId, text) === "injected" ? { status: "delivered" } : { status: "not-active" }; }
+    catch (error) { return { status: "failed", reason: safeLogError(error).message }; }
+  }
+
+  async interrupt(runtime: AgentRuntimeRef): Promise<InterruptReceipt> {
+    if (!this.herdr.sendEscape) return { status: "failed", reason: "Agent interruption is unavailable" };
+    try { await this.herdr.sendEscape(runtime.paneId); return { status: "interrupted" }; }
+    catch (error) { return { status: "failed", reason: safeLogError(error).message }; }
   }
 }

@@ -18,9 +18,11 @@ import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
 import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
+import type { ControlActor } from "../domain/commands.js";
+import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "../domain/instance-turn.js";
 
 const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "instance_operations", "instance_events", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
@@ -224,6 +226,85 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.exec("COMMIT"); return removed;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
+
+  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean } {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getAgentInstance(input.instanceId);
+      if (!current || current.projectId !== input.projectId || current.generation !== input.instanceGeneration) throw new Error("Instance generation changed before turn acceptance");
+      const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, input.text, timestamp, timestamp).changes === 1;
+      const turn = this.getInstanceTurnByKey(input.idempotencyKey);
+      if (!turn) throw new Error("Accepted instance turn could not be loaded");
+      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind) throw new Error("Idempotency key belongs to a different instance turn");
+      if (inserted) this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
+      this.database.exec("COMMIT"); return { turn, inserted };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  getInstanceTurn(id: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE id = ?").get(id) as Record<string, unknown> | undefined); }
+  private getInstanceTurnByKey(key: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
+  listInstanceTurns(instanceId: string): InstanceTurn[] { return (this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? ORDER BY created_at, rowid").all(instanceId) as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!); }
+
+  claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const instance = this.getAgentInstance(instanceId);
+      if (!instance || instance.generation !== expectedGeneration || !instance.runtimeRef || !["idle", "working", "blocked"].includes(instance.observedState)) { this.database.exec("COMMIT"); return null; }
+      const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId);
+      if (active) { this.database.exec("COMMIT"); return null; }
+      const row = this.database.prepare("SELECT id FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state = 'queued' ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as { id: string } | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      this.database.prepare("UPDATE instance_turns SET state = 'claimed', updated_at = ? WHERE id = ? AND state = 'queued'").run(now(), row.id);
+      const turn = this.getInstanceTurn(row.id)!; this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.claimed", {});
+      this.database.exec("COMMIT"); return turn;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getInstanceTurn(input.turnId);
+      if (!current || current.instanceGeneration !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      const changed = this.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)").run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
+      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state });
+      this.database.exec("COMMIT"); return this.getInstanceTurn(input.turnId);
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+  completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null { return this.updateInstanceTurn({ ...input, state: "completed", eventKind: "turn.completed" }); }
+  listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] {
+    return (this.database.prepare("SELECT * FROM instance_events WHERE instance_id = ? AND id > ? ORDER BY id LIMIT 100").all(instanceId, afterId) as Array<Record<string, unknown>>).map((row) => ({ id: Number(row.id), projectId: String(row.project_id), instanceId: String(row.instance_id), turnId: row.turn_id === null ? null : String(row.turn_id), kind: String(row.kind), payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>, createdAt: String(row.created_at) }));
+  }
+  countPendingInstanceTurns(instanceId: string): number { return Number((this.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId) as { count: number }).count); }
+  acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean } {
+    const timestamp = now();
+    const instance = this.getAgentInstance(input.instanceId);
+    if (!instance || instance.projectId !== input.projectId || instance.generation !== input.instanceGeneration) throw new Error("Instance generation changed before operation acceptance");
+    const inserted = this.database.prepare(`INSERT INTO instance_operations(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, payload, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+      .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, input.payload, timestamp, timestamp).changes === 1;
+    const row = this.database.prepare("SELECT * FROM instance_operations WHERE idempotency_key = ?").get(input.idempotencyKey) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("Accepted instance operation could not be loaded");
+    const operation = this.mapInstanceOperation(row);
+    if (operation.instanceId !== input.instanceId || operation.kind !== input.kind || operation.payload !== input.payload) throw new Error("Idempotency key belongs to a different instance operation");
+    return { operation, inserted };
+  }
+  claimInstanceOperation(id: string, expectedGeneration: number): InstanceOperation | null {
+    const changed = this.database.prepare(`UPDATE instance_operations SET state = 'running', result = 'running', updated_at = ? WHERE id = ? AND instance_generation = ? AND state = 'accepted' AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_operations.instance_id AND i.generation = ?)`)
+      .run(now(), id, expectedGeneration, expectedGeneration);
+    if (changed.changes !== 1) return null;
+    return this.mapInstanceOperation(this.database.prepare("SELECT * FROM instance_operations WHERE id = ?").get(id) as Record<string, unknown>);
+  }
+  updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null {
+    const changed = this.database.prepare("UPDATE instance_operations SET state = ?, result = ?, updated_at = ? WHERE id = ? AND instance_generation = ?").run(input.state, input.result, now(), input.id, input.expectedGeneration);
+    if (changed.changes !== 1) return null;
+    return this.mapInstanceOperation(this.database.prepare("SELECT * FROM instance_operations WHERE id = ?").get(input.id) as Record<string, unknown>);
+  }
+  private mapInstanceOperation(row: Record<string, unknown>): InstanceOperation { return { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceOperation["kind"], payload: row.payload === null ? null : String(row.payload), state: String(row.state) as InstanceOperation["state"], result: row.result === null ? null : String(row.result), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+  private insertInstanceEvent(projectId: string, instanceId: string, turnId: string | null, kind: string, payload: Record<string, unknown>): void { this.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(projectId, instanceId, turnId, kind, JSON.stringify(payload), now()); }
+  private mapInstanceTurn(row: Record<string, unknown> | undefined): InstanceTurn | null { return row ? { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceTurn["kind"], text: String(row.text), state: String(row.state) as InstanceTurnState, result: row.result === null ? null : String(row.result), error: row.error === null ? null : String(row.error), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : null; }
 
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null {
     const binding = this.getBinding(bindingId);
@@ -2077,6 +2158,18 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE IF NOT EXISTS instance_removal_plans(
         id TEXT PRIMARY KEY, instance_id TEXT NOT NULL, instance_generation INTEGER NOT NULL, workspace_generation INTEGER NOT NULL,
         worktree_fingerprint TEXT, safe INTEGER NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','consumed','stale')), created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS instance_turns(
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, actor_json TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('turn','followup')), text TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued','claimed','dispatching','running','blocked','completed','failed','cancelled','dispatch-uncertain')), result TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS instance_turns_queue ON instance_turns(instance_id, state, created_at);
+      CREATE TABLE IF NOT EXISTS instance_operations(
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, actor_json TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('steer','interrupt')), payload TEXT, state TEXT NOT NULL CHECK(state IN ('accepted','running','succeeded','rejected','failed')), result TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS instance_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, turn_id TEXT REFERENCES instance_turns(id) ON DELETE SET NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS inbound_messages(
         event_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, payload_json TEXT NOT NULL,

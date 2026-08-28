@@ -16,10 +16,14 @@ export type DispatchReceipt =
   | { status: "confirmed-delivered"; runtimeCursor?: string }
   | { status: "not-delivered"; reason: string }
   | { status: "delivery-uncertain"; reason: string };
+export type SteerReceipt = { status: "delivered" } | { status: "unsupported" } | { status: "not-active" } | { status: "failed"; reason: string };
+export type InterruptReceipt = { status: "interrupted" } | { status: "not-active" } | { status: "failed"; reason: string };
 
 export interface AgentRuntimeDriver {
   readonly kind: AgentKind;
   describe(): AgentCapabilities;
   start(runtime: AgentRuntimeRef): Promise<void>;
   submit(runtime: AgentRuntimeRef, text: string): Promise<DispatchReceipt>;
+  steer?(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt>;
+  interrupt?(runtime: AgentRuntimeRef): Promise<InterruptReceipt>;
 }
