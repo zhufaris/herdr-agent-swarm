@@ -148,6 +148,13 @@ build, validation, and service installation after configuration has been
 initialized. The checked-in service file is an explanatory template; the
 installer renders the production unit.
 
+`npm run solo:restart` refuses to interrupt active TraeX turns and reports the
+running and queued prompt counts. Wait for the active work to drain whenever
+possible. For an intentional observer handoff,
+`npm run solo:restart -- --force` preserves the existing detached/no-replay
+recovery behavior. `/status` exposes bounded `operational.promptLatency`
+aggregates for queue, execution, and final Lark delivery time.
+
 ## Install the compatibility Herdr plugin
 
 Clone or copy the repository, install the locked dependencies, build it, then
@@ -344,6 +351,10 @@ herdr plugin action invoke restart --plugin herdr-lark-bridge
 The restart action completes only after the replacement service reports the
 expected build identity. This lets systemd finish an in-flight graceful shutdown
 without treating the handover as a failed restart.
+It also refuses to restart while active turns are reported. If an operator has
+explicitly chosen to detach the bridge observer, run
+`bash plugin/service.sh restart --force` from the linked checkout; the prompt is
+never replayed automatically.
 
 To edit the project registry later, invoke
 `configure-projects`. It edits a temporary copy and atomically replaces the
