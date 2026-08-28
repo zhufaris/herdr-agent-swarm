@@ -246,7 +246,7 @@
 - [x] Run configuration validation and focused packaging tests.
 - [x] Run `npm test`, `npm run typecheck`, and `npm run build`.
 - [x] Run the real headless smoke for the selected TraeX deployment; record executable versions, instance IDs, pane IDs, turn IDs, restart evidence, and results without secrets. Executable discovery for other adapters remains distinct from authentication/live verification.
-- [ ] Commit as `feat: ship standalone solo agent daemon`.
+- [x] Commit as `feat: ship standalone solo agent daemon` (`c518b00`).
 
 ### Task 10: Completion audit
 
@@ -257,15 +257,15 @@
 **Interfaces:**
 - Produces a prompt-to-artifact matrix mapping every ticket criterion and explicit user requirement to code, tests, and live evidence.
 
-- [ ] Restate the objective as concrete deliverables and list every ticket acceptance criterion.
-- [ ] Map each criterion to exact implementation modules, focused tests, and live evidence; mark missing or weak coverage as incomplete.
-- [ ] Inspect Git status, staged and committed diffs, generated build identity, configuration validation, test output, and daemon readiness.
-- [ ] Re-run `npm test`, `npm run typecheck`, and `npm run build` after the final edit.
+- [x] Restate the objective as concrete deliverables and list every ticket acceptance criterion.
+- [x] Map each criterion to exact implementation modules, focused tests, and live evidence; mark missing or weak coverage as incomplete.
+- [x] Inspect Git status, staged and committed diffs, generated build identity, configuration validation, test output, and daemon readiness.
+- [x] Re-run `npm test`, `npm run typecheck`, and `npm run build` after the final edit.
 - [x] Re-run the selected TraeX Primary plus TraeX Worker headless smoke and confirm no Herdr TUI process is required.
-- [ ] Verify unavailable adapters are documented as unavailable rather than claimed complete.
-- [ ] Verify no secret, database, WAL/SHM, log, runtime state, or live project registry is tracked.
-- [ ] Record residual non-goals separately from incomplete requirements.
-- [ ] Mark the ticket complete only when every in-scope criterion has direct evidence.
+- [x] Verify unavailable adapters are documented as unavailable rather than claimed complete.
+- [x] Verify no secret, database, WAL/SHM, log, runtime state, or live project registry is tracked.
+- [x] Record residual non-goals separately from incomplete requirements.
+- [x] Mark the ticket complete only when every in-scope criterion has direct evidence.
 
 ## Plan Self-Review
 
