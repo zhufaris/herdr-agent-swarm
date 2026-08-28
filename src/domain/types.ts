@@ -448,6 +448,22 @@ export interface RuntimeOutputProjectionResult {
   outboxReserved: boolean;
 }
 
+export interface BindingTitleProjectionInput {
+  bindingId: string;
+  expectedPaneId: string;
+  expectedGeneration: number;
+  title: string;
+  view: import("./topic-view.js").TopicViewState;
+  rootMessageId: string | null;
+  card: object;
+}
+
+export interface BindingTitleProjectionResult {
+  outcome: "projected" | "unchanged" | "stale_binding";
+  binding: Binding | null;
+  outboxReserved: boolean;
+}
+
 export interface OrphanBindingProjectionInput {
   bindingId: string;
   expectedPaneId: string;

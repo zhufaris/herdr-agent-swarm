@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { initialTopicView } from "../src/domain/topic-view.js";
+import { createBridgeEvent } from "../src/domain/create-bridge-event.js";
+import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
@@ -132,6 +133,32 @@ describe("SQLite store", () => {
     expect(store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, fingerprint: "fp-1", view, rootMessageId: "root", card: {} })).toMatchObject({ outcome: "unchanged" });
     expect(store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 2, fingerprint: "fp-2", view: { ...view, answer: "stale", viewVersion: 2 }, rootMessageId: "root", card: {} })).toMatchObject({ outcome: "stale" });
     expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: "fp-1" });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+  });
+
+  it("atomically reconciles a pane-derived binding title with its main-card intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "legacy title" });
+    store.updateBinding("b1", { paneId: "w1:p1", generation: 1, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached" });
+    const event = createBridgeEvent("b1", "BindingRenamed", "herdr", { title: "repo / task-ab12" });
+    const view = reduceTopicView({ ...initialTopicView("b1"), title: "legacy title", workspaceId: "w1", paneId: "w1:p1", phase: "ready" }, event);
+
+    expect(store.reconcileBindingTitleWithProjection({
+      bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, title: "repo / task-ab12", view, rootMessageId: "root", card: { title: "repo / task-ab12" }
+    })).toMatchObject({ outcome: "projected", binding: { title: "repo / task-ab12" }, outboxReserved: true });
+    expect(store.loadTopicView("b1")).toMatchObject({ title: "repo / task-ab12", lastEventId: event.eventId });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" })]);
+
+    expect(store.reconcileBindingTitleWithProjection({
+      bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, title: "repo / task-ab12", view, rootMessageId: "root", card: {}
+    })).toMatchObject({ outcome: "unchanged", outboxReserved: false });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+
+    expect(store.reconcileBindingTitleWithProjection({
+      bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 2, title: "repo / stale", view: { ...view, title: "repo / stale", viewVersion: 2 }, rootMessageId: "root", card: {}
+    })).toMatchObject({ outcome: "stale_binding", outboxReserved: false });
+    expect(store.getBinding("b1")?.title).toBe("repo / task-ab12");
+    expect(store.loadTopicView("b1")?.title).toBe("repo / task-ab12");
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
   });
 
