@@ -91,7 +91,7 @@ export class HerdrCliAdapter implements HerdrPort {
   async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const pane = await this.getPane(paneId);
     if (!pane) return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" };
-    const nativeTraex = pane.agentKind === "traex" || pane.agentKind === "codex";
+    const nativeTraex = pane.agentKind === "traex" || pane.agentKind === "codex" || pane.agentKind === "claude" || pane.agentKind === "pi";
     const foregroundExecutables = nativeTraex ? pane.foregroundExecutables : await this.foregroundExecutables(paneId);
     const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
@@ -151,6 +151,20 @@ export class HerdrCliAdapter implements HerdrPort {
       ], this.commandTimeoutMs);
     }
     await this.waitUntilTraexComposer(paneId);
+  }
+
+  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void> {
+    const canonical = input.kind === "claude" ? "claude" : input.kind;
+    if (input.executable === canonical) {
+      const args = ["agent", "start", input.name, "--kind", input.kind, "--pane", paneId, "--timeout", String(this.commandTimeoutMs)];
+      if (input.args?.length) args.push("--", ...input.args);
+      await this.runner.run(this.executable, args, this.commandTimeoutMs);
+    } else {
+      await this.runner.run(this.executable, ["pane", "run", paneId, input.executable, ...(input.args ?? [])], this.commandTimeoutMs);
+    }
+    const pane = await this.getPane(paneId);
+    if (!pane || pane.agentKind !== input.kind || pane.agentState === "unknown") throw new Error(`Herdr did not verify ${input.kind} in pane ${paneId}`);
+    if (input.executable !== canonical) await this.runner.run(this.executable, ["agent", "rename", paneId, input.name], this.commandTimeoutMs);
   }
 
   async runPrompt(
@@ -365,7 +379,7 @@ export class HerdrCliAdapter implements HerdrPort {
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
     const foregroundCwd = raw.foreground_cwd ?? agent?.foreground_cwd ?? null;
-    const foregroundExecutables = kind === "codex" || kind === "traex" ? ["traex"] : kind ? [kind] : [];
+    const foregroundExecutables = kind ? [kind] : [];
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
       ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,

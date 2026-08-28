@@ -12,6 +12,32 @@ const nativeClient = (calls: Array<{ method: string; params: object }>) => ({
 });
 
 describe("Herdr adapter", () => {
+  it("starts a named Codex agent through argv-only Herdr control and verifies detection", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "agent" && args[1] === "start") return { stdout: "", stderr: "" };
+      if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle" }], agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "idle" }] } });
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    } };
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).startAgent("w1:p1", { name: "p1-reviewer", kind: "codex", executable: "codex", args: ["--model", "gpt"] })).resolves.toBeUndefined();
+    expect(calls[0]).toEqual(["agent", "start", "p1-reviewer", "--kind", "codex", "--pane", "w1:p1", "--timeout", "1000", "--", "--model", "gpt"]);
+  });
+
+  it("uses an explicitly configured agent executable and still verifies Herdr detection", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "pane" && args[1] === "run") return { stdout: "", stderr: "" };
+      if (args[0] === "agent" && args[1] === "rename") return { stdout: "", stderr: "" };
+      if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle" }], agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "claude", agent_status: "idle" }] } });
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    } };
+    await new HerdrCliAdapter(runner, "herdr", 1000).startAgent("w1:p1", { name: "p1-reviewer", kind: "claude", executable: "/opt/claude", args: ["--model", "sonnet"] });
+    expect(calls[0]).toEqual(["pane", "run", "w1:p1", "/opt/claude", "--model", "sonnet"]);
+    expect(calls.at(-1)).toEqual(["agent", "rename", "w1:p1", "p1-reviewer"]);
+  });
+
   it("reads an unknown TraeX Pane through the Pane CLI without a failing native agent.read", async () => {
     const nativeCalls: Array<{ method: string; params: object }> = [];
     const calls: string[][] = [];
@@ -118,7 +144,7 @@ describe("Herdr adapter", () => {
     expect(calls).toEqual([["api", "snapshot"]]);
   });
 
-  it("normalizes a detected Codex agent as a TraeX runtime in snapshots", async () => {
+  it("preserves a detected Codex agent identity in snapshots", async () => {
     const runner: CommandRunner = { async run() {
       return json({ snapshot: {
         panes: [{ pane_id: "w5:p20", workspace_id: "w5", cwd: "/repo", agent: "codex", agent_status: "done", terminal_id: "term-main" }],
@@ -127,7 +153,7 @@ describe("Herdr adapter", () => {
     } };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).listAllPanes()).resolves.toMatchObject([{
-      paneId: "w5:p20", agentKind: "codex", agentState: "done", foregroundExecutables: ["traex"]
+      paneId: "w5:p20", agentKind: "codex", agentState: "done", foregroundExecutables: ["codex"]
     }]);
   });
 

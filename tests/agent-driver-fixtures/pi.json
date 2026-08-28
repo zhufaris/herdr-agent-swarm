@@ -1,0 +1,7 @@
+{
+  "agentKind": "pi",
+  "herdrKind": "pi",
+  "states": ["idle", "working", "blocked", "done", "unknown"],
+  "verifiedCapabilities": ["interactive", "terminal-approval", "terminal-interrupt"],
+  "unavailableReason": "executable not installed in the verification environment"
+}

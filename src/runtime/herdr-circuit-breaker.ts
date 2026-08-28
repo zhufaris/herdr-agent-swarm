@@ -59,6 +59,10 @@ export class HerdrCircuitBreaker implements HerdrPort {
 
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> { return this.call("command", () => this.delegate.createPane(workspaceId, cwd, options)); }
   async startTraex(paneId: string, executable: string): Promise<void> { await this.call("command", () => this.delegate.startTraex(paneId, executable)); }
+  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void> {
+    if (!this.delegate.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
+    await this.call("command", () => this.delegate.startAgent!(paneId, input));
+  }
   async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<AgentState> {
     return this.call("command", () => this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched));
   }

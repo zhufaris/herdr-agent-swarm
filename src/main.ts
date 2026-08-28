@@ -42,6 +42,10 @@ import { WorktreeManager } from "./runtime/worktree-manager.js";
 import { HerdrPaneHost } from "./runtime/herdr/pane-host.js";
 import { AgentDriverRegistry } from "./runtime/agents/agent-driver.js";
 import { TraexDriver } from "./runtime/agents/traex-driver.js";
+import { CodexDriver } from "./runtime/agents/codex-driver.js";
+import { ClaudeCodeDriver } from "./runtime/agents/claude-code-driver.js";
+import { PiDriver } from "./runtime/agents/pi-driver.js";
+import { detectAgentRuntimeAvailability } from "./runtime/agents/agent-availability.js";
 import { InstanceControlWorkflow } from "./coordinator/instance-control-workflow.js";
 import { InstanceMessagingWorkflow } from "./coordinator/instance-messaging-workflow.js";
 import { InstanceWorkScheduler } from "./events/instance-work-scheduler.js";
@@ -86,7 +90,17 @@ rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTi
 herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
 herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, 2_000, logger);
 const paneHost = new HerdrPaneHost(herdr);
-const agentDrivers = new AgentDriverRegistry([new TraexDriver(herdr, config.traex.executable, config.turnTimeoutMs)]);
+const [codexAvailable, claudeAvailable, piAvailable] = await Promise.all([
+  detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
+  detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
+  detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
+]);
+const agentDrivers = new AgentDriverRegistry([
+  new TraexDriver(herdr, config.traex.executable, config.turnTimeoutMs),
+  new CodexDriver(herdr, config.agents.codex, config.turnTimeoutMs, codexAvailable),
+  new ClaudeCodeDriver(herdr, config.agents.claudeCode, config.turnTimeoutMs, claudeAvailable),
+  new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, piAvailable)
+]);
 const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
 const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
 const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers });

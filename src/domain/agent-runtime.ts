@@ -22,7 +22,7 @@ export type InterruptReceipt = { status: "interrupted" } | { status: "not-active
 export interface AgentRuntimeDriver {
   readonly kind: AgentKind;
   describe(): AgentCapabilities;
-  start(runtime: AgentRuntimeRef): Promise<void>;
+  start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null }): Promise<void>;
   submit(runtime: AgentRuntimeRef, text: string): Promise<DispatchReceipt>;
   steer?(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt>;
   interrupt?(runtime: AgentRuntimeRef): Promise<InterruptReceipt>;

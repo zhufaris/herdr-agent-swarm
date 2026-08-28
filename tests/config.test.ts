@@ -121,6 +121,10 @@ describe("project registry configuration", () => {
     expect(loadConfig({ ...requiredEnvironment, TRAEX_SESSIONS_ROOT: "/runtime/traex/sessions" }).traex.sessionsRoot).toBe("/runtime/traex/sessions");
   });
 
+  it("configures every supported agent executable independently", () => {
+    expect(loadConfig({ ...requiredEnvironment, CODEX_BIN: "/opt/codex", CLAUDE_CODE_BIN: "/opt/claude", PI_BIN: "/opt/pi" }).agents).toEqual({ codex: "/opt/codex", claudeCode: "/opt/claude", pi: "/opt/pi" });
+  });
+
   it("configures Lark request timeout independently from command execution", () => {
     expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000" }).lark.requestTimeoutMs).toBe(30_000);
     expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000", LARK_REQUEST_TIMEOUT_MS: "12000" })).toMatchObject({

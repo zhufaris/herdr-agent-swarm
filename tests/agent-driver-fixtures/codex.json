@@ -1,0 +1,6 @@
+{
+  "agentKind": "codex",
+  "herdrKind": "codex",
+  "states": ["idle", "working", "blocked", "done", "unknown"],
+  "verifiedCapabilities": ["interactive", "model-at-startup", "resume", "terminal-approval", "terminal-steering", "terminal-interrupt"]
+}

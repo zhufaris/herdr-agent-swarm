@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { TraexDriver } from "../src/runtime/agents/traex-driver.js";
+import { CodexDriver } from "../src/runtime/agents/codex-driver.js";
+import { ClaudeCodeDriver } from "../src/runtime/agents/claude-code-driver.js";
+import { PiDriver } from "../src/runtime/agents/pi-driver.js";
 import type { HerdrPort } from "../src/domain/ports.js";
+import { detectAgentRuntimeAvailability, discoverExecutable } from "../src/runtime/agents/agent-availability.js";
 
 const runtime = { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null, generation: 1 };
 
@@ -37,5 +42,50 @@ describe("agent driver contract", () => {
     const driver = new TraexDriver({ runPrompt } as unknown as HerdrPort, "traex", 1_000);
 
     await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "not-delivered", reason: "agent unavailable" });
+  });
+
+  it.each([
+    ["codex", CodexDriver, "codex", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
+    ["claude-code", ClaudeCodeDriver, "claude", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: false, steering: "terminal-input", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
+    ["pi", PiDriver, "pi", [], { structuredEvents: false, nativeResume: false, primaryTools: false, steering: "unsupported", approvals: "terminal", modelSelection: "unsupported", usageReporting: false }]
+  ] as const)("starts the %s driver through Herdr with exact capabilities", async (_label, Driver, herdrKind, expectedArgs, capabilities) => {
+    const startAgent = vi.fn(async () => undefined);
+    const driver = new Driver({ startAgent } as unknown as HerdrPort, `/bin/${herdrKind}`, 1_000, true);
+    expect(driver.describe()).toMatchObject({ available: true, ...capabilities });
+    await driver.start(runtime, { projectId: "p1", name: "reviewer", model: "chosen-model" });
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ name: "p1-reviewer", kind: herdrKind, executable: `/bin/${herdrKind}`, args: expectedArgs }));
+  });
+
+  it.each([CodexDriver, ClaudeCodeDriver, PiDriver])("does not start an unavailable adapter", async (Driver) => {
+    const startAgent = vi.fn();
+    const driver = new Driver({ startAgent } as unknown as HerdrPort, "missing", 1_000, false);
+    expect(driver.describe().available).toBe(false);
+    await expect(driver.start(runtime, { name: "worker", model: null })).rejects.toThrow(/unavailable/);
+    expect(startAgent).not.toHaveBeenCalled();
+  });
+
+  it("preserves no-replay semantics for a Codex prompt that may have been delivered", async () => {
+    const runPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, _observation: unknown, _signal: unknown, onDispatched: () => void) => { onDispatched(); throw new Error("lost observer"); });
+    const driver = new CodexDriver({ runPrompt } as unknown as HerdrPort, "codex", 1_000, true);
+    await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "delivery-uncertain", reason: "lost observer" });
+  });
+
+  it("reports unsupported steering explicitly for Pi", async () => {
+    const driver = new PiDriver({} as HerdrPort, "pi", 1_000, true);
+    await expect(driver.steer(runtime, "change course")).resolves.toEqual({ status: "unsupported" });
+  });
+
+  it("requires both an executable and Herdr agent-kind support for availability", async () => {
+    expect(discoverExecutable("codex", "/missing")).toBeNull();
+    const runner = { run: vi.fn(async () => ({ stdout: "possible values: pi|claude|codex", stderr: "" })) };
+    await expect(detectAgentRuntimeAvailability({ runner, herdrExecutable: "herdr", agentExecutable: process.execPath, herdrKind: "codex", pathValue: "" })).resolves.toBe(true);
+    await expect(detectAgentRuntimeAvailability({ runner, herdrExecutable: "herdr", agentExecutable: "missing", herdrKind: "codex", pathValue: "/missing" })).resolves.toBe(false);
+    expect(runner.run).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["codex", "claude-code", "pi"])("keeps a bounded non-secret lifecycle fixture for %s", (kind) => {
+    const fixture = JSON.parse(readFileSync(new URL(`./agent-driver-fixtures/${kind}.json`, import.meta.url), "utf8")) as Record<string, unknown>;
+    expect(fixture).toMatchObject({ agentKind: kind, states: ["idle", "working", "blocked", "done", "unknown"] });
+    expect(JSON.stringify(fixture)).not.toMatch(/token|secret|open_id|sessionId/i);
   });
 });
