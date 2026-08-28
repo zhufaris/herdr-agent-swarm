@@ -206,7 +206,7 @@ describe("run card", () => {
     expect(footerIndex).toBe(elements.length - 1);
     expect(serialized).not.toContain("**当前工作**");
     expect(serialized.match(/确认部署版本/g)).toHaveLength(1);
-    expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-3", "line-4", "line-5", "line-6"]);
+    expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-1", "line-2", "line-3", "line-4", "line-5", "line-6"]);
     expect(serialized).toContain("`GPT-5.4` · context `36%` · queue `0`");
     expect(serialized).toContain("worktree `feat/query-log`");
   });
@@ -289,7 +289,7 @@ describe("run card", () => {
     expect(progress.length).toBeLessThanOrEqual(220);
   });
 
-  it("shows the three newest tool activities and up to four latest answer lines on the project card", () => {
+  it("shows the three newest tool activities and up to 12 latest answer lines on the project card", () => {
     const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
@@ -310,8 +310,24 @@ describe("run card", () => {
     expect(serialized).toContain("🔎 检查调用位置");
     expect(serialized).toContain("读取旧配置");
     expect(serialized).toContain("查看完整过程（1）");
-    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-4));
+    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-12));
     expect(serialized).not.toContain("**项目任务**");
+  });
+
+  it("bounds the 12-line project-card preview at 6000 characters", () => {
+    const lines = Array.from({ length: 25 }, (_, index) => `line-${index + 1}: ${String(index % 10).repeat(700)}`);
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", answer: lines.join("\n")
+    });
+    const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**最新消息**"))?.content ?? "";
+    const previewBody = latestMessage.split("\n").slice(2).join("\n");
+
+    expect(previewBody).not.toContain("line-13:");
+    expect(previewBody).toContain("line-14:");
+    expect(previewBody).toContain("line-25:");
+    expect(previewBody).toContain("已省略中间");
+    expect(previewBody.length).toBeLessThanOrEqual(6_000);
   });
 
   it("falls back to the newest formatted activity when the project has no answer prose", () => {

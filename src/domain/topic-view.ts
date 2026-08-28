@@ -3,6 +3,8 @@ import type { BridgeEvent } from "./events.js";
 import { normalizeTurnOutputObservation } from "./events.js";
 import type { MainCardLiveStatus, RunCardView, RunProgressEvent } from "./run-card-view.js";
 
+const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
+
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
@@ -149,4 +151,4 @@ function sameLiveStatus(left: MainCardLiveStatus | null, right: MainCardLiveStat
     && sameVisibleProgress(left.planSteps, right.planSteps);
 }
 
-function keepAnswerTail(answer: string): string { return answer.slice(-2_500); }
+function keepAnswerTail(answer: string): string { return answer.slice(-TOPIC_ANSWER_TAIL_LIMIT); }

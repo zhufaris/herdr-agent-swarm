@@ -29,6 +29,8 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
 };
 
 const MAIN_CARD_PREVIEW_LIMIT = 2_000;
+const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 12;
+const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 6_000;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 const CODE_FOLD_LINE_LIMIT = 80;
 const CODE_FOLD_CHARACTER_LIMIT = 6_000;
@@ -123,7 +125,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable
     ? null
-    : latestLines(visibleAnswer, 4) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
+    : latestLines(visibleAnswer, PROJECT_ENTRY_PREVIEW_LINE_LIMIT) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
   const elements: object[] = [];
   if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
@@ -131,7 +133,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const recentActivity = progress.filter((event) => !planKeys.has(event.key));
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
-  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, MAIN_CARD_PREVIEW_LIMIT)}` });
+  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
   elements.push(...mainCardActions(input));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {

@@ -118,19 +118,21 @@ describe("topic view reducer", () => {
     expect(duplicate.activityAt).toBe("2026-08-27T12:00:00Z");
   });
 
-  it("keeps complete current-turn progress and the latest 2500 answer characters", () => {
+  it("keeps complete current-turn progress and the latest 9000 answer characters", () => {
     let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
-    for (let index = 0; index < 9; index += 1) {
+    let fullAnswer = "";
+    for (let index = 0; index < 34; index += 1) {
+      fullAnswer += String(index % 10).repeat(300);
       view = reduceTopicView(view, event("TurnOutputObserved", {
-        promptId: "p1", answerSnapshot: Array.from({ length: index + 1 }, (_, snapshotIndex) => String(snapshotIndex).repeat(300)).join(""),
+        promptId: "p1", answerSnapshot: fullAnswer,
         progressEvents: [{ key: `read:${index}`, kind: "read", label: `file-${index}`, state: "done" }]
       }));
     }
 
-    expect(view.recentProgress).toHaveLength(9);
-    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 9 }, (_, index) => `read:${index}`));
-    expect(view.answer).toHaveLength(2500);
-    expect(view.answer).toBe(`${"0".repeat(100)}${"1".repeat(300)}${"2".repeat(300)}${"3".repeat(300)}${"4".repeat(300)}${"5".repeat(300)}${"6".repeat(300)}${"7".repeat(300)}${"8".repeat(300)}`);
+    expect(view.recentProgress).toHaveLength(34);
+    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 34 }, (_, index) => `read:${index}`));
+    expect(view.answer).toHaveLength(9_000);
+    expect(view.answer).toBe(fullAnswer.slice(-9_000));
   });
 
   it("updates repeated progress keys in place within one incremental snapshot", () => {
@@ -169,8 +171,8 @@ describe("topic view reducer", () => {
     const output = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "latest answer", progressEvents: [{ key: "test", kind: "test", label: "tests passed", state: "done", occurredAt: "later" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "done", answer: "finished" });
 
-    expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(2_600), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
-      phase: "done", answer: "x".repeat(2_500), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
+    expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(9_100), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
+      phase: "done", answer: "x".repeat(9_000), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
     });
   });
 });
