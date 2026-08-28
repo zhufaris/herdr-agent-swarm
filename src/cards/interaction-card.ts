@@ -37,7 +37,7 @@ export function renderMoreActionsCard(input: { bindingId: string; bindingGenerat
   }
   return { schema: "2.0", config: { update_multi: true, summary: { content: "更多操作" } }, header: { title: { tag: "plain_text", content: "更多操作" }, template: "blue" }, body: { elements: [
     { tag: "markdown", content: input.creator ? "以下操作基于当前会话状态实时校验。" : "你可以查看状态；会话管理操作仅创建者可用。" },
-    { tag: "action", actions }
+    ...actions
   ] } };
 }
 

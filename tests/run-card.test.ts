@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderModelResultCard } from "../src/cards/model-card.js";
+import { renderMoreActionsCard } from "../src/cards/interaction-card.js";
 import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
+
+function findTaggedNodes(value: unknown, tag: string): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) return value.flatMap((item) => findTaggedNodes(item, tag));
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  return [...(record.tag === tag ? [record] : []), ...Object.values(record).flatMap((item) => findTaggedNodes(item, tag))];
+}
 
 describe("run card", () => {
   afterEach(() => vi.useRealTimers());
@@ -71,6 +79,22 @@ describe("run card", () => {
 
     expect(serialized).toContain("GPT-5.6-Sol");
     expect(serialized).toContain("context `31.1K tokens`");
+  });
+
+  it("renders CardKit 2.0 callback buttons without legacy action containers", () => {
+    const main = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "ready" });
+    const more = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: true, lifecycle: "active", attachment: "attached" });
+
+    expect(findTaggedNodes(main, "button").map((node) => node.value)).toEqual(expect.arrayContaining([
+      { action: "create_new_task", bindingId: "b1" },
+      { action: "open_more_actions", bindingId: "b1" }
+    ]));
+    expect(findTaggedNodes(more, "button").map((node) => node.value)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "session_status", bindingId: "b1" }),
+      expect.objectContaining({ action: "session_stop", bindingId: "b1" })
+    ]));
+    expect(findTaggedNodes(main, "action")).toEqual([]);
+    expect(findTaggedNodes(more, "action")).toEqual([]);
   });
 
   it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
@@ -607,10 +631,7 @@ describe("run card", () => {
 });
 
 function mainCardCallbackActions(card: object): string[] {
-  const elements = (card as { body: { elements: Array<{ tag?: string; actions?: Array<{ value?: { action?: string } }> }> } }).body.elements;
-  return elements
-    .filter((element) => element.tag === "action")
-    .flatMap((element) => element.actions ?? [])
-    .map((action) => action.value?.action)
+  return findTaggedNodes(card, "button")
+    .map((button) => (button.value as { action?: unknown } | undefined)?.action)
     .filter((action): action is string => typeof action === "string");
 }
