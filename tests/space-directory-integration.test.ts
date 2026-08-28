@@ -216,17 +216,21 @@ function threadBinding(
 
 function findAction(card: object, action: string): unknown {
   const elements = (card as { body: { elements: unknown[] } }).body.elements;
-  const item = findElement(elements, (element) => element.value?.action === action);
+  const item = findElement(elements, (element) => element.behaviors?.some((behavior) => behavior.type === "callback" && behavior.value?.action === action));
   if (!item) throw new Error(`Missing action: ${action}`);
-  return item.value;
+  return item.behaviors!.find((behavior) => behavior.type === "callback")!.value;
 }
 
-function findElement(value: unknown, predicate: (value: { value?: { action?: string } }) => boolean): { value?: { action?: string } } | null {
+function findElement(value: unknown, predicate: (value: CallbackElement) => boolean): CallbackElement | null {
   if (!value || typeof value !== "object") return null;
-  if (predicate(value as { value?: { action?: string } })) return value as { value?: { action?: string } };
+  if (predicate(value as CallbackElement)) return value as CallbackElement;
   for (const child of Array.isArray(value) ? value : Object.values(value)) {
     const match = findElement(child, predicate);
     if (match) return match;
   }
   return null;
+}
+
+interface CallbackElement {
+  behaviors?: Array<{ type?: string; value?: { action?: string } }>;
 }

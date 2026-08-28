@@ -70,7 +70,9 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         if (!current.answerCardId && current.answerMessageId && (view.spaceName !== spaceName || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
         else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId);
       }
-      const latestRun = runCards.at(-1);
+      const activeRun = runCards.find((view) => view.phase === "running" || view.phase === "blocked")
+        ?? (reconciledTopicView.activePromptId ? runCards.find((view) => view.promptId === reconciledTopicView.activePromptId) : null);
+      const latestRun = activeRun ?? runCards.at(-1);
       const finalTopic = latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
       await this.mainCardWorkflow.project(finalTopic);
   }

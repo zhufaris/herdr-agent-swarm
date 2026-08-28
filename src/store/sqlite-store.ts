@@ -1088,6 +1088,8 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!current) throw new Error(`Run card missing for prompt: ` + promptId);
     const next = reduceRunCard(current, change);
     if (next !== current) this.saveRunCard(next);
+    const prompt = this.getPrompt(promptId);
+    if (prompt?.dispatchKind === "steering") return;
     const topic = this.loadTopicView(current.bindingId);
     if (topic) this.saveTopicView(mirrorRunCardToTopic(topic, next));
   }

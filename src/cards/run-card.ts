@@ -4,6 +4,7 @@ import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
+import { callbackButton } from "./cardkit-button.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 
 const RUN_STATE_VIEW = {
@@ -39,8 +40,7 @@ export function renderProjectSelectorCard(input: { selectionId: string; projects
     header: { title: { tag: "plain_text", content: "选择项目" }, subtitle: { tag: "plain_text", content: "HERDR PROJECTS" }, template: "blue" },
     body: { elements: input.projects.flatMap((project) => [
       { tag: "markdown", content: `**${escapeMarkdown(project.displayName)}**\n${escapeMarkdown(project.description)}` },
-      { tag: "button", text: { tag: "plain_text", content: `打开 ${project.displayName}` }, type: "primary",
-        value: { action: "select_project", selectionId: input.selectionId, projectId: project.id } }
+      callbackButton(`打开 ${project.displayName}`, { action: "select_project", selectionId: input.selectionId, projectId: project.id }, "primary")
     ]) }
   };
 }
@@ -57,7 +57,7 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
   const view = views[input.status];
   const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "点击“发送话题入口”后，请打开群里随后出现的话题卡片，并在其中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
   const elements: object[] = [{ tag: "markdown", content: details || view.title }];
-  if (input.status === "completed" && input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "发送话题入口" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
+  if (input.status === "completed" && input.bindingId) elements.push(callbackButton("发送话题入口", { action: "open_project_thread", bindingId: input.bindingId }, "primary"));
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
@@ -70,7 +70,7 @@ export function renderAttachStatusCard(input: { spaceName: string; paneId: strin
     tag: "markdown",
     content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${message}${input.bindingId && !input.resumeRequired ? " 点击“发送话题入口”后，请打开群里随后出现的话题卡片。" : ""}`
   }];
-  if (input.bindingId) elements.push({ tag: "button", text: { tag: "plain_text", content: "发送话题入口" }, type: "primary", value: { action: "open_project_thread", bindingId: input.bindingId } });
+  if (input.bindingId) elements.push(callbackButton("发送话题入口", { action: "open_project_thread", bindingId: input.bindingId }, "primary"));
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: title } },
@@ -147,7 +147,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 }
 
 function mainCardActions(input: TopicViewState): object[] {
-  const button = (content: string, action: string, type?: "primary") => ({ tag: "button", text: { tag: "plain_text", content }, ...(type ? { type } : {}), value: { action, bindingId: input.bindingId } });
+  const button = (content: string, action: string, type?: "primary") => callbackButton(content, { action, bindingId: input.bindingId }, type);
   if (input.phase === "provisioning" || input.phase === "draining") return [];
   if (input.phase === "archived") return [button("新建任务", "create_new_task", "primary")];
   if (input.phase === "blocked") return [button("立即补充", "open_supplement", "primary"), button("恢复指引", "view_recovery"), button("更多操作", "open_more_actions")];
@@ -197,7 +197,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   ];
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  if (input.phase === "queued" && input.conversionParentPromptId) elements.push({ tag: "button", text: { tag: "plain_text", content: "改为立即补充" }, type: "primary", value: { action: "convert_queued_prompt", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.conversionParentPromptId, targetPromptId: input.promptId } });
+  if (input.phase === "queued" && input.conversionParentPromptId) elements.push(callbackButton("改为立即补充", { action: "convert_queued_prompt", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.conversionParentPromptId, targetPromptId: input.promptId }, "primary"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {

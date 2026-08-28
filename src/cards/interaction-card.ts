@@ -1,3 +1,5 @@
+import { callbackButton, formSubmitButton } from "./cardkit-button.js";
+
 export function renderSupplementInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object {
   return {
     schema: "2.0",
@@ -7,8 +9,7 @@ export function renderSupplementInputCard(input: { interactionId: string; bindin
       { tag: "markdown", content: "这段内容只会发送给当前正在执行的任务；任务结束后不会自动转投下一条。" },
       { tag: "form", name: "supplement_form", elements: [
         { tag: "input", name: "supplement_text", placeholder: { tag: "plain_text", content: "输入需要立即补充的内容" } },
-        { tag: "button", text: { tag: "plain_text", content: "发送补充" }, type: "primary", action_type: "form_submit",
-          value: { action: "submit_supplement", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration } }
+        formSubmitButton("发送补充", "submit_supplement", { action: "submit_supplement", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration }, "primary")
       ] }
     ] }
   };
@@ -44,17 +45,17 @@ export function renderMoreActionsCard(input: { bindingId: string; bindingGenerat
 export function renderRenameInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object {
   return { schema: "2.0", config: { update_multi: true, summary: { content: "重命名会话" } }, header: { title: { tag: "plain_text", content: "重命名会话" }, template: "blue" }, body: { elements: [{ tag: "form", name: "rename_form", elements: [
     { tag: "input", name: "title", placeholder: { tag: "plain_text", content: "输入新标题" } },
-    { tag: "button", text: { tag: "plain_text", content: "确认重命名" }, type: "primary", action_type: "form_submit", value: { action: "submit_rename", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration } }
+    formSubmitButton("确认重命名", "submit_rename", { action: "submit_rename", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration }, "primary")
   ] }] } };
 }
 
 export function renderReattachInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object {
   return { schema: "2.0", config: { update_multi: true, summary: { content: "重新连接 Pane" } }, header: { title: { tag: "plain_text", content: "重新连接 Pane" }, template: "orange" }, body: { elements: [{ tag: "form", name: "reattach_form", elements: [
     { tag: "input", name: "pane_id", placeholder: { tag: "plain_text", content: "输入原 Pane ID" } },
-    { tag: "button", text: { tag: "plain_text", content: "验证并连接" }, type: "primary", action_type: "form_submit", value: { action: "submit_reattach", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration } }
+    formSubmitButton("验证并连接", "submit_reattach", { action: "submit_reattach", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration }, "primary")
   ] }] } };
 }
 
 function button(content: string, action: string, input: { bindingId: string; bindingGeneration: number; interactionId?: string }): object {
-  return { tag: "button", text: { tag: "plain_text", content }, value: { action, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, ...(input.interactionId ? { interactionId: input.interactionId } : {}) } };
+  return callbackButton(content, { action, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, ...(input.interactionId ? { interactionId: input.interactionId } : {}) });
 }

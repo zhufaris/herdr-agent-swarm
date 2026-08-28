@@ -1,4 +1,5 @@
 import type { AgentState } from "../domain/types.js";
+import { callbackButton } from "./cardkit-button.js";
 
 const MAX_CARD_SERIALIZED_LENGTH = 12_000;
 const MAX_PANE_ROWS_PER_PAGE = 16;
@@ -127,9 +128,7 @@ function textColumn(content: string, weight: number): object {
 }
 
 function buttonColumn(content: string, value: object): object {
-  return { tag: "column", width: "weighted", weight: 2, elements: [{
-    tag: "button", text: { tag: "plain_text", content }, type: "primary", size: "small", value
-  }] };
+  return { tag: "column", width: "weighted", weight: 2, elements: [callbackButton(content, value, "primary", { size: "small" })] };
 }
 
 function shortPaneId(paneId: string): string {

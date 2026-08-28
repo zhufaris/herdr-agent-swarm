@@ -89,6 +89,22 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
+  it("restores the running parent instead of a newer completed steering card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "task", workspaceId: "wH", paneId: "wH:p1", phase: "done", agentState: "done", activePromptId: null });
+    const parent = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "parent", workspaceId: "wH", paneId: "wH:p1", requestText: "work", queuePosition: 0, occurredAt: "2026-08-28T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "parent-message", actorOpenId: "u1", body: "work" }, view: { ...parent, phase: "running" }, rootMessageId: "root", answerCard: {} });
+    const steering = createQueuedRunCard({ promptId: "steering", bindingId: "b1", title: "supplement", workspaceId: "wH", paneId: "wH:p1", requestText: "more", queuePosition: 0, occurredAt: "2026-08-28T00:01:00Z" });
+    store.acceptPrompt({ prompt: { id: "steering", bindingId: "b1", larkMessageId: "steering-message", actorOpenId: "u1", body: "more", dispatchKind: "steering", parentPromptId: "parent" }, view: { ...steering, phase: "completed", notice: "已加入当前执行" }, rootMessageId: "root", answerCard: {} });
+
+    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }).converge();
+
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "running", agentState: "working", activePromptId: "parent" });
+    store.close();
+  });
+
   it("rebuilds missing terminal stream intents from a durable completed run card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

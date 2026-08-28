@@ -318,8 +318,8 @@ function command(index: number, pane = "w5:p3G") {
 }
 
 function findActionButton(card: object, action: string): { value: unknown } {
-  const elements = (card as { body: { elements: Array<{ value?: { action?: string } }> } }).body.elements;
-  const button = elements.find((element) => element.value?.action === action);
+  const elements = (card as { body: { elements: Array<{ behaviors?: Array<{ type?: string; value?: { action?: string } }> }> } }).body.elements;
+  const button = elements.find((element) => element.behaviors?.some((behavior) => behavior.type === "callback" && behavior.value?.action === action));
   if (!button) throw new Error(`Missing action button: ${action}`);
-  return { value: button.value };
+  return { value: button.behaviors!.find((behavior) => behavior.type === "callback")!.value };
 }

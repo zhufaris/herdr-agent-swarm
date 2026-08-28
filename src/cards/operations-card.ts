@@ -1,4 +1,5 @@
 import type { AgentState, Binding, FailureSummary, SessionSummary } from "../domain/types.js";
+import { callbackButton } from "./cardkit-button.js";
 
 const LIFECYCLE_LABEL: Record<Binding["lifecycle"], string> = {
   provisioning: "创建中", active: "活跃", draining: "归档中", archived: "已归档", closed: "已关闭", failed: "失败"
@@ -50,7 +51,7 @@ function paginate(title: string, empty: string, rows: object[][], template: stri
   return pages.map((elements, index) => ({ schema: "2.0", config: { update_multi: true, summary: { content: title } }, header: { title: { tag: "plain_text", content: pages.length > 1 ? `${title} · ${index + 1}/${pages.length}` : title }, template }, body: { elements } }));
 }
 
-function button(content: string, value: object, type: "primary" | "default" = "primary"): object { return { tag: "button", text: { tag: "plain_text", content }, type, value }; }
+function button(content: string, value: object, type: "primary" | "default" = "primary"): object { return callbackButton(content, value, type); }
 function escape(value: string): string { return value.slice(0, 500).replace(/[\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
 function shortId(value: string): string { return value.length <= 12 ? value : `${value.slice(0, 8)}…${value.slice(-4)}`; }
 function relativeTime(value: string): string {

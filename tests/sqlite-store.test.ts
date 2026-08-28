@@ -477,6 +477,21 @@ describe("SQLite store", () => {
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "done", activePromptId: null });
   });
 
+  it("keeps the Main Card running when a steering prompt completes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "running", agentState: "working", activePromptId: "parent" });
+    const steering = createQueuedRunCard({ promptId: "steering", bindingId: "b1", title: "Supplement", workspaceId: "w1", paneId: "w1:p1", requestText: "add tests", queuePosition: 0, occurredAt: "2026-08-24T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "steering", bindingId: "b1", larkMessageId: "m-steering", actorOpenId: "u1", body: "add tests", dispatchKind: "steering", parentPromptId: "parent" }, view: steering, rootMessageId: "root-1", answerCard: {} });
+    store.updatePrompt("steering", "running");
+
+    store.completeSteering({ promptId: "steering", notice: "已加入当前执行", occurredAt: "2026-08-24T00:01:00Z" });
+
+    expect(store.loadRunCard("steering")).toMatchObject({ phase: "completed", notice: "已加入当前执行" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "running", agentState: "working", activePromptId: "parent" });
+  });
+
   it("reopens a completed turn without lifecycle replay or prompt duplication", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-terminal-projection-"));
     const path = join(temporaryDirectory, "bridge.db");

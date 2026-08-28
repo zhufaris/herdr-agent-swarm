@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderModelResultCard } from "../src/cards/model-card.js";
-import { renderMoreActionsCard } from "../src/cards/interaction-card.js";
+import { renderMoreActionsCard, renderSupplementInputCard } from "../src/cards/interaction-card.js";
 import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
@@ -82,19 +82,35 @@ describe("run card", () => {
   });
 
   it("renders CardKit 2.0 callback buttons without legacy action containers", () => {
-    const main = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "ready" });
+    const main = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", queueDepth: 1 });
     const more = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: true, lifecycle: "active", attachment: "attached" });
 
-    expect(findTaggedNodes(main, "button").map((node) => node.value)).toEqual(expect.arrayContaining([
-      { action: "create_new_task", bindingId: "b1" },
+    const mainButtons = findTaggedNodes(main, "button");
+    const moreButtons = findTaggedNodes(more, "button");
+    expect(mainButtons.map(callbackValue)).toEqual(expect.arrayContaining([
+      { action: "open_supplement", bindingId: "b1" },
+      { action: "view_queue", bindingId: "b1" },
       { action: "open_more_actions", bindingId: "b1" }
     ]));
-    expect(findTaggedNodes(more, "button").map((node) => node.value)).toEqual(expect.arrayContaining([
+    expect(moreButtons.map(callbackValue)).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "session_status", bindingId: "b1" }),
       expect.objectContaining({ action: "session_stop", bindingId: "b1" })
     ]));
+    expect([...mainButtons, ...moreButtons].every((button) => !Object.hasOwn(button, "value"))).toBe(true);
     expect(findTaggedNodes(main, "action")).toEqual([]);
     expect(findTaggedNodes(more, "action")).toEqual([]);
+  });
+
+  it("renders supplement submission with CardKit 2.0 form and callback behaviors", () => {
+    const card = renderSupplementInputCard({ interactionId: "i1", bindingId: "b1", bindingGeneration: 2 });
+    const submit = findTaggedNodes(card, "button")[0]!;
+
+    expect(submit).toMatchObject({
+      name: "submit_supplement", form_action_type: "submit",
+      behaviors: [{ type: "callback", value: { action: "submit_supplement", interactionId: "i1", bindingId: "b1", bindingGeneration: 2 } }]
+    });
+    expect(submit).not.toHaveProperty("action_type");
+    expect(submit).not.toHaveProperty("value");
   });
 
   it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
@@ -632,6 +648,13 @@ describe("run card", () => {
 
 function mainCardCallbackActions(card: object): string[] {
   return findTaggedNodes(card, "button")
-    .map((button) => (button.value as { action?: unknown } | undefined)?.action)
+    .map((button) => callbackValue(button)?.action)
     .filter((action): action is string => typeof action === "string");
+}
+
+function callbackValue(button: Record<string, unknown>): Record<string, unknown> | undefined {
+  const behaviors = button.behaviors;
+  if (!Array.isArray(behaviors)) return undefined;
+  const callback = behaviors.find((behavior) => behavior && typeof behavior === "object" && (behavior as Record<string, unknown>).type === "callback") as Record<string, unknown> | undefined;
+  return callback?.value && typeof callback.value === "object" && !Array.isArray(callback.value) ? callback.value as Record<string, unknown> : undefined;
 }
