@@ -1,193 +1,231 @@
-# Herdr Lark Bridge Interactive Architecture Atlas Design
+# Herdr Lark Bridge Engineering Architecture Document Design
 
-## Purpose
+## Decision
 
-Create one self-contained interactive HTML document that lets engineers, operators, and reviewers understand Herdr Lark Bridge without first reading the entire repository. The page must explain both the static module architecture and the dynamic behavior of a request, including persistence, scheduling, reconciliation, recovery, and Lark delivery.
+Replace `docs/system-architecture.html` in full. The deliverable is a formal engineering architecture and design document packaged as one directly openable HTML file. It is not a landing page, product tour, simulated dashboard, or architecture “atlas.” The current HTML layout, content hierarchy, and interaction model are not retained as a design foundation.
 
-The artifact will live at `docs/system-architecture.html`. It must open directly from disk, require no build step or network connection, and keep all CSS, SVG, content, and JavaScript in the same file.
+The document combines C4-style system decomposition with implementation-level diagrams for workflows, persistence, delivery lanes, recovery, and operations. Every diagram must answer four questions: what participates, what crosses each edge, who owns the resulting state, and what happens when the edge fails.
 
-## Audience and success criteria
+## Deliverable and constraints
 
-The primary audiences are:
+- Deliver exactly one reader-facing artifact: `docs/system-architecture.html`.
+- Embed all HTML, CSS, SVG, diagrams, and JavaScript in that file.
+- Open correctly from `file://` with no build step and no network access.
+- Use no third-party libraries, remote fonts, external images, analytics, or live service calls.
+- Do not expose credentials, configured tenant identifiers, live database paths, or environment values.
+- Do not change application source files or generated `dist/` files.
+- Render as a linear, complete engineering document without JavaScript; JavaScript may add navigation, diagram inspection, and view controls.
+- Preserve keyboard access, visible focus, reduced motion, mobile readability, and a useful print layout.
 
-- engineers learning where a change belongs;
-- operators diagnosing a live or recovering bridge;
-- reviewers checking that a change preserves durability and safety boundaries.
+## Audience
 
-The page succeeds when a reader can use it to answer these questions:
+The document is written for engineers changing the bridge, reviewers validating a design, and operators diagnosing failures. It assumes general distributed-systems knowledge but no prior knowledge of this repository.
 
-1. Which system owns each kind of truth?
-2. What happens from a Lark message to a completed Answer Card?
-3. Which source modules participate at each stage?
-4. Where are durable checkpoints and retry boundaries?
-5. How do ordinary turns, steering, restarts, and delivery retries differ?
-6. Why do wake-up events not replace reconciliation?
-7. How do health, readiness, leases, outbox state, and quarantines affect operations?
+After reading it, a new engineer must be able to explain:
 
-## Chosen experience
+1. why the bridge is a durable coordinator rather than a relay;
+2. which system owns runtime, workflow, presentation, and process-lifecycle truth;
+3. how concrete modules are composed and communicate;
+4. how an inbound message becomes a TraeX turn and then Lark projections;
+5. how prompt FIFO differs from steering;
+6. how outbound lane keys are derived and scheduled;
+7. why failure in one lane does not block independent lanes;
+8. why uncertain TraeX work is observed rather than replayed;
+9. how startup, reconciliation, delivery recovery, and shutdown converge;
+10. where a proposed code change belongs and which invariants it may affect.
 
-The page is an **Interactive Architecture Atlas** with the narrative playback of an architecture storyboard. It uses an industrial control-room visual language: deep ink background, warm paper text, cyan signal paths, amber durable boundaries, green healthy states, and coral fault states. Fine grid lines, restrained glow, and compact technical labels make it feel like an instrument built for this system rather than a generic dashboard.
+## Document structure
 
-The experience has three persistent regions on wide screens:
+### 1. Executive summary
 
-- a left rail for section navigation and scenario selection;
-- a central canvas for the current architecture, timeline, or state view;
-- a right inspector for contextual details about the selected module or step.
+State the system purpose, its durable-coordinator model, the one-topic-to-one-pane binding, and the central safety property: workflow intent is persisted before fallible effects, while live process truth is re-observed from Herdr. Include a compact metadata block for runtime, persistence, delivery surface, service owner, and source authority.
 
-On narrow screens the rail becomes a horizontal section selector and the inspector becomes an inline expandable panel. The content remains fully usable with keyboard navigation and reduced-motion preferences.
+### 2. Goals and non-goals
 
-## Information architecture
+Goals include durable inbound acceptance, per-binding serialization, explicit steering, observable TraeX execution, deterministic card projection, ordered delivery, restart convergence, and bounded operational diagnostics.
 
-### 1. Orientation
+Non-goals include remote high-risk approval, treating Lark cards as workflow truth, replaying uncertain prompts, using in-memory events as a durable ledger, exposing the health server publicly, and acting as a generic multi-agent scheduler.
 
-The opening section states the bridge's role in one sentence: it is a durable workflow coordinator connecting Lark topics to TraeX processes running in real Herdr panes. A compact system boundary diagram introduces Lark, the bridge process, SQLite, Herdr, TraeX, and user systemd.
+### 3. System context diagram
 
-A source-of-truth matrix makes ownership explicit:
+Show the human user, Lark platform, bridge service, SQLite database, Herdr workspace/pane, TraeX process, user systemd, and Herdr plugin. Label every edge with protocol or interaction:
 
-| Concern | Authority | Bridge behavior |
-| --- | --- | --- |
-| Pane, terminal, foreground process, agent state | Herdr | Observe and reconcile from a fresh snapshot |
-| Binding lifecycle, prompt FIFO, projections, outbox, audit, lease | SQLite | Persist before effects and transition atomically |
-| Visible cards and messages | Lark | Treat as delivery surfaces, never workflow truth |
-| Service process lifecycle | user systemd | Start, stop, restart, and report process state |
+- user ↔ Lark: topic messages and card actions;
+- Lark → bridge: long-connection events;
+- bridge → Lark: CardKit API;
+- bridge ↔ SQLite: transactional state and lease;
+- bridge → Herdr: CLI commands and targeted observation;
+- Herdr → bridge: snapshots, socket hints, and plugin event hints;
+- Herdr pane → TraeX: native agent prompt/control;
+- systemd → bridge: process lifecycle;
+- plugin → systemd/bridge: supported operator actions.
 
-### 2. Request journey
+Visually distinguish synchronous calls, asynchronous hints, durable writes, and process ownership. Place source-of-truth ownership directly on the relevant system boundaries.
 
-The central diagram presents the canonical path:
+### 4. Container and component architecture
 
-`Lark message or card action → Lark adapter → InboundRouter → SQLite acceptance → PromptWorkScheduler → PromptRunWorkflow → Herdr and TraeX → lifecycle events → ConversationViewProjector → SQLite outbox → LarkOutboxDispatcher → Lark cards`
+Show the actual layers and dependency direction:
 
-Users can play, pause, restart, or step through the flow. Only one step is active at a time. The active edge animates, relevant modules brighten, and the inspector explains:
+- composition root: `src/main.ts`;
+- boundary adapters and infrastructure;
+- application coordinators;
+- event, scheduling, projection, and delivery components;
+- domain types, ports, lifecycle transitions, reducers, and planners;
+- SQLite implementation of capability-focused store ports;
+- pure CardKit renderers and health reporting.
 
-- what enters the step;
-- what it decides or transforms;
-- which durable record changes;
-- what can fail;
-- how retry or reconciliation proceeds;
-- which source files implement the behavior.
+The component diagram must include concrete production modules rather than directory-only boxes: `LarkSdkAdapter`, `HerdrCliAdapter`, `InboundRouter`, `BindingProvisioningWorkflow`, `PromptRunWorkflow`, `TurnSupervisor`, `HerdrRuntimeReconciler`, `CardInteractionWorkflow`, pane/session/model workflows, `BridgeEventBus`, `PromptWorkScheduler`, `ConversationViewProjector`, `AnswerPageWorkflow`, `MainCardWorkflow`, `OutboundIntentWriter`, `LarkOutboxDispatcher`, `SqliteBindingStore`, runtime resilience components, and `startHealthServer`.
 
-Durable checkpoints use amber markers. Side effects use cyan markers. Uncertain dispatch is called out explicitly: once a prompt may have reached TraeX, it is observed again and never automatically replayed.
+Edges must name the exchanged contract: normalized inbound event, capability port call, prompt work hint, lifecycle event, projection state, outbound intent, delivery checkpoint, or runtime observation.
 
-### 3. Scenario laboratory
+### 5. Composition and module responsibility map
 
-The same diagram supports four scenario lenses:
+Explain how `main.ts` constructs concrete implementations, injects narrow ports into workflows, connects dispatcher checkpoints back to schedulers/card convergence, takes the fenced lease, starts diagnostics, and owns graceful shutdown.
 
-- **Normal turn:** durable acceptance, FIFO scheduling, one active ordinary turn per binding, observation, projection, and delivery.
-- **Steering:** an eligible message targets the active turn instead of becoming another ordinary concurrent turn.
-- **Restart recovery:** startup restores projections, detaches uncertain observers safely, snapshots Herdr, and converges without replaying a possibly dispatched prompt.
-- **Delivery retry:** an already-persisted outbox intent is retried or dead-lettered without repeating the TraeX work.
+Provide a source-code map table with module, responsibility, inputs, outputs, durable effects, principal collaborators, and source path. Clicking a diagram component may focus the matching table row, but the complete table must be visible in static and print modes.
 
-Changing scenario updates the numbered path, explanation, failure notes, and highlighted persistence boundaries. Scenario controls do not simulate live service state; they are deterministic educational views backed by data embedded in the page.
+### 6. Inbound request sequence
 
-### 4. Module atlas
+Provide a sequence diagram from Lark event through normalization, durable inbound recording, routing, prompt acceptance, scheduler wake, durable claim, Herdr prompt submission, observation, lifecycle event, projection, outbox reservation, and Lark delivery.
 
-The module explorer groups source code by architectural role:
+Mark transaction boundaries and the irreversible prompt-dispatch boundary. Explain that the event bus and notifier are low-latency hints; durable scans recover lost hints.
 
-- `src/main.ts`: composition root and lifecycle wiring;
-- `src/adapters/`: Herdr CLI and Lark SDK normalization;
-- `src/coordinator/`: inbound, provisioning, prompt, steering, reconciliation, cards, and operational workflows;
-- `src/domain/`: ports, commands, events, lifecycle rules, types, and deterministic view planning;
-- `src/events/`: event bus, projectors, schedulers, and outbox dispatch;
-- `src/runtime/`: parsing, streams, event hints, caches, lease, shutdown, integrity, and bounded operational mechanics;
-- `src/store/`: SQLite schema, records, transactions, queues, projections, and outbox lanes;
-- `src/cards/`: pure CardKit rendering;
-- `src/health/`: loopback health, readiness, and status reporting.
+### 7. Prompt scheduling and steering
 
-Each clickable module card exposes its responsibility, important collaborators, source path, and the scenarios in which it participates. A search field matches module names, paths, responsibilities, and concepts such as `lease`, `steering`, `outbox`, or `reconcile`. Category chips filter without hiding the current selection unexpectedly.
+Show a per-binding ordinary prompt FIFO and a separate explicit steering path:
 
-### 5. Durable state and state machines
+- at most one ordinary active turn per binding;
+- later ordinary prompts remain queued in creation order;
+- ordinary text is never auto-promoted to steering;
+- `/swarm steer` targets a captured active parent and bypasses ordinary FIFO;
+- `/swarm stop` is a local pane control, not a prompt job;
+- stale binding generation or parent identity prevents misdirected control;
+- uncertain dispatch changes observation handling, not prompt eligibility for replay.
 
-This section explains SQLite as the workflow memory rather than a passive cache. It visualizes the relationships among projects, bindings, inbound records, prompts, answer pages, main-card projections, outbox items, audit records, and the instance lease at a conceptual level. It avoids inventing literal table or column names where the page does not need them.
+### 8. Outbound lane architecture
 
-Three small state views cover:
+This is a primary engineering diagram, not a footnote. Show the complete producer-to-consumer path:
 
-- prompt lifecycle from queued through active observation to a terminal or recoverable state;
-- outbox lifecycle from pending through delivery, retry, or dead letter;
-- Answer pagination from active page to frozen immutable page and continuation page.
+`workflow/projector → transactional SQLite enqueue → OutboundWorkNotifier hint → LarkOutboxDispatcher scan → outbox_lane_heads → bounded parallel handlers → LarkPort → transactional delivery checkpoint → checkpoint subscribers`
 
-The views emphasize transitions and invariants rather than presenting a misleading database administration diagram.
+Document the exact lane-key rules from `src/store/outbox-lanes.ts`:
 
-### 6. Reconciliation and recovery
+1. `card_role = answer` and `prompt_id != null` → `answer:<promptId>`;
+2. otherwise `stream_content` or `stream_finish` → `stream:<rootMessageId>`;
+3. otherwise → `message:<rootMessageId>`.
 
-A split timeline contrasts fast hints with authoritative convergence:
+Show at least three simultaneous lanes and multiple rows in each lane. Explain:
 
-- Herdr socket/plugin events invalidate caches and wake reconciliation;
-- `SessionReconciler` or the current runtime reconciler path takes a fresh Herdr snapshot;
-- observed runtime truth is compared with durable SQLite intent;
-- bridge events update projections and enqueue delivery intent.
+- every row receives durable `delivery_order`;
+- `outbox_lane_heads` exposes only the earliest pending row in each non-quarantined lane;
+- only one row per lane can be in a dispatcher batch;
+- the dispatcher runs at most four independent lane handlers concurrently;
+- delivery or dismissal advances that lane's head;
+- a future-due or failed head blocks only its own lane;
+- retry scheduling uses the earliest due lane head;
+- `stream_card_create`, `stream_content`, `stream_finish`, `card_update`, `card_reply`, and `text` have different Lark effects and checkpoints.
 
-Recovery callouts cover startup, shutdown detachment, stale events, uncertain dispatch, missing visible cards, and failed Lark delivery. The copy must never imply that card text is authoritative or that a prompt is replayed to repair display state.
+Include a failure branch showing transient backoff, permanent/exhausted dead letter, lane classification, quarantine, and recovery action. Explain all lane classes:
 
-### 7. Operations and safety
+- `answer_stream`;
+- `main_card`;
+- `replaceable_card`;
+- `immutable`.
 
-An operations panel distinguishes `/health`, `/ready`, and `/status`:
+For Answer stream failure, later unsafe content/finish rows cannot skip the failed head. Recovery uses canonical `RunCardView` content, page source offsets, and sequence state. For replaceable snapshots, only a newer durable view may advance. Immutable work remains blocked until explicit retry or dismissal.
 
-- health means the process responds;
-- readiness requires the lease, configured projects, Herdr, and Lark to be usable;
-- status explains degraded components and durable backlog or quarantine signals.
+Show checkpoint feedback:
 
-It also explains build identity, fenced instance lease, SQLite integrity audit, bounded logs, correlation identifiers, outbox retention, and graceful shutdown. The final invariant wall summarizes:
+- successful Answer card creation/content/finish notifies Answer convergence;
+- successful main-card delivery advances `deliveredVersion`;
+- successful task/Answer card creation may wake the prompt scheduler once the required visible target exists;
+- delivery retry never invokes TraeX.
 
-- one ordinary active turn per binding;
-- FIFO for later ordinary work;
-- steering is explicit;
-- never replay uncertain TraeX dispatch;
-- persist delivery intent before sending to Lark;
-- preserve ordered CardKit stream sequence;
-- frozen Answer pages are immutable;
-- high-risk approval remains local to Herdr.
+### 9. Persistence model and transaction boundaries
 
-## Interaction design
+Document conceptual aggregates and the actual durable relationships among project selection, binding, prompt job, control/interaction records, run-card view, topic view, Answer page, outbound reply, lane head, lane quarantine, audit, and instance lease.
 
-All controls use semantic HTML buttons, links, inputs, and landmarks. The page provides:
+Do not invent exact column-level ER semantics unnecessarily. Do name the fields required to explain correctness: binding generation, prompt dispatch kind and observation state, view/delivered version, page index/source start/sequence/state, idempotency key, lane key, delivery order, retry timestamp, failure class, and fencing token.
 
-- sticky section navigation with active-section tracking;
-- scenario tabs and play/pause/previous/next controls;
-- selectable SVG or HTML diagram nodes with keyboard focus;
-- a contextual inspector that updates without navigation;
-- module search and category filters;
-- expandable definitions for bridge-specific terminology;
-- a reduced-motion mode derived from `prefers-reduced-motion`;
-- a print stylesheet that expands essential details and removes controls.
+Call out atomic transitions that couple workflow state, projection changes, Answer-page reservation, and outbox intent.
 
-JavaScript progressively enhances the document. Core explanations remain present and readable if scripting is unavailable. Deep-link hashes identify major sections, but the page does not require routing or local storage.
+### 10. State machines
 
-## Content model and implementation boundary
+Include explicit state diagrams for:
 
-The HTML contains small JavaScript data structures for modules and scenarios. Rendering functions derive diagram highlighting, inspector content, search results, and step counters from this data. Content is not duplicated across hidden DOM fragments.
+- binding lifecycle and attachment;
+- provisioning checkpoints;
+- prompt state plus orthogonal observation state;
+- pane-control operations;
+- Answer page state;
+- outbound reply and lane quarantine state.
 
-The artifact must not:
+Each transition must name its trigger and explain whether it is reversible, retryable, or terminal.
 
-- import fonts, libraries, icons, analytics, or remote assets;
-- call the live bridge, Lark, Herdr, or SQLite;
-- expose secrets, live IDs, database paths, or environment values;
-- claim to be a live operations dashboard;
-- depend on generated `dist/` output or a documentation build system.
+### 11. Reconciliation and recovery
 
-Icons and diagrams use inline SVG. Typography uses a deliberate local font stack with a condensed technical display face fallback and a readable serif/sans body pairing.
+Contrast the hint path and convergence path. Document startup order, lease fencing, integrity audit, inbound recovery, view convergence, pane-control recovery, delivery recovery, fresh Herdr observation, scheduler scans, and activation of live event subscriptions.
 
-## Accuracy sources
+Include failure narratives for bridge termination during prompt submission, bridge termination during observation, missing/replaced pane, missed Herdr event, failed CardKit target, stale stream operation, database integrity failure, and lease loss.
 
-The implementation must derive behavior from these current repository sources:
+### 12. Answer projection and pagination
 
-- `docs/architecture.md` for durability, authority boundaries, lifecycle, and recovery;
-- `docs/feishu-group-usage.md` for user-visible commands and interaction behavior;
-- `src/main.ts` for actual composition and startup wiring;
-- the relevant `src/adapters`, `src/coordinator`, `src/domain`, `src/events`, `src/runtime`, `src/store`, `src/cards`, and `src/health` entry points for module descriptions.
+Explain canonical Answer content, sanitized runtime observations, Answer page source offsets, ordered element sequence, active/frozen/finished pages, continuation creation, delivery checkpointing, and restart reconstruction. Explicitly state that frozen pages are immutable and rendering transformations do not rewrite canonical offsets.
 
-Historical design documents are not behavioral authority. The implementation must avoid overwriting or incorporating unrelated uncommitted CardKit and recovery work.
+### 13. Operations, health, and security
+
+Differentiate `/health`, `/ready`, and `/status`. Describe structured correlation identifiers, build identity, circuit breaker, snapshot cache, integrity diagnostics, outbox backlog/quarantine signals, retention, and bounded shutdown.
+
+Document security boundaries: configured-chat/user allowlists, project registry validation, command argument redaction, terminal sanitization, credential redaction, loopback-only health/event listeners, and local-only high-risk approval.
+
+### 14. Failure matrix and architectural invariants
+
+Provide a matrix with failure, authoritative evidence, durable response, retry owner, user-visible effect, and prohibited recovery. Close with the non-negotiable invariants from `AGENTS.md` and `docs/architecture.md`.
+
+## Visual and interaction design
+
+Use a restrained engineering-document aesthetic: light drafting-paper background, dark ink, one cyan interaction accent, amber durable-state accent, red failure accent, fine grid/rule lines, compact captions, and high-density but readable diagrams. Avoid oversized marketing typography, decorative hero sections, glass panels, fake live indicators, and dashboard simulation.
+
+The desktop layout uses a narrow table-of-contents rail and a wide document column. Diagrams may use their full column width. Dense diagrams expose a `Fit / 100%` control and a dedicated horizontal pan area rather than shrinking labels until unreadable. Mobile uses a compact top navigation and horizontally scrollable diagram canvases. Print removes controls, expands details, preserves diagram legends, and uses page-break-aware sections.
+
+Allowed interactions are documentation-oriented:
+
+- table-of-contents section tracking;
+- diagram zoom-to-fit and 100% controls;
+- node selection that focuses the corresponding responsibility detail;
+- lane scenario toggles for normal, retry, and quarantine states;
+- collapse/expand for supporting details;
+- module table search.
+
+No timed autoplay, animated storytelling, fake telemetry, or simulated live status is included.
+
+## Source authority
+
+The implementation must be checked against current source, principally:
+
+- `docs/architecture.md`;
+- `docs/feishu-group-usage.md`;
+- `src/main.ts`;
+- `src/store/outbox-lanes.ts`;
+- `src/store/sqlite-store.ts`;
+- `src/events/lark-outbox-dispatcher.ts`;
+- `src/events/outbound-intent-writer.ts`;
+- `src/events/conversation-view-projector.ts`;
+- `src/events/prompt-work-scheduler.ts`;
+- `src/coordinator/prompt-run-workflow.ts`;
+- `src/coordinator/herdr-runtime-reconciler.ts`;
+- `src/coordinator/answer-page-workflow.ts`;
+- `src/coordinator/main-card-workflow.ts`;
+- `src/domain/ports.ts`, `types.ts`, and view reducers/planners.
+
+Historical design files are context only and never override current source or `docs/architecture.md`.
 
 ## Validation
 
-Validation is proportional to a static documentation artifact:
-
-1. Confirm exactly one HTML artifact contains no external `src`, stylesheet, font, or network dependencies.
-2. Parse the file with an available local HTML parser or browser engine and check for duplicate IDs and unresolved internal section links.
-3. Exercise scenario stepping, play/pause, module selection, search, filters, and keyboard focus using a local browser automation tool when available.
-4. Check responsive layouts at desktop and mobile widths and verify reduced-motion behavior.
-5. Compare page statements against `docs/architecture.md` and `src/main.ts`.
-6. Run the repository's existing documentation-neutral typecheck or build only if implementation work does not overlap ongoing source changes; the HTML itself must require neither command.
-
-## Deliverable
-
-One new implementation artifact: `docs/system-architecture.html`. The design and implementation-plan documents remain separate process records; the user-facing architecture experience itself is a single portable HTML file.
+1. Confirm one self-contained HTML file with no external resources or network calls.
+2. Check unique IDs, internal links, semantic landmarks, accessible control names, and static readability without JavaScript.
+3. Verify every required diagram, module, state machine, lane rule, failure class, and architectural invariant is present.
+4. Exercise table-of-contents tracking, diagram controls, node-to-module focus, lane scenarios, search, and disclosures in Chromium.
+5. Inspect desktop, narrow mobile, reduced-motion, and print rendering.
+6. Cross-check every lane rule and recovery statement against current source.
+7. Confirm no application source or unrelated worktree file was changed.
