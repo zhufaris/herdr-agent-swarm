@@ -82,7 +82,7 @@ describe("project selection flow", () => {
     await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
     expect(created).toHaveLength(1);
     expect(created[0]).toMatch(/^task-[a-z0-9]{4}$/);
-    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", title: "alpha / 帮我排查登录超时" });
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", title: `alpha / ${created[0]}` });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -187,8 +187,9 @@ describe("project selection flow", () => {
     expect(groupCards).toHaveLength(1);
     expect(JSON.stringify(groupCards[0])).toContain("datasage_semantic_knowledge");
     expect(JSON.stringify(groupCards[0])).toContain("wD:p9");
+    const paneTitle = (created[0]![2] as { title: string }).title;
     expect(store.findBindingByPane("wD:p9")).toMatchObject({
-      projectId: "datasage", workspaceId: "wD", title: "datasage_semantic_knowledge / Fix login", state: "active",
+      projectId: "datasage", workspaceId: "wD", title: `datasage_semantic_knowledge / ${paneTitle}`, state: "active",
       topicId: "project-topic-1", rootMessageId: "project-root-1", statusMessageId: "project-root-1", lastAgentState: "idle"
     });
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });

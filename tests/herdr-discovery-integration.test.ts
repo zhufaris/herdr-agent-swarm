@@ -250,7 +250,8 @@ describe("Herdr discovery", () => {
     await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
     await vi.waitFor(() => expect(store.getProjectSelection(selection)?.state).toBe("completed"));
     expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: expect.stringMatching(/^task-[a-z0-9]{4}$/) }]);
-    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Initial pane" });
+    const paneTitle = (created[0] as { title: string }).title;
+    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: `my-space / ${paneTitle}` });
 
     await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/swarm rename Better pane", mentionsBot: false, isRootMessage: false });
     expect(renamed).toEqual([["w1:p2", "Better pane", { tabTitle: "Better pane" }]]);

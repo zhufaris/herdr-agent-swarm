@@ -63,7 +63,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const { config, store, herdr } = this.options;
     const project = this.projectsById.get(config.defaultProjectId) ?? config.projects[0]!;
     const paneTitle = randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, requestedTitle || paneTitle, "TraeX pane");
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = store.createPendingBinding({
       id: randomUUID(), projectId: project.id, workspaceId: project.workspaceId, chatId: message.chatId,
       topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title, creatorOpenId: message.actorOpenId
@@ -180,7 +180,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const project = this.projectsById.get(binding.projectId);
     if (!project) { await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。"); return false; }
     const paneTitle = randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, requestedTitle ?? paneTitle, "TraeX pane");
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     const candidate = store.createResetCandidate({ oldBindingId: binding.id, newBindingId: randomUUID(), title, actorOpenId: message.actorOpenId, resetMessageId: message.messageId });
     try {
       let replacement = candidate.replacement;
@@ -295,7 +295,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const { store, herdr, lark, config, logger } = this.options;
     const bindingId = selection.bindingId ?? randomUUID();
     const paneTitle = randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, selection.requestedTitle ?? paneTitle, "TraeX pane");
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
     if (!binding) { binding = store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title, creatorOpenId: selection.actorOpenId }); store.linkProjectSelectionBinding(selection.id, binding.id); await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null }); }
     try {
