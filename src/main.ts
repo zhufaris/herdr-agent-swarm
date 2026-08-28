@@ -38,6 +38,12 @@ import { SqliteIntegrityAuditor } from "./runtime/sqlite-integrity-auditor.js";
 import { AnswerPageWorkflow } from "./coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "./coordinator/main-card-workflow.js";
 import { WorktreeNameResolver } from "./runtime/worktree-name-resolver.js";
+import { WorktreeManager } from "./runtime/worktree-manager.js";
+import { HerdrPaneHost } from "./runtime/herdr/pane-host.js";
+import { AgentDriverRegistry } from "./runtime/agents/agent-driver.js";
+import { TraexDriver } from "./runtime/agents/traex-driver.js";
+import { InstanceControlWorkflow } from "./coordinator/instance-control-workflow.js";
+import { randomUUID } from "node:crypto";
 import { safeLogError } from "./runtime/safe-error.js";
 import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
 import { TraexSessionReporter } from "./runtime/traex-session-reporter.js";
@@ -76,6 +82,11 @@ const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
 rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
 herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
 herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, 2_000, logger);
+const paneHost = new HerdrPaneHost(herdr);
+const agentDrivers = new AgentDriverRegistry([new TraexDriver(herdr, config.traex.executable, config.turnTimeoutMs)]);
+const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
+const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
+void instanceControl; // Application service is composed now; Feishu exposure arrives in the dedicated control-surface slice.
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);

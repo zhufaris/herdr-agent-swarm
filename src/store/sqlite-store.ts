@@ -16,11 +16,11 @@ import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
 import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
-import type { AgentInstance, CreateAgentInstanceInput, WorkspaceLease } from "../domain/agent-instance.js";
+import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 
 const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
@@ -127,7 +127,8 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.prepare(`
         INSERT INTO agent_instances(
           id, project_id, name, role, agent_kind, model, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?)
+          , provisioning_checkpoint, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
       `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
@@ -163,15 +164,65 @@ export class SqliteBindingStore implements BindingStorePort {
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null {
     const nextGeneration = input.expectedGeneration + 1;
     const result = this.database.prepare(`
-      UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, generation = ?, observed_state = 'idle', updated_at = ?
+      UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, generation = ?, observed_state = 'idle', provisioning_checkpoint = 'verified', last_error = NULL, updated_at = ?
       WHERE id = ? AND generation = ?
     `).run(input.herdrWorkspaceId, input.paneId, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
+    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+  }
+
+  checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null {
+    const result = this.database.prepare(`UPDATE agent_instances SET provisioning_checkpoint = ?, observed_state = COALESCE(?, observed_state), pending_pane_id = COALESCE(?, pending_pane_id), pending_herdr_workspace_id = COALESCE(?, pending_herdr_workspace_id), last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+      .run(input.checkpoint, input.observedState ?? null, input.pendingPaneId ?? null, input.pendingWorkspaceId ?? null, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
+    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+  }
+
+  updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null {
+    const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+      .run(input.desiredState, input.observedState, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
     return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
   }
 
   getWorkspaceLease(id: string): WorkspaceLease | null {
     const row = this.database.prepare("SELECT * FROM workspace_leases WHERE id = ?").get(id) as WorkspaceLeaseRow | undefined;
     return row ? mapWorkspaceLease(row) : null;
+  }
+
+  updateWorkspaceLease(input: { id: string; expectedGeneration: number; state: WorkspaceLeaseState; cwd?: string; branch?: string | null; baseCommit?: string }): WorkspaceLease | null {
+    const current = this.getWorkspaceLease(input.id);
+    if (!current || current.generation !== input.expectedGeneration) return null;
+    const result = this.database.prepare(`UPDATE workspace_leases SET state = ?, cwd = ?, branch = ?, base_commit = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+      .run(input.state, input.cwd ?? current.cwd, input.branch === undefined ? current.branch : input.branch, input.baseCommit ?? current.baseCommit, now(), input.id, input.expectedGeneration);
+    return result.changes === 1 ? this.getWorkspaceLease(input.id) : null;
+  }
+
+  createInstanceRemovalPlan(plan: InstanceRemovalPlan): InstanceRemovalPlan {
+    this.database.prepare(`INSERT INTO instance_removal_plans(id, instance_id, instance_generation, workspace_generation, worktree_fingerprint, safe, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(plan.id, plan.instanceId, plan.instanceGeneration, plan.workspaceGeneration, plan.worktreeFingerprint, plan.safe ? 1 : 0, plan.reason, plan.state, plan.createdAt);
+    return this.getInstanceRemovalPlan(plan.id)!;
+  }
+
+  getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null {
+    const row = this.database.prepare("SELECT * FROM instance_removal_plans WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? { id: String(row.id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), workspaceGeneration: Number(row.workspace_generation), worktreeFingerprint: row.worktree_fingerprint === null ? null : String(row.worktree_fingerprint), safe: Number(row.safe) === 1, reason: String(row.reason) as InstanceRemovalPlan["reason"], state: String(row.state) as InstanceRemovalPlan["state"], createdAt: String(row.created_at) } : null;
+  }
+
+  consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null {
+    const result = this.database.prepare(`UPDATE instance_removal_plans SET state = 'consumed' WHERE id = ? AND state = 'pending' AND safe = 1 AND instance_id = ? AND instance_generation = ? AND workspace_generation = ? AND worktree_fingerprint IS ?`)
+      .run(input.id, input.instanceId, input.instanceGeneration, input.workspaceGeneration, input.worktreeFingerprint);
+    return result.changes === 1 ? this.getInstanceRemovalPlan(input.id) : null;
+  }
+
+  removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const instance = this.getAgentInstance(input.instanceId);
+      if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef) { this.database.exec("COMMIT"); return false; }
+      const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
+      if (!lease || lease.generation !== input.expectedWorkspaceGeneration) { this.database.exec("COMMIT"); return false; }
+      this.database.prepare("DELETE FROM workspace_leases WHERE id = ? AND generation = ?").run(lease.id, lease.generation);
+      const removed = this.database.prepare("DELETE FROM agent_instances WHERE id = ? AND generation = ?").run(instance.id, instance.generation).changes === 1;
+      this.database.exec("COMMIT"); return removed;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null {
@@ -182,7 +233,8 @@ export class SqliteBindingStore implements BindingStorePort {
       desiredState: binding.state === "archived" ? "stopped" : "running",
       observedState: binding.state === "failed" ? "failed" : binding.state === "archived" ? "stopped" : binding.lastAgentState === "done" ? "idle" : binding.lastAgentState === "unknown" ? "detached" : binding.lastAgentState,
       workspaceLeaseId: `legacy:${binding.id}:workspace`, generation: binding.generation,
-      runtimeRef: binding.paneId ? { herdrWorkspaceId: binding.workspaceId, paneId: binding.paneId, nativeSessionId: binding.traexSessionId, generation: binding.generation } : null
+      runtimeRef: binding.paneId ? { herdrWorkspaceId: binding.workspaceId, paneId: binding.paneId, nativeSessionId: binding.traexSessionId, generation: binding.generation } : null,
+      pendingRuntimeRef: null, provisioningCheckpoint: "verified", lastError: null
     };
   }
 
@@ -2011,6 +2063,7 @@ export class SqliteBindingStore implements BindingStorePort {
         desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
         observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
         workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
+        provisioning_checkpoint TEXT NOT NULL DEFAULT 'recorded', last_error TEXT, pending_herdr_workspace_id TEXT, pending_pane_id TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, name)
       );
       CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
@@ -2020,6 +2073,10 @@ export class SqliteBindingStore implements BindingStorePort {
         kind TEXT NOT NULL CHECK(kind IN ('main-checkout','git-worktree','shared-read-only')), cwd TEXT NOT NULL, branch TEXT, base_commit TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('allocating','ready','dirty','committed','conflicted','release-requested','retained','released')),
         generation INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS instance_removal_plans(
+        id TEXT PRIMARY KEY, instance_id TEXT NOT NULL, instance_generation INTEGER NOT NULL, workspace_generation INTEGER NOT NULL,
+        worktree_fingerprint TEXT, safe INTEGER NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','consumed','stale')), created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS inbound_messages(
         event_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, payload_json TEXT NOT NULL,
@@ -2102,6 +2159,7 @@ export class SqliteBindingStore implements BindingStorePort {
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
     `);
     this.ensureOutboundReplyColumns();
+    this.ensureAgentInstanceLifecycleColumns();
     this.ensureInboundMessageIdempotency();
     this.ensureOutboundCardCheckpoint();
     this.ensureRequestCardOutboxColumns();
@@ -2161,6 +2219,14 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.exec("COMMIT");
       } catch (error) { this.database.exec("ROLLBACK"); throw error; }
     }
+  }
+
+  private ensureAgentInstanceLifecycleColumns(): void {
+    const names = new Set((this.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!names.has("provisioning_checkpoint")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN provisioning_checkpoint TEXT NOT NULL DEFAULT 'recorded'");
+    if (!names.has("last_error")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN last_error TEXT");
+    if (!names.has("pending_herdr_workspace_id")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN pending_herdr_workspace_id TEXT");
+    if (!names.has("pending_pane_id")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN pending_pane_id TEXT");
   }
 
   private finishLegacyDeliveredAnswerPages(timestamp: string): void {

@@ -4,7 +4,7 @@ import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
 import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
-import type { AgentInstance, CreateAgentInstanceInput, WorkspaceLease } from "./agent-instance.js";
+import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "./agent-instance.js";
 
 export interface InstanceStore {
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
@@ -12,7 +12,14 @@ export interface InstanceStore {
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
+  checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
+  updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
   getWorkspaceLease(id: string): WorkspaceLease | null;
+  updateWorkspaceLease(input: { id: string; expectedGeneration: number; state: WorkspaceLeaseState; cwd?: string; branch?: string | null; baseCommit?: string }): WorkspaceLease | null;
+  createInstanceRemovalPlan(plan: InstanceRemovalPlan): InstanceRemovalPlan;
+  getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null;
+  consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
+  removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
 }
 

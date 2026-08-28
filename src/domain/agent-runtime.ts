@@ -20,5 +20,6 @@ export type DispatchReceipt =
 export interface AgentRuntimeDriver {
   readonly kind: AgentKind;
   describe(): AgentCapabilities;
+  start(runtime: AgentRuntimeRef): Promise<void>;
   submit(runtime: AgentRuntimeRef, text: string): Promise<DispatchReceipt>;
 }

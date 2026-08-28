@@ -10,6 +10,7 @@ export type ObservedInstanceState =
   | "detached"
   | "stopped"
   | "failed";
+export type InstanceProvisioningCheckpoint = "recorded" | "workspace-ready" | "pane-allocated" | "runtime-started" | "verified";
 
 export interface AgentRuntimeRef {
   herdrWorkspaceId: string;
@@ -30,6 +31,9 @@ export interface AgentInstance {
   workspaceLeaseId: string;
   generation: number;
   runtimeRef: AgentRuntimeRef | null;
+  pendingRuntimeRef: Omit<AgentRuntimeRef, "nativeSessionId"> | null;
+  provisioningCheckpoint: InstanceProvisioningCheckpoint;
+  lastError: string | null;
 }
 
 export type WorkspaceLeaseState =
@@ -63,6 +67,18 @@ export interface CreateAgentInstanceInput {
   model: string | null;
   desiredState: DesiredInstanceState;
   workspace: Omit<WorkspaceLease, "projectId" | "instanceId" | "state" | "generation">;
+}
+
+export interface InstanceRemovalPlan {
+  id: string;
+  instanceId: string;
+  instanceGeneration: number;
+  workspaceGeneration: number;
+  worktreeFingerprint: string | null;
+  safe: boolean;
+  reason: "main-checkout" | "shared-read-only" | "clean" | "dirty" | "conflicted" | "ahead" | "uncertain";
+  state: "pending" | "consumed" | "stale";
+  createdAt: string;
 }
 
 export type InstanceTarget =
