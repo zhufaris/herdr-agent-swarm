@@ -22,11 +22,17 @@ A recovered lightweight Answer Card establishes only the page's CardKit identity
 
 For state already written by the former behavior, startup may atomically roll back only an exact invalid rebuild: the current page is frozen with a confirmed CardKit identity, the immediately following page is still `creating` without a card or message, both pages have the same source offset, canonical content for the current page is dead-lettered, and the failed quarantined reply is the matching deterministic `stream-rebuild` creation. Recovery deletes only the never-created page reservation, restores the confirmed page to `active`, dismisses the failed rebuild reply, and releases its quarantine; it retains the canonical content dead letter and all delivery error text.
 
+An exhausted transient `stream_content` delivery on an active page may receive one bounded canonical-content recovery. Startup derives at most 4,000 render-safe characters from the durable RunCard at the page's existing source offset, persists the exclusive canonical `sourceEnd` in a deterministic `startup-lite-content:<failed-reply-id>` replacement, and spends the replacement's automatic-recovery budget before delivery. Permanent or unknown content failures remain actively quarantined for operator action. The original dead letter and its error remain unchanged.
+
+The delivered replacement's `sourceEnd` is the only authority for advancing beyond a shortened recovery chunk. If `sourceEnd` is before the end of canonical content, convergence finishes the current page and creates the next page from exactly that offset. If `sourceEnd` reaches canonical content's end, convergence finishes the current page in place and must not create an empty continuation. Pending or dead-lettered replacements remain content boundaries and cannot advance. Repeated startup convergence must not enqueue another replacement for the same failed reply.
+
 When project-selection recovery confirms that a persisted `pane_created` pane no longer exists, it marks both the selection and binding failed. Uncertain failures remain processing and recoverable.
 
 ## Verification
 
 - Store tests cover bounded Answer retry, advisory-message dismissal, audit preservation, and unrelated quarantine retention.
+- Planner and workflow tests cover both recovery outcomes: continuation from a persisted `sourceEnd` and terminal finish without an empty page.
+- Permanent and unknown Answer content failures remain actively quarantined and do not emit recovery work.
 - Provisioning recovery tests cover confirmed missing pane terminalization.
 - Startup convergence tests cover wake-up of recovered outbox work.
 - Full typecheck, test, build, deployment, and live `/status` verification are required.

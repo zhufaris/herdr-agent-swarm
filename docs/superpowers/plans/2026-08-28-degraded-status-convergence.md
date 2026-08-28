@@ -54,3 +54,26 @@
 - [x] Run `npm run typecheck`, `npm test`, and `npm run build`.
 - [ ] Restart through the Herdr plugin.
 - [ ] Verify `/health`, `/ready`, `/status`, startup recovery, and SQLite state.
+
+### Task 5: Bounded canonical content recovery
+
+**Files:**
+- Modify: `src/runtime/answer-stream.ts`
+- Modify: `src/domain/types.ts`
+- Modify: `src/domain/answer-page-plan.ts`
+- Modify: `src/store/sqlite-store.ts`
+- Test: `tests/sqlite-store.test.ts`
+- Test: `tests/answer-page-plan.test.ts`
+- Test: `tests/lark-outbox-dispatcher.test.ts`
+
+**Interfaces:**
+- Consumes: an exhausted transient `stream_content`, its active `AnswerPage`, and canonical `RunCardView` content
+- Produces: one `startup-lite-content:<failed-reply-id>` replacement with `sourceEnd`, followed by either an exact continuation or terminal finish
+
+- [ ] Add a store regression that exhausts a transient active-page content reply and asserts one 4,000-character-or-smaller canonical replacement, spent recovery budget, preserved dead letter, released quarantine, and restart idempotency.
+- [ ] Add a dispatcher regression proving a permanent content rejection remains actively quarantined and emits no Answer checkpoint or continuation.
+- [ ] Add planner regressions for a delivered recovery chunk whose `sourceEnd` is before canonical EOF and one whose `sourceEnd` equals canonical EOF.
+- [ ] Persist `sourceEnd` in delivery facts and continue only when it is strictly before canonical EOF; otherwise reserve terminal finish on the same page.
+- [ ] Run `npx vitest run tests/answer-page-plan.test.ts tests/lark-outbox-dispatcher.test.ts tests/sqlite-store.test.ts tests/answer-page-workflow.test.ts tests/answer-page-recovery.integration.test.ts`.
+- [ ] Run `npm test`, `npm run typecheck`, `npm run build`, and `git diff --check`, then commit only the Answer recovery files.
+- [ ] Build the exact commit, restart through the Herdr plugin, and verify `ready`, `status`, outbox lanes, active quarantines, and the recovered page's durable terminal or continuation state.
