@@ -81,7 +81,7 @@ turn 已结束，内容不会发送，也不会转投新的 turn。
 
 ## 当前可用指令
 
-### `/swarm reset [标题]`
+### `/swarm reset [说明]`
 
 在当前已绑定话题中先创建并确认新的 TraeX 会话可用，再原子切换同一个飞书话题。
 如果新 pane 创建或 TraeX 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
@@ -93,6 +93,8 @@ blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 H
 ```
 
 `/swarm reset` 与 `/swarm new` 不同：后者会选择项目并创建一个新的飞书话题。
+新 Pane 使用 `task-xxxx` 随机名称，当前话题的主卡标题会更新为
+`项目名 / task-xxxx`；可选说明不会替代这个会话身份。
 
 ### `/swarm stop`
 
@@ -113,7 +115,7 @@ prompt，也不依赖 Herdr 是否识别出 named agent。
 bridge 监督的活动 turn（`working` 或 `blocked`）即可注入；`blocked` 时文本会进入
 TraeX 的 steering 输入，而不是审批界面。没有活动 turn 时会拒绝，不会降级为普通任务。
 
-### `/swarm new <标题>`
+### `/swarm new [说明]`
 
 打开项目选择卡片；选择后创建新的 Herdr pane、启动 TraeX，并建立飞书话题绑定。
 
@@ -122,8 +124,11 @@ TraeX 的 steering 输入，而不是审批界面。没有活动 turn 时会拒�
 ```
 
 如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
-不带标题的 `/swarm new` 会在选择后使用短随机 Pane 名，例如 `task-7kq2`；
-卡片标题展示为 `space / pane_name`。
+`/swarm new` 始终在选择项目后使用短随机 Pane 名，例如 `task-7kq2`；
+话题主卡标题展示为 `space / pane_name`，例如
+`herdr-agent-swarm / task-7kq2`。自然语言首条请求和可选说明不会作为话题名。
+服务启动后的 Herdr 对账也会让已有受管话题按其真实 Pane 名收敛到该格式。
+如需人工命名，使用 `/swarm rename <名称>`，标题将变为 `space / 名称`。
 
 ### `/swarm projects`
 
