@@ -122,6 +122,19 @@ export interface ProjectConfig {
   description: string;
   workspaceId: string;
   cwd: string;
+  maxInstances?: number;
+  instances?: ProjectInstanceConfig[];
+}
+
+export interface ProjectInstanceConfig {
+  name: string;
+  role: "primary" | "worker";
+  agent: "pi" | "claude-code" | "codex" | "traex";
+  model?: string | undefined;
+  workspace:
+    | { kind: "main-checkout" }
+    | { kind: "git-worktree"; baseRef: string; branchName?: string | undefined }
+    | { kind: "shared-read-only" };
 }
 
 export interface IncomingLarkCardAction {

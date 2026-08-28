@@ -27,8 +27,66 @@ describe("project registry configuration", () => {
     const config = loadConfig({ ...requiredEnvironment, PROJECTS_CONFIG_PATH: registryPath });
 
     expect(config.defaultProjectId).toBe("bridge");
-    expect(config.projects).toEqual([{ id: "bridge", displayName: "Herdr Lark Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" }]);
+    expect(config.projects).toEqual([{
+      id: "bridge", displayName: "Herdr Lark Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge",
+      maxInstances: 8, instances: []
+    }]);
     expect(config.herdr.workspaceId).toBe("wH");
+  });
+
+  it("loads explicit primary and worker instances for every supported agent kind", () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-projects-"));
+    const registryPath = join(directory, "projects.json");
+    writeFileSync(registryPath, JSON.stringify({
+      defaultProjectId: "bridge",
+      projects: [{
+        id: "bridge", displayName: "Bridge", description: "Bridge", workspaceId: "w1", cwd: "/work/bridge", maxInstances: 8,
+        instances: [
+          { name: "architect", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } },
+          { name: "coder", role: "worker", agent: "codex", workspace: { kind: "git-worktree", baseRef: "HEAD" } },
+          { name: "reviewer", role: "worker", agent: "claude-code", workspace: { kind: "shared-read-only" } },
+          { name: "explorer", role: "worker", agent: "pi", workspace: { kind: "shared-read-only" } }
+        ]
+      }]
+    }));
+
+    expect(loadConfig({ ...requiredEnvironment, PROJECTS_CONFIG_PATH: registryPath }).projects[0]).toMatchObject({
+      maxInstances: 8,
+      instances: [
+        { name: "architect", role: "primary", agent: "traex" },
+        { name: "coder", role: "worker", agent: "codex" },
+        { name: "reviewer", role: "worker", agent: "claude-code" },
+        { name: "explorer", role: "worker", agent: "pi" }
+      ]
+    });
+  });
+
+  it("rejects duplicate instance names and multiple primaries", () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-projects-"));
+    const registryPath = join(directory, "projects.json");
+    const project = { id: "bridge", displayName: "Bridge", description: "Bridge", workspaceId: "w1", cwd: "/work/bridge" };
+
+    writeFileSync(registryPath, JSON.stringify({
+      defaultProjectId: "bridge", projects: [{ ...project, instances: [
+        { name: "same", role: "worker", agent: "codex", workspace: { kind: "git-worktree", baseRef: "HEAD" } },
+        { name: "same", role: "worker", agent: "pi", workspace: { kind: "shared-read-only" } }
+      ] }]
+    }));
+    expect(() => loadConfig({ ...requiredEnvironment, PROJECTS_CONFIG_PATH: registryPath })).toThrow(/duplicate instance name/);
+
+    writeFileSync(registryPath, JSON.stringify({
+      defaultProjectId: "bridge", projects: [{ ...project, instances: [
+        { name: "one", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } },
+        { name: "two", role: "primary", agent: "codex", workspace: { kind: "main-checkout" } }
+      ] }]
+    }));
+    expect(() => loadConfig({ ...requiredEnvironment, PROJECTS_CONFIG_PATH: registryPath })).toThrow(/multiple primary/);
+  });
+
+  it("keeps legacy project registries compatible", () => {
+    const project = loadConfig(requiredEnvironment).projects[0];
+    expect(project.maxInstances).toBe(8);
+    expect(project.instances).toEqual([]);
   });
 
   it("requires the project registry even when legacy workspace variables are present", () => {
