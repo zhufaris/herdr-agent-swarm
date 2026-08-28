@@ -32,9 +32,9 @@ export function renderInteractionGuidanceCard(input: { kind: "recovery" | "new_t
 export function renderMoreActionsCard(input: { bindingId: string; bindingGeneration: number; interactionId?: string; creator: boolean; lifecycle: string; attachment: string }): object {
   const actions: object[] = [button("刷新状态", "session_status", input)];
   if (input.creator) {
-    if (input.lifecycle === "active") actions.push(button("停止当前任务", "session_stop", input), button("模型", "session_model", input), button("重命名", "open_rename", input), button("重置会话", "session_reset", input), button("归档", "session_archive", input), button("关闭 Pane", "session_pane_close", input));
-    if (input.lifecycle === "archived") actions.push(button("恢复会话", "session_resume", input));
-    if (input.attachment === "orphaned") actions.push(button("重新连接 Pane", "open_reattach", input), button("创建替代 Pane", "session_replace", input));
+    if (input.attachment === "orphaned") actions.push(button("重新连接 Pane", "open_reattach", input), button("创建替代 Pane", "session_replace", input), button("归档", "session_archive", input));
+    else if (input.lifecycle === "active") actions.push(button("停止当前任务", "session_stop", input), button("模型", "session_model", input), button("重命名", "open_rename", input), button("重置会话", "session_reset", input), button("归档", "session_archive", input), button("关闭 Pane", "session_pane_close", input));
+    else if (input.lifecycle === "archived") actions.push(button("恢复会话", "session_resume", input));
   }
   return { schema: "2.0", config: { update_multi: true, summary: { content: "更多操作" } }, header: { title: { tag: "plain_text", content: "更多操作" }, template: "blue" }, body: { elements: [
     { tag: "markdown", content: input.creator ? "以下操作基于当前会话状态实时校验。" : "你可以查看状态；会话管理操作仅创建者可用。" },

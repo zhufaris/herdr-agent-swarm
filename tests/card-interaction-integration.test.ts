@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
-function harness() {
+function harness(options: { steerable?: boolean } = {}) {
   const store = new SqliteBindingStore(":memory:");
   const binding = store.createPendingBinding({ id: "b1", creatorOpenId: "creator", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
   store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active" });
@@ -11,7 +11,7 @@ function harness() {
   let active: { promptId: string; paneId: string } | null = { promptId: "parent", paneId: "w1:p1" };
   const steer = vi.fn(async () => true);
   const wakeSteering = vi.fn();
-  const workflow = new CardInteractionWorkflow({ store, paneControl: { steer, stop: vi.fn(async () => true) }, sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) }, provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) }, activeTurn: () => active, wakeSteering });
+  const workflow = new CardInteractionWorkflow({ store, paneControl: { steer, stop: vi.fn(async () => true) }, sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) }, provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) }, activeTurn: () => active, isSteerable: vi.fn(async () => options.steerable ?? true), wakeSteering });
   return { store, binding: store.getBinding("b1")!, workflow, steer, wakeSteering, end: () => { active = null; } };
 }
 
@@ -35,7 +35,8 @@ describe("card interactions", () => {
     const opened = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "member", value: { action: "open_supplement", bindingId: "b1" } });
     const interactionId = findValue(opened!.card!, "submit_supplement").interactionId as string; h.end();
     const result = await h.workflow.handle({ messageId: "form", chatId: "chat", operatorOpenId: "member", value: { action: "submit_supplement", interactionId, bindingId: "b1", bindingGeneration: 1 }, formValues: { supplement_text: "late" } });
-    expect(result?.toast?.type).toBe("warning"); expect(h.steer).not.toHaveBeenCalled(); h.store.close();
+    expect(result?.toast).toEqual({ type: "warning", content: "任务刚刚结束，补充内容未发送。" });
+    expect(h.steer).not.toHaveBeenCalled(); h.store.close();
   });
 
   it("atomically converts a queued prompt and preserves it when the parent has ended", async () => {
@@ -49,6 +50,18 @@ describe("card interactions", () => {
     expect(stale?.toast?.type).toBe("warning"); expect(h.store.getPrompt("queued-2")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" }); h.store.close();
   });
 
+  it("keeps a queued prompt in FIFO when live TraeX is no longer steerable", async () => {
+    const h = harness({ steerable: false });
+    h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
+
+    const result = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" } });
+
+    expect(result?.toast).toEqual({ type: "warning", content: "TraeX 已结束当前执行，原消息仍按原顺序排队。" });
+    expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" });
+    expect(h.wakeSteering).not.toHaveBeenCalled();
+    h.store.close();
+  });
+
   it("never converts an old queued card into a newer active turn", async () => {
     const h = harness();
     h.store.enqueuePrompt({ id: "queued-old", bindingId: "b1", larkMessageId: "queued-old-message", actorOpenId: "member", body: "old follow-up" });
@@ -60,7 +73,7 @@ describe("card interactions", () => {
       store: h.store, paneControl: { steer: h.steer, stop: vi.fn(async () => true) },
       sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) },
       provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) },
-      activeTurn: () => ({ promptId: "new-parent", paneId: "w1:p1" }), wakeSteering: h.wakeSteering
+      activeTurn: () => ({ promptId: "new-parent", paneId: "w1:p1" }), isSteerable: vi.fn(async () => true), wakeSteering: h.wakeSteering
     });
     const result = await workflow.handle({ messageId: "old-answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued-old" } });
     expect(result?.toast?.type).toBe("warning");
@@ -76,6 +89,27 @@ describe("card interactions", () => {
     expect(forged?.toast?.type).toBe("error");
     const creator = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1" } });
     expect(JSON.stringify(creator?.card)).toContain("停止当前任务"); expect(JSON.stringify(creator?.card)).toContain("关闭 Pane"); h.store.close();
+  });
+
+  it("shows only recovery-safe controls for an orphaned binding", async () => {
+    const h = harness();
+    h.store.updateBinding("b1", { state: "orphaned", attachment: "orphaned" });
+
+    const creator = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1" } });
+    const creatorCard = JSON.stringify(creator?.card);
+    expect(creatorCard).toContain("刷新状态");
+    expect(creatorCard).toContain("重新连接 Pane");
+    expect(creatorCard).toContain("创建替代 Pane");
+    expect(creatorCard).toContain("归档");
+    expect(creatorCard).not.toContain("停止当前任务");
+    expect(creatorCard).not.toContain("模型");
+    expect(creatorCard).not.toContain("重置会话");
+    expect(creatorCard).not.toContain("关闭 Pane");
+
+    const member = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "member", value: { action: "open_more_actions", bindingId: "b1" } });
+    expect(JSON.stringify(member?.card)).toContain("刷新状态");
+    expect(JSON.stringify(member?.card)).not.toContain("重新连接 Pane");
+    h.store.close();
   });
 });
 

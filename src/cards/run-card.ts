@@ -150,11 +150,12 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 
 function mainCardActions(input: TopicViewState): object[] {
   const button = (content: string, action: string, type?: "primary") => callbackButton(content, { action, bindingId: input.bindingId }, type);
+  const canSupplement = input.activePromptId !== null && (input.phase === "running" || input.phase === "blocked");
   if (input.phase === "provisioning" || input.phase === "draining") return [];
   if (input.phase === "archived") return [button("新建任务", "create_new_task", "primary")];
-  if (input.phase === "blocked") return [button("立即补充", "open_supplement", "primary"), button("恢复指引", "view_recovery"), button("更多操作", "open_more_actions")];
+  if (input.phase === "blocked") return [...(canSupplement ? [button("立即补充", "open_supplement", "primary")] : []), button("恢复指引", "view_recovery", canSupplement ? undefined : "primary"), button("更多操作", "open_more_actions")];
   if (input.phase === "error" || input.phase === "orphaned") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
-  if (input.phase === "running") return [button("立即补充", "open_supplement", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
+  if (input.phase === "running") return [...(canSupplement ? [button("立即补充", "open_supplement", "primary")] : []), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
   return [button("发送新任务", "create_new_task", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
 }
 

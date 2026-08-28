@@ -82,7 +82,7 @@ describe("run card", () => {
   });
 
   it("renders CardKit 2.0 callback buttons without legacy action containers", () => {
-    const main = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", queueDepth: 1 });
+    const main = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", activePromptId: "p1", queueDepth: 1 });
     const more = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: true, lifecycle: "active", attachment: "attached" });
 
     const mainButtons = findTaggedNodes(main, "button");
@@ -367,7 +367,7 @@ describe("run card", () => {
 
   it("gives blocked and orphaned topic cards a safe local recovery path", () => {
     for (const phase of ["blocked", "orphaned"] as const) {
-      const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase, notice: "Inspect this state" });
+      const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase, activePromptId: phase === "blocked" ? "p1" : null, notice: "Inspect this state" });
       const serialized = JSON.stringify(card);
       const actions = mainCardCallbackActions(card);
       expect(serialized).toContain("Inspect this state");
@@ -388,18 +388,34 @@ describe("run card", () => {
       { phase: "ready", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
       { phase: "queued", queueDepth: 2, actions: ["create_new_task", "view_queue", "open_more_actions"] },
       { phase: "done", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
-      { phase: "running", queueDepth: 0, actions: ["open_supplement", "open_more_actions"] },
-      { phase: "running", queueDepth: 2, actions: ["open_supplement", "view_queue", "open_more_actions"] },
-      { phase: "blocked", queueDepth: 0, actions: ["open_supplement", "view_recovery", "open_more_actions"] },
+      { phase: "running", activePromptId: "p1", queueDepth: 0, actions: ["open_supplement", "open_more_actions"] },
+      { phase: "running", activePromptId: "p1", queueDepth: 2, actions: ["open_supplement", "view_queue", "open_more_actions"] },
+      { phase: "blocked", activePromptId: "p1", queueDepth: 0, actions: ["open_supplement", "view_recovery", "open_more_actions"] },
       { phase: "error", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
       { phase: "orphaned", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
       { phase: "archived", queueDepth: 0, actions: ["create_new_task"] }
     ] as const;
 
     for (const entry of cases) {
-      const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: entry.phase, queueDepth: entry.queueDepth });
+      const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: entry.phase, activePromptId: "activePromptId" in entry ? entry.activePromptId : null, queueDepth: entry.queueDepth });
       expect(mainCardCallbackActions(card), `${entry.phase} with queue ${entry.queueDepth}`).toEqual(entry.actions);
     }
+  });
+
+  it("does not advertise supplement when an interactive phase has no active prompt", () => {
+    const running = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", activePromptId: null });
+    const blocked = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "blocked", activePromptId: null, notice: "Turn ended" });
+
+    expect(mainCardCallbackActions(running)).toEqual(["open_more_actions"]);
+    expect(mainCardCallbackActions(blocked)).toEqual(["view_recovery", "open_more_actions"]);
+  });
+
+  it("limits orphaned More Actions to recovery-safe controls", () => {
+    const card = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: true, lifecycle: "active", attachment: "orphaned" });
+    const actions = findTaggedNodes(card, "button").map(callbackValue).map((value) => value.action);
+
+    expect(actions).toEqual(["session_status", "open_reattach", "session_replace", "session_archive"]);
+    expect(actions).not.toEqual(expect.arrayContaining(["session_stop", "session_model", "session_reset", "session_pane_close"]));
   });
 
   it("keeps creator-only controls out of the shared Main Card", () => {

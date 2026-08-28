@@ -16,6 +16,7 @@ interface Options {
   paneClosure: Pick<PaneClosureWorkflowPort, "requestPaneClose">;
   modelSelection: Pick<ModelSelectionWorkflowPort, "runModel">;
   activeTurn(bindingId: string): { promptId: string; paneId: string } | null;
+  isSteerable(turn: { promptId: string; paneId: string }): Promise<boolean>;
   wakeSteering(bindingId: string, parentPromptId: string): void;
 }
 
@@ -65,7 +66,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (!interaction || interaction.actionKind !== "supplement" || !binding || binding.generation !== generation || interaction.bindingId !== bindingId || interaction.bindingGeneration !== generation) return interactionToast("warning", "补充入口已失效，内容未发送。");
     if (interaction.actorOpenId !== action.operatorOpenId) return interactionToast("error", "这张输入卡仅限打开它的人使用。");
     if (interaction.state === "consumed") return interactionToast("success", "这条补充已处理。");
-    if (interaction.expiresAt <= new Date().toISOString() || !active || active.promptId !== interaction.parentPromptId) return interactionToast("warning", "原任务已经结束，补充内容未发送。");
+    if (interaction.expiresAt <= new Date().toISOString() || !active || active.promptId !== interaction.parentPromptId) return interactionToast("warning", "任务刚刚结束，补充内容未发送。");
     const message: IncomingLarkMessage = { eventId: `card:${interactionId}`, messageId: `card:${interactionId}`, chatId: action.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: action.operatorOpenId, text, mentionsBot: true, isRootMessage: false };
     const accepted = await this.options.paneControl.steer(message, binding, text, interaction.parentPromptId ?? undefined);
     if (!accepted) return interactionToast("warning", "原任务已经结束，补充内容未发送。");
@@ -73,7 +74,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     return consumed.outcome === "consumed" || consumed.outcome === "duplicate" ? interactionToast("success", "已补充到当前任务。") : interactionToast("warning", "补充入口已失效，请检查当前任务状态。");
   }
 
-  private convertQueuedPrompt(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
+  private async convertQueuedPrompt(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
     let interactionId = stringValue(value.interactionId); const bindingId = stringValue(value.bindingId); let generation = numberValue(value.bindingGeneration);
     const capturedParentPromptId = stringValue(value.parentPromptId);
     let interaction = interactionId ? this.options.store.getCardInteraction(interactionId) : null;
@@ -86,6 +87,13 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     }
     generation ??= interaction?.bindingGeneration ?? null;
     if (!interactionId || !bindingId || generation === null || !interaction?.parentPromptId || !interaction.targetPromptId) return interactionToast("warning", "转换入口已失效，原消息仍在队列中。");
+    const active = this.options.activeTurn(bindingId);
+    if (!active || active.promptId !== interaction.parentPromptId) return interactionToast("warning", "当前任务已结束，原消息仍按原顺序排队。");
+    try {
+      if (!await this.options.isSteerable(active)) return interactionToast("warning", "TraeX 已结束当前执行，原消息仍按原顺序排队。");
+    } catch {
+      return interactionToast("warning", "暂时无法确认 TraeX 状态，原消息仍按原顺序排队。");
+    }
     const result = this.options.store.convertQueuedPromptToSteering({ interactionId, actorOpenId: action.operatorOpenId, bindingId, bindingGeneration: generation, parentPromptId: interaction.parentPromptId, targetPromptId: interaction.targetPromptId, now: new Date().toISOString() });
     if (result.outcome === "converted") { this.options.wakeSteering(bindingId, interaction.parentPromptId); return interactionToast("success", "已改为立即补充。"); }
     if (result.outcome === "duplicate") return interactionToast("success", "这条消息已转换。");

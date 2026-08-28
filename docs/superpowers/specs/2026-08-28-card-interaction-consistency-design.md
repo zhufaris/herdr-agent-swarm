@@ -36,6 +36,14 @@ and report that TraeX is no longer steerable. Never create an ordinary prompt,
 never replay the text, and never claim success merely because durable steering
 intent was accepted.
 
+The request-card `改为立即补充` action has an additional reversible boundary.
+Before atomically changing a queued ordinary prompt into steering work, observe
+the target pane and require its authoritative agent state to remain `working`
+or `blocked`. If the observation says the turn ended, or the observation itself
+fails, leave the prompt unchanged in its FIFO position and return a warning.
+Once conversion succeeds, later injection uncertainty remains a failed steering
+operation and must never be converted back or replayed as ordinary work.
+
 ### Orphaned action capability
 
 More Actions must derive its controls from attachment before lifecycle. For an
