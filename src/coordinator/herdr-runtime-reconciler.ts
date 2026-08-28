@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
+import { projectSpaceName } from "../config.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { ProjectConfig, Binding, HerdrPane } from "../domain/types.js";
@@ -10,6 +11,7 @@ import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../run
 import { safeLogError } from "../runtime/safe-error.js";
 import { parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
+import { formatProjectPaneTitle } from "../domain/thread-title.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -49,11 +51,13 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly observedTabIds = new Map<string, string | null>();
   private readonly observedWorktreeNames = new Map<string, string | null>();
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
+  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
+    this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
     const projectsByWorkspaceAndCwd = new Map<string, ProjectConfig[]>();
     for (const project of options.projects) {
       const key = workspaceCwdKey(project.workspaceId, project.cwd);
@@ -240,6 +244,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         continue;
       }
       existing = observation.binding;
+      existing = await this.convergeBindingTitle(existing, pane);
       if (observation.terminalIdentityRefreshed) this.options.logger.info({ event: "binding-terminal-identity-refreshed", bindingId: existing.id, paneId: pane.paneId, outcome: "native_session_matched" }, "accepted new terminal identity for restored native Agent session");
       if (observation.nativeSessionMismatch) {
         this.options.logger.warn({
@@ -323,6 +328,27 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const output = cleanTerminalOutput(await this.options.herdr.readOutput(paneId, 240));
     if (!output) return;
     await this.persistChangedLocalOutput(binding, paneId, generation, output);
+  }
+
+  private async convergeBindingTitle(binding: Binding, pane: HerdrPane): Promise<Binding> {
+    const paneLabel = pane.label?.trim();
+    const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
+    if (!paneLabel || !project) return binding;
+    const title = formatProjectPaneTitle(projectSpaceName(project), pane.cwd, paneLabel, pane.paneId);
+    if (title === binding.title) return binding;
+    const event = createBridgeEvent(binding.id, "BindingRenamed", "herdr", { title });
+    const current = this.options.store.loadTopicView(binding.id) ?? {
+      ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: binding.paneId, phase: "ready"
+    };
+    const view = reduceTopicView(current, event);
+    const result = this.options.store.reconcileBindingTitleWithProjection({
+      bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, title, view,
+      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view)
+    });
+    if (result.outcome !== "projected" || !result.binding) return binding;
+    if (result.outboxReserved) this.options.wakeOutbound?.();
+    await this.options.lifecycleEvents.publish(event);
+    return result.binding;
   }
 
   private async persistBaselineOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {

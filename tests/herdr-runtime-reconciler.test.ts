@@ -71,6 +71,42 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("converges an existing binding title from its matching Herdr pane once", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task-esk0", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const herdr = { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort;
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "legacy prompt title" });
+    store.updateBinding("b1", { paneId: pane.paneId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "legacy prompt title", workspaceId: "w1", paneId: pane.paneId, phase: "ready" });
+    const wakeOutbound = vi.fn();
+    const reconciler = fixture(store, herdr, undefined, undefined, undefined, wakeOutbound);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")?.title).toBe("repo / task-esk0");
+    expect(store.loadTopicView("b1")?.title).toBe("repo / task-esk0");
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" })]);
+    expect(wakeOutbound).toHaveBeenCalledOnce();
+
+    await reconciler.reconcile();
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(wakeOutbound).toHaveBeenCalledOnce();
+    store.close();
+  });
+
+  it("does not replace an existing title from a blank pane label", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "   ", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / retained" });
+    store.updateBinding("b1", { paneId: pane.paneId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+
+    await fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort).reconcile();
+
+    expect(store.getBinding("b1")?.title).toBe("repo / retained");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.close();
+  });
+
   it("starts one timer and stop waits for the in-flight pass", async () => {
     vi.useFakeTimers();
     let release!: () => void;
