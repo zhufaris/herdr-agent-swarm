@@ -34,6 +34,13 @@ describe("instance runtime reconciliation", () => {
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", observedState: "detached", generation: instance.generation + 1, runtimeRef: null, lastError: expect.stringMatching(/identity mismatch/) });
   });
 
+  it("reconciles a TraeX instance reported under Herdr's codex label", async () => {
+    const { instance, reconciler } = setup([pane({ agentKind: "codex", foregroundExecutables: ["traex"] })]);
+    store!.database.prepare("UPDATE agent_instances SET agent_kind = 'traex' WHERE id = ?").run(instance.id);
+    await reconciler.reconcile();
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "idle", runtimeRef: { paneId: "herdr-w:p1" } });
+  });
+
   it("retains desired-running state when an idle pane is missing", async () => {
     const { instance, reconciler, wake } = setup([]);
     store!.acceptInstanceTurn({ id: "not-started", idempotencyKey: "not-started", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "safe to run after explicit restart" });

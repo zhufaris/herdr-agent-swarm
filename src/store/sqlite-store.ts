@@ -23,7 +23,7 @@ import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState 
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 
 const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "instance_operations", "instance_events", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
@@ -322,6 +322,20 @@ export class SqliteBindingStore implements BindingStorePort {
   getInstanceTurn(id: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE id = ?").get(id) as Record<string, unknown> | undefined); }
   private getInstanceTurnByKey(key: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
   listInstanceTurns(instanceId: string): InstanceTurn[] { return (this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? ORDER BY created_at, rowid").all(instanceId) as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!); }
+  getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
+    const row = this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked') ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as Record<string, unknown> | undefined;
+    return this.mapInstanceTurn(row);
+  }
+  setPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; credentialGeneration: number; capabilityHash: string }): boolean {
+    const instance = this.getAgentInstance(input.instanceId);
+    if (!instance || instance.role !== "primary" || instance.generation !== input.expectedGeneration) return false;
+    this.database.prepare("INSERT INTO primary_tool_capabilities(instance_id, instance_generation, capability_hash, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET instance_generation = excluded.instance_generation, capability_hash = excluded.capability_hash, created_at = excluded.created_at").run(input.instanceId, input.credentialGeneration, input.capabilityHash, now());
+    return true;
+  }
+  verifyPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; capabilityHash: string }): boolean {
+    const row = this.database.prepare("SELECT 1 FROM primary_tool_capabilities c JOIN agent_instances i ON i.id = c.instance_id WHERE c.instance_id = ? AND c.instance_generation = ? AND c.capability_hash = ? AND i.role = 'primary' AND i.generation = c.instance_generation").get(input.instanceId, input.expectedGeneration, input.capabilityHash);
+    return Boolean(row);
+  }
 
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
     this.database.exec("BEGIN IMMEDIATE");
@@ -2255,6 +2269,9 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS instance_events(
         id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, turn_id TEXT REFERENCES instance_turns(id) ON DELETE SET NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS primary_tool_capabilities(
+        instance_id TEXT PRIMARY KEY REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS approval_requests(
         id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL,

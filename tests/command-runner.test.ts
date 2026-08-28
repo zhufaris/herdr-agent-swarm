@@ -56,4 +56,14 @@ describe("command error redaction", () => {
     expect(error.message).not.toContain(capability);
     expect(JSON.stringify(error)).not.toContain(capability);
   });
+
+  it("never exposes the Primary tool capability from pane environment arguments", () => {
+    const capability = "b".repeat(64);
+    const environment = "SOLO_AGENT_PRIMARY_CAPABILITY=" + capability;
+    const error = new CommandError("herdr", ["tab", "create", "--env", environment], "failed with " + environment + " and " + capability, false);
+
+    expect(error.args).toEqual(["tab", "create", "--env", "SOLO_AGENT_PRIMARY_CAPABILITY=[REDACTED]"]);
+    expect(error.message).not.toContain(capability);
+    expect(JSON.stringify(error)).not.toContain(capability);
+  });
 });

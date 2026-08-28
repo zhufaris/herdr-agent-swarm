@@ -46,9 +46,10 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
 }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
-  const root = requiredDirectory(environment.HERDR_PLUGIN_ROOT, "HERDR_PLUGIN_ROOT");
-  const configDirectory = requiredDirectory(environment.HERDR_PLUGIN_CONFIG_DIR, "HERDR_PLUGIN_CONFIG_DIR", false);
-  const stateDirectory = requiredDirectory(environment.HERDR_PLUGIN_STATE_DIR, "HERDR_PLUGIN_STATE_DIR", false);
+  const standalone = Boolean(environment.SOLO_AGENT_ROOT);
+  const root = requiredDirectory(environment.SOLO_AGENT_ROOT || environment.HERDR_PLUGIN_ROOT, standalone ? "SOLO_AGENT_ROOT" : "HERDR_PLUGIN_ROOT");
+  const configDirectory = requiredDirectory(environment.SOLO_AGENT_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || (standalone ? `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/solo-agent` : undefined), standalone ? "SOLO_AGENT_CONFIG_DIR" : "HERDR_PLUGIN_CONFIG_DIR", false);
+  const stateDirectory = requiredDirectory(environment.SOLO_AGENT_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || (standalone ? `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/solo-agent` : undefined), standalone ? "SOLO_AGENT_STATE_DIR" : "HERDR_PLUGIN_STATE_DIR", false);
   const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || "herdr-lark-bridge.service";
   if (!/^[A-Za-z0-9_.@-]+\.service$/.test(serviceName)) throw new Error(`invalid systemd service name: ${serviceName}`);
   const unitDirectory = resolve(environment.BRIDGE_SYSTEMD_UNIT_DIR || `${homedir()}/.config/systemd/user`);
@@ -71,9 +72,11 @@ function requiredDirectory(value: string | undefined, name: string, mustExist = 
 function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (!existsSync(paths.environmentFile)) throw new Error(`configuration file not found: ${paths.environmentFile}; run the setup action first`);
   const environment = { ...readEnvironmentFile(paths.environmentFile), ...base };
-  environment.HERDR_PLUGIN_ROOT = paths.root;
-  environment.HERDR_PLUGIN_CONFIG_DIR = paths.configDirectory;
-  environment.HERDR_PLUGIN_STATE_DIR = paths.stateDirectory;
+  if (!base.SOLO_AGENT_ROOT) {
+    environment.HERDR_PLUGIN_ROOT = paths.root;
+    environment.HERDR_PLUGIN_CONFIG_DIR = paths.configDirectory;
+    environment.HERDR_PLUGIN_STATE_DIR = paths.stateDirectory;
+  }
   environment.PROJECTS_CONFIG_PATH ||= resolve(paths.configDirectory, "projects.json");
   environment.BRIDGE_DATABASE_PATH ||= resolve(paths.stateDirectory, "bridge.db");
   const config = loadConfig(environment);
@@ -102,6 +105,7 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
 }
 
 function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): string {
+  const standalone = Boolean(environment.SOLO_AGENT_ROOT);
   return [
     "[Unit]",
     "Description=Herdr Lark Bridge",
@@ -112,9 +116,14 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     "Type=simple",
     `WorkingDirectory=${systemdEscape(paths.root)}`,
     `EnvironmentFile=${systemdEscape(paths.environmentFile)}`,
-    `Environment=HERDR_PLUGIN_ROOT=${systemdEscape(paths.root)}`,
-    `Environment=HERDR_PLUGIN_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,
-    `Environment=HERDR_PLUGIN_STATE_DIR=${systemdEscape(paths.stateDirectory)}`,
+    ...(standalone ? [
+      `Environment=PROJECTS_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "projects.json"))}`,
+      `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(paths.stateDirectory, "bridge.db"))}`
+    ] : [
+      `Environment=HERDR_PLUGIN_ROOT=${systemdEscape(paths.root)}`,
+      `Environment=HERDR_PLUGIN_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,
+      `Environment=HERDR_PLUGIN_STATE_DIR=${systemdEscape(paths.stateDirectory)}`
+    ]),
     ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
     `ExecStart=${systemdEscape(paths.nodeExecutable)} ${systemdEscape(paths.entrypoint)}`,

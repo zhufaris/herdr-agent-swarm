@@ -1,8 +1,12 @@
-# Herdr Lark Bridge
+# Solo Agent / Herdr Lark Bridge
 
-Herdr Lark Bridge connects a Lark topic to a TraeX process running in a real
-Herdr pane. People can submit work from Lark while developers observe or take
-over the same terminal session in Herdr.
+Solo Agent is a standalone, human-controlled multi-agent service built on the
+Herdr headless runtime. One Feishu gateway can manage multiple projects; each
+project may have one Primary and several explicitly created Workers using
+TraeX, Codex, Claude Code, or Pi. Herdr owns live panes and processes, while its
+TUI and this repository's Herdr plugin are optional operator interfaces.
+
+The original one-topic/one-TraeX bridge remains available during migration.
 
 Each ordinary Lark message gets an Answer CardKit entity. The bridge streams safe
 terminal output into its fixed Markdown element as the request moves from queued
@@ -34,11 +38,16 @@ worktree value is the Git root directory name only, never an absolute host path.
 reconciliation and rendered as `—` when the installed Herdr runtime does not
 report it.
 
-This bridge deliberately omits remote stop and approval actions. High-risk
-approval stays in Herdr. For the reliability model and exact behavioral
+The product deliberately keeps topology changes human-controlled. A Primary may
+call an existing Worker in the same project without per-call confirmation, but
+cannot create, remove, promote, retarget, or select Workers automatically.
+Worker completion never creates a Primary turn. High-risk approval stays local.
+For the reliability model and exact behavioral
 constraints, see [Architecture](docs/architecture.md). For a maintainer-oriented
 map of the domain model, major modules, and end-to-end flows, see
 [Architecture reference](docs/architecture-reference.md).
+The milestone's requirement-by-requirement evidence is recorded in the
+[Solo Agent completion audit](docs/superpowers/audits/2026-08-28-solo-agent-product.md).
 
 ## Security model
 
@@ -66,7 +75,8 @@ substitute for the trust boundary above.
 - Linux with Node.js 22.5 or newer. Node.js 24 LTS is recommended.
 - npm, supplied with Node.js.
 - A running Herdr workspace.
-- `herdr` and `traex` installed and executable by the service account.
+- `herdr` and at least one supported agent CLI (`traex`, `codex`, `claude`, or
+  `pi`) installed and executable by the service account.
 - A Lark custom app with bot capability.
 - A topic-enabled Lark group containing the bot.
 
@@ -103,7 +113,39 @@ In the Lark developer console:
    (`ou_...`). The open ID is available from the bot's contact entry or the
    event-subscription test console.
 
-The bridge accepts messages only from the configured chat ID.
+The bridge accepts messages only from the configured chat ID. Set
+`LARK_OPERATOR_OPEN_IDS` to a comma-separated owner allowlist for instance
+management; leaving it empty preserves the existing configured-chat behavior.
+
+## Install as a standalone service
+
+The standalone service needs a running Herdr server, but it does not need the
+Herdr TUI or plugin. Initialize private XDG configuration, edit the generated
+files, then install and start the user service:
+
+```bash
+npm ci
+npm run build
+npm run solo:init
+$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/solo-agent/.env"
+$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/solo-agent/projects.json"
+npm run solo:install
+npm run solo:start
+npm run solo:status
+```
+
+The defaults are `~/.config/solo-agent` for configuration,
+`~/.local/state/solo-agent` for SQLite state, and `solo-agent.service` for the
+user systemd unit. Override them with `SOLO_AGENT_CONFIG_DIR`,
+`SOLO_AGENT_STATE_DIR`, and `BRIDGE_SYSTEMD_SERVICE_NAME`. The installer writes
+absolute paths and the expected build identity into the unit; secrets remain in
+the mode-600 environment file.
+
+Useful lifecycle commands are `npm run solo:restart`, `npm run solo:stop`, and
+`npm run solo:logs`. `./install.sh --standalone` combines dependency install,
+build, validation, and service installation after configuration has been
+initialized. The checked-in service file is an explanatory template; the
+installer renders the production unit.
 
 ## Install as a Herdr plugin
 
@@ -163,6 +205,9 @@ BRIDGE_HTTP_PORT=8787
 HERDR_BRIDGE_EVENT_PORT=18787
 HERDR_BIN=herdr
 TRAEX_BIN=traex
+CODEX_BIN=codex
+CLAUDE_CODE_BIN=claude
+PI_BIN=pi
 TRAEX_PERMISSION_MODE=auto
 TRAEX_SESSIONS_ROOT=/home/your-user/.trae/cli/sessions
 LOG_LEVEL=info
@@ -179,9 +224,11 @@ MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
 
-`projects.json` is the project allowlist shown by `/swarm new`. Every
+`projects.json` is the project allowlist. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
-and absolute `cwd`; `defaultProjectId` must reference one entry. The registry is
+absolute `cwd`, optional `maxInstances`, and optional desired instance
+descriptors; `defaultProjectId` must reference one entry. Workers may not use
+the main checkout. The registry is
 required; a missing or invalid file prevents startup. Copy
 `config/projects.example.json` to `config/projects.json` (or to the plugin
 config directory) and replace the workspace ID and cwd with your own values.
@@ -323,6 +370,14 @@ safety boundaries, see [Feishu group usage](docs/feishu-group-usage.md).
 Available commands:
 
 ```text
+/projects
+/project <id>
+/instances
+/instance <name>
+/to <name> <task>
+/steer <name> <text>
+/interrupt <name>
+
 /swarm new <title>
 /swarm new
 /swarm projects
@@ -339,6 +394,28 @@ Available commands:
 /swarm resume
 /swarm help
 ```
+
+The short commands operate the standalone multi-agent directory. Select a
+project with `/project`, create instances from `/instances`, and choose a stable
+target from an instance detail card. Ordinary messages then go to that target,
+or to the project's current Primary when the symbolic Primary target is active.
+All creation, promotion, stopping, and safe removal actions are explicit human
+card actions.
+
+Run the non-mutating adapter preflight with:
+
+```bash
+npm run smoke:headless-multi-agent
+```
+
+To perform real read-only turns, run the same command with `-- --execute` from a
+Herdr pane. The acceptance path uses a TraeX Primary and TraeX Worker, creates
+temporary panes and a temporary Git repository, exercises a real Primary-to-
+Worker tool call plus restart/no-replay and safety assertions, reports bounded
+evidence, and cleans up only those temporary resources. Adapter contract tests
+cover TraeX, Codex, Claude Code, and Pi independently. Executable discovery does
+not prove that an adapter is authenticated: on this host TraeX is live-verified,
+Claude Code is installed but not logged in, and Pi is not installed.
 
 The `new` and `projects` commands open a project selector. Only the command
 initiator can use it, and each resulting topic remains bound to that project.

@@ -5,9 +5,14 @@
       "id": "my-project",
       "displayName": "My Project",
       "spaceName": "my-project",
-      "description": "A repository driven by TraeX through Lark topics",
+      "description": "A repository managed by Solo Agent through Feishu",
       "workspaceId": "REPLACE_WITH_HERDR_WORKSPACE_ID",
-      "cwd": "/absolute/path/to/your/project"
+      "cwd": "/absolute/path/to/your/project",
+      "maxInstances": 8,
+      "instances": [
+        { "name": "primary", "role": "primary", "agent": "traex", "workspace": { "kind": "main-checkout" } },
+        { "name": "reviewer", "role": "worker", "agent": "codex", "workspace": { "kind": "git-worktree", "baseRef": "HEAD" } }
+      ]
     }
   ]
 }

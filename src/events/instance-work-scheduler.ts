@@ -31,8 +31,9 @@ export class InstanceWorkScheduler {
         this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "dispatching", eventKind: "turn.dispatching" });
         const receipt = await driver.submit(instance.runtimeRef, turn.text);
         if (receipt.status === "confirmed-delivered") {
-          this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "running", eventKind: "turn.running" });
-          this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "running", observedState: "working" });
+          this.options.store.completeInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, result: receipt.runtimeCursor ?? "" });
+          this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "running", observedState: "idle" });
+          continue;
         }
         else if (receipt.status === "delivery-uncertain") this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "dispatch-uncertain", error: receipt.reason, eventKind: "turn.dispatch-uncertain" });
         else this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "failed", error: receipt.reason, eventKind: "turn.failed" });

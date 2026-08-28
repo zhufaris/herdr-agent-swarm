@@ -30,6 +30,9 @@ export interface InstanceStore {
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean };
   getInstanceTurn(id: string): InstanceTurn | null;
   listInstanceTurns(instanceId: string): InstanceTurn[];
+  getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
+  setPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; credentialGeneration: number; capabilityHash: string }): boolean;
+  verifyPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; capabilityHash: string }): boolean;
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
@@ -67,7 +70,7 @@ export interface HerdrPort {
   observeRuntime(paneId: string): Promise<RuntimeObservation>;
   waitForRuntimeChange?(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void>;
   createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane>;
-  startTraex(paneId: string, executable: string): Promise<void>;
+  startTraex(paneId: string, executable: string, args?: string[]): Promise<void>;
   startAgent?(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void>;
   runPrompt(
     paneId: string,
@@ -77,6 +80,7 @@ export interface HerdrPort {
     signal?: AbortSignal,
     onDispatched?: () => void | Promise<void>
   ): Promise<AgentState>;
+  runManagedPrompt?(paneId: string, text: string, timeoutMs: number, onDispatched?: () => void | Promise<void>): Promise<AgentState>;
   runPaneCommand?(paneId: string, command: string, timeoutMs: number): Promise<string>;
   beginPaneModelSelection?(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }>;
   completePaneModelMode?(paneId: string, mode: string, timeoutMs: number): Promise<void>;

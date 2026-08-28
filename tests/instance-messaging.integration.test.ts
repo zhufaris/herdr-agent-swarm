@@ -122,15 +122,15 @@ describe("instance messaging", () => {
     expect(store!.listInstanceEvents(worker.id).map(({ kind }) => kind)).toContain("turn.dispatch-uncertain");
   });
 
-  it("marks a confirmed dispatch as running and stops before the next FIFO turn", async () => {
+  it("completes settled dispatches and drains the next FIFO turn", async () => {
     const { create, workflow, scheduler, submit } = setup();
     const worker = create("worker");
     const actor = { kind: "human" as const, userId: "u1" };
     await workflow.submit({ idempotencyKey: "m1", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "one" } });
     await workflow.submit({ idempotencyKey: "m2", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "two" } });
     await scheduler.drain(worker.id);
-    expect(store!.listInstanceTurns(worker.id).map(({ state }) => state)).toEqual(["running", "queued"]);
-    expect(store!.getAgentInstance(worker.id)).toMatchObject({ observedState: "working" });
-    expect(submit).toHaveBeenCalledTimes(1);
+    expect(store!.listInstanceTurns(worker.id).map(({ state }) => state)).toEqual(["completed", "completed"]);
+    expect(store!.getAgentInstance(worker.id)).toMatchObject({ observedState: "idle" });
+    expect(submit).toHaveBeenCalledTimes(2);
   });
 });

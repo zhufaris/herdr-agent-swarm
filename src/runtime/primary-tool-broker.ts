@@ -1,7 +1,7 @@
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceMessagingWorkflow } from "../coordinator/instance-messaging-workflow.js";
 
-interface PrimaryIdentity { projectId: string; instanceId: string; generation: number; parentTurnId: string }
+export interface PrimaryIdentity { projectId: string; instanceId: string; generation: number; parentTurnId: string }
 
 export class PrimaryToolBroker {
   private readonly actor: Extract<ControlActor, { kind: "primary-agent" }>;

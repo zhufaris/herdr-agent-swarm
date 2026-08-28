@@ -96,7 +96,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
     if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
-    if (pane.agentState !== "unknown") return { pane: observed, traexProcess, composerReady: pane.agentState === "idle", evidenceSource: "structured" };
+    if (pane.agentState !== "unknown") return { pane: observed, traexProcess, composerReady: pane.agentState === "idle" || pane.agentState === "done", evidenceSource: "structured" };
     try {
       const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
       if (recentState !== "unknown") return this.runtimeObservation(observed, recentState, "recent");
@@ -140,14 +140,14 @@ export class HerdrCliAdapter implements HerdrPort {
     return this.enrichPane(candidate);
   }
 
-  async startTraex(paneId: string, executable: string): Promise<void> {
+  async startTraex(paneId: string, executable: string, args: string[] = []): Promise<void> {
     const initial = await this.observeRuntime(paneId);
     if (initial.composerReady) return;
     if (!initial.traexProcess) {
       await this.runner.run(this.executable, [
         "pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode,
         "--dangerously-bypass-hook-trust",
-        "-c", sessionHookOverride(SESSION_REPORTER_PATH)
+        "-c", sessionHookOverride(SESSION_REPORTER_PATH), ...args
       ], this.commandTimeoutMs);
     }
     await this.waitUntilTraexComposer(paneId);
@@ -158,13 +158,26 @@ export class HerdrCliAdapter implements HerdrPort {
     if (input.executable === canonical) {
       const args = ["agent", "start", input.name, "--kind", input.kind, "--pane", paneId, "--timeout", String(this.commandTimeoutMs)];
       if (input.args?.length) args.push("--", ...input.args);
-      await this.runner.run(this.executable, args, this.commandTimeoutMs);
+      await this.startWhenShellReady(args);
     } else {
       await this.runner.run(this.executable, ["pane", "run", paneId, input.executable, ...(input.args ?? [])], this.commandTimeoutMs);
     }
     const pane = await this.getPane(paneId);
     if (!pane || pane.agentKind !== input.kind || pane.agentState === "unknown") throw new Error(`Herdr did not verify ${input.kind} in pane ${paneId}`);
     if (input.executable !== canonical) await this.runner.run(this.executable, ["agent", "rename", paneId, input.name], this.commandTimeoutMs);
+  }
+
+  private async startWhenShellReady(args: string[]): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try { await this.runner.run(this.executable, args, this.commandTimeoutMs); return; }
+      catch (error) {
+        lastError = error;
+        if (!String(error).includes("agent_pane_busy")) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    throw lastError;
   }
 
   async runPrompt(
@@ -177,6 +190,7 @@ export class HerdrCliAdapter implements HerdrPort {
   ): Promise<AgentState> {
     throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
+    let promptConfirmedInComposer = false;
     try {
       await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
       await onDispatched?.();
@@ -184,8 +198,16 @@ export class HerdrCliAdapter implements HerdrPort {
       if (isPossiblyDispatchedAgentPromptError(error)) await onDispatched?.();
       if (!isUnsupportedAgentPromptError(error)) throw error;
       await this.submitPromptText(paneId, text, before, signal, onDispatched);
+      promptConfirmedInComposer = true;
     }
-    return this.waitForTraexTurn(paneId, before, timeoutMs, onObservation, signal);
+    return this.waitForTraexTurn(paneId, text, before, timeoutMs, onObservation, signal, promptConfirmedInComposer);
+  }
+
+  async runManagedPrompt(paneId: string, text: string, timeoutMs: number, onDispatched?: () => void | Promise<void>): Promise<AgentState> {
+    const before = await this.readOutput(paneId, 240);
+    const baselineStateChangeSeq = (await this.getPane(paneId))?.stateChangeSeq;
+    await this.submitPromptText(paneId, text, before, undefined, onDispatched);
+    return this.waitForTraexTurn(paneId, text, before, timeoutMs, undefined, undefined, true, baselineStateChangeSeq);
   }
 
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
@@ -398,7 +420,7 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   private runtimeObservation(pane: HerdrPane, state: AgentState, evidenceSource: RuntimeObservation["evidenceSource"]): RuntimeObservation {
-    return { pane: { ...pane, agentState: state }, traexProcess: true, composerReady: state === "idle", evidenceSource };
+    return { pane: { ...pane, agentState: state }, traexProcess: true, composerReady: state === "idle" || state === "done", evidenceSource };
   }
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {
@@ -425,10 +447,13 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private async waitForTraexTurn(
     paneId: string,
+    submittedText: string,
     before: string,
     timeoutMs: number,
     onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    promptConfirmedInComposer = false,
+    baselineStateChangeSeq?: number | null
   ): Promise<AgentState> {
     const deadline = Date.now() + timeoutMs;
     let observedWorking = false;
@@ -437,17 +462,22 @@ export class HerdrCliAdapter implements HerdrPort {
     let lastOutputRevision: number | null | undefined;
     let stableIdlePolls = 0;
     let outputChangedAfterSubmission = false;
+    const comparableText = normalizePromptEcho(submittedText);
+    const previousPromptOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
+    let promptObservedAfterSubmission = promptConfirmedInComposer;
     let outputStable = false;
 
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       let agentState: AgentState = "unknown";
+      let stateChangeSeq: number | null | undefined;
       let foregroundExecutables: string[] = [];
       let outputRead = false;
       try {
         const pane = await this.getPane(paneId);
         if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
         agentState = pane.agentState;
+        stateChangeSeq = pane.stateChangeSeq;
         foregroundExecutables = pane.foregroundExecutables;
         const revisionChanged = pane.outputRevision === null || pane.outputRevision === undefined || pane.outputRevision !== lastOutputRevision;
         if (agentState === "unknown" || revisionChanged) {
@@ -455,6 +485,7 @@ export class HerdrCliAdapter implements HerdrPort {
           outputRead = true;
           outputStable = output === lastOutput;
           if (output !== before) outputChangedAfterSubmission = true;
+          if (countOccurrences(normalizePromptEcho(output), comparableText) > previousPromptOccurrences) promptObservedAfterSubmission = true;
           if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
             if (agentState !== "unknown") lastAgentState = agentState;
             await onObservation?.({ state: agentState, stateSource: agentState === "unknown" ? "unknown" : "structured", output });
@@ -472,11 +503,15 @@ export class HerdrCliAdapter implements HerdrPort {
         const output = await this.readOutput(paneId, 240);
         outputStable = output === lastOutput;
         if (output !== before) outputChangedAfterSubmission = true;
+        if (countOccurrences(normalizePromptEcho(output), comparableText) > previousPromptOccurrences) promptObservedAfterSubmission = true;
         if (output !== lastOutput) await onObservation?.({ state: "unknown", stateSource: "unknown", output });
         lastOutput = output;
       }
       if (agentState === "working" || agentState === "blocked") observedWorking = true;
-      if (observedWorking && (agentState === "done" || agentState === "idle")) return "done";
+      if (observedWorking && promptObservedAfterSubmission && (agentState === "done" || agentState === "idle")) return "done";
+      const lifecycleAdvanced = baselineStateChangeSeq !== null && baselineStateChangeSeq !== undefined
+        && stateChangeSeq !== null && stateChangeSeq !== undefined && stateChangeSeq > baselineStateChangeSeq;
+      if (promptConfirmedInComposer && lifecycleAdvanced && (agentState === "done" || agentState === "idle")) return "done";
       const safelyIdle = agentState === "unknown" && outputChangedAfterSubmission && isTraexIdle(lastOutput) && !hasActiveTurnHelper(foregroundExecutables);
       if (safelyIdle) {
         stableIdlePolls = outputStable ? stableIdlePolls + 1 : 0;

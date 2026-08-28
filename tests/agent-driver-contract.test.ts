@@ -27,6 +27,19 @@ describe("agent driver contract", () => {
     expect(startTraex).toHaveBeenCalledWith("w1:p1", "/bin/traex");
   });
 
+  it("injects the scoped MCP server into capable Primary drivers only", async () => {
+    const startTraex = vi.fn(async () => undefined);
+    const traex = new TraexDriver({ startTraex } as unknown as HerdrPort, "traex", 1_000);
+    const primaryTools = { command: process.execPath, args: ["shim.js", "--instance", "primary"] };
+    await traex.start(runtime, { name: "primary", model: null, primaryTools });
+    expect(startTraex).toHaveBeenCalledWith("w1:p1", "traex", ["-c", expect.stringMatching(/^'mcp_servers\.solo_agent\.command=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.solo_agent\.args=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.solo_agent\.env_vars=.*'$/)]);
+
+    const startAgent = vi.fn(async () => undefined);
+    const codex = new CodexDriver({ startAgent } as unknown as HerdrPort, "codex", 1_000, true);
+    await codex.start(runtime, { name: "primary", model: null, primaryTools });
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["-c", expect.stringContaining("mcp_servers.solo_agent.command"), "-c", expect.stringContaining("mcp_servers.solo_agent.args"), "-c", expect.stringContaining("SOLO_AGENT_PRIMARY_CAPABILITY")] }));
+  });
+
   it("returns an uncertain receipt when a submitted prompt may have reached TraeX", async () => {
     const runPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, _observation: unknown, _signal: unknown, onDispatched: () => void) => {
       onDispatched();
@@ -35,6 +48,16 @@ describe("agent driver contract", () => {
     const driver = new TraexDriver({ runPrompt } as unknown as HerdrPort, "traex", 1_000);
 
     await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "delivery-uncertain", reason: "observer disconnected" });
+  });
+
+  it("prefers Herdr's atomic managed prompt surface for instance turns", async () => {
+    const runPrompt = vi.fn();
+    const runManagedPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, onDispatched: () => void) => { onDispatched(); return "done" as const; });
+    const driver = new TraexDriver({ runPrompt, runManagedPrompt } as unknown as HerdrPort, "traex", 1_000);
+
+    await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "confirmed-delivered" });
+    expect(runManagedPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, expect.any(Function));
+    expect(runPrompt).not.toHaveBeenCalled();
   });
 
   it("reports a confirmed non-delivery when submission fails before dispatch", async () => {

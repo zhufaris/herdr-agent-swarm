@@ -7,6 +7,23 @@ import { describe, expect, it } from "vitest";
 import { runPluginLifecycle } from "../src/cli/plugin-lifecycle.js";
 
 describe("plugin lifecycle", () => {
+  it("supports standalone private config and state paths without Herdr plugin variables", async () => {
+    const fixture = createFixture();
+    const standaloneConfig = join(fixture.root, "standalone-config");
+    const standaloneState = join(fixture.root, "standalone-state");
+    mkdirSync(standaloneConfig);
+    writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
+    writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SOLO_AGENT_ROOT: fixture.root, SOLO_AGENT_CONFIG_DIR: standaloneConfig, SOLO_AGENT_STATE_DIR: standaloneState, BRIDGE_SYSTEMD_SERVICE_NAME: "solo-agent.service" };
+
+    await expect(runPluginLifecycle("install", environment)).resolves.toBe(0);
+    const unit = readFileSync(join(fixture.units, "solo-agent.service"), "utf8");
+    expect(unit).toContain(`EnvironmentFile=${standaloneConfig}/.env`);
+    expect(unit).toContain(`Environment=PROJECTS_CONFIG_PATH=${standaloneConfig}/projects.json`);
+    expect(unit).toContain(`Environment=BRIDGE_DATABASE_PATH=${standaloneState}/bridge.db`);
+    expect(unit).not.toContain("HERDR_PLUGIN_ROOT");
+  });
+
   it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {
     const fixture = createFixture();
     await expect(runPluginLifecycle("install", fixture.environment)).resolves.toBe(0);

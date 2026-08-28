@@ -1,10 +1,43 @@
 # 飞书群使用指南
 
-Herdr Lark Bridge 将飞书话题绑定到 Herdr pane 中运行的 TraeX。用户可以在
+Solo Agent 通过 Herdr headless runtime 管理多个项目和多个 Agent 实例；Herdr UI
+不是必需组件。每个项目最多一个 Primary，并可有多个由用户显式创建的 Worker，底层
+可以是 TraeX、Codex、Claude Code 或 Pi。原有 Herdr Lark Bridge 仍可将飞书话题
+绑定到 Herdr pane 中运行的 TraeX。用户可以在
 飞书中创建任务、查看状态、修改名称和发送后续要求；开发者仍可在 Herdr 中
 观察或接管同一个终端会话。
 
 ## 开始使用
+
+多 Agent 模式先选择项目，再打开实例目录：
+
+```text
+/projects
+/project my-project
+/instances
+```
+
+在实例目录点击“创建实例”，明确填写名称、角色、Agent 和是否立即启动。Primary 默认
+使用主 checkout；可写 Worker 默认获得独立 branch/worktree。每个项目只能有一个 Primary。
+创建后可用以下命令查看和发任务：
+
+```text
+/instance reviewer
+/to reviewer 检查当前改动并给出建议
+/steer reviewer 只关注并发安全
+/interrupt reviewer
+```
+
+在实例详情卡选择“设为当前目标”后，普通消息会持续发给该实例；若目标为 symbolic
+Primary，则 Primary 变更后自动解析到新 Primary。实例 generation 变化时旧卡片和固定
+目标会失效，必须刷新后重新选择。Primary 可直接调用同项目中已存在的 Worker，不需要
+逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
+触发 Primary turn。
+
+实例停止不删除 worktree。删除前系统会重新检查 dirty、conflict、ahead、generation 和
+fingerprint；任何不安全或不确定状态都会保留实例/worktree，不提供危险确认按钮。
+
+以下传统 `/swarm` 流程用于单话题 TraeX binding，并在迁移期间继续支持。
 
 在已经配置 Bridge Bot 的飞书群中发送顶层消息，并 `@Bot`：
 
@@ -233,6 +266,12 @@ Pane。请先检查对应 Space；已有 Pane 时发送
 （`working` 或 `blocked`）即可生效，越过普通 FIFO，但不改变已排队的普通消息。
 
 ## 权限与审批
+
+Solo Agent 使用固定三档策略：配置 workspace 内读写、项目测试和 Primary 调用同项目既有
+Worker 属于 routine；只有显式配置且可审计的外部效果可通过飞书一次性确认；push、部署、
+删除、凭据访问、权限绕过、敏感主机路径、破坏性命令和 Agent 原生非结构化审批均为
+local-only。远程 grant 绑定操作者、项目、实例 generation、action fingerprint、资源范围、
+策略版本与过期时间，只能消费一次；动作内容变化后旧授权立即失效。
 
 TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待终端审批”状态。此时
 必须回到对应 Herdr pane 批准或拒绝操作。

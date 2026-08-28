@@ -9,6 +9,7 @@ interface ShutdownLogger {
 
 interface ShutdownDependencies {
   traexSessionReporter?: { stop(): Promise<void> };
+  primaryToolGateway?: { stop(): Promise<void> };
   herdrEventInbox?: { stop(): Promise<void> };
   herdrSocketSubscriber?: { stop(): Promise<void> };
   instanceRuntime?: { stop(): Promise<void> };
@@ -37,7 +38,7 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<void> {
-    const { herdrEventInbox, herdrSocketSubscriber, traexSessionReporter, instanceRuntime, instanceWorker, coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+    const { herdrEventInbox, herdrSocketSubscriber, traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker, coordinator, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     const startedAt = Date.now();
     const budgetMs = this.dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     const { context, abort } = createShutdownContext(budgetMs);
@@ -55,6 +56,7 @@ export class BridgeRuntimeShutdown {
     logger.info({ event: "bridge-shutdown-started", signal, deadlineAt: context.deadlineAt, budgetMs }, "shutting down");
     if (herdrEventInbox) await this.stopComponent("herdrEventInbox", () => herdrEventInbox.stop(), context, logger, failures, timeouts);
     if (traexSessionReporter) writers.push({ component: "traexSessionReporter", ...(await this.stopComponent("traexSessionReporter", () => traexSessionReporter.stop(), context, logger, failures, timeouts)) });
+    if (primaryToolGateway) writers.push({ component: "primaryToolGateway", ...(await this.stopComponent("primaryToolGateway", () => primaryToolGateway.stop(), context, logger, failures, timeouts)) });
     if (herdrSocketSubscriber) await this.stopComponent("herdrSocketSubscriber", () => herdrSocketSubscriber.stop(), context, logger, failures, timeouts);
     if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
     if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(), context, logger, failures, timeouts)) });

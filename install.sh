@@ -4,16 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd -P)"
 PLUGIN_ID="herdr-lark-bridge"
 RUN_SETUP=0
+STANDALONE=0
 
 usage() {
     cat <<'EOF'
-Usage: ./install.sh [--setup]
+Usage: ./install.sh [--setup|--standalone]
 
 Build, link, enable, and verify the Herdr Lark Bridge plugin.
 
 Options:
   --setup  Open the interactive setup action after installation. This validates
            configuration, installs the systemd user service, and starts it.
+  --standalone
+           Build and install solo-agent.service without linking a Herdr plugin.
   -h, --help
            Show this help.
 EOF
@@ -22,6 +25,7 @@ EOF
 case "${1:-}" in
     "") ;;
     --setup) RUN_SETUP=1 ;;
+    --standalone) STANDALONE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
 esac
@@ -33,6 +37,14 @@ for command_name in node npm herdr; do
         exit 1
     fi
 done
+
+if [ "$STANDALONE" -eq 1 ]; then
+    npm ci
+    npm run build
+    bash "$ROOT/scripts/solo-agent.sh" install
+    echo "Standalone service installed. Run 'npm run solo:start' after configuration is ready."
+    exit 0
+fi
 
 bash "$ROOT/plugin/build.sh"
 herdr plugin link "$ROOT" --enabled

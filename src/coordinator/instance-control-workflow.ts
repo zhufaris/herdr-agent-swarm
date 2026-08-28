@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { CreateAgentInstanceInput, AgentInstance, InstanceRemovalPlan, WorkspaceLease } from "../domain/agent-instance.js";
+import { matchesHerdrAgentKind, type CreateAgentInstanceInput, type AgentInstance, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateInstanceCommand } from "../domain/commands.js";
 import type { InstanceStore } from "../domain/ports.js";
 import type { ProjectConfig } from "../domain/types.js";
@@ -10,6 +10,10 @@ import type { WorktreeManager } from "../runtime/worktree-manager.js";
 
 interface Options {
   projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
+  primaryTools?: {
+    issue(instanceId: string, expectedGeneration: number): { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] };
+    configuration(instanceId: string, runtimeGeneration: number): { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] };
+  };
 }
 
 export class InstanceControlWorkflow {
@@ -47,6 +51,7 @@ export class InstanceControlWorkflow {
     const driver = this.options.drivers.get(instance.agentKind);
     if (!driver?.describe().available) throw new Error(`Agent adapter is unavailable: ${instance.agentKind}`);
     let workspace = this.requireWorkspace(instance.workspaceLeaseId);
+    let issuedPrimaryTools: { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] } | undefined;
     try {
       if (instance.provisioningCheckpoint === "verified" && !instance.runtimeRef) {
         instance = this.requireCheckpoint(instance, "workspace-ready", "starting");
@@ -59,20 +64,22 @@ export class InstanceControlWorkflow {
         instance = this.requireCheckpoint(instance, "workspace-ready", "starting");
       }
       if (instance.provisioningCheckpoint === "workspace-ready") {
+        issuedPrimaryTools = instance.role === "primary" && driver.describe().primaryTools ? this.options.primaryTools?.issue(instance.id, instance.generation) : undefined;
         await this.options.paneHost.ensureWorkspace(project.workspaceId);
-        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: instance.name });
+        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: instance.name, ...(issuedPrimaryTools ? { environment: issuedPrimaryTools.environment } : {}) });
         instance = this.requireCheckpoint(instance, "pane-allocated", "starting", pane.paneId, project.workspaceId);
       }
       const pending = instance.pendingRuntimeRef;
       if (!pending) throw new Error("Provisioning pane checkpoint is missing");
       if (instance.provisioningCheckpoint === "pane-allocated") {
-        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, model: instance.model });
+        const primaryTools = issuedPrimaryTools ?? (instance.role === "primary" && driver.describe().primaryTools ? this.options.primaryTools?.configuration(instance.id, instance.generation + 1) : undefined);
+        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, model: instance.model, ...(primaryTools ? { primaryTools } : {}) });
         instance = this.requireCheckpoint(instance, "runtime-started", "starting");
       }
       if (instance.provisioningCheckpoint === "runtime-started") {
         const observed = await this.options.paneHost.inspectPane(pending.paneId);
         if (!observed || observed.workspaceId !== project.workspaceId || observed.cwd !== workspace.cwd) throw new Error("Started agent pane could not be verified");
-        if (observed.agentKind && observed.agentKind !== instance.agentKind) throw new Error(`Started pane reported unexpected agent: ${observed.agentKind}`);
+        if (observed.agentKind && !matchesHerdrAgentKind(instance.agentKind, observed.agentKind)) throw new Error(`Started pane reported unexpected agent: ${observed.agentKind}`);
         const attached = this.options.store.attachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: project.workspaceId, paneId: pending.paneId, nativeSessionId: observed.agentSession?.value ?? observed.terminalId ?? null });
         if (!attached) throw new Error("Instance generation changed during runtime attachment");
         return attached;

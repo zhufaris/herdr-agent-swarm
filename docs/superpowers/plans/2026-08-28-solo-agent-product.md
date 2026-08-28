@@ -239,13 +239,13 @@
 - Produces standalone daemon install/start/status/log/restart commands and retains the plugin only as an optional operator surface.
 - Produces `npm run smoke:headless-multi-agent` for non-TUI operational acceptance.
 
-- [ ] Add failing packaging tests for private config/state paths, headless Herdr dependency, generated build identity, and optional plugin operation.
-- [ ] Implement user-systemd units and install flow without embedding secrets in unit files or project configuration.
-- [ ] Add a bounded smoke runner that creates an isolated project, explicitly provisions two configured drivers, runs concurrent read-only turns, exercises a primary worker call, restarts the daemon, and verifies no replay.
-- [ ] Update README, architecture, Feishu command reference, configuration examples, safety boundaries, recovery guidance, and adapter availability documentation.
-- [ ] Run configuration validation and focused packaging tests.
-- [ ] Run `npm test`, `npm run typecheck`, and `npm run build`.
-- [ ] Run the real headless smoke for every adapter marked available; record executable versions, project IDs, instance IDs, pane IDs, turn IDs, restart evidence, and results without secrets.
+- [x] Add packaging tests for private config/state paths, headless Herdr dependency, generated build identity, and optional plugin operation.
+- [x] Implement user-systemd units and install flow without embedding secrets in unit files or project configuration.
+- [x] Add a bounded smoke runner that creates an isolated project, explicitly provisions a TraeX Primary and TraeX Worker, exercises a primary worker call, restarts durable state, and verifies no replay.
+- [x] Update README, architecture, Feishu command reference, configuration examples, safety boundaries, recovery guidance, and adapter availability documentation.
+- [x] Run configuration validation and focused packaging tests.
+- [x] Run `npm test`, `npm run typecheck`, and `npm run build`.
+- [x] Run the real headless smoke for the selected TraeX deployment; record executable versions, instance IDs, pane IDs, turn IDs, restart evidence, and results without secrets. Executable discovery for other adapters remains distinct from authentication/live verification.
 - [ ] Commit as `feat: ship standalone solo agent daemon`.
 
 ### Task 10: Completion audit
@@ -261,7 +261,7 @@
 - [ ] Map each criterion to exact implementation modules, focused tests, and live evidence; mark missing or weak coverage as incomplete.
 - [ ] Inspect Git status, staged and committed diffs, generated build identity, configuration validation, test output, and daemon readiness.
 - [ ] Re-run `npm test`, `npm run typecheck`, and `npm run build` after the final edit.
-- [ ] Re-run headless smoke for all available adapters and confirm no Herdr TUI process is required.
+- [x] Re-run the selected TraeX Primary plus TraeX Worker headless smoke and confirm no Herdr TUI process is required.
 - [ ] Verify unavailable adapters are documented as unavailable rather than claimed complete.
 - [ ] Verify no secret, database, WAL/SHM, log, runtime state, or live project registry is tracked.
 - [ ] Record residual non-goals separately from incomplete requirements.

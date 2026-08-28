@@ -1,0 +1,18 @@
+[Unit]
+Description=Solo Agent daemon (Herdr headless runtime and Feishu gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The installer renders absolute paths and the current build identity.
+EnvironmentFile=%h/.config/solo-agent/.env
+Environment=PROJECTS_CONFIG_PATH=%h/.config/solo-agent/projects.json
+Environment=BRIDGE_DATABASE_PATH=%h/.local/state/solo-agent/bridge.db
+ExecStart=/usr/bin/env node /absolute/path/to/solo-agent/dist/main.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=50
+
+[Install]
+WantedBy=default.target

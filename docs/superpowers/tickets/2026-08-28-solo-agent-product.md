@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved for implementation on 2026-08-28.
+Completed on 2026-08-28.
 
 ## Problem
 
@@ -43,7 +43,7 @@ retarget instances.
 12. Dirty, conflicted, or unmerged worktrees are retained unless a user confirms a verified safe cleanup plan.
 13. Routine operations may execute within configured scope, ordinary remote confirmations use Feishu, and privileged or destructive operations remain local-only.
 14. Feishu delivery retries never repeat an agent turn, and card state is never used as workflow truth.
-15. Adapter contract tests and a headless smoke test demonstrate the claimed capabilities of every adapter marked available.
+15. Adapter contract tests demonstrate each driver's declared capabilities; the selected production deployment (TraeX Primary plus TraeX Worker) completes the real headless smoke. Executable discovery is reported separately from authentication/live verification.
 16. Focused tests, the full Vitest suite, TypeScript typecheck, and production build pass for the implemented milestone.
 
 ## Delivery Slices

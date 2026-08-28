@@ -1,4 +1,4 @@
-import type { AgentInstance, ObservedInstanceState } from "../domain/agent-instance.js";
+import { matchesHerdrAgentKind, type AgentInstance, type ObservedInstanceState } from "../domain/agent-instance.js";
 import type { InstanceStore } from "../domain/ports.js";
 import type { HerdrPane, ProjectConfig } from "../domain/types.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
@@ -48,8 +48,7 @@ export class InstanceRuntimeReconciler {
     const pane = panes.get(runtime.paneId);
     if (!pane) { this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} is missing` }); return; }
     const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
-    const expectedKind = instance.agentKind === "claude-code" ? "claude" : instance.agentKind;
-    if (pane.workspaceId !== runtime.herdrWorkspaceId || pane.workspaceId !== project.workspaceId || pane.cwd !== workspace?.cwd || pane.agentKind !== expectedKind) {
+    if (pane.workspaceId !== runtime.herdrWorkspaceId || pane.workspaceId !== project.workspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
       this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} identity mismatch` });
       return;
     }

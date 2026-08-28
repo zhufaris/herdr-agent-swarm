@@ -20,14 +20,19 @@ export class TraexDriver implements AgentRuntimeDriver {
     };
   }
 
-  async start(runtime: AgentRuntimeRef): Promise<void> {
-    await this.herdr.startTraex(runtime.paneId, this.executable);
+  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
+    const args = options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...mcpArguments(options.primaryTools)] : undefined;
+    if (args) await this.herdr.startTraex(runtime.paneId, this.executable, args);
+    else await this.herdr.startTraex(runtime.paneId, this.executable);
   }
 
   async submit(runtime: AgentRuntimeRef, text: string): Promise<DispatchReceipt> {
     let dispatched = false;
     try {
-      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; });
+      const run = this.herdr.runManagedPrompt
+        ? this.herdr.runManagedPrompt(runtime.paneId, text, this.turnTimeoutMs, () => { dispatched = true; })
+        : this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; });
+      await run;
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;
@@ -47,3 +52,13 @@ export class TraexDriver implements AgentRuntimeDriver {
     catch (error) { return { status: "failed", reason: safeLogError(error).message }; }
   }
 }
+
+function mcpArguments(server: { command: string; args: string[] }): string[] {
+  return [
+    "-c", shellQuote(`mcp_servers.solo_agent.command=${JSON.stringify(server.command)}`),
+    "-c", shellQuote(`mcp_servers.solo_agent.args=${JSON.stringify(server.args)}`),
+    "-c", shellQuote('mcp_servers.solo_agent.env_vars=["SOLO_AGENT_PRIMARY_CAPABILITY"]')
+  ];
+}
+
+function shellQuote(value: string): string { return `'${value.replace(/'/g, `'"'"'`)}'`; }

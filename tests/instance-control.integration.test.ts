@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
+import type { AgentKind } from "../src/domain/agent-instance.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { InstanceControlWorkflow } from "../src/coordinator/instance-control-workflow.js";
@@ -12,7 +13,7 @@ afterEach(() => { store?.close(); store = undefined; });
 const project = { id: "project-a", displayName: "Project A", description: "A", workspaceId: "herdr-a", cwd: "/repo", maxInstances: 4, instances: [] };
 const pane = { paneId: "herdr-a:p1", workspaceId: "herdr-a", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term-1" };
 
-function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManager["prepare"] } = {}) {
+function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManager["prepare"]; primaryTools?: { issue: ReturnType<typeof vi.fn>; configuration: ReturnType<typeof vi.fn> }; agentKind?: AgentKind } = {}) {
   store = new SqliteBindingStore(":memory:");
   let allocatedPane = pane;
   const paneHost = {
@@ -20,14 +21,14 @@ function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManag
     inspectPane: vi.fn(async () => allocatedPane), releasePane: vi.fn(async () => undefined)
   } as unknown as PaneHost;
   const driver: AgentRuntimeDriver = {
-    kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "runtime", usageReporting: true }),
+    kind: overrides.agentKind ?? "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "runtime", usageReporting: true }),
     start: vi.fn(overrides.start ?? (async () => undefined)), submit: vi.fn(async () => ({ status: "confirmed-delivered" }))
   };
   const worktrees = {
     prepare: vi.fn(overrides.prepare ?? (async (input) => ({ cwd: input.targetPath, branch: input.branch, baseCommit: "base-sha", headCommit: "base-sha" }))),
     planRemoval: vi.fn(async (input) => ({ ...input, safe: true, reason: "clean" as const, fingerprint: "fingerprint-1", inspection: null })), release: vi.fn(async () => undefined)
   } as unknown as WorktreeManager;
-  const workflow = new InstanceControlWorkflow({ projects: [project], store, paneHost, drivers: new AgentDriverRegistry([driver]), worktrees, idFactory: (() => { let n = 0; return () => `id-${++n}`; })() });
+  const workflow = new InstanceControlWorkflow({ projects: [project], store, paneHost, drivers: new AgentDriverRegistry([driver]), worktrees, idFactory: (() => { let n = 0; return () => `id-${++n}`; })(), ...(overrides.primaryTools ? { primaryTools: overrides.primaryTools } : {}) });
   return { workflow, paneHost, driver, worktrees };
 }
 
@@ -39,6 +40,27 @@ describe("InstanceControlWorkflow", () => {
     expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "main-checkout", cwd: "/repo", state: "ready" });
     expect(worktrees.prepare).not.toHaveBeenCalled();
     expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo", expect.objectContaining({ bindingId: instance.id, projectId: "project-a" }));
+  });
+
+  it("injects trusted tools only into a capable primary runtime", async () => {
+    const primaryTools = { issue: vi.fn(() => ({ environment: { SOLO_AGENT_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] })), configuration: vi.fn() };
+    const { workflow, paneHost, driver } = setup({ primaryTools });
+    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "primary", role: "primary", agentKind: "traex", model: null, start: true });
+    expect(primaryTools.issue).toHaveBeenCalledWith(instance.id, 1);
+    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo", expect.objectContaining({ environment: { SOLO_AGENT_PRIMARY_CAPABILITY: "secret" } }));
+    expect(driver.start).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ primaryTools: { environment: { SOLO_AGENT_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] } }));
+  });
+
+  it("accepts Herdr's canonical claude kind for a Claude Code instance", async () => {
+    const { workflow, paneHost } = setup({ agentKind: "claude-code" });
+    vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "claude", foregroundExecutables: ["claude"] });
+    await expect(workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "claude-code", model: null, start: true })).resolves.toMatchObject({ agentKind: "claude-code", observedState: "idle" });
+  });
+
+  it("accepts Herdr's codex label for the TraeCode distribution", async () => {
+    const { workflow, paneHost } = setup();
+    vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, agentKind: "codex", foregroundExecutables: ["traex"] });
+    await expect(workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "primary", role: "primary", agentKind: "traex", model: null, start: true })).resolves.toMatchObject({ agentKind: "traex", observedState: "idle" });
   });
 
   it("allocates a named branch and isolated worktree for an explicit worker", async () => {

@@ -10,12 +10,21 @@
     "build": "tsc -p tsconfig.json && node scripts/generate-build-info.mjs",
     "config:validate": "node dist/cli/validate-config.js",
     "plugin": "node dist/cli/plugin-lifecycle.js",
+    "primary-tools:mcp": "node dist/cli/primary-tools-mcp.js",
+    "solo:init": "bash scripts/solo-agent.sh init",
+    "solo:install": "bash scripts/solo-agent.sh install",
+    "solo:start": "bash scripts/solo-agent.sh start",
+    "solo:status": "bash scripts/solo-agent.sh status",
+    "solo:restart": "bash scripts/solo-agent.sh restart",
+    "solo:stop": "bash scripts/solo-agent.sh stop",
+    "solo:logs": "bash scripts/solo-agent.sh logs",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke:real-user": "node scripts/real-user-smoke.mjs"
+    "smoke:real-user": "node scripts/real-user-smoke.mjs",
+    "smoke:headless-multi-agent": "tsx scripts/smoke-headless-multi-agent.ts"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.56.0",

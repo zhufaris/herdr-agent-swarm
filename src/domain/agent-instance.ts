@@ -109,3 +109,9 @@ export function resolveInstanceTarget(target: InstanceTarget, instances: readonl
   }
   return { ok: true, instance };
 }
+
+export function matchesHerdrAgentKind(kind: AgentKind, observed: string): boolean {
+  if (kind === "claude-code") return observed === "claude";
+  if (kind === "traex") return observed === "traex" || observed === "codex";
+  return observed === kind;
+}

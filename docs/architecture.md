@@ -26,7 +26,7 @@ transaction by itself.
 | Typed turn output, live status heading, structured plan, and token counters for an active turn | Exactly identified TraeX JSONL transcript | The transcript is parsed once into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
-| Process lifecycle | user systemd service | The plugin controls the service; the application does not manage PID files. |
+| Process lifecycle | user systemd service | Standalone CLI or the optional plugin controls the service; the application does not manage PID files. |
 | Plugin events | bounded wake-up hints | Events improve latency but do not create a second event log. |
 
 When these sources disagree, do not repair SQLite from a Lark card or infer a
@@ -521,15 +521,17 @@ head update are committed in one SQLite transaction.
 
 ## Process lifecycle and diagnostics
 
-The supported production owner is a user systemd service installed and operated
-through Herdr plugin actions. The application also holds a fenced SQLite lease,
+The supported production owner is a user systemd service installed through the
+standalone CLI or operated through optional Herdr plugin actions. Herdr remains
+a mandatory headless pane/process authority, but the TUI and plugin are not
+runtime dependencies. The application also holds a fenced SQLite lease,
 which protects against accidental duplicate processes sharing one database.
 
 Health endpoints have separate meanings:
 
 - `/health` means the process can answer requests.
 - `/ready` additionally requires the lease, configured project paths, Herdr,
-  and Lark to be usable.
+  Lark, and completion of the first multi-agent runtime reconciliation.
 - `/status` returns a sanitized operational snapshot even when dependencies are
   degraded.
 
@@ -542,7 +544,8 @@ time, and rejection/failure counters. Open and half-open states degrade status.
 It also reports each startup recovery stage with its bounded duration and error;
 an isolated failed stage degrades status without making the process unavailable.
 
-Shutdown stops ingress, waits for known work, and detaches observers if the
+Shutdown uses one shared deadline, stops ingress and both runtime reconcilers,
+waits for known write-capable work, and detaches observers if the
 grace period expires. It does not replay work or delete user state. Logs and
 status deliberately exclude prompt bodies, raw terminal output, card payloads,
 and credentials.
@@ -561,6 +564,26 @@ and credentials.
 - Plugin events and Lark cards are not trusted business-state sources.
 - Runtime SQLite files are service-owned data and are never version-controlled.
 
+## Multi-agent ownership and recovery
+
+SQLite owns project selection, Primary/Worker roles, desired state, instance
+generation, queues, approval identity, and workspace leases. Herdr owns whether
+the recorded pane and expected agent process actually exist. Git inspection owns
+dirty, conflict, branch-head, and worktree removal facts. Feishu cards are only
+controls and projections.
+
+`InstanceRuntimeReconciler` is the single startup, periodic, and event-woken
+convergence path. It updates only recorded instance/pane identities and never
+adopts an unrecorded pane. Missing or mismatched runtimes become detached behind
+a generation fence. Queued work that provably never started remains queued for
+an explicit restart; claimed, dispatching, running, blocked, and already
+uncertain work remains uncertain and is never automatically replayed.
+
+Approval policy has fixed `routine`, `remote-confirmation`, and `local-only`
+tiers. Remote grants are persisted and bind the actor, project, instance
+generation, canonical action fingerprint, resource scope, policy version,
+expiry, and single-use state. Any mismatch fails closed.
+
 ## Known implementation gaps
 
 These are concrete correctness or robustness gaps in the current implementation,
@@ -577,10 +600,6 @@ boundary change to fix.
   card debounce, 100 ms UDP debounce, 12000/28000 character CardKit limits,
   60 s close-code TTL) are hardcoded in their respective modules. These should
   move to the validated configuration surface.
-- **Shutdown deadline coordination**: grace periods are per-component rather than
-  driven by a shared deadline from the composition root. A coordinated
-  `AbortSignal` or deadline passed through shutdown would prevent premature
-  timeout of in-flight work.
 
 ## Current evolution priorities
 
@@ -590,7 +609,6 @@ boundary change to fix.
    implemented.
 2. Move remaining polling intervals and size limits into validated configuration
    as operator tuning needs arise.
-3. Coordinate shutdown through one shared deadline or `AbortSignal`.
 
 ## Related documents
 
