@@ -32,6 +32,39 @@ export interface AgentInstance {
   runtimeRef: AgentRuntimeRef | null;
 }
 
+export type WorkspaceLeaseState =
+  | "allocating"
+  | "ready"
+  | "dirty"
+  | "committed"
+  | "conflicted"
+  | "release-requested"
+  | "retained"
+  | "released";
+
+export interface WorkspaceLease {
+  id: string;
+  projectId: string;
+  instanceId: string;
+  kind: "main-checkout" | "git-worktree" | "shared-read-only";
+  cwd: string;
+  branch: string | null;
+  baseCommit: string;
+  state: WorkspaceLeaseState;
+  generation: number;
+}
+
+export interface CreateAgentInstanceInput {
+  id: string;
+  projectId: string;
+  name: string;
+  role: InstanceRole;
+  agentKind: AgentKind;
+  model: string | null;
+  desiredState: DesiredInstanceState;
+  workspace: Omit<WorkspaceLease, "projectId" | "instanceId" | "state" | "generation">;
+}
+
 export type InstanceTarget =
   | { kind: "primary" }
   | { kind: "instance"; instanceId: string; expectedGeneration?: number };

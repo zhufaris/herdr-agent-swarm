@@ -17,6 +17,62 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("atomically creates and reads an agent instance with its workspace lease", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const created = store.createAgentInstance({
+      id: "i1", projectId: "project-a", name: "reviewer", role: "worker", agentKind: "claude-code", model: null,
+      desiredState: "stopped", workspace: { id: "ws1", kind: "git-worktree", cwd: "/work/reviewer", branch: "worker/reviewer", baseCommit: "abc123" }
+    });
+
+    expect(created).toMatchObject({ id: "i1", projectId: "project-a", name: "reviewer", role: "worker", generation: 1, observedState: "unprovisioned", workspaceLeaseId: "ws1" });
+    expect(store.getAgentInstance("i1")).toEqual(created);
+    expect(store.getWorkspaceLease("ws1")).toMatchObject({ instanceId: "i1", kind: "git-worktree", state: "allocating", branch: "worker/reviewer" });
+  });
+
+  it("enforces one primary per project and switches it atomically", () => {
+    store = new SqliteBindingStore(":memory:");
+    const create = (id: string, name: string) => store!.createAgentInstance({
+      id, projectId: "project-a", name, role: "worker", agentKind: "traex", model: null, desiredState: "stopped",
+      workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "abc123" }
+    });
+    create("i1", "one");
+    create("i2", "two");
+
+    expect(store.setPrimaryAgentInstance("project-a", "i1")).toMatchObject({ id: "i1", role: "primary" });
+    expect(store.setPrimaryAgentInstance("project-a", "i2")).toMatchObject({ id: "i2", role: "primary" });
+    expect(store.listAgentInstances("project-a").map(({ id, role }) => ({ id, role }))).toEqual([
+      { id: "i1", role: "worker" }, { id: "i2", role: "primary" }
+    ]);
+  });
+
+  it("rejects stale runtime attachment without changing the instance", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({
+      id: "i1", projectId: "project-a", name: "coder", role: "worker", agentKind: "codex", model: null, desiredState: "running",
+      workspace: { id: "ws1", kind: "git-worktree", cwd: "/work/coder", branch: "worker/coder", baseCommit: "abc123" }
+    });
+
+    expect(store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 2, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1" })).toBeNull();
+    expect(store.getAgentInstance("i1")).toMatchObject({ generation: 1, runtimeRef: null, observedState: "unprovisioned" });
+    expect(store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1" })).toMatchObject({
+      generation: 2, observedState: "idle", runtimeRef: { paneId: "w1:p1", generation: 2 }
+    });
+  });
+
+  it("projects a legacy binding as a TraeX instance without creating durable work", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Legacy" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "working" });
+
+    expect(store.projectLegacyBindingAsAgentInstance("b1")).toMatchObject({
+      id: "legacy:b1", projectId: "project-a", name: "Legacy", role: "worker", agentKind: "traex", generation: 3, observedState: "working",
+      runtimeRef: { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "terminal-1", generation: 3 }
+    });
+    expect(store.listAgentInstances("project-a")).toEqual([]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual({ count: 0 });
+  });
+
   it("persists creator identity and consumes scoped card interactions once", () => {
     store = new SqliteBindingStore(":memory:");
     const binding = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });

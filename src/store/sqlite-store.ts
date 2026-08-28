@@ -16,9 +16,11 @@ import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
 import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
+import type { AgentInstance, CreateAgentInstanceInput, WorkspaceLease } from "../domain/agent-instance.js";
+import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 
 const FENCED_TABLES = [
-  "bindings", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "bindings", "agent_instances", "workspace_leases", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
@@ -116,6 +118,72 @@ export class SqliteBindingStore implements BindingStorePort {
 
   releaseInstanceLease(ownerId: string, fencingToken: number): boolean {
     return this.database.prepare("DELETE FROM instance_lease WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ?").run(ownerId, fencingToken).changes === 1;
+  }
+
+  createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO agent_instances(
+          id, project_id, name, role, agent_kind, model, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?)
+      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.desiredState, input.workspace.id, timestamp, timestamp);
+      this.database.prepare(`
+        INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
+      `).run(input.workspace.id, input.projectId, input.id, input.workspace.kind, input.workspace.cwd, input.workspace.branch, input.workspace.baseCommit, timestamp, timestamp);
+      this.database.exec("COMMIT");
+      return this.getAgentInstance(input.id)!;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  getAgentInstance(id: string): AgentInstance | null {
+    const row = this.database.prepare("SELECT * FROM agent_instances WHERE id = ?").get(id) as AgentInstanceRow | undefined;
+    return row ? mapAgentInstance(row) : null;
+  }
+
+  listAgentInstances(projectId: string): AgentInstance[] {
+    return (this.database.prepare("SELECT * FROM agent_instances WHERE project_id = ? ORDER BY created_at, id").all(projectId) as AgentInstanceRow[]).map(mapAgentInstance);
+  }
+
+  setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const target = this.database.prepare("SELECT project_id FROM agent_instances WHERE id = ?").get(instanceId) as { project_id: string } | undefined;
+      if (!target || target.project_id !== projectId) throw new Error(`Agent instance not found in project: ${instanceId}`);
+      const timestamp = now();
+      this.database.prepare("UPDATE agent_instances SET role = 'worker', updated_at = ? WHERE project_id = ? AND role = 'primary' AND id <> ?").run(timestamp, projectId, instanceId);
+      this.database.prepare("UPDATE agent_instances SET role = 'primary', updated_at = ? WHERE id = ? AND project_id = ?").run(timestamp, instanceId, projectId);
+      this.database.exec("COMMIT");
+      return this.getAgentInstance(instanceId)!;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null {
+    const nextGeneration = input.expectedGeneration + 1;
+    const result = this.database.prepare(`
+      UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, generation = ?, observed_state = 'idle', updated_at = ?
+      WHERE id = ? AND generation = ?
+    `).run(input.herdrWorkspaceId, input.paneId, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
+    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+  }
+
+  getWorkspaceLease(id: string): WorkspaceLease | null {
+    const row = this.database.prepare("SELECT * FROM workspace_leases WHERE id = ?").get(id) as WorkspaceLeaseRow | undefined;
+    return row ? mapWorkspaceLease(row) : null;
+  }
+
+  projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null {
+    const binding = this.getBinding(bindingId);
+    if (!binding?.projectId) return null;
+    return {
+      id: `legacy:${binding.id}`, projectId: binding.projectId, name: binding.title, role: "worker", agentKind: "traex", model: null,
+      desiredState: binding.state === "archived" ? "stopped" : "running",
+      observedState: binding.state === "failed" ? "failed" : binding.state === "archived" ? "stopped" : binding.lastAgentState === "done" ? "idle" : binding.lastAgentState === "unknown" ? "detached" : binding.lastAgentState,
+      workspaceLeaseId: `legacy:${binding.id}:workspace`, generation: binding.generation,
+      runtimeRef: binding.paneId ? { herdrWorkspaceId: binding.workspaceId, paneId: binding.paneId, nativeSessionId: binding.traexSessionId, generation: binding.generation } : null
+    };
   }
 
   recordInboundMessage(message: IncomingLarkMessage): boolean {
@@ -1936,6 +2004,22 @@ export class SqliteBindingStore implements BindingStorePort {
         status_message_id TEXT,
         last_agent_state TEXT NOT NULL CHECK(last_agent_state IN ('idle','working','blocked','done','unknown')),
         last_output_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS agent_instances(
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT,
+        desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
+        observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
+        workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, name)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
+      CREATE INDEX IF NOT EXISTS agent_instances_project_state ON agent_instances(project_id, observed_state, created_at);
+      CREATE TABLE IF NOT EXISTS workspace_leases(
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, instance_id TEXT NOT NULL UNIQUE REFERENCES agent_instances(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK(kind IN ('main-checkout','git-worktree','shared-read-only')), cwd TEXT NOT NULL, branch TEXT, base_commit TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('allocating','ready','dirty','committed','conflicted','release-requested','retained','released')),
+        generation INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS inbound_messages(
         event_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, payload_json TEXT NOT NULL,

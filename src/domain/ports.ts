@@ -4,6 +4,17 @@ import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
 import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
+import type { AgentInstance, CreateAgentInstanceInput, WorkspaceLease } from "./agent-instance.js";
+
+export interface InstanceStore {
+  createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
+  getAgentInstance(id: string): AgentInstance | null;
+  listAgentInstances(projectId: string): AgentInstance[];
+  setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
+  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
+  getWorkspaceLease(id: string): WorkspaceLease | null;
+  projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
+}
 
 export interface LarkPort {
   start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<LarkCardActionResult | void>): Promise<void>;
