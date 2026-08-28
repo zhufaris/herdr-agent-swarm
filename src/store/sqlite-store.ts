@@ -1413,6 +1413,47 @@ export class SqliteBindingStore implements BindingStorePort {
         this.refreshOutboxLaneHead(row.lane_key);
         if (!retriedAnswerPromptIds.includes(row.prompt_id)) retriedAnswerPromptIds.push(row.prompt_id);
       }
+      const invalidRebuildRows = this.database.prepare(`
+        SELECT rebuild.id, rebuild.prompt_id, rebuild.lane_key, current.page_index AS current_page_index, next.page_index AS next_page_index
+        FROM outbox_lane_quarantines q
+        JOIN outbound_replies rebuild ON rebuild.id = q.failed_reply_id
+        JOIN answer_pages next ON next.prompt_id = rebuild.prompt_id
+          AND next.page_index = json_extract(rebuild.payload, '$.stream.pageIndex')
+          AND next.state = 'creating' AND next.message_id IS NULL AND next.card_id IS NULL
+        JOIN answer_pages current ON current.prompt_id = next.prompt_id
+          AND current.page_index = next.page_index - 1
+          AND current.state = 'frozen' AND current.message_id IS NOT NULL AND current.card_id IS NOT NULL
+          AND current.source_start = next.source_start
+        JOIN run_cards card ON card.prompt_id = current.prompt_id AND card.answer_page_index = current.page_index
+        WHERE q.state = 'active' AND q.lane_class = 'immutable'
+          AND q.failure_class = 'permanent'
+          AND rebuild.state = 'dead_letter' AND rebuild.kind = 'stream_card_create'
+          AND rebuild.idempotency_key = 'stream-rebuild:' || rebuild.prompt_id || ':' || next.page_index
+          AND json_extract(rebuild.payload, '$.stream.pageStart') = next.source_start
+          AND json_extract(rebuild.payload, '$.stream.elementId') = next.element_id
+          AND EXISTS (
+            SELECT 1 FROM outbound_replies content
+            WHERE content.prompt_id = current.prompt_id AND content.card_role = 'answer'
+              AND content.kind = 'stream_content' AND content.state = 'dead_letter'
+              AND json_extract(content.payload, '$.pageIndex') = current.page_index
+              AND json_extract(content.payload, '$.elementId') = current.element_id
+          )
+        ORDER BY q.created_at, rebuild.delivery_order
+      `).all() as Array<{ id: string; prompt_id: string; lane_key: string; current_page_index: number; next_page_index: number }>;
+      const rolledBackAnswerPromptIds: string[] = [];
+      for (const row of invalidRebuildRows) {
+        const removed = this.database.prepare(`DELETE FROM answer_pages
+          WHERE prompt_id = ? AND page_index = ? AND state = 'creating' AND message_id IS NULL AND card_id IS NULL`).run(row.prompt_id, row.next_page_index);
+        if (removed.changes !== 1) continue;
+        const restored = this.database.prepare(`UPDATE answer_pages SET state = 'active', updated_at = ?
+          WHERE prompt_id = ? AND page_index = ? AND state = 'frozen'`).run(timestamp, row.prompt_id, row.current_page_index);
+        if (restored.changes !== 1) throw new Error(`Failed to restore Answer page ${row.prompt_id}:${row.current_page_index}`);
+        this.database.prepare("UPDATE outbound_replies SET state = 'dismissed', updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(timestamp, row.id);
+        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rollback', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
+        this.refreshOutboxLaneHead(row.lane_key);
+        if (!rolledBackAnswerPromptIds.includes(row.prompt_id)) rolledBackAnswerPromptIds.push(row.prompt_id);
+      }
       const notices = this.database.prepare(`
         SELECT o.id, o.lane_key
         FROM outbox_lane_quarantines q JOIN outbound_replies o ON o.id = q.failed_reply_id
@@ -1430,7 +1471,7 @@ export class SqliteBindingStore implements BindingStorePort {
         dismissedNotices += 1;
       }
       this.database.exec("COMMIT");
-      return { retriedAnswerPromptIds, dismissedNotices };
+      return { retriedAnswerPromptIds, rolledBackAnswerPromptIds, dismissedNotices };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -1736,7 +1777,7 @@ export class SqliteBindingStore implements BindingStorePort {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
       if (page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
-      if (facts.finishPending || facts.continuationPending) return "waiting";
+      if ((facts.latestContent && facts.latestContent.state !== "delivered") || facts.finishPending || facts.continuationPending) return "waiting";
       const sequence = page.sequence + 1;
       this.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND sequence = ?")
         .run(sequence, now(), input.promptId, input.pageIndex, page.sequence);
@@ -1751,6 +1792,8 @@ export class SqliteBindingStore implements BindingStorePort {
   reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
       if (input.nextPageIndex !== input.pageIndex + 1 || input.sourceStart !== page.sourceStart) return "stale";
+      const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
+      if (facts.latestContent && facts.latestContent.state !== "delivered") return "waiting";
       if (this.hasPendingAnswerContinuation(input.promptId, input.nextPageIndex)) return "waiting";
       const timestamp = now();
       this.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active'")

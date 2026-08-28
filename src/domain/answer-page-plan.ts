@@ -16,13 +16,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
   const rendered = renderAnswerStreamPage(content, page.sourceStart, ANSWER_STREAM_PAGE_LIMIT);
   if (facts.continuationPending) return { type: "wait" };
   if (facts.latestContent?.state === "pending") return { type: "wait" };
-  if (facts.latestContent?.state === "dead_letter") {
-    const nextPageIndex = page.pageIndex + 1;
-    return {
-      type: "rebuild", currentSummary: "回答将在恢复页继续", nextPageIndex, nextPageStart: page.sourceStart,
-      nextElementId: answerElementId(view.promptId, nextPageIndex), initialContent: rendered.page
-    };
-  }
+  if (facts.latestContent?.state === "dead_letter") return { type: "wait" };
   if (!rendered.page) {
     if (view.phase === "completed" || view.phase === "failed") {
       if (facts.finishPending) return { type: "wait" };

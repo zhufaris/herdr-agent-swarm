@@ -20,6 +20,8 @@ The startup view converger invokes this operation before projecting durable view
 
 A recovered lightweight Answer Card establishes only the page's CardKit identity; it does not confirm that the page's canonical content is visible. While the latest `stream_content` intent for the current page is pending or dead-lettered, Answer-page convergence must keep that page active and must not freeze it, reserve a continuation, or create the next page. Failed outbox and quarantine rows remain as history. Startup recovery may rebuild only a page whose card creation was not confirmed; it must not cross an unconfirmed content boundary merely because the lightweight replacement card was delivered.
 
+For state already written by the former behavior, startup may atomically roll back only an exact invalid rebuild: the current page is frozen with a confirmed CardKit identity, the immediately following page is still `creating` without a card or message, both pages have the same source offset, canonical content for the current page is dead-lettered, and the failed quarantined reply is the matching deterministic `stream-rebuild` creation. Recovery deletes only the never-created page reservation, restores the confirmed page to `active`, dismisses the failed rebuild reply, and releases its quarantine; it retains the canonical content dead letter and all delivery error text.
+
 When project-selection recovery confirms that a persisted `pane_created` pane no longer exists, it marks both the selection and binding failed. Uncertain failures remain processing and recoverable.
 
 ## Verification

@@ -166,7 +166,7 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("quarantines a permanently rejected Answer sequence and wakes canonical reconstruction", async () => {
+  it("quarantines a permanently rejected Answer sequence without crossing its content boundary", async () => {
     const permanent = Object.assign(new Error("invalid sequence"), { response: { status: 400, data: { code: 200740 } } });
     const stream = vi.fn(async () => { throw permanent; });
     const replyText = vi.fn(async () => ({ messageId: "text-1" }));
@@ -196,10 +196,9 @@ describe("Lark channel publisher", () => {
       { id: "content-1", state: "dead_letter" }, { id: "content-2", state: "dismissed" }
     ]);
     await convergence;
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_card_create", promptId: "p1" })]);
-    expect(store.listAnswerPages("p1")).toMatchObject([
-      { pageIndex: 0, sourceStart: 0, state: "frozen" }, { pageIndex: 1, sourceStart: 0, state: "creating" }
-    ]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.listAnswerPages("p1")).toMatchObject([{ pageIndex: 0, sourceStart: 0, state: "active" }]);
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'content-1'").get()).toEqual({ state: "released", action: "rebuild_answer" });
     await publisher.stop();
     store.close();
   });
@@ -299,7 +298,7 @@ describe("Lark channel publisher", () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       store.markOutboundReplyFailedWithQuarantine(failedCreate.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
     }
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], dismissedNotices: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0 });
 
     const create = vi.fn(async () => ({ messageId: "answer-13", cardId: "cardkit-13" }));
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
@@ -320,6 +319,19 @@ describe("Lark channel publisher", () => {
       content: renderAnswerStreamPage(answerStreamContent(store.loadRunCard("p1")!), 109_267).page
     });
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(0);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine(content.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
+    }
+    await workflow.converge("p1");
+
+    expect(store.listAnswerPages("p1")).toEqual([
+      expect.objectContaining({ pageIndex: 0, state: "frozen" }),
+      expect.objectContaining({ pageIndex: 12, state: "frozen" }),
+      expect.objectContaining({ pageIndex: 13, sourceStart: 109_267, state: "active", messageId: "answer-13", cardId: "cardkit-13" })
+    ]);
+    expect(store.listPendingOutboundReplies().some((reply) => reply.kind === "stream_card_create")).toBe(false);
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = ?").get(content.id)).toEqual({ state: "dead_letter" });
     await publisher.stop();
     store.close();
   });

@@ -13,7 +13,7 @@ const config = {
 describe("StartupViewConverger", () => {
   it("recovers stale outbox quarantines before projecting views and wakes delivery", async () => {
     const store = new SqliteBindingStore(":memory:");
-    const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], dismissedNotices: 1 });
+    const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 1 });
     const wake = vi.fn();
 
     await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake, subscribe: () => () => {} }).converge();
