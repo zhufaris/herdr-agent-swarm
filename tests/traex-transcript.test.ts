@@ -196,7 +196,7 @@ describe("TraexTranscriptReader", () => {
       result
     ]));
     const resultOutput = await cursor.readDelta();
-    expect(resultOutput).toBe("✓ Command · `command`");
+    expect(resultOutput).toBe("");
     expect(resultOutput).not.toContain("fixture output");
     expect(resultOutput).not.toMatch(/unmatched output|malformed output|missing identity output/);
     await expect(cursor.readDelta()).resolves.toBe("");
@@ -211,7 +211,7 @@ describe("TraexTranscriptReader", () => {
     const output = await cursor.readDelta();
     expect(output).toContain("Typed answer");
     expect(output).not.toContain("▶ Command");
-    expect(output).toContain("✓ Command · `command`");
+    expect(output).not.toContain("Command · command");
     expect(output).not.toMatch(/opaque orchestration|fixture output/);
   });
 
@@ -282,20 +282,39 @@ describe("TraexTranscriptReader", () => {
 
     await expect(cursor.readDelta()).resolves.toBe("");
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-" + field, call_id: "call-" + field, output: "Script completed" }]));
-    await expect(cursor.readDelta()).resolves.toBe("✓ Command · `npm test`");
+    await expect(cursor.readDelta()).resolves.toBe("```bash\nnpm test\n```");
   });
 
-  it("suppresses repeated internal wait results for the same call", async () => {
+  it("renders a wrapped command and JSON result as fenced Answer Card Markdown", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{
+      type: "function_call", id: "fc-wrapper", call_id: "call-wrapper", name: "exec",
+      arguments: JSON.stringify({ input: 'const r = await tools.exec_command({cmd: "npm test"}); text(r.output);' })
+    }]));
+    await expect(cursor.readDelta()).resolves.toBe("");
+
+    await appendFile(path, mutation([{
+      type: "function_call_output", id: "fco-wrapper", call_id: "call-wrapper",
+      output: JSON.stringify({ exit_code: 0, output: "Test Files 1 passed\nTests 2 passed" })
+    }]));
+    await expect(cursor.readDelta()).resolves.toBe([
+      "```bash", "npm test", "```", "", "```text",
+      "Test Files 1 passed", "Tests 2 passed", "```"
+    ].join("\n"));
+  });
+
+  it("renders repeated internal wait checkpoints without exposing output", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-running", call_id: "call-running", name: "write_stdin", arguments: JSON.stringify({ session_id: 263 }) }]));
     await expect(cursor.readDelta()).resolves.toBe("");
 
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-running", call_id: "call-running", output: JSON.stringify({ session_id: 263, output: "private partial output" }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("");
+    await expect(cursor.readDelta()).resolves.toBe("… 等待命令完成 · session 263");
 
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-complete", call_id: "call-running", output: JSON.stringify({ exit_code: 0, output: "private final output" }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("");
+    await expect(cursor.readDelta()).resolves.toBe("✓ 等待完成 · session 263");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {

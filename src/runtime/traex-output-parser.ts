@@ -32,7 +32,7 @@ export function inferTraexAgentState(output: string): AgentState {
   if (hasTraexComposerReady(tail)) return "idle";
   const tailText = tail.join("\n");
   if (/(?:Approve (?:command|action)?|approval required|waiting for (?:approval|user))/i.test(tailText)) return "blocked";
-  if (/[✧◆]\s*Work(?:ing|i…)|\bAuto Mode\b.*\bactive turn\b/iu.test(tailText)) return "working";
+  if (/[✧◆]\s*Work(?:ing|i…)|^\s*◈[^\n]*\([^\n)]*\besc to interrupt\b[^\n)]*\)|\bAuto Mode\b.*\bactive turn\b/imu.test(tailText)) return "working";
   return "unknown";
 }
 

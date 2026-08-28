@@ -175,8 +175,8 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
-    const pane = await this.getPane(paneId);
-    if (!pane || (pane.agentState !== "working" && pane.agentState !== "blocked")) return "not_working";
+    const runtime = await this.observeRuntime(paneId);
+    if (!runtime.pane || (runtime.pane.agentState !== "working" && runtime.pane.agentState !== "blocked")) return "not_working";
     const before = await this.readOutput(paneId, 240);
     await this.submitPromptText(paneId, text, before);
     return "injected";

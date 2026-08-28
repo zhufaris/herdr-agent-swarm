@@ -13,6 +13,7 @@ export interface ProjectedToolCall {
 
 const TARGET_LIMIT = 160;
 const FAILURE_DETAIL_LIMIT = 4_000;
+const COMMAND_OUTPUT_LIMIT = 4_000;
 const FAILURE_LINE_LIMIT = 20;
 const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s"']+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
@@ -29,8 +30,11 @@ export function projectToolCall(name: string, argumentsJson: string): ProjectedT
 export function projectToolResult(descriptor: ToolActivityDescriptor, output: unknown): string {
   const normalized = normalizeOutput(output);
   const status = explicitStatus(output, normalized);
+  if (descriptor.category === "Command" && !descriptor.target) return "";
+  if (descriptor.category === "Command") return renderCommandResult(descriptor, output, normalized, status);
   if (descriptor.category === "Wait") {
-    if (status.kind !== "failed") return "";
+    if (status.kind === "running") return "… 等待命令完成 · " + descriptor.target;
+    if (status.kind === "success") return "✓ 等待完成 · " + descriptor.target;
     return renderFailure("✗ 等待后台任务完成 · " + status.summary, normalized);
   }
   const target = renderTarget(descriptor);
@@ -75,7 +79,7 @@ function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
     return descriptor("Edit", firstValue(record, ["path", "file", "filename"]) ?? name);
   }
   if (normalized === "exec_command" || normalized === "shell" || normalized === "bash" || normalized === "exec") {
-    return descriptor("Command", firstValue(record, ["cmd", "command"]) ?? "command");
+    return descriptor("Command", firstValue(record, ["cmd", "command"]) ?? "");
   }
   if (normalized === "wait" || normalized === "write_stdin" || normalized.includes("wait_agent")) {
     const session = firstValue(record, ["session_id", "cell_id", "target"]);
@@ -88,7 +92,7 @@ function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
 }
 
 function descriptor(category: ToolActivityCategory, target: string): ToolActivityDescriptor {
-  return { category, target: boundTarget(target), skillNames: [] };
+  return { category, target: boundTarget(target, category !== "Command"), skillNames: [] };
 }
 
 function nestedToolCall(value: string): { name: string; arguments: unknown } | null {
@@ -140,12 +144,11 @@ function firstValue(record: Record<string, unknown> | null, keys: string[]): str
   return null;
 }
 
-function boundTarget(value: string): string {
-  const safe = redactToolActivitySecrets(value).replace(/[\r\n]+/g, " ")
+function boundTarget(value: string, escapeInlineMarkdown = true): string {
+  let safe = redactToolActivitySecrets(value).replace(/[\r\n]+/g, " ")
     .replace(/\b[A-Z][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)/g, (assignment) => assignment.slice(0, assignment.indexOf("=")) + "=[REDACTED]")
-    .replaceAll("\\", "\\\\")
-    .replaceAll(String.fromCharCode(96), "\\" + String.fromCharCode(96))
     .replace(/\s+/g, " ").trim();
+  if (escapeInlineMarkdown) safe = safe.replaceAll("\\", "\\\\").replaceAll(String.fromCharCode(96), "\\" + String.fromCharCode(96));
   return safe.length <= TARGET_LIMIT ? safe : safe.slice(0, TARGET_LIMIT - 1).trimEnd() + "…";
 }
 
@@ -171,6 +174,35 @@ function explicitStatus(output: unknown, normalized: string): { kind: "success" 
   if (/^Script failed\b/m.test(normalized)) return { kind: "failed", summary: "失败" };
   if (record && (record.session_id !== undefined || record.cell_id !== undefined) && record.exit_code === undefined) return { kind: "running", summary: "仍在运行" };
   return { kind: "success", summary: "成功" };
+}
+
+function renderCommandResult(descriptor: ToolActivityDescriptor, output: unknown, normalized: string, status: ReturnType<typeof explicitStatus>): string {
+  const command = fence("bash", descriptor.target);
+  if (status.kind === "running") return `… Command · 运行中\n\n${command}`;
+  if (status.kind === "failed") {
+    const heading = `✗ Command · ${status.summary}`;
+    return renderBoundedCommandBlocks([heading, command], failureTail(normalized));
+  }
+  return renderBoundedCommandBlocks([command], commandOutput(output, normalized));
+}
+
+function commandOutput(output: unknown, normalized: string): string {
+  const parsed = typeof output === "string" ? parseArguments(output) : output;
+  const record = asRecord(parsed);
+  const source = typeof record?.output === "string" ? record.output.trim() : normalized;
+  const cleaned = redactToolActivitySecrets(source).split("\n").map((line) => line.trimEnd())
+    .filter((line) => !/^(?:Script completed|Wall time\b.*|Output:)$/i.test(line.trim()))
+    .join("\n").trim();
+  return cleaned;
+}
+
+function renderBoundedCommandBlocks(parts: string[], detail: string): string {
+  const prefix = parts.join("\n\n");
+  if (!detail) return prefix;
+  const opening = "\n\n```text\n";
+  const closing = "\n```";
+  const room = Math.max(0, COMMAND_OUTPUT_LIMIT - prefix.length - opening.length - closing.length);
+  return prefix + opening + detail.slice(-room) + closing;
 }
 
 function successSummary(descriptor: ToolActivityDescriptor, output: string): string {

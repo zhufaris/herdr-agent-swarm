@@ -36,16 +36,16 @@ describe("tool activity projector", () => {
     expect(projected.descriptor.target).not.toMatch(/top-secret|query-secret/);
   });
 
-  it("neutralizes embedded backticks inside a command target", () => {
+  it("preserves shell backticks inside the fenced command", () => {
     const projected = projectToolCall("exec_command", JSON.stringify({ cmd: "echo `date`" }));
 
-    expect(projectToolResult(projected.descriptor, "Script completed")).toBe("✓ Command · `echo \\`date\\``");
+    expect(projectToolResult(projected.descriptor, "Script completed")).toBe("```bash\necho `date`\n```");
   });
 
-  it("uses a neutral command target when an exec wrapper cannot be inspected", () => {
+  it("suppresses an exec wrapper when its command cannot be inspected", () => {
     const { descriptor } = projectToolCall("exec", JSON.stringify({ input: "opaque orchestration" }));
 
-    expect(projectToolResult(descriptor, "Script completed")).toBe("✓ Command · `command`");
+    expect(projectToolResult(descriptor, "Script completed")).toBe("");
   });
 
   it.each([
@@ -61,12 +61,13 @@ describe("tool activity projector", () => {
   });
 
   it.each([
-    ["write_stdin", { session_id: 263 }],
-    ["wait", { cell_id: "296" }]
-  ])("suppresses successful internal wait results for %s", (name, args) => {
+    ["write_stdin", { session_id: 263 }, "session 263"],
+    ["wait", { cell_id: "296" }, "session 296"]
+  ])("keeps visible wait checkpoints for %s", (name, args, target) => {
     const { descriptor } = projectToolCall(name, JSON.stringify(args));
 
-    expect(projectToolResult(descriptor, JSON.stringify({ exit_code: 0 }))).toBe("");
+    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 263, output: "private partial output" }))).toBe(`… 等待命令完成 · ${target}`);
+    expect(projectToolResult(descriptor, JSON.stringify({ exit_code: 0, output: "private final output" }))).toBe(`✓ 等待完成 · ${target}`);
   });
 
   it("renders one semantic redacted fallback for a failed wait", () => {
@@ -89,20 +90,23 @@ describe("tool activity projector", () => {
     expect(JSON.stringify(projected.descriptor)).not.toContain("SKILL.md");
   });
 
-  it("summarizes successful command output without retaining stdout", () => {
+  it("renders a successful command and its output as fenced Markdown", () => {
     const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
     const output = [
       "Script completed", "Wall time 6.8 seconds", "Output:", "private test log",
       "Test Files  69 passed (69)", "Tests  662 passed (662)"
     ].join("\n");
 
-    expect(projectToolResult(descriptor, output)).toBe("✓ Command · `npm test` · 69 files / 662 tests passed");
+    expect(projectToolResult(descriptor, output)).toBe([
+      "```bash", "npm test", "```", "", "```text", "private test log",
+      "Test Files  69 passed (69)", "Tests  662 passed (662)", "```"
+    ].join("\n"));
   });
 
   it("renders an explicit running result without retaining payload", () => {
     const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
 
-    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 42, output: "private partial output" }))).toBe("… Command · `npm test` · 运行中");
+    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 42, output: "private partial output" }))).toBe("… Command · 运行中\n\n```bash\nnpm test\n```");
   });
 
   it("retains only a bounded redacted failure tail", () => {
@@ -112,7 +116,7 @@ describe("tool activity projector", () => {
     const output = ["Script failed", "Process exited with code 2", ...lines].join("\n");
     const result = projectToolResult(descriptor, output);
 
-    expect(result).toContain("✗ Command · `npm test` · exit 2");
+    expect(result).toContain("✗ Command · exit 2\n\n```bash\nnpm test\n```");
     expect(result).not.toContain("failure-10\n");
     expect(result).toContain("failure-11");
     expect(result).toContain("TOKEN=[REDACTED]");

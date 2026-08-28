@@ -886,6 +886,26 @@ describe("Herdr adapter", () => {
     expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "change course while blocked"]);
   });
 
+  it("steers when structured state is unknown but the live terminal shows an active turn", async () => {
+    const calls: string[][] = [];
+    const active = "◈ Organizing test procedures (1m 21s • ↑ 2.62K tokens • esc to interrupt)\nGPT-5.6-Sol · Context 78% left · Auto Mode";
+    const outputs = [active, active, `${active}\n❯ add a focused regression test`];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? `${active}\n❯ add a focused regression test`, stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "add a focused regression test"))
+      .resolves.toBe("injected");
+    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "add a focused regression test"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+  });
+
   it("sends Esc directly without requiring named-agent working state", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) { calls.push(args); return { stdout: "", stderr: "" }; } };
