@@ -48,9 +48,9 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const standalone = Boolean(environment.SOLO_AGENT_ROOT);
   const root = requiredDirectory(environment.SOLO_AGENT_ROOT || environment.HERDR_PLUGIN_ROOT, standalone ? "SOLO_AGENT_ROOT" : "HERDR_PLUGIN_ROOT");
-  const configDirectory = requiredDirectory(environment.SOLO_AGENT_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || (standalone ? `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/solo-agent` : undefined), standalone ? "SOLO_AGENT_CONFIG_DIR" : "HERDR_PLUGIN_CONFIG_DIR", false);
-  const stateDirectory = requiredDirectory(environment.SOLO_AGENT_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || (standalone ? `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/solo-agent` : undefined), standalone ? "SOLO_AGENT_STATE_DIR" : "HERDR_PLUGIN_STATE_DIR", false);
-  const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || "herdr-lark-bridge.service";
+  const configDirectory = requiredDirectory(environment.SOLO_AGENT_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || (standalone ? `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm` : undefined), standalone ? "SOLO_AGENT_CONFIG_DIR" : "HERDR_PLUGIN_CONFIG_DIR", false);
+  const stateDirectory = requiredDirectory(environment.SOLO_AGENT_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || (standalone ? `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm` : undefined), standalone ? "SOLO_AGENT_STATE_DIR" : "HERDR_PLUGIN_STATE_DIR", false);
+  const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || (standalone ? "herdr-agent-swarm.service" : "herdr-lark-bridge.service");
   if (!/^[A-Za-z0-9_.@-]+\.service$/.test(serviceName)) throw new Error(`invalid systemd service name: ${serviceName}`);
   const unitDirectory = resolve(environment.BRIDGE_SYSTEMD_UNIT_DIR || `${homedir()}/.config/systemd/user`);
   return {
@@ -108,7 +108,7 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
   const standalone = Boolean(environment.SOLO_AGENT_ROOT);
   return [
     "[Unit]",
-    "Description=Herdr Lark Bridge",
+    `Description=${standalone ? "Herdr Agent Swarm" : "Herdr Lark Bridge"}`,
     "After=network-online.target",
     "Wants=network-online.target",
     "",

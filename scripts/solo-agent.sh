@@ -3,16 +3,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ACTION="${1:-}"
-CONFIG_DIR="${SOLO_AGENT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/solo-agent}"
-STATE_DIR="${SOLO_AGENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/solo-agent}"
-SERVICE_NAME="${BRIDGE_SYSTEMD_SERVICE_NAME:-solo-agent.service}"
+CONFIG_DIR="${SOLO_AGENT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
+STATE_DIR="${SOLO_AGENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
+SERVICE_NAME="${BRIDGE_SYSTEMD_SERVICE_NAME:-herdr-agent-swarm.service}"
 
 case "$ACTION" in
   init)
     install -d -m 700 "$CONFIG_DIR" "$STATE_DIR"
     if [ ! -e "$CONFIG_DIR/.env" ]; then install -m 600 "$ROOT/.env.example" "$CONFIG_DIR/.env"; fi
     if [ ! -e "$CONFIG_DIR/projects.json" ]; then install -m 600 "$ROOT/config/projects.example.json" "$CONFIG_DIR/projects.json"; fi
-    printf 'Created private standalone configuration in %s\nEdit .env and projects.json, then run: npm run solo:install\n' "$CONFIG_DIR"
+    printf 'Created private Herdr Agent Swarm configuration in %s\nEdit .env and projects.json, then run: npm run solo:install\n' "$CONFIG_DIR"
     exit 0
     ;;
   install|uninstall|start|status|restart|stop|logs) ;;
