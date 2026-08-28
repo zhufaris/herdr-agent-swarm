@@ -14,7 +14,7 @@ Before invoking `systemctl --user restart`, the lifecycle CLI reads the configur
 
 The CLI accepts `--force` only for `restart`. Forced restart preserves the existing shutdown behavior: an in-flight observer is detached, the prompt is not replayed, and startup recovery observes the existing TraeX turn before allowing later FIFO work to run. Start, stop, install, status, logs, and uninstall behavior remain unchanged.
 
-If `/status` is unreachable, malformed, or belongs to a different service/build, the preflight does not invent activity state. The restart continues because an unavailable or stale process may be the reason the operator requested restart. The post-restart identity and readiness checks remain authoritative.
+If `/status` is unreachable, malformed, or belongs to a different service, the preflight does not invent activity state. The restart continues because an unavailable or stale process may be the reason the operator requested restart. A build mismatch does not bypass the guard: the currently running build is normally older during deployment, while `serviceId` still establishes that its active-work counters belong to this service. The post-restart build identity and readiness checks remain authoritative.
 
 ## Latency diagnostics
 
@@ -23,10 +23,10 @@ If `/status` is unreachable, malformed, or belongs to a different service/build,
 - the sample count and window size;
 - queue latency from prompt creation to Run Card start;
 - execution latency from Run Card start to finish;
-- completion latency from Run Card finish to its final durable update;
+- delivery latency from Run Card finish to successful Answer stream finalization in the Lark outbox;
 - average and maximum milliseconds for each phase.
 
-Only prompts with the timestamps required for a phase contribute to that phase. Empty phases report a zero sample count and `null` averages/maxima. Calculations use SQLite timestamps and expose no prompt text, Lark payload, user identity, or secret. A fixed recent-record limit keeps `/status` inexpensive regardless of database history.
+Only prompts with the timestamps required for a phase contribute to that phase. Empty phases report a zero sample count and `null` averages/maxima. Delivery uses the first successfully delivered `stream_finish` row at or after the Run Card finish time. Calculations use SQLite timestamps and expose no prompt text, Lark payload, user identity, or secret. A fixed recent-record limit keeps `/status` inexpensive regardless of database history.
 
 `/status` returns the new data inside the existing `operational` object. It remains diagnostic: high latency alone does not make `/ready` fail or change service health. Existing prompt counts and outbox diagnostics remain unchanged.
 

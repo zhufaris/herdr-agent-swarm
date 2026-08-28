@@ -507,6 +507,44 @@ describe("SQLite store", () => {
     expect(serialized).not.toContain("private card payload");
   });
 
+  it("summarizes bounded prompt latency without exposing prompt content", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    for (const id of ["completed", "failed", "running"]) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: `private ${id}`, queuePosition: 1, occurredAt: "2026-08-28T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: `private ${id}` }, view, rootMessageId: "m1", answerCard: {} });
+    }
+    store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', created_at = '2026-08-28T00:00:00.000Z' WHERE id = 'completed'").run();
+    store.database.prepare("UPDATE run_cards SET started_at = '2026-08-28T00:00:02.000Z', finished_at = '2026-08-28T00:00:12.000Z', updated_at = '2026-08-28T00:00:15.000Z' WHERE prompt_id = 'completed'").run();
+    store.enqueueOutboundReply({ id: "finish-completed", idempotencyKey: "finish-completed", bindingId: "b1", promptId: "completed", rootMessageId: "m1", kind: "stream_finish", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered', updated_at = '2026-08-28T00:00:15.000Z' WHERE id = 'finish-completed'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'failed', created_at = '2026-08-28T00:01:00.000Z' WHERE id = 'failed'").run();
+    store.database.prepare("UPDATE run_cards SET started_at = '2026-08-28T00:01:04.000Z', finished_at = '2026-08-28T00:01:10.000Z', updated_at = '2026-08-28T00:01:11.000Z' WHERE prompt_id = 'failed'").run();
+    store.enqueueOutboundReply({ id: "finish-failed", idempotencyKey: "finish-failed", bindingId: "b1", promptId: "failed", rootMessageId: "m1", kind: "stream_finish", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered', updated_at = '2026-08-28T00:01:11.000Z' WHERE id = 'finish-failed'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', created_at = '2026-08-28T00:02:00.000Z' WHERE id = 'running'").run();
+    store.database.prepare("UPDATE run_cards SET started_at = '2026-08-28T00:02:01.000Z', finished_at = NULL WHERE prompt_id = 'running'").run();
+
+    const summary = store.getOperationalSummary();
+    expect(summary.promptLatency).toEqual({
+      windowSize: 100, sampleCount: 2,
+      queue: { sampleCount: 2, averageMs: 3000, maxMs: 4000 },
+      execution: { sampleCount: 2, averageMs: 8000, maxMs: 10000 },
+      delivery: { sampleCount: 2, averageMs: 2000, maxMs: 3000 }
+    });
+    expect(JSON.stringify(summary.promptLatency)).not.toContain("private");
+  });
+
+  it("reports empty prompt latency phases without synthetic zero durations", () => {
+    store = new SqliteBindingStore(":memory:");
+    expect(store.getOperationalSummary().promptLatency).toEqual({
+      windowSize: 100, sampleCount: 0,
+      queue: { sampleCount: 0, averageMs: null, maxMs: null },
+      execution: { sampleCount: 0, averageMs: null, maxMs: null },
+      delivery: { sampleCount: 0, averageMs: null, maxMs: null }
+    });
+  });
+
   it("reports bounded quarantine and stalled-lane diagnostics without payload data", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-26T00:10:00.000Z"));

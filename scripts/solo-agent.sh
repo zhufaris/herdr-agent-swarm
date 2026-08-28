@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ACTION="${1:-}"
+FORCE="${2:-}"
 CONFIG_DIR="${SOLO_AGENT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
 STATE_DIR="${SOLO_AGENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
 SERVICE_NAME="${BRIDGE_SYSTEMD_SERVICE_NAME:-herdr-agent-swarm.service}"
@@ -16,11 +17,17 @@ case "$ACTION" in
     exit 0
     ;;
   install|uninstall|start|status|restart|stop|logs) ;;
-  *) printf 'usage: %s <init|install|uninstall|start|status|restart|stop|logs>\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s <init|install|uninstall|start|status|restart|stop|logs> [--force for restart]\n' "$0" >&2; exit 2 ;;
 esac
+if { [ -n "$FORCE" ] && { [ "$ACTION" != "restart" ] || [ "$FORCE" != "--force" ]; }; } || [ "$#" -gt 2 ]; then
+  printf 'usage: %s <init|install|uninstall|start|status|restart|stop|logs> [--force for restart]\n' "$0" >&2
+  exit 2
+fi
 
 export SOLO_AGENT_ROOT="$ROOT"
 export SOLO_AGENT_CONFIG_DIR="$CONFIG_DIR"
 export SOLO_AGENT_STATE_DIR="$STATE_DIR"
 export BRIDGE_SYSTEMD_SERVICE_NAME="$SERVICE_NAME"
-exec node "$ROOT/dist/cli/plugin-lifecycle.js" "$ACTION"
+args=("$ROOT/dist/cli/plugin-lifecycle.js" "$ACTION")
+if [ -n "$FORCE" ]; then args+=("$FORCE"); fi
+exec node "${args[@]}"

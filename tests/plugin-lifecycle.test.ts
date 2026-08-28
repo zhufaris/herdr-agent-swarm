@@ -75,6 +75,84 @@ describe("plugin lifecycle", () => {
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block test-bridge.service");
   });
 
+  it("refuses an unforced restart while the running service reports active turns", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/status") {
+        response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:old-build" }, operational: { prompts: { running: 2, queued: 3 } } }));
+        return;
+      }
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", buildId: "sha256:test-build" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      writeFileSync(fixture.calls, "");
+      await expect(runPluginLifecycle("restart", fixture.environment)).rejects.toThrow(/2 running.*3 queued.*unknown active.*--force/);
+      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("refuses restart when an active worker remains after durable running work clears", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { running: 0, queued: 1 } }, promptWorker: { activeTurnWorkers: 1 } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", fixture.environment)).rejects.toThrow(/0 running.*1 queued.*1 active/);
+      expect(readFileSync(fixture.calls, "utf8")).not.toContain("restart --no-block");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("allows restart when status is unavailable or belongs to another service", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", buildId: "sha256:test-build", identity: { serviceId: "another-service" }, operational: { prompts: { running: 9, queued: 9 } }, promptWorker: { activeTurnWorkers: 9 } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+
+    const unavailable = createFixture({ port: 1 });
+    await runPluginLifecycle("install", unavailable.environment);
+    await expect(runPluginLifecycle("restart", { ...unavailable.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "50" })).rejects.toThrow(/did not become active/);
+    expect(readFileSync(unavailable.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+  });
+
+  it("rejects force for lifecycle actions other than restart", async () => {
+    const fixture = createFixture();
+    await expect(runPluginLifecycle("start", fixture.environment, { force: true })).rejects.toThrow(/only for restart/);
+  });
+
+  it("allows a forced restart while active turns are reported", async () => {
+    let healthRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/status") {
+        response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { running: 1, queued: 4 } }, promptWorker: { activeTurnWorkers: 1 } }));
+        return;
+      }
+      healthRequests += 1;
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" }, { force: true })).resolves.toBe(0);
+      expect(healthRequests).toBeGreaterThanOrEqual(2);
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it("waits for two matching health observations after a non-blocking restart", async () => {
     let healthRequests = 0;
     const server = createServer((_request, response) => {

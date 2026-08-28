@@ -1903,6 +1903,7 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   getOperationalSummary(): OperationalSummary {
+    const promptLatencyWindowSize = 100;
     const observedAt = now();
     const stalledBefore = new Date(Date.parse(observedAt) - 300_000).toISOString();
     const groupedCounts = <T extends string>(table: string, column: string, values: readonly T[]): Record<T, number> => {
@@ -1913,6 +1914,27 @@ export class SqliteBindingStore implements BindingStorePort {
     };
     const recentFailedPrompt = this.database.prepare("SELECT id, binding_id, updated_at, error FROM prompt_jobs WHERE state = 'failed' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string; updated_at: string; error: string | null } | undefined;
     const recentDeadLetter = this.database.prepare("SELECT id, binding_id, prompt_id, attempt_count, updated_at, error FROM outbound_replies WHERE state = 'dead_letter' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
+    const promptLatency = this.database.prepare(`
+      WITH recent AS (
+        SELECT p.created_at, r.started_at, r.finished_at, (
+          SELECT MIN(o.updated_at) FROM outbound_replies o
+          WHERE o.prompt_id = p.id AND o.kind = 'stream_finish' AND o.state = 'delivered' AND o.updated_at >= r.finished_at
+        ) AS delivered_at
+        FROM prompt_jobs p JOIN run_cards r ON r.prompt_id = p.id
+        WHERE p.state IN ('delivered', 'failed', 'cancelled') AND r.finished_at IS NOT NULL
+        ORDER BY r.finished_at DESC, p.rowid DESC LIMIT ${promptLatencyWindowSize}
+      )
+      SELECT COUNT(*) AS sample_count,
+        COUNT(started_at) AS queue_count, ROUND(AVG(MAX(0, (julianday(started_at) - julianday(created_at)) * 86400000))) AS queue_average_ms, ROUND(MAX(MAX(0, (julianday(started_at) - julianday(created_at)) * 86400000))) AS queue_max_ms,
+        COUNT(CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL THEN 1 END) AS execution_count, ROUND(AVG(CASE WHEN started_at IS NOT NULL THEN MAX(0, (julianday(finished_at) - julianday(started_at)) * 86400000) END)) AS execution_average_ms, ROUND(MAX(CASE WHEN started_at IS NOT NULL THEN MAX(0, (julianday(finished_at) - julianday(started_at)) * 86400000) END)) AS execution_max_ms,
+        COUNT(delivered_at) AS delivery_count, ROUND(AVG(CASE WHEN delivered_at IS NOT NULL THEN MAX(0, (julianday(delivered_at) - julianday(finished_at)) * 86400000) END)) AS delivery_average_ms, ROUND(MAX(CASE WHEN delivered_at IS NOT NULL THEN MAX(0, (julianday(delivered_at) - julianday(finished_at)) * 86400000) END)) AS delivery_max_ms
+      FROM recent
+    `).get() as Record<string, number | null>;
+    const latencyPhase = (prefix: "queue" | "execution" | "delivery") => ({
+      sampleCount: Number(promptLatency[`${prefix}_count`] ?? 0),
+      averageMs: promptLatency[`${prefix}_average_ms`] === null ? null : Number(promptLatency[`${prefix}_average_ms`]),
+      maxMs: promptLatency[`${prefix}_max_ms`] === null ? null : Number(promptLatency[`${prefix}_max_ms`])
+    });
     const oldestPending = this.database.prepare("SELECT MIN(created_at) AS value FROM outbound_replies WHERE state = 'pending'").get() as { value: string | null };
     const laneHealth = this.database.prepare(`
       SELECT COUNT(*) AS pending,
@@ -1945,6 +1967,7 @@ export class SqliteBindingStore implements BindingStorePort {
       bindings: groupedCounts<BindingState>("bindings", "state", ["pending", "active", "archived", "orphaned", "failed"]),
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
       promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
+      promptLatency: { windowSize: promptLatencyWindowSize, sampleCount: Number(promptLatency.sample_count ?? 0), queue: latencyPhase("queue"), execution: latencyPhase("execution"), delivery: latencyPhase("delivery") },
       outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),

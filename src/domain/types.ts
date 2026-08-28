@@ -296,10 +296,25 @@ export interface AnswerPageDeliveryFacts {
 
 export type AnswerPageReservationOutcome = "reserved" | "waiting" | "stale";
 
+export interface PromptLatencyPhaseSummary {
+  sampleCount: number;
+  averageMs: number | null;
+  maxMs: number | null;
+}
+
+export interface PromptLatencySummary {
+  windowSize: number;
+  sampleCount: number;
+  queue: PromptLatencyPhaseSummary;
+  execution: PromptLatencyPhaseSummary;
+  delivery: PromptLatencyPhaseSummary;
+}
+
 export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;
   promptDispatch: Record<PromptDispatchKind, number>;
+  promptLatency: PromptLatencySummary;
   outbound: Record<OutboundReplyState, number>;
   pendingOutbox: number;
   deadLetters: number;

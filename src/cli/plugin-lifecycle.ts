@@ -8,6 +8,7 @@ import { readEnvironmentFile } from "../runtime/environment-file.js";
 import { BRIDGE_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
+interface LifecycleOptions { force?: boolean }
 
 interface RuntimePaths {
   root: string;
@@ -21,7 +22,8 @@ interface RuntimePaths {
   nodeExecutable: string;
 }
 
-export async function runPluginLifecycle(action: Action, environment: NodeJS.ProcessEnv = process.env): Promise<number> {
+export async function runPluginLifecycle(action: Action, environment: NodeJS.ProcessEnv = process.env, options: LifecycleOptions = {}): Promise<number> {
+  if (options.force && action !== "restart") throw new Error("--force is supported only for restart");
   const paths = runtimePaths(environment);
   mkdirSync(paths.configDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(paths.stateDirectory, { recursive: true, mode: 0o700 });
@@ -31,6 +33,7 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   if (action === "status") return printStatus(paths, environment);
 
   requireInstalled(paths);
+  if (action === "restart" && !options.force) await assertRestartSafe(paths, environment);
   if (action === "start" || action === "restart") {
     loadRuntimeEnvironment(paths, environment);
     atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), environment), 0o600);
@@ -43,6 +46,34 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
   return waitForHealth(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment));
+}
+
+async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<void> {
+  if (!isUnitActive(paths.serviceName, base)) return;
+  let status: unknown;
+  try {
+    const config = loadConfig(loadRuntimeEnvironment(paths, base));
+    status = await getJson(config.http.host, config.http.port, "/status", true);
+  } catch { return; }
+  const record = asRecord(status);
+  const identity = asRecord(record?.identity);
+  if (identity?.serviceId !== BRIDGE_SERVICE_ID) return;
+  const operational = asRecord(record?.operational);
+  const prompts = asRecord(operational?.prompts);
+  const promptWorker = asRecord(record?.promptWorker);
+  const running = nonNegativeInteger(prompts?.running);
+  const queued = nonNegativeInteger(prompts?.queued) ?? 0;
+  const activeWorkers = nonNegativeInteger(promptWorker?.activeTurnWorkers);
+  if (running === null && activeWorkers === null) return;
+  if ((running ?? 0) > 0 || (activeWorkers ?? 0) > 0) throw new Error(`restart blocked: ${running ?? "unknown"} running prompts, ${queued} queued prompts, ${activeWorkers ?? "unknown"} active turn workers; wait for active work to drain or retry with --force`);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
@@ -246,10 +277,11 @@ function getJson(host: string, port: number, path: string, acceptErrorStatus = f
 function safeMessage(error: unknown): string { return (error instanceof Error ? error.message : String(error)).slice(0, 500); }
 
 const action = process.argv[2] as Action | undefined;
+const flags = process.argv.slice(3);
 if (import.meta.url === `file://${process.argv[1]}`) {
-  if (!action || !["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action)) {
-    process.stderr.write("usage: plugin-lifecycle <install|uninstall|start|status|restart|stop|logs>\n"); process.exitCode = 2;
+  if (!action || !["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action) || flags.some((flag) => flag !== "--force") || flags.length > 1 || flags.includes("--force") && action !== "restart") {
+    process.stderr.write("usage: plugin-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart]\n"); process.exitCode = 2;
   } else {
-    runPluginLifecycle(action).then((code) => { process.exitCode = code; }).catch((error) => { process.stderr.write(`plugin lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 1; });
+    runPluginLifecycle(action, process.env, { force: flags.includes("--force") }).then((code) => { process.exitCode = code; }).catch((error) => { process.stderr.write(`plugin lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 1; });
   }
 }
