@@ -1009,10 +1009,26 @@ describe("SQLite store", () => {
 
     const transition = store.markOutboundReplyFailedWithQuarantine("content-2", "invalid sequence", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "200740" });
 
-    expect(transition).toMatchObject({ state: "dead_letter", action: "rebuild_answer", laneClass: "answer_stream", promptId: "p1" });
+    expect(transition).toMatchObject({ state: "dead_letter", action: "blocked", laneClass: "answer_stream", promptId: "p1" });
     expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([]);
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([]);
-    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0, byLaneClass: { answer_stream: 1 } } });
+  });
+
+  it("keeps an exhausted unknown Answer content failure quarantined without automatic recovery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
+    store.enqueueOutboundReply({ id: "content", idempotencyKey: "content", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "snapshot", sequence: 1 }) });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine("content", "unclassified rejection", { failureClass: "unknown", httpStatus: 400, larkErrorCode: null });
+    }
+
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0, byLaneClass: { answer_stream: 1 }, byFailureClass: { unknown: 1 } } });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0 });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
   it("keeps immutable successors quarantined until an operator retries the failed head", () => {
@@ -1174,24 +1190,58 @@ describe("SQLite store", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+    const canonicalAnswer = "x".repeat(130_000);
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: canonicalAnswer, answerSegments: [canonicalAnswer], viewVersion: 20 });
     store.database.prepare("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'").run();
     store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 13, 'answer-13', 'card-13', ?, 109267, 1, 'frozen', 'now', 'now')").run(answerElementId("p1", 13));
     store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 14, NULL, NULL, ?, 109267, 0, 'creating', 'now', 'now')").run(answerElementId("p1", 14));
     store.database.prepare("UPDATE run_cards SET answer_message_id = 'answer-13', answer_card_id = 'card-13', answer_element_id = ?, answer_page_index = 13, answer_page_start = 109267 WHERE prompt_id = 'p1'").run(answerElementId("p1", 13));
     store.enqueueOutboundReply({ id: "content-13", idempotencyKey: "stream:p1:card-13:1", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer", rootMessageId: "card-13", kind: "stream_content", payload: JSON.stringify({ pageIndex: 13, elementId: answerElementId("p1", 13), content: "canonical", sequence: 1 }) });
+    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = 'content-13'").run();
     store.markOutboundReplyDeadLetter("content-13", "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
     store.enqueueOutboundReply({ id: "rebuild-14", idempotencyKey: "stream-rebuild:p1:14", bindingId: "b1", promptId: "p1", viewVersion: 20, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: {}, stream: { pageIndex: 14, pageStart: 109267, elementId: answerElementId("p1", 14) } }) });
     store.markOutboundReplyFailedWithQuarantine("rebuild-14", "Answer continuation target mismatch for prompt p1", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
 
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: ["p1"], dismissedNotices: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: ["p1"], dismissedNotices: 0 });
     expect(store.listAnswerPages("p1")).toEqual([
       expect.objectContaining({ pageIndex: 0, state: "frozen" }),
       expect.objectContaining({ pageIndex: 13, sourceStart: 109267, state: "active", messageId: "answer-13", cardId: "card-13" })
     ]);
     expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = 'content-13'").get()).toEqual({ state: "dead_letter", error: "timeout" });
     expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = 'rebuild-14'").get()).toEqual({ state: "dismissed", error: "Answer continuation target mismatch for prompt p1" });
+    const replacement = store.listPendingOutboundReplies().find((reply) => reply.idempotencyKey === "startup-lite-content:content-13");
+    expect(replacement).toMatchObject({ kind: "stream_content", rootMessageId: "card-13", autoRecoveryCount: 2 });
+    expect(JSON.parse(replacement!.payload)).toMatchObject({ pageIndex: 13, elementId: answerElementId("p1", 13), sequence: 2, sourceEnd: expect.any(Number) });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'rebuild-14'").get()).toEqual({ state: "released", action: "startup_rollback" });
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(0);
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0 });
+  });
+
+  it("replaces an exhausted active-page content update with one bounded canonical chunk", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+    const canonicalAnswer = "x".repeat(12_000);
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: canonicalAnswer, answerSegments: [canonicalAnswer], viewVersion: 3 });
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-0", elementId: answerElementId("p1", 0), content: canonicalAnswer })).toBe("reserved");
+    const failed = store.listPendingOutboundReplies()[0]!;
+    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(failed.id);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine(failed.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
+    }
+
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0 });
+    const replacement = store.listPendingOutboundReplies()[0]!;
+    const payload = JSON.parse(replacement.payload) as { content: string; sourceEnd: number; sequence: number };
+    expect(replacement).toMatchObject({ idempotencyKey: `startup-lite-content:${failed.id}`, kind: "stream_content", autoRecoveryCount: 2 });
+    expect(payload.content.length).toBeLessThanOrEqual(4_000);
+    expect(payload.sourceEnd).toBeGreaterThan(0);
+    expect(payload.sourceEnd).toBeLessThan(canonicalAnswer.length);
+    expect(payload.sequence).toBe(2);
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failed.id)).toEqual({ state: "released", action: "startup_rebuild" });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0 });
   });
 
   it("dismisses stale disconnected-topic notices but preserves unrelated immutable quarantines", () => {

@@ -190,15 +190,14 @@ describe("Lark channel publisher", () => {
 
     expect(stream).toHaveBeenCalledTimes(1);
     expect(replyText).toHaveBeenCalledTimes(1);
-    expect(checkpoint).toHaveBeenCalledTimes(1);
-    expect(checkpoint).toHaveBeenCalledWith("p1", 1);
+    expect(checkpoint).not.toHaveBeenCalled();
     expect(store.database.prepare("SELECT id, state FROM outbound_replies WHERE id IN ('content-1','content-2') ORDER BY delivery_order").all()).toEqual([
       { id: "content-1", state: "dead_letter" }, { id: "content-2", state: "dismissed" }
     ]);
     await convergence;
     expect(store.listPendingOutboundReplies()).toEqual([]);
     expect(store.listAnswerPages("p1")).toMatchObject([{ pageIndex: 0, sourceStart: 0, state: "active" }]);
-    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'content-1'").get()).toEqual({ state: "released", action: "rebuild_answer" });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'content-1'").get()).toEqual({ state: "active", action: "blocked" });
     await publisher.stop();
     store.close();
   });

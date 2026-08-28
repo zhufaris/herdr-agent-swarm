@@ -36,6 +36,21 @@ describe("answer page planner", () => {
     expect(planAnswerPage(view, page, { latestContent: { content: "partial", sequence: 2, state: "dead_letter" }, finishPending: false, continuationPending: false })).toEqual({ type: "wait" });
   });
 
+  it("continues from the persisted source end of a delivered recovery chunk", () => {
+    const { view, page } = fixture("canonical answer continues");
+    expect(planAnswerPage(view, page, { latestContent: { content: "canonical", sequence: 2, state: "delivered", sourceEnd: 9 }, finishPending: false, continuationPending: false })).toMatchObject({
+      type: "continue", nextPageIndex: 1, nextPageStart: 9, nextElementId: answerElementId("p1", 1)
+    });
+  });
+
+  it("finishes in place when a delivered recovery chunk reaches canonical EOF", () => {
+    const { view, page } = fixture("canonical answer", "completed");
+    const content = answerStreamContent(view);
+
+    expect(planAnswerPage(view, page, { latestContent: { content, sequence: 2, state: "delivered", sourceEnd: content.length }, finishPending: false, continuationPending: false }))
+      .toEqual({ type: "finish-terminal", summary: "Completed" });
+  });
+
   it("does not enqueue empty content when a running answer shrinks before a continuation offset", () => {
     const { view, page } = fixture("short transient redraw");
     const continuation = { ...page, pageIndex: 2, sourceStart: answerStreamContent(view).length + 20, elementId: answerElementId("p1", 2) };

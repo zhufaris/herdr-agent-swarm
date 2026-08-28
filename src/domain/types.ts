@@ -276,7 +276,7 @@ export interface AnswerPage {
 }
 
 export interface AnswerPageDeliveryFacts {
-  latestContent: { content: string; sequence: number; state: OutboundReplyState } | null;
+  latestContent: { content: string; sequence: number; state: OutboundReplyState; sourceEnd?: number | null } | null;
   finishPending: boolean;
   continuationPending: boolean;
 }

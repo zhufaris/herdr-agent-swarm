@@ -17,6 +17,21 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
   if (facts.continuationPending) return { type: "wait" };
   if (facts.latestContent?.state === "pending") return { type: "wait" };
   if (facts.latestContent?.state === "dead_letter") return { type: "wait" };
+  if (typeof facts.latestContent?.sourceEnd === "number" && facts.latestContent.sourceEnd > page.sourceStart) {
+    if (facts.latestContent.sourceEnd >= content.length) {
+      if (view.phase === "completed" || view.phase === "failed") {
+        if (facts.finishPending) return { type: "wait" };
+        return { type: "finish-terminal", summary: view.phase === "completed" ? "Completed" : "Failed" };
+      }
+      return { type: "wait" };
+    }
+    const nextPageIndex = page.pageIndex + 1;
+    return {
+      type: "continue", currentSummary: `回答将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex,
+      nextPageStart: facts.latestContent.sourceEnd, nextElementId: answerElementId(view.promptId, nextPageIndex),
+      initialContent: renderAnswerStreamPage(content, facts.latestContent.sourceEnd, ANSWER_STREAM_PAGE_LIMIT).page
+    };
+  }
   if (!rendered.page) {
     if (view.phase === "completed" || view.phase === "failed") {
       if (facts.finishPending) return { type: "wait" };

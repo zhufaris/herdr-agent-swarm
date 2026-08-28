@@ -2,6 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerStreamContent } from "../src/runtime/answer-stream.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 function readyStore(): SqliteBindingStore {
@@ -54,6 +55,48 @@ describe("AnswerPageWorkflow", () => {
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_finish", viewVersion: 2 })]);
     expect(store.getActiveAnswerPage("p1")?.sequence).toBe(2);
     expect(wake).toHaveBeenCalledOnce();
+    store.close();
+  });
+
+  it("finishes a delivered recovery chunk at canonical EOF without creating an empty page", async () => {
+    const store = readyStore();
+    const completed = store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "done", answerSegments: ["done"], viewVersion: 2 });
+    const content = answerStreamContent(completed);
+    store.enqueueOutboundReply({
+      id: "recovery-content", idempotencyKey: "startup-lite-content:failed-content", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer",
+      rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: store.getActiveAnswerPage("p1")!.elementId, content, sequence: 1, sourceEnd: content.length })
+    });
+    store.markOutboundReplyDelivered("recovery-content", "card-1");
+
+    await new AnswerPageWorkflow(store, vi.fn()).converge("p1");
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_finish", viewVersion: 2 })]);
+    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "active" })]);
+    store.close();
+  });
+
+  it("continues exactly from a delivered recovery chunk source end", async () => {
+    const store = readyStore();
+    const answer = "x".repeat(12_000);
+    const completed = store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
+    const content = answerStreamContent(completed);
+    const sourceEnd = 4_000;
+    store.enqueueOutboundReply({
+      id: "recovery-content", idempotencyKey: "startup-lite-content:failed-content", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer",
+      rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: store.getActiveAnswerPage("p1")!.elementId, content: content.slice(0, sourceEnd), sequence: 1, sourceEnd })
+    });
+    store.markOutboundReplyDelivered("recovery-content", "card-1");
+
+    await new AnswerPageWorkflow(store, vi.fn()).converge("p1");
+
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ kind: "stream_finish" }),
+      expect.objectContaining({ kind: "stream_card_create", payload: expect.stringContaining(`\"pageStart\":${sourceEnd}`) })
+    ]);
+    expect(store.listAnswerPages("p1")).toEqual([
+      expect.objectContaining({ pageIndex: 0, sourceStart: 0, state: "active" }),
+      expect.objectContaining({ pageIndex: 1, sourceStart: sourceEnd, state: "creating" })
+    ]);
     store.close();
   });
 

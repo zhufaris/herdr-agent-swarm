@@ -12,6 +12,7 @@ import { initialTopicView, mirrorRunCardToTopic } from "../domain/topic-view.js"
 import type { BridgeEvent } from "../domain/events.js";
 import { transitionSession, type AttachmentState, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
 import { normalizeLarkCardElementIds } from "../runtime/lark-card-id.js";
+import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
 import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
@@ -1315,7 +1316,10 @@ export class SqliteBindingStore implements BindingStorePort {
       if (laneClass === "answer_stream" && failed.promptId) {
         this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ?
           WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
-        action = "rebuild_answer"; quarantineState = "released";
+        // A failed cumulative stream update is an unconfirmed content boundary.
+        // Keep it quarantined instead of creating another page from the same
+        // source offset, which would skip or duplicate canonical content.
+        action = "blocked"; quarantineState = "active";
       } else if (laneClass === "main_card" && lockedMainCard && failed.bindingId) {
         const replacement = this.database.prepare(`
           SELECT payload, COALESCE(view_version, 0) AS view_version
@@ -1455,6 +1459,46 @@ export class SqliteBindingStore implements BindingStorePort {
           WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
         this.refreshOutboxLaneHead(row.lane_key);
         if (!rolledBackAnswerPromptIds.includes(row.prompt_id)) rolledBackAnswerPromptIds.push(row.prompt_id);
+      }
+      const failedContentRows = this.database.prepare(`
+        SELECT content.id, content.prompt_id, content.lane_key
+        FROM outbound_replies content
+        JOIN answer_pages page ON page.prompt_id = content.prompt_id
+          AND page.page_index = json_extract(content.payload, '$.pageIndex')
+          AND page.element_id = json_extract(content.payload, '$.elementId')
+          AND page.state = 'active' AND page.card_id = content.root_message_id
+        WHERE content.card_role = 'answer' AND content.kind = 'stream_content' AND content.state = 'dead_letter'
+          AND content.failure_class = 'transient' AND content.auto_recovery_count BETWEEN 1 AND 2
+          AND NOT EXISTS (SELECT 1 FROM outbound_replies replacement WHERE replacement.idempotency_key = 'startup-lite-content:' || content.id)
+          AND (
+            EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.failed_reply_id = content.id AND q.state = 'active' AND q.lane_class = 'answer_stream')
+            OR EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.state = 'released' AND q.action = 'startup_rollback'
+              AND q.failed_reply_id IN (SELECT rebuild.id FROM outbound_replies rebuild WHERE rebuild.prompt_id = content.prompt_id))
+          )
+        ORDER BY content.delivery_order
+      `).all() as Array<{ id: string; prompt_id: string; lane_key: string }>;
+      for (const failedContent of failedContentRows) {
+        const promptId = failedContent.prompt_id;
+        const page = this.getActiveAnswerPage(promptId);
+        const view = this.loadRunCard(promptId);
+        if (!page?.cardId || !view || (view.phase !== "completed" && view.phase !== "failed")) continue;
+        const rendered = renderAnswerStreamPage(answerStreamContent(view), page.sourceStart, ANSWER_RECOVERY_PAGE_LIMIT);
+        if (!rendered.page) continue;
+        const sequence = page.sequence + 1;
+        const sourceEnd = rendered.nextPageStart ?? answerStreamContent(view).length;
+        this.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active'")
+          .run(sequence, timestamp, promptId, page.pageIndex);
+        this.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
+          .run(sequence, timestamp, promptId, page.pageIndex);
+        const replacement = this.enqueueOutboundReply({
+          id: randomUUID(), idempotencyKey: `startup-lite-content:${failedContent.id}`, bindingId: view.bindingId, promptId, viewVersion: sequence, cardRole: "answer",
+          rootMessageId: page.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: page.pageIndex, elementId: page.elementId, content: rendered.page, sequence, sourceEnd })
+        });
+        this.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 2, updated_at = ? WHERE id = ? AND state = 'pending'").run(timestamp, replacement.id);
+        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, failedContent.lane_key, failedContent.id);
+        this.refreshOutboxLaneHead(failedContent.lane_key);
+        if (!retriedAnswerPromptIds.includes(promptId)) retriedAnswerPromptIds.push(promptId);
       }
       const notices = this.database.prepare(`
         SELECT o.id, o.lane_key
@@ -1739,7 +1783,10 @@ export class SqliteBindingStore implements BindingStorePort {
       if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
       if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
       if (row.kind === "stream_content" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) {
-        latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state };
+        latestContent = {
+          content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state,
+          sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null
+        };
       }
     }
     return { latestContent, finishPending, continuationPending };

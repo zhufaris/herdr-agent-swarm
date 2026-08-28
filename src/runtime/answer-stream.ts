@@ -8,6 +8,7 @@ import { renderLarkMarkdownPage } from "./lark-markdown.js";
  * continuation/recovery protocol.
  */
 export const ANSWER_STREAM_PAGE_LIMIT = 9_000;
+export const ANSWER_RECOVERY_PAGE_LIMIT = 4_000;
 const CONTINUATION_WARNING = "… 本页接近显示上限，后续内容将继续显示在下一张 Answer Card。";
 const CONTINUATION_SUFFIX = `\n\n${CONTINUATION_WARNING}`;
 
