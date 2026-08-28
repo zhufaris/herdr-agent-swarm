@@ -1,6 +1,6 @@
 # 飞书群使用指南
 
-Solo Agent 通过 Herdr headless runtime 管理多个项目和多个 Agent 实例；Herdr UI
+Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目和多个 Agent 实例；Herdr UI
 不是必需组件。每个项目最多一个 Primary，并可有多个由用户显式创建的 Worker，底层
 可以是 TraeX、Codex、Claude Code 或 Pi。原有 Herdr Lark Bridge 仍可将飞书话题
 绑定到 Herdr pane 中运行的 TraeX。用户可以在
@@ -267,7 +267,7 @@ Pane。请先检查对应 Space；已有 Pane 时发送
 
 ## 权限与审批
 
-Solo Agent 使用固定三档策略：配置 workspace 内读写、项目测试和 Primary 调用同项目既有
+Herdr Agent Swarm 使用固定三档策略：配置 workspace 内读写、项目测试和 Primary 调用同项目既有
 Worker 属于 routine；只有显式配置且可审计的外部效果可通过飞书一次性确认；push、部署、
 删除、凭据访问、权限绕过、敏感主机路径、破坏性命令和 Agent 原生非结构化审批均为
 local-only。远程 grant 绑定操作者、项目、实例 generation、action fingerprint、资源范围、

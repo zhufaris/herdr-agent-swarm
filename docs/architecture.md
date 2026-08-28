@@ -1,4 +1,4 @@
-# Herdr Lark Bridge Architecture
+# Herdr Agent Swarm Architecture
 
 ## Who this is for
 
@@ -9,10 +9,11 @@ and back to a durable Lark delivery.
 
 ## System purpose
 
-Herdr Lark Bridge connects a Lark topic to one TraeX process in a real Herdr
-pane. It lets a person start work, queue later requests, and see a safe terminal
-stream in Lark while preserving Herdr as the place for local observation and
-high-risk approval.
+Herdr Agent Swarm manages human-controlled Primary and Worker instances across
+multiple projects on the Herdr headless runtime. Its compatibility bridge also
+connects a Lark topic to one TraeX process in a real Herdr pane, letting a person
+start work, queue later requests, and see a safe terminal stream in Lark while
+preserving Herdr as the place for local observation and high-risk approval.
 
 The bridge is a durable workflow coordinator, not a message relay. It does not
 assume that a Lark API call, a terminal read, or a plugin event is a complete

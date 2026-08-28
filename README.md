@@ -1,6 +1,6 @@
-# Solo Agent / Herdr Lark Bridge
+# Herdr Agent Swarm
 
-Solo Agent is a standalone, human-controlled multi-agent service built on the
+Herdr Agent Swarm is a standalone, human-controlled multi-agent service built on the
 Herdr headless runtime. One Feishu gateway can manage multiple projects; each
 project may have one Primary and several explicitly created Workers using
 TraeX, Codex, Claude Code, or Pi. Herdr owns live panes and processes, while its
@@ -47,7 +47,7 @@ constraints, see [Architecture](docs/architecture.md). For a maintainer-oriented
 map of the domain model, major modules, and end-to-end flows, see
 [Architecture reference](docs/architecture-reference.md).
 The milestone's requirement-by-requirement evidence is recorded in the
-[Solo Agent completion audit](docs/superpowers/audits/2026-08-28-solo-agent-product.md).
+[Herdr Agent Swarm completion audit](docs/superpowers/audits/2026-08-28-solo-agent-product.md).
 
 ## Security model
 
@@ -127,15 +127,16 @@ files, then install and start the user service:
 npm ci
 npm run build
 npm run solo:init
-$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/solo-agent/.env"
-$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/solo-agent/projects.json"
+$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm/.env"
+$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm/projects.json"
 npm run solo:install
 npm run solo:start
 npm run solo:status
 ```
 
-The defaults are `~/.config/solo-agent` for configuration,
-`~/.local/state/solo-agent` for SQLite state, and `solo-agent.service` for the
+The defaults are `~/.config/herdr-agent-swarm` for configuration,
+`~/.local/state/herdr-agent-swarm` for SQLite state, and
+`herdr-agent-swarm.service` for the
 user systemd unit. Override them with `SOLO_AGENT_CONFIG_DIR`,
 `SOLO_AGENT_STATE_DIR`, and `BRIDGE_SYSTEMD_SERVICE_NAME`. The installer writes
 absolute paths and the expected build identity into the unit; secrets remain in
@@ -147,14 +148,14 @@ build, validation, and service installation after configuration has been
 initialized. The checked-in service file is an explanatory template; the
 installer renders the production unit.
 
-## Install as a Herdr plugin
+## Install the compatibility Herdr plugin
 
 Clone or copy the repository, install the locked dependencies, build it, then
 link and enable the checkout. Local `plugin link` intentionally skips the
 manifest build step; packaged `plugin install` runs it.
 
 ```bash
-cd /absolute/path/to/swarm-lark-bridge
+cd /absolute/path/to/herdr-agent-swarm
 ./install.sh
 ```
 
@@ -280,7 +281,8 @@ making `/ready` fail and are never repaired automatically.
 
 ## Operate through Herdr
 
-The setup action installs `herdr-lark-bridge.service` as a user systemd service.
+The compatibility setup action installs `herdr-lark-bridge.service` as a user
+systemd service.
 Herdr remains the operator entry point while systemd owns the long-running
 process:
 
@@ -517,9 +519,10 @@ Then perform a Lark smoke test:
   `TRAEX_BIN` paths in `.env`.
 - The service cannot write SQLite: verify that `$HERDR_PLUGIN_STATE_DIR` exists
   and is writable by the Herdr account.
-- A service action fails: inspect `systemctl --user status
-  herdr-lark-bridge.service` and `journalctl --user -u
-  herdr-lark-bridge.service -n 100 --no-pager`.
+- A standalone service action fails: inspect `systemctl --user status
+  herdr-agent-swarm.service` and `journalctl --user -u
+  herdr-agent-swarm.service -n 100 --no-pager`. Compatibility plugin installs
+  continue to use `herdr-lark-bridge.service`.
 - A running card becomes detached after restart. The bridge observes the existing
   Herdr turn and does not replay the prompt because doing so could repeat side
   effects. If completion cannot be observed reliably, inspect the pane before
