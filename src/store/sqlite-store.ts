@@ -1296,7 +1296,8 @@ export class SqliteBindingStore implements BindingStorePort {
           return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
         }
       }
-      const failed = metadata.failureClass === "permanent"
+      const lockedMainCard = before.kind === "card_update" && before.targetRole === "session_status" && metadata.larkErrorCode === "230099";
+      const failed = metadata.failureClass === "permanent" || lockedMainCard
         ? this.markOutboundReplyDeadLetter(id, error, metadata)
         : this.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
       if (!failed) { this.database.exec("COMMIT"); return null; }
@@ -1313,6 +1314,26 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ?
           WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
         action = "rebuild_answer"; quarantineState = "released";
+      } else if (laneClass === "main_card" && lockedMainCard && failed.bindingId) {
+        const replacement = this.database.prepare(`
+          SELECT payload, COALESCE(view_version, 0) AS view_version
+          FROM outbound_replies
+          WHERE binding_id = ? AND target_role = 'session_status'
+            AND (id = ? OR state = 'pending')
+          ORDER BY COALESCE(view_version, 0) DESC, delivery_order DESC
+          LIMIT 1
+        `).get(failed.bindingId, id) as { payload: string; view_version: number } | undefined;
+        const binding = this.requireBinding(failed.bindingId);
+        if (replacement && binding.rootMessageId) {
+          this.database.prepare(`DELETE FROM outbound_replies
+            WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_update' AND state = 'pending'`).run(failed.bindingId);
+          this.enqueueOutboundReply({
+            id: randomUUID(), idempotencyKey: `main-card:rebuild:${failed.bindingId}:${replacement.view_version}`,
+            bindingId: failed.bindingId, viewVersion: replacement.view_version, targetRole: "session_status",
+            rootMessageId: binding.rootMessageId, kind: "card_reply", payload: replacement.payload
+          });
+          action = "rebuild_main"; quarantineState = "released";
+        }
       } else if (laneClass === "main_card" || laneClass === "replaceable_card") {
         action = "released_newer_snapshot"; quarantineState = "released";
       }
@@ -1357,6 +1378,59 @@ export class SqliteBindingStore implements BindingStorePort {
       }
       this.database.exec("COMMIT");
       return recovered;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  recoverStaleOutboxQuarantines(): import("../domain/types.js").StaleOutboxQuarantineRecovery {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const timestamp = now();
+      const answerRows = this.database.prepare(`
+        SELECT o.id, o.prompt_id, o.lane_key
+        FROM outbox_lane_quarantines q
+        JOIN outbound_replies o ON o.id = q.failed_reply_id
+        JOIN answer_pages p ON p.prompt_id = o.prompt_id
+          AND p.page_index = json_extract(o.payload, '$.stream.pageIndex')
+          AND p.state = 'creating' AND p.message_id IS NULL AND p.card_id IS NULL
+        WHERE q.state = 'active' AND q.lane_class = 'immutable' AND q.failure_class = 'transient'
+          AND o.state = 'dead_letter' AND o.kind = 'stream_card_create' AND o.auto_recovery_count BETWEEN 1 AND 2
+          AND o.idempotency_key NOT LIKE 'startup-lite:%'
+          AND NOT EXISTS (SELECT 1 FROM outbound_replies replacement WHERE replacement.idempotency_key = 'startup-lite:' || o.id)
+        ORDER BY q.created_at, o.delivery_order
+      `).all() as Array<{ id: string; prompt_id: string; lane_key: string }>;
+      const retriedAnswerPromptIds: string[] = [];
+      for (const row of answerRows) {
+        const failed = this.getOutboundReply(row.id);
+        if (!failed) continue;
+        const replacement = this.enqueueOutboundReply({
+          id: randomUUID(), idempotencyKey: `startup-lite:${row.id}`, bindingId: failed.bindingId, promptId: failed.promptId,
+          viewVersion: failed.viewVersion, cardRole: failed.cardRole, rootMessageId: failed.rootMessageId, kind: "stream_card_create",
+          payload: lightweightAnswerCardPayload(failed.payload)
+        });
+        this.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 2, updated_at = ? WHERE id = ? AND state = 'pending'").run(timestamp, replacement.id);
+        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
+        this.refreshOutboxLaneHead(row.lane_key);
+        if (!retriedAnswerPromptIds.includes(row.prompt_id)) retriedAnswerPromptIds.push(row.prompt_id);
+      }
+      const notices = this.database.prepare(`
+        SELECT o.id, o.lane_key
+        FROM outbox_lane_quarantines q JOIN outbound_replies o ON o.id = q.failed_reply_id
+        WHERE q.state = 'active' AND q.lane_class = 'immutable' AND q.failure_class = 'transient'
+          AND o.state = 'dead_letter' AND o.kind = 'card_reply' AND o.binding_id IS NULL AND o.prompt_id IS NULL AND o.selection_id IS NULL
+          AND o.idempotency_key LIKE 'disconnected-topic:%'
+      `).all() as Array<{ id: string; lane_key: string }>;
+      let dismissedNotices = 0;
+      for (const row of notices) {
+        const updated = this.database.prepare("UPDATE outbound_replies SET state = 'dismissed', updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(timestamp, row.id);
+        if (updated.changes !== 1) continue;
+        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_dismiss', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
+        this.refreshOutboxLaneHead(row.lane_key);
+        dismissedNotices += 1;
+      }
+      this.database.exec("COMMIT");
+      return { retriedAnswerPromptIds, dismissedNotices };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -1555,11 +1629,11 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!current || current.viewVersion !== view.viewVersion) return "waiting";
     const binding = this.requireBinding(view.bindingId);
     if (current.viewVersion <= current.deliveredVersion) return "current";
+    const replacementPending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
+    if (replacementPending) return "waiting";
     const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND COALESCE(view_version, 0) >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
     if (existingCurrent) return "waiting";
     if (!binding.statusMessageId) {
-      const pending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
-      if (pending) return "waiting";
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
     } else {
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
@@ -2448,6 +2522,21 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
     return stream && Number.isInteger(stream.pageIndex) && Number.isInteger(stream.pageStart) && typeof stream.elementId === "string"
       ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
   } catch { return null; }
+}
+
+function lightweightAnswerCardPayload(payload: string): string {
+  const decoded = JSON.parse(payload) as { card?: { body?: { elements?: Array<Record<string, unknown>> } }; stream?: { elementId?: unknown } };
+  if (!decoded.card || !decoded.stream || typeof decoded.stream.elementId !== "string") throw new Error("Answer continuation metadata missing for lightweight recovery");
+  const elements = decoded.card.body?.elements;
+  if (!Array.isArray(elements)) throw new Error("Answer card body missing for lightweight recovery");
+  let replaced = false;
+  decoded.card.body!.elements = elements.map((element) => {
+    if (element.element_id !== decoded.stream!.elementId) return element;
+    replaced = true;
+    return { ...element, content: "正在恢复本页内容…" };
+  });
+  if (!replaced) throw new Error("Answer card streaming element missing for lightweight recovery");
+  return JSON.stringify(decoded);
 }
 function parseJsonRecord(payload: string): Record<string, unknown> {
   try { const value = JSON.parse(payload) as unknown; return isRecord(value) ? value : {}; } catch { return {}; }

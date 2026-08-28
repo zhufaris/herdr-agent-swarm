@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeObservation, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -208,6 +208,7 @@ export interface BindingStorePort {
   markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null;
   markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
+  recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery;
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
@@ -237,7 +238,7 @@ export type DatabaseIntegrityStore = Pick<BindingStorePort, "inspectIntegrity">;
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
   | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"
-  | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "reserveMainCard" | "saveRunCard" | "saveTopicView"
+  | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "recoverStaleOutboxQuarantines" | "reserveMainCard" | "saveRunCard" | "saveTopicView"
 >;
 
 export type PromptRunStore = Pick<BindingStorePort,

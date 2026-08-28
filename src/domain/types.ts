@@ -11,8 +11,9 @@ export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dism
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
 export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
-export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "released_newer_snapshot";
+export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "startup_rebuild" | "startup_dismiss";
 export interface OutboundFailureTransition { state: OutboundReplyState; action: OutboxQuarantineAction; laneClass: OutboxLaneClass; promptId: string | null; reply: OutboundReply }
+export interface StaleOutboxQuarantineRecovery { retriedAnswerPromptIds: string[]; dismissedNotices: number }
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type OutboundTargetRole = "session_status" | "operation_result";

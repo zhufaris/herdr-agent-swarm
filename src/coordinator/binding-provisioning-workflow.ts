@@ -62,8 +62,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   async createRoot(message: IncomingLarkMessage, requestedTitle: string): Promise<Binding> {
     const { config, store, herdr } = this.options;
     const project = this.projectsById.get(config.defaultProjectId) ?? config.projects[0]!;
-    const paneTitle = requestedTitle || randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
+    const paneTitle = randomPaneName();
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, requestedTitle || paneTitle, "TraeX pane");
     let binding = store.createPendingBinding({
       id: randomUUID(), projectId: project.id, workspaceId: project.workspaceId, chatId: message.chatId,
       topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title, creatorOpenId: message.actorOpenId
@@ -179,8 +179,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     }
     const project = this.projectsById.get(binding.projectId);
     if (!project) { await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。"); return false; }
-    const paneTitle = requestedTitle ?? randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
+    const paneTitle = randomPaneName();
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, requestedTitle ?? paneTitle, "TraeX pane");
     const candidate = store.createResetCandidate({ oldBindingId: binding.id, newBindingId: randomUUID(), title, actorOpenId: message.actorOpenId, resetMessageId: message.messageId });
     try {
       let replacement = candidate.replacement;
@@ -191,7 +191,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
         replacement = store.updateBindingMetadata(replacement.id, paneIdentityPatch(pane));
         replacement = store.transitionBinding(replacement.id, { type: "pane_created" });
       }
-      if (!pane) throw new Error(`Provisioned Herdr pane ${replacement.paneId ?? "unknown"} no longer exists`);
+      if (!pane) throw new ProvisionedPaneMissingError(replacement.paneId);
       if (replacement.provisioningCheckpoint === "pane_created") {
         await herdr.startTraex(pane.paneId, config.traex.executable);
         const startedPane = await this.requireStartedPane(project, pane.paneId, replacement.traexSessionId);
@@ -281,7 +281,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
     const existingPane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
-    const paneTitle = existingPane?.label?.trim() || binding.title.split(" / ").at(-1) || project.displayName;
+    const paneTitle = randomPaneName();
     const nextGeneration = binding.generation + 1;
     const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle, this.options.sessionReporter));
     await herdr.startTraex(pane.paneId, config.traex.executable);
@@ -294,13 +294,13 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async createSelectedProject(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> {
     const { store, herdr, lark, config, logger } = this.options;
     const bindingId = selection.bindingId ?? randomUUID();
-    const paneTitle = selection.requestedTitle ?? randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
+    const paneTitle = randomPaneName();
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, selection.requestedTitle ?? paneTitle, "TraeX pane");
     let binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
     if (!binding) { binding = store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title, creatorOpenId: selection.actorOpenId }); store.linkProjectSelectionBinding(selection.id, binding.id); await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null }); }
     try {
       let pane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
-      if (binding.paneId && !pane) throw new Error(`Provisioned Herdr pane ${binding.paneId} no longer exists`);
+      if (binding.paneId && !pane) throw new ProvisionedPaneMissingError(binding.paneId);
       if (pane && binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${binding.paneId}`);
       if (binding.provisioningCheckpoint === "selected") {
         if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
@@ -328,7 +328,19 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) ?? null : null;
     if (!selection.bindingId || !project) { store.failProjectSelection(selection.id, "Interrupted before recoverable project identity was persisted"); return; }
     try { const binding = await this.createSelectedProject(selection, project, false); store.completeProjectSelection(selection.id, binding.id); if (selection.selectorMessageId) await this.publishSelectionSuccess(selection.id, selection.selectorMessageId, project, binding); logger.info({ event: "project-selection-recovered", selectionId: selection.id, bindingId: binding.id, paneId: binding.paneId, outcome: "completed" }, "resumed interrupted project provisioning"); }
-    catch (error) { store.pauseProjectSelection(selection.id, errorMessage(error)); if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:recoverable`, renderProjectSelectionStatusCard({ status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) })); logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "retry_on_restart" }, "project provisioning remains recoverable"); }
+    catch (error) {
+      if (error instanceof ProvisionedPaneMissingError) {
+        const binding = store.getBinding(selection.bindingId);
+        if (binding?.lifecycle === "provisioning") store.transitionBinding(binding.id, { type: "provisioning_failed" });
+        store.failProjectSelection(selection.id, error.message);
+        if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:failed`, renderProjectSelectionStatusCard({ status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: error.message }));
+        logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "failed_missing_pane" }, "project provisioning cannot resume because its pane no longer exists");
+        return;
+      }
+      store.pauseProjectSelection(selection.id, errorMessage(error));
+      if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:recoverable`, renderProjectSelectionStatusCard({ status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) }));
+      logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "retry_on_restart" }, "project provisioning remains recoverable");
+    }
   }
 
   private async recoverDiscoveredBinding(binding: Binding): Promise<void> {
@@ -413,3 +425,7 @@ function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSe
 function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function provisioningRecoveryMessage(error: unknown): string { const detail = errorMessage(error); return detail.includes("/swarm attach") ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/swarm attach <space> <pane>\`；若不存在，再发送 \`/swarm new\`。${detail}` : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`; }
+
+class ProvisionedPaneMissingError extends Error {
+  constructor(paneId: string | null) { super(`Provisioned Herdr pane ${paneId ?? "unknown"} no longer exists`); this.name = "ProvisionedPaneMissingError"; }
+}

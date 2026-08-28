@@ -138,7 +138,8 @@ describe("pane/thread lifecycle integration", () => {
     const replacement = store.findBindingByLarkScope("topic", "root")!;
     expect(retired).toMatchObject({ id: "old", lifecycle: "archived", topicId: null, retiredTopicId: "topic", paneId: oldPane.paneId });
     expect(replacement).toMatchObject({ lifecycle: "active", topicId: "topic", rootMessageId: "root", paneId: newPane.paneId });
-    expect(created).toEqual(["fresh session"]);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatch(/^task-[a-z0-9]{4}$/);
     expect(oldObserverAborted).toBe(true);
     expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = 'm2'").get()).toEqual({ state: "cancelled" });
     expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs WHERE lark_message_id = 'm1'").get()).toEqual({ state: "running", observation_state: "detached" });

@@ -38,6 +38,11 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   }
 
   async converge(): Promise<void> {
+    const recovered = this.store.recoverStaleOutboxQuarantines();
+    if (recovered.retriedAnswerPromptIds.length > 0 || recovered.dismissedNotices > 0) {
+      this.outboundWork.wake();
+      this.logger?.warn({ event: "startup-outbox-quarantines-recovered", ...recovered, outcome: "converging" }, "recovered stale outbox quarantines from canonical state");
+    }
     for (const binding of this.store.listBindings()) {
       try {
         await this.convergeBinding(binding);

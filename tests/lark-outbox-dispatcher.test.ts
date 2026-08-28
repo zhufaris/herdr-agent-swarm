@@ -13,6 +13,7 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("Lark channel publisher", () => {
   it("checkpoints a delivered Main Card version and emits a convergence hint", async () => {
@@ -28,6 +29,30 @@ describe("Lark channel publisher", () => {
 
     expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 2, deliveredVersion: 2 });
     expect(checkpoint).toHaveBeenCalledWith("b1", 2);
+    store.close();
+  });
+
+  it("rebuilds a locked Main Card once instead of retrying its stale message target", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Current", viewVersion: 2, deliveredVersion: 1 });
+    store.reserveMainCard(store.loadTopicView("b1")!, "root-1", { version: 2 });
+    const locked = Object.assign(new Error("Request failed with status code 400"), { response: { status: 400, data: { code: 230099, msg: "card action is lock" } } });
+    const updateCard = vi.fn(async () => { throw locked; });
+    const replyCard = vi.fn(async () => ({ messageId: "replacement-main" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard, replyCard }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(updateCard).toHaveBeenCalledOnce();
+    expect(replyCard).toHaveBeenCalledOnce();
+    expect(store.getBinding("b1")?.statusMessageId).toBe("replacement-main");
+    expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 2, deliveredVersion: 2 });
+    expect(store.database.prepare("SELECT kind, state, attempt_count, lark_error_code FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
+      { kind: "card_update", state: "dead_letter", attempt_count: 1, lark_error_code: "230099" },
+      { kind: "card_reply", state: "delivered", attempt_count: 1, lark_error_code: null }
+    ]);
     store.close();
   });
 
@@ -248,6 +273,54 @@ describe("Lark channel publisher", () => {
 
     expect(created).toHaveBeenCalledTimes(2);
     expect(resumed).toHaveBeenCalledWith("p1", 8);
+    store.close();
+  });
+
+  it("streams canonical content from the preserved offset after a lightweight startup replacement is delivered", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
+    const answer = Array.from({ length: 14_000 }, (_, index) => `line-${index}`).join("\n");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answer, answerSegments: [answer], viewVersion: 20 });
+    store.database.prepare("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'").run();
+    store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 12, 'answer-12', 'cardkit-12', ?, 100000, 0, 'active', 'now', 'now')").run(answerElementId("p1", 12));
+    store.database.prepare("UPDATE run_cards SET answer_message_id = 'answer-12', answer_card_id = 'cardkit-12', answer_element_id = ?, answer_page_index = 12, answer_page_start = 100000 WHERE prompt_id = 'p1'").run(answerElementId("p1", 12));
+    expect(store.reserveAnswerContinuation({
+      promptId: "p1", pageIndex: 12, cardId: "cardkit-12", summary: "continued", nextPageIndex: 13, nextPageStart: 109_267,
+      nextElementId: answerElementId("p1", 13), rootMessageId: "root-1", viewVersion: 20,
+      card: { body: { elements: [{ tag: "markdown", element_id: answerElementId("p1", 13), content: "x".repeat(10_000) }] } }
+    })).toBe("reserved");
+    const finish = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_finish")!;
+    store.markOutboundReplyDelivered(finish.id, "cardkit-12");
+    const failedCreate = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
+    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(failedCreate.id);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine(failedCreate.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
+    }
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], dismissedNotices: 0 });
+
+    const create = vi.fn(async () => ({ messageId: "answer-13", cardId: "cardkit-13" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+    const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+    let convergence = Promise.resolve();
+    publisher.onAnswerCheckpoint((promptId) => { convergence = workflow.converge(promptId); });
+
+    await publisher.requestScan();
+    await convergence;
+
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0]![0]).toBe("root-1");
+    expect(JSON.stringify(create.mock.calls[0]![1])).toContain("正在恢复本页内容");
+    expect(store.getActiveAnswerPage("p1")).toMatchObject({ pageIndex: 13, sourceStart: 109_267, messageId: "answer-13", cardId: "cardkit-13" });
+    const content = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_content")!;
+    expect(JSON.parse(content.payload)).toMatchObject({
+      pageIndex: 13, elementId: answerElementId("p1", 13),
+      content: renderAnswerStreamPage(answerStreamContent(store.loadRunCard("p1")!), 109_267).page
+    });
+    expect(store.getOperationalSummary().outboxQuarantines.active).toBe(0);
+    await publisher.stop();
     store.close();
   });
 

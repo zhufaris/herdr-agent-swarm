@@ -248,7 +248,8 @@ describe("Herdr discovery", () => {
     const selection = (store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("root-2") as { id: string }).id;
     expect(selection).toBeTruthy();
     await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
-    expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: "Initial pane" }]);
+    await vi.waitFor(() => expect(store.getProjectSelection(selection)?.state).toBe("completed"));
+    expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: expect.stringMatching(/^task-[a-z0-9]{4}$/) }]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Initial pane" });
 
     await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/swarm rename Better pane", mentionsBot: false, isRootMessage: false });

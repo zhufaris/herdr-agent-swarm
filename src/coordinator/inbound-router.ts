@@ -63,6 +63,7 @@ export interface InboundRouterOptions {
 
 export class InboundRouter implements InboundRouterPort {
   private inboundDrain: Promise<void> | null = null;
+  private readonly cardActionTasks = new Set<Promise<void>>();
   private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
   private readonly projectsById: Map<string, BridgeConfig["projects"][number]>;
@@ -122,7 +123,7 @@ export class InboundRouter implements InboundRouterPort {
     this.options.modelSelection.shutdown();
     await Promise.allSettled([
       this.options.lark.stop(), this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context),
-      ...(this.inboundDrain ? [this.inboundDrain] : [])
+      ...(this.inboundDrain ? [this.inboundDrain] : []), ...this.cardActionTasks
     ]);
   }
 
@@ -166,9 +167,16 @@ export class InboundRouter implements InboundRouterPort {
     }
     const selection = parseProjectAction(action.value);
     if (selection) {
-      const completed = await this.options.provisioning.completeSelection(action, selection.selectionId, selection.projectId);
-      if (completed) await this.enqueueInitialProjectPrompt(completed.binding, completed.selection);
+      this.trackCardActionTask(this.options.provisioning.completeSelection(action, selection.selectionId, selection.projectId)
+        .then(async (completed) => { if (completed) await this.enqueueInitialProjectPrompt(completed.binding, completed.selection); })
+        .catch((error) => this.options.logger.error({ event: "project-selection-background-failed", err: safeLogError(error), selectionId: selection.selectionId, projectId: selection.projectId, outcome: "checkpointed" }, "background project selection failed after the card callback returned")));
+      return { toast: { type: "success", content: "项目创建已开始。" } };
     }
+  }
+
+  private trackCardActionTask(task: Promise<void>): void {
+    this.cardActionTasks.add(task);
+    void task.finally(() => this.cardActionTasks.delete(task));
   }
 
   private async recoverInitialProjectPrompts(): Promise<void> {

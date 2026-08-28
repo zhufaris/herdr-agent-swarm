@@ -72,6 +72,21 @@ describe("project provisioning recovery", () => {
     await harness.close();
   });
 
+  it("terminalizes a project selection whose provisioned pane is confirmed missing", async () => {
+    const harness = createHarness({ paneMissing: true });
+    const selection = createProcessingSelection(harness.store);
+    let binding = harness.store.createPendingBinding({ id: "binding-1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Alpha / task" });
+    harness.store.linkProjectSelectionBinding(selection.id, binding.id);
+    binding = harness.store.updateBinding(binding.id, { paneId: "w1:p9", traexSessionId: "term-1" });
+    harness.store.transitionBinding(binding.id, { type: "pane_created" });
+
+    await harness.coordinator.start();
+
+    expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "failed", error: expect.stringContaining("no longer exists") });
+    expect(harness.store.getBinding(binding.id)).toMatchObject({ state: "failed", lifecycle: "failed" });
+    await harness.close();
+  });
+
   it("fails a legacy processing selection that has no linked binding", async () => {
     const harness = createHarness();
     const selection = createProcessingSelection(harness.store);
@@ -92,12 +107,12 @@ function createProcessingSelection(store: SqliteBindingStore) {
   return selection;
 }
 
-function createHarness(options: { terminalId?: string } = {}) {
+function createHarness(options: { terminalId?: string; paneMissing?: boolean } = {}) {
   const store = new SqliteBindingStore(":memory:");
   let created = 0; let started = 0; let topics = 0; const topicKeys: Array<string | undefined> = [];
   const pane: HerdrPane = { paneId: "w1:p9", terminalId: options.terminalId ?? "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
-    async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+    async assertWorkspace() {}, async listPanes() { return options.paneMissing ? [] : [pane]; }, async getPane() { return options.paneMissing ? null : pane; },
     async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
     async createPane() { created += 1; return pane; }, async startTraex() { started += 1; }, async runPrompt() { return "done"; },
     async readOutput() { return ""; }, async renamePane() {}

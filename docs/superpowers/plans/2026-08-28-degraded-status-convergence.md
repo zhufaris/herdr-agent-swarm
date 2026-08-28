@@ -50,7 +50,7 @@
 
 ### Task 4: Verification and deployment
 
-- [ ] Run focused tests for store, startup convergence, provisioning, dispatcher, and health.
-- [ ] Run `npm run typecheck`, `npm test`, and `npm run build`.
+- [x] Run focused tests for store, startup convergence, provisioning, dispatcher, and health.
+- [x] Run `npm run typecheck`, `npm test`, and `npm run build`.
 - [ ] Restart through the Herdr plugin.
 - [ ] Verify `/health`, `/ready`, `/status`, startup recovery, and SQLite state.

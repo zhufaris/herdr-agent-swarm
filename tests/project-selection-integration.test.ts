@@ -10,6 +10,40 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project selection flow", () => {
+  it("returns the card callback before project provisioning completes", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
+    let releasePane!: () => void;
+    const paneReady = new Promise<void>((resolve) => { releasePane = resolve; });
+    const selectorCards: object[] = [];
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "task-topic", rootMessageId: "task-root" }; },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card" }; },
+      async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane(_workspaceId, cwd, options) { await paneReady; return { paneId: "w1:p1", workspaceId: "w1", cwd, label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] }; },
+      async observeRuntime() { return { pane: { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/work/alpha", label: "task-abcd", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
+      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "e-async", messageId: "m-async", chatId: "chat", topicId: "m-async", rootMessageId: "m-async", actorOpenId: "user-1", text: "/swarm new title", mentionsBot: true, isRootMessage: true });
+    const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
+
+    await expect(onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value })).resolves.toEqual({ toast: { type: "success", content: "项目创建已开始。" } });
+    expect(store.getProjectSelection(value.selectionId)?.state).toBe("processing");
+    releasePane();
+    await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("requires an explicit project click before dispatching a natural-language root request", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
     const created: string[] = [];
@@ -24,7 +58,7 @@ describe("project selection flow", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
-      async createPane() { created.push("created"); return { paneId: "w1:p1", workspaceId: "w1", cwd: "/work/alpha", label: "task", agentState: "idle", foregroundExecutables: [] }; },
+      async createPane(_workspaceId, _cwd, options) { created.push(options?.title ?? ""); return { paneId: "w1:p1", workspaceId: "w1", cwd: "/work/alpha", label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/work/alpha", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async startTraex() {}, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async readOutput() { return ""; }, async renamePane() {}
     };
@@ -46,8 +80,9 @@ describe("project selection flow", () => {
     await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
     await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
-    expect(created).toEqual(["created"]);
-    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1" });
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatch(/^task-[a-z0-9]{4}$/);
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", title: "alpha / 帮我排查登录超时" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -142,9 +177,10 @@ describe("project selection flow", () => {
 
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+    await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
     expect(created).toEqual([["wD", "/work/datasage", {
-      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: "Fix login"
+      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: expect.stringMatching(/^task-[a-z0-9]{4}$/)
     }]]);
     expect(started).toEqual(["wD:p9"]);
     expect(prompts).toEqual([]);
@@ -210,6 +246,7 @@ describe("project selection flow", () => {
     await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/swarm new", mentionsBot: true, isRootMessage: true });
     const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+    await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
     const paneName = created[0]?.title;
     expect(paneName).toMatch(/^task-[a-z0-9]{4}$/);
@@ -284,6 +321,7 @@ describe("project selection flow", () => {
     await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/swarm new Broken", mentionsBot: true, isRootMessage: true });
     const value = findProjectButton(selectorCards[0]!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+    await vi.waitFor(() => expect(store.getProjectSelection((value as { selectionId: string }).selectionId)?.error).toBe("group card unavailable"));
 
     expect(store.listBindings()).toHaveLength(1);
     expect(store.listBindings()[0]).toMatchObject({ state: "pending", lifecycle: "provisioning", provisioningCheckpoint: "runtime_started", paneId: "w1:p7", topicId: null, rootMessageId: null, statusMessageId: null });
@@ -318,6 +356,7 @@ describe("project selection flow", () => {
     await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/swarm new Not ready", mentionsBot: true, isRootMessage: true });
     const value = findProjectButton(selectorCards[0]!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
+    await vi.waitFor(() => expect(store.getProjectSelection((value as { selectionId: string }).selectionId)?.error).toBe("TraeX composer did not become ready in pane w1:p7"));
 
     expect(store.listBindings()[0]).toMatchObject({
       state: "pending", lifecycle: "provisioning", provisioningCheckpoint: "pane_created", paneId: "w1:p7", lastAgentState: "unknown"
