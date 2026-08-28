@@ -505,3 +505,12 @@ export type BridgeCommand =
   | { kind: "replace" }
   | { kind: "resume" }
   | { kind: "help" };
+
+export type InstanceCommand =
+  | { kind: "projects" }
+  | { kind: "project"; projectId: string }
+  | { kind: "instances" }
+  | { kind: "instance"; name: string }
+  | { kind: "to"; name: string; text: string }
+  | { kind: "steer_instance"; name: string; text: string }
+  | { kind: "interrupt_instance"; name: string };

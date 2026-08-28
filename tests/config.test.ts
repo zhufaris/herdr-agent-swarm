@@ -129,6 +129,11 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, LARK_REQUEST_TIMEOUT_MS: "0" })).toThrow();
   });
 
+  it("parses an optional Feishu operator allowlist", () => {
+    expect(loadConfig({ ...requiredEnvironment }).lark.operatorOpenIds).toEqual([]);
+    expect(loadConfig({ ...requiredEnvironment, LARK_OPERATOR_OPEN_IDS: "ou_one, ou_two,ou_one" }).lark.operatorOpenIds).toEqual(["ou_one", "ou_two"]);
+  });
+
   it("validates Herdr circuit breaker threshold and cooldown independently", () => {
     expect(loadConfig({ ...requiredEnvironment }).herdrCircuitBreaker).toEqual({ failureThreshold: 3, openMs: 15_000 });
     expect(loadConfig({ ...requiredEnvironment, HERDR_CIRCUIT_FAILURE_THRESHOLD: "5", HERDR_CIRCUIT_OPEN_MS: "20000" }).herdrCircuitBreaker)

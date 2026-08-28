@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveTopicTitle, parseCommand, splitMessage } from "../src/domain/commands.js";
+import { deriveTopicTitle, parseCommand, parseInstanceCommand, splitMessage } from "../src/domain/commands.js";
 
 describe("commands", () => {
   it("parses supported commands", () => {
@@ -41,5 +41,17 @@ describe("commands", () => {
   it("derives bounded titles and splits at line boundaries", () => {
     expect(deriveTopicTitle(`${"a".repeat(100)}\nbody`)).toHaveLength(80);
     expect(splitMessage("12345\n67890", 7)).toEqual(["12345", "67890"]);
+  });
+});
+
+describe("instance commands", () => {
+  it("parses the compact standalone command surface", () => {
+    expect(parseInstanceCommand("/projects")).toEqual({ kind: "projects" });
+    expect(parseInstanceCommand("/project alpha")).toEqual({ kind: "project", projectId: "alpha" });
+    expect(parseInstanceCommand("/instances")).toEqual({ kind: "instances" });
+    expect(parseInstanceCommand("/instance reviewer")).toEqual({ kind: "instance", name: "reviewer" });
+    expect(parseInstanceCommand("/to reviewer inspect this")).toEqual({ kind: "to", name: "reviewer", text: "inspect this" });
+    expect(parseInstanceCommand("/steer reviewer focus tests")).toEqual({ kind: "steer_instance", name: "reviewer", text: "focus tests" });
+    expect(parseInstanceCommand("/interrupt reviewer")).toEqual({ kind: "interrupt_instance", name: "reviewer" });
   });
 });

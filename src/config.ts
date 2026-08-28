@@ -59,6 +59,7 @@ const environmentSchema = z.object({
   LARK_APP_SECRET: z.string().min(1),
   LARK_CHAT_ID: z.string().min(1),
   LARK_BOT_OPEN_ID: z.string().min(1),
+  LARK_OPERATOR_OPEN_IDS: z.string().default(""),
   PROJECTS_CONFIG_PATH: z.string().min(1).default("./config/projects.json"),
   BRIDGE_DATABASE_PATH: z.string().min(1).default("./var/bridge.db"),
   BRIDGE_HTTP_HOST: z.string().min(1).default("127.0.0.1"),
@@ -94,7 +95,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   }
   const defaultProject = registry.projects.find((project) => project.id === registry.defaultProjectId)!;
   return {
-    lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS },
+    lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS, operatorOpenIds: [...new Set(value.LARK_OPERATOR_OPEN_IDS.split(",").map((item) => item.trim()).filter(Boolean))] },
     herdr: { workspaceId: defaultProject.workspaceId, workspaceCwd: defaultProject.cwd, executable: value.HERDR_BIN },
     projects: registry.projects,
     defaultProjectId: registry.defaultProjectId,

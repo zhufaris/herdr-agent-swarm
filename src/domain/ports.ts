@@ -33,6 +33,8 @@ export interface InstanceStore {
   acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean };
   claimInstanceOperation(id: string, expectedGeneration: number): InstanceOperation | null;
   updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null;
+  getConversationTarget(chatId: string): { projectId: string; target: import("./agent-instance.js").InstanceTarget } | null;
+  setConversationTarget(input: { chatId: string; projectId: string; target: import("./agent-instance.js").InstanceTarget }): void;
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
 }
 

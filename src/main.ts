@@ -45,6 +45,7 @@ import { TraexDriver } from "./runtime/agents/traex-driver.js";
 import { InstanceControlWorkflow } from "./coordinator/instance-control-workflow.js";
 import { InstanceMessagingWorkflow } from "./coordinator/instance-messaging-workflow.js";
 import { InstanceWorkScheduler } from "./events/instance-work-scheduler.js";
+import { InstanceInteractionWorkflow } from "./coordinator/instance-interaction-workflow.js";
 import { randomUUID } from "node:crypto";
 import { safeLogError } from "./runtime/safe-error.js";
 import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
@@ -89,15 +90,14 @@ const agentDrivers = new AgentDriverRegistry([new TraexDriver(herdr, config.trae
 const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
 const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
 const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers });
-const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
-void instanceControl; // Application service is composed now; Feishu exposure arrives in the dedicated control-surface slice.
-void instanceMessaging;
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);
 const inboundWork = new InProcessInboundWorkNotifier();
 const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
+const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
+const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, operatorOpenIds: config.lark.operatorOpenIds, store, control: instanceControl, messaging: instanceMessaging, drivers: agentDrivers, outbound });
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
 const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
 const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
@@ -128,7 +128,7 @@ const reconciler = new HerdrRuntimeReconciler({
   worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
 });
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews });
+const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), (workspaceIds) => coordinator.reconcileHerdrWorkspaces(workspaceIds), logger)

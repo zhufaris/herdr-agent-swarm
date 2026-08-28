@@ -1,4 +1,4 @@
-import type { BridgeCommand } from "./types.js";
+import type { BridgeCommand, InstanceCommand } from "./types.js";
 import type { AgentKind, InstanceRole } from "./agent-instance.js";
 
 export type ControlActor =
@@ -64,6 +64,22 @@ export function parseCommand(text: string): BridgeCommand | null {
     default:
       return { kind: "help" };
   }
+}
+
+export function parseInstanceCommand(text: string): InstanceCommand | null {
+  const trimmed = text.trim();
+  const match = /^\/(projects|project|instances|instance|to|steer|interrupt)(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  if (!match) return null;
+  const action = match[1]!.toLowerCase();
+  const argument = (match[2] ?? "").trim();
+  if (action === "projects") return argument ? null : { kind: "projects" };
+  if (action === "instances") return argument ? null : { kind: "instances" };
+  if (action === "project") return argument && !/\s/.test(argument) ? { kind: "project", projectId: argument } : null;
+  if (action === "instance") return argument && !/\s/.test(argument) ? { kind: "instance", name: argument } : null;
+  const parts = /^(\S+)\s+([\s\S]+)$/.exec(argument);
+  if (action === "to") return parts ? { kind: "to", name: parts[1]!, text: parts[2]!.trim() } : null;
+  if (action === "steer") return parts ? { kind: "steer_instance", name: parts[1]!, text: parts[2]!.trim() } : null;
+  return argument && !/\s/.test(argument) ? { kind: "interrupt_instance", name: argument } : null;
 }
 export function deriveTopicTitle(text: string): string {
   const firstLine = text.trim().split(/\r?\n/, 1)[0] ?? "TraeX task";

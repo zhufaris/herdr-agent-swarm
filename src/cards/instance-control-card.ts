@@ -1,0 +1,45 @@
+import type { AgentInstance, InstanceRemovalPlan, WorkspaceLease } from "../domain/agent-instance.js";
+import { callbackButton, formSubmitButton } from "./cardkit-button.js";
+
+export function renderInstanceCreateCard(input: { projectId: string; requestedBy: string }): object {
+  return card("创建 Agent 实例", "blue", [{ tag: "form", name: "instance_create_form", elements: [
+    { tag: "input", name: "name", required: true, placeholder: { tag: "plain_text", content: "实例名，例如 reviewer" } },
+    select("role", "选择角色", [["Worker", "worker"], ["Primary", "primary"]]),
+    select("agent_kind", "选择底层 Agent", [["TraeX", "traex"], ["Codex", "codex"], ["Claude Code", "claude-code"], ["Pi", "pi"]]),
+    { tag: "input", name: "model", placeholder: { tag: "plain_text", content: "可选模型名" } },
+    select("start", "创建后是否启动", [["暂不启动", "false"], ["立即启动", "true"]]),
+    formSubmitButton("创建实例", "instance_create_submit", { action: "instance_create_submit", projectId: input.projectId, requestedBy: input.requestedBy }, "primary")
+  ] }]);
+}
+
+export function renderInstanceSteerCard(input: { instance: AgentInstance; requestedBy: string }): object {
+  return card(`Steer · ${input.instance.name}`, "blue", [
+    { tag: "markdown", content: "内容只注入当前活动 turn；若实例状态或 generation 已变化，提交会被拒绝。" },
+    { tag: "form", name: "instance_steer_form", elements: [
+      { tag: "input", name: "steer_text", required: true, placeholder: { tag: "plain_text", content: "输入调整指令" } },
+      formSubmitButton("发送 Steer", "instance_steer_submit", { action: "instance_steer_submit", instanceId: input.instance.id, generation: input.instance.generation, requestedBy: input.requestedBy }, "primary")
+    ] }
+  ]);
+}
+
+export function renderInstanceRemovalPlanCard(input: { instance: AgentInstance; workspace: WorkspaceLease; plan: InstanceRemovalPlan; requestedBy: string }): object {
+  const retained = !input.plan.safe;
+  const evidence = [
+    `**INSTANCE**  ${escape(input.instance.name)}   **GENERATION**  ${input.plan.instanceGeneration}`,
+    `**WORKTREE**  ${input.workspace.kind} · ${escape(input.workspace.cwd)}`,
+    `**WORKSPACE GENERATION**  ${input.plan.workspaceGeneration}   **STATE**  ${input.workspace.state}`,
+    `**CHECK**  ${input.plan.reason}   **FINGERPRINT**  \`${input.plan.worktreeFingerprint ?? "—"}\``
+  ].join("\n");
+  const elements: object[] = [{ tag: "markdown", content: evidence }];
+  if (retained) elements.push({ tag: "markdown", content: "⚠️ 检查结果不安全，实例和 worktree 已保留。请在本地处理后重新生成删除计划。" });
+  else elements.push({ tag: "markdown", content: "删除会重新读取 SQLite 中的实例、workspace generation 与此计划；任一证据变化都会拒绝操作。" }, callbackButton("确认删除实例", { action: "instance_confirm_removal", instanceId: input.instance.id, generation: input.instance.generation, planId: input.plan.id, requestedBy: input.requestedBy }, "danger"));
+  return card(retained ? `已保留 · ${input.instance.name}` : `确认删除 · ${input.instance.name}`, retained ? "orange" : "red", elements);
+}
+
+function card(title: string, template: string, elements: object[]): object {
+  return { schema: "2.0", config: { update_multi: true, summary: { content: title } }, header: { title: { tag: "plain_text", content: title }, template }, body: { elements } };
+}
+function select(name: string, placeholder: string, values: Array<[string, string]>): object {
+  return { tag: "select_static", name, required: true, placeholder: { tag: "plain_text", content: placeholder }, options: values.map(([content, value]) => ({ text: { tag: "plain_text", content }, value })) };
+}
+function escape(value: string): string { return value.replace(/[\`*_{}[\]()#+.!|>-]/g, "\\$&").slice(0, 300); }

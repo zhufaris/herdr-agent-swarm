@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
-import { deriveTopicTitle, parseCommand } from "../domain/commands.js";
+import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { InboundStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
+import type { InboundStore, InstanceStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, ProjectSelection, StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -26,6 +26,7 @@ import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
+import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
 
 export interface InboundRouterPort {
   start(): Promise<void>;
@@ -35,7 +36,7 @@ export interface InboundRouterPort {
   snapshot(): StartupRecoveryDiagnostics;
 }
 
-type InboundRouterStore = InboundStore & PromptAcceptanceStore;
+type InboundRouterStore = InboundStore & PromptAcceptanceStore & InstanceStore;
 export interface InboundRouterOptions {
   config: BridgeConfig;
   store: InboundRouterStore;
@@ -59,6 +60,7 @@ export interface InboundRouterOptions {
   reconciler: HerdrRuntimeReconcilerPort;
   retiredPaneCleanup: RetiredPaneCleanupWorkflowPort;
   startupViews: StartupViewConvergerPort;
+  instanceInteractions?: InstanceInteractionWorkflow;
 }
 
 export class InboundRouter implements InboundRouterPort {
@@ -140,6 +142,8 @@ export class InboundRouter implements InboundRouterPort {
 
   async handleCardAction(action: IncomingLarkCardAction): Promise<import("../domain/types.js").LarkCardActionResult | void> {
     if (action.chatId !== this.options.config.lark.chatId) return;
+    const instanceInteraction = await this.options.instanceInteractions?.handleCardAction(action);
+    if (instanceInteraction) return instanceInteraction;
     const interaction = await this.options.cardInteractions.handle(action);
     if (interaction) return interaction;
     const model = parseModelSelectionAction(action.value, action.option);
@@ -209,12 +213,14 @@ export class InboundRouter implements InboundRouterPort {
   }
 
   private async acceptInboundMessage(message: IncomingLarkMessage): Promise<void> {
+    const instanceCommand = parseInstanceCommand(message.text);
     const command = parseCommand(message.text); const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
-    const decision = command ? `command:${command.kind}` : binding?.state === "active" && binding.lifecycle === "active" ? "prompt" : message.isRootMessage && message.mentionsBot ? "create_binding" : binding?.state === "archived" ? "archived_feedback" : "unbound_feedback";
+    const decision = instanceCommand ? `instance-command:${instanceCommand.kind}` : command ? `command:${command.kind}` : binding?.state === "active" && binding.lifecycle === "active" ? "prompt" : this.options.store.getConversationTarget(message.chatId) ? "instance-prompt" : message.isRootMessage && message.mentionsBot ? "create_binding" : binding?.state === "archived" ? "archived_feedback" : "unbound_feedback";
     this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: "accepted" }, "routed persisted Lark message");
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
-      if (command?.kind === "help") await this.reply(message.rootMessageId ?? message.messageId, renderHelpCard());
+      if (instanceCommand && this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand);
+      else if (command?.kind === "help") await this.reply(message.rootMessageId ?? message.messageId, renderHelpCard());
       else if (command?.kind === "stop") disposition = await this.requireCreator(message, binding) && await this.options.paneControl.stop(message, binding) ? "command_completed" : "rejected";
       else if (command?.kind === "steer") disposition = await this.options.paneControl.steer(message, binding, command.text) ? "command_completed" : "rejected";
       else if (command?.kind === "model") disposition = await this.requireCreator(message, binding) && await this.options.modelSelection.runModel(message, binding, command.name) ? "command_completed" : "rejected";
@@ -233,6 +239,7 @@ export class InboundRouter implements InboundRouterPort {
       else if (command?.kind === "replace") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected"; } else await this.options.provisioning.replace(binding, message.actorOpenId); }
       else if (command?.kind === "resume") disposition = await this.requireCreator(message, binding) && await this.options.sessionAdministration.resume(message, binding) ? "command_completed" : "rejected";
       else if (binding?.state === "active" && binding.lifecycle === "active") { await this.enqueue(binding, message); disposition = "prompt_queued"; }
+      else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) disposition = "prompt_queued";
       else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
       else { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
     } catch (error) { this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed"); throw error; }
