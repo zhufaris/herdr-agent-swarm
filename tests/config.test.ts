@@ -133,6 +133,15 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, LARK_REQUEST_TIMEOUT_MS: "0" })).toThrow();
   });
 
+  it("restricts the health server to loopback hosts", () => {
+    for (const host of ["127.0.0.1", "localhost", "::1"]) {
+      expect(loadConfig({ ...requiredEnvironment, BRIDGE_HTTP_HOST: host }).http.host).toBe(host);
+    }
+    for (const host of ["0.0.0.0", "::", "192.168.1.10", "bridge.internal"]) {
+      expect(() => loadConfig({ ...requiredEnvironment, BRIDGE_HTTP_HOST: host })).toThrow(/BRIDGE_HTTP_HOST/);
+    }
+  });
+
   it("parses an optional Feishu operator allowlist", () => {
     expect(loadConfig({ ...requiredEnvironment }).lark.operatorOpenIds).toEqual([]);
     expect(loadConfig({ ...requiredEnvironment, LARK_OPERATOR_OPEN_IDS: "ou_one, ou_two,ou_one" }).lark.operatorOpenIds).toEqual(["ou_one", "ou_two"]);

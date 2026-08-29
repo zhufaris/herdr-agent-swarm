@@ -62,7 +62,7 @@ const environmentSchema = z.object({
   LARK_OPERATOR_OPEN_IDS: z.string().default(""),
   PROJECTS_CONFIG_PATH: z.string().min(1).default("./config/projects.json"),
   BRIDGE_DATABASE_PATH: z.string().min(1).default("./var/bridge.db"),
-  BRIDGE_HTTP_HOST: z.string().min(1).default("127.0.0.1"),
+  BRIDGE_HTTP_HOST: z.enum(["127.0.0.1", "localhost", "::1"]).default("127.0.0.1"),
   BRIDGE_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   HERDR_BIN: z.string().min(1).default("herdr"),
   TRAEX_BIN: z.string().min(1).default("traex"),
