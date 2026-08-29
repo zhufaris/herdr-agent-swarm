@@ -36,7 +36,8 @@ export class ConversationViewProjector {
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
     answerPages?: AnswerPageWorkflowPort,
-    mainCards?: MainCardWorkflowPort
+    mainCards?: MainCardWorkflowPort,
+    options: { cardUpdateDebounceMs?: number } = {}
   ) {
     this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, logger);
     this.mainCards = mainCards ?? new MainCardWorkflow(store as ProjectionStore & MainCardStore, () => { void checkpoints.requestScan(); }, logger);
@@ -48,7 +49,7 @@ export class ConversationViewProjector {
       }
       await this.answerPages.converge(promptId);
       if (view) this.answerContentLengths.set(promptId, answerStreamContent(view).length);
-    }, ANSWER_STREAM_INTERVAL_MS);
+    }, options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS);
   }
 
   start(): () => void {
