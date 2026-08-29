@@ -31,6 +31,7 @@ interface HerdrRuntimeReconcilerOptions {
 }
 
 const BASELINE_READ_CONCURRENCY = 4;
+const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
 
 export interface HerdrRuntimeReconcilerPort {
   captureBaselines(): Promise<void>;
@@ -51,6 +52,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
   private readonly observedTabIds = new Map<string, string | null>();
   private readonly observedWorktreeNames = new Map<string, string | null>();
+  private readonly lastReconciledAt = new Map<string, number>();
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
   private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
@@ -110,6 +112,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       this.coalescedRequestCount += 1;
       return this.reconciliation;
     }
+    if (!this.reconciliation && this.recentReconciliationCovers(workspaceIds)) {
+      this.coalescedRequestCount += 1;
+      return;
+    }
     this.enqueueReconciliation(workspaceIds);
     if (this.reconciliation) { this.coalescedRequestCount += 1; return this.reconciliation; }
     const work = this.drainReconciliations();
@@ -129,6 +135,12 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     if (this.activeReconciliation === null) return true;
     if (workspaceIds === undefined) return false;
     return workspaceIds.every((workspaceId) => this.activeReconciliation!.has(workspaceId));
+  }
+
+  private recentReconciliationCovers(workspaceIds?: readonly string[]): boolean {
+    const cutoff = performance.now() - EVENT_RECONCILIATION_COOLDOWN_MS;
+    const requested = workspaceIds ?? [...this.configuredWorkspaceIds];
+    return requested.length > 0 && requested.every((workspaceId) => (this.lastReconciledAt.get(workspaceId) ?? -Infinity) >= cutoff);
   }
 
   private async drainReconciliations(): Promise<void> {
@@ -155,6 +167,8 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     this.lastStartedAt = new Date().toISOString();
     try {
       await this.reconcileOnce(requestedWorkspaceIds);
+      const completedAt = performance.now();
+      for (const workspaceId of requestedWorkspaceIds ?? this.configuredWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
       this.successCount += 1;
       this.lastOutcome = "succeeded";
     } catch (error) {

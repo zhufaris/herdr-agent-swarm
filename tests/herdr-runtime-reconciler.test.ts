@@ -241,6 +241,24 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("absorbs an event emitted immediately after its workspace scan completes", async () => {
+    const listPanes = vi.fn(async () => []);
+    const store = new SqliteBindingStore(":memory:");
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" }],
+      store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    await reconciler.requestReconciliation(["w1"]);
+    await reconciler.requestReconciliation(["w1"]);
+
+    expect(listPanes).toHaveBeenCalledTimes(1);
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 1, successCount: 1, coalescedRequestCount: 1 });
+    store.close();
+  });
+
   it("records a failed physical reconciliation without swallowing the error", async () => {
     const store = new SqliteBindingStore(":memory:");
     vi.spyOn(store, "listBindingsByState").mockImplementation(() => { throw new Error("scan failed"); });
