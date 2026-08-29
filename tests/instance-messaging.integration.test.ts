@@ -133,4 +133,31 @@ describe("instance messaging", () => {
     expect(store!.getAgentInstance(worker.id)).toMatchObject({ observedState: "idle" });
     expect(submit).toHaveBeenCalledTimes(2);
   });
+
+  it("persists the dispatch boundary before a driver settles", async () => {
+    const { create, workflow, scheduler, driver } = setup();
+    const worker = create("worker");
+    let release!: () => void;
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, onDispatched) => {
+      onDispatched?.();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { status: "confirmed-delivered" };
+    });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
+    const draining = scheduler.drain(worker.id);
+    await vi.waitFor(() => expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "running" }));
+    release();
+    await draining;
+    expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "completed" });
+  });
+
+  it("fences a thrown driver call as uncertain without rejecting the drain", async () => {
+    const { create, workflow, scheduler, driver } = setup();
+    const worker = create("worker");
+    vi.mocked(driver.submit).mockRejectedValueOnce(new Error("driver crashed"));
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
+    await expect(scheduler.drain(worker.id)).resolves.toBeUndefined();
+    expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "dispatch-uncertain", error: "driver crashed" });
+    expect(scheduler.snapshot()).toMatchObject({ activeDispatchWorkers: 0, lastFailure: "driver crashed" });
+  });
 });

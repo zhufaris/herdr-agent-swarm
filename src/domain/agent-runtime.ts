@@ -23,7 +23,7 @@ export interface AgentRuntimeDriver {
   readonly kind: AgentKind;
   describe(): AgentCapabilities;
   start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void>;
-  submit(runtime: AgentRuntimeRef, text: string): Promise<DispatchReceipt>;
+  submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt>;
   steer?(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt>;
   interrupt?(runtime: AgentRuntimeRef): Promise<InterruptReceipt>;
 }

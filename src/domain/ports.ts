@@ -58,6 +58,7 @@ export interface InstanceStore {
   verifyPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; capabilityHash: string }): boolean;
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] };
+  listObservableInstanceTurns(): InstanceTurn[];
   updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
   listInstanceEvents(instanceId: string, afterId?: number): InstanceEvent[];

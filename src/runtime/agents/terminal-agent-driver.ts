@@ -18,13 +18,13 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
     await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: this.herdrKind, executable: this.executable, args });
   }
 
-  async submit(runtime: AgentRuntimeRef, text: string): Promise<DispatchReceipt> {
+  async submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt> {
     if (!this.available) return { status: "not-delivered", reason: `Agent adapter is unavailable: ${this.kind}` };
     let dispatched = false;
     try {
       const run = this.herdr.runManagedPrompt
-        ? this.herdr.runManagedPrompt(runtime.paneId, text, this.turnTimeoutMs, () => { dispatched = true; })
-        : this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; });
+        ? this.herdr.runManagedPrompt(runtime.paneId, text, this.turnTimeoutMs, () => { dispatched = true; onDispatched?.(); })
+        : this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; onDispatched?.(); });
       await run;
       return { status: "confirmed-delivered" };
     } catch (error) {

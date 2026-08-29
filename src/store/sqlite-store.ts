@@ -391,6 +391,10 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
+  listObservableInstanceTurns(): InstanceTurn[] {
+    return (this.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!);
+  }
+
   updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
