@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -1019,6 +1019,39 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.exec("COMMIT");
       return { outcome: "orphaned", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds, outboxReserved: answerOutboxReserved || reservation === "reserved" };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  recoverOrphanBindingWithProjection(input: RecoverOrphanBindingProjectionInput): RecoverOrphanBindingProjectionResult {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      let binding = this.requireBinding(input.bindingId);
+      if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration
+        || binding.lifecycle !== "active" || binding.attachment !== "orphaned" || binding.workspaceId !== input.pane.workspaceId) {
+        this.database.exec("COMMIT");
+        return { outcome: "stale", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
+      }
+      const persistedSession = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+        ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
+        : null;
+      const observedSession = input.pane.agentSession ?? null;
+      const nativeSessionMatches = !persistedSession || Boolean(observedSession
+        && persistedSession.source === observedSession.source && persistedSession.agent === observedSession.agent
+        && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
+      if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId
+        || !nativeSessionMatches || !input.pane.agentKind || !input.pane.foregroundExecutables.includes("traex")) {
+        this.database.exec("COMMIT");
+        return { outcome: "identity_mismatch", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
+      }
+      binding = this.transitionBinding(input.bindingId, { type: "pane_reattached", replacement: false });
+      binding = this.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.pane.agentState });
+      this.saveTopicView(input.view);
+      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
+      this.database.exec("COMMIT");
+      return { outcome: "recovered", binding, view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding {

@@ -146,6 +146,14 @@ the live pane and TraeX state; Lark receives visible messages and cards. Neither
 adapter defines business-state transitions, and no workflow may infer durable
 truth from a Lark card.
 
+Project workspace configuration controls only new provisioning and discovery. A
+full reconciliation also observes the persisted workspaces of active and
+orphaned bindings, so changing a project's target Space does not abandon its
+existing panes. An orphaned binding is recovered automatically only when the
+authoritative pane still has the same workspace, pane, generation, terminal,
+and (when persisted) native Agent session identity. Recovery does not recreate
+or replay prompt work that orphaning already made terminal.
+
 ### Events and scheduling
 
 The design uses two different event *roles*. They may share small in-process

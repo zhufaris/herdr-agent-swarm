@@ -173,6 +173,93 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("keeps observing an active binding in its persisted legacy workspace after project rerouting", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "legacy", projectId: "repo", workspaceId: "w-old", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / legacy" });
+    store.updateBinding("legacy", {
+      paneId: "w-old:p1", traexSessionId: "term-1", state: "active", lifecycle: "active",
+      attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+    const pane = {
+      paneId: "w-old:p1", terminalId: "term-1", workspaceId: "w-old", cwd: "/repo", label: "legacy",
+      agentState: "working" as const, agentKind: "traex", stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const listPanes = vi.fn(async (workspaceId: string) => workspaceId === "w-old" ? [pane] : []);
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w-new", cwd: "/repo" }],
+      store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("legacy workspaces must not discover new bindings"); },
+      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+
+    expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId).sort()).toEqual(["w-new", "w-old"]);
+    expect(store.getBinding("legacy")).toMatchObject({ workspaceId: "w-old", state: "active", attachment: "attached", lastAgentState: "working" });
+    store.close();
+  });
+
+  it("recovers a migration-orphaned legacy binding only from its unchanged live runtime identity", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "legacy", projectId: "repo", workspaceId: "w-old", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / legacy" });
+    store.updateBinding("legacy", {
+      paneId: "w-old:p1", traexSessionId: "term-1", agentSessionSource: "traex-hook", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-1", state: "orphaned", lifecycle: "active",
+      attachment: "orphaned", provisioningCheckpoint: "activated", lastAgentState: "unknown", degradationCount: 2
+    });
+    store.saveTopicView({ ...initialTopicView("legacy"), title: "repo / legacy", workspaceId: "w-old", spaceName: "repo", paneId: "w-old:p1", phase: "orphaned", notice: "workspace unavailable" });
+    const pane = {
+      paneId: "w-old:p1", terminalId: "term-1", workspaceId: "w-old", cwd: "/repo", label: "legacy",
+      agentState: "idle" as const, agentKind: "traex", agentSession: { source: "traex-hook", agent: "traex", kind: "id" as const, value: "session-1" },
+      stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const wake = vi.fn();
+    const scheduler = new InProcessPromptWorkScheduler();
+    scheduler.subscribe(wake);
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w-new", cwd: "/repo" }],
+      store, herdr: { async listPanes(workspaceId: string) { return workspaceId === "w-old" ? [pane] : []; } } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("legacy")).toMatchObject({ state: "active", lifecycle: "active", attachment: "attached", degradationCount: 0, lastAgentState: "idle" });
+    expect(store.loadTopicView("legacy")).toMatchObject({ phase: "ready", notice: null, workspaceId: "w-old", paneId: "w-old:p1" });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "legacy", targetRole: "session_status" })]);
+    expect(wake).not.toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "legacy" });
+    store.close();
+  });
+
+  it("keeps a legacy binding orphaned when its pane now has a different runtime identity", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "legacy", projectId: "repo", workspaceId: "w-old", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / legacy" });
+    store.updateBinding("legacy", {
+      paneId: "w-old:p1", traexSessionId: "term-1", agentSessionSource: "traex-hook", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-1", state: "orphaned", lifecycle: "active",
+      attachment: "orphaned", provisioningCheckpoint: "activated", degradationCount: 2
+    });
+    const pane = {
+      paneId: "w-old:p1", terminalId: "term-2", workspaceId: "w-old", cwd: "/repo", label: "replacement",
+      agentState: "idle" as const, agentKind: "traex", agentSession: { source: "traex-hook", agent: "traex", kind: "id" as const, value: "session-2" },
+      stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w-new", cwd: "/repo" }],
+      store, herdr: { async listPanes(workspaceId: string) { return workspaceId === "w-old" ? [pane] : []; } } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("legacy")).toMatchObject({ state: "orphaned", attachment: "orphaned", traexSessionId: "term-1", agentSessionValue: "session-1" });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.close();
+  });
+
   it("runs a follow-up pass when an event arrives during reconciliation", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });

@@ -93,7 +93,7 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.reconcile();
 
-    expect(states).toEqual(["active"]);
+    expect(states).toEqual(["active", "orphaned"]);
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 

@@ -158,9 +158,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     this.runCount += 1;
     this.lastStartedAt = new Date().toISOString();
     try {
-      await this.reconcileOnce(requestedWorkspaceIds);
+      const reconciledWorkspaceIds = await this.reconcileOnce(requestedWorkspaceIds);
       const completedAt = performance.now();
-      for (const workspaceId of requestedWorkspaceIds ?? this.configuredWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
+      for (const workspaceId of reconciledWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
       this.successCount += 1;
       this.lastOutcome = "succeeded";
     } catch (error) {
@@ -190,11 +190,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     if (this.reconciliation) await this.reconciliation;
   }
 
-  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
+  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<ReadonlySet<string>> {
+    const allActiveBindings = this.options.store.listBindingsByState("active");
+    const orphanedBindings = this.options.store.listBindingsByState("orphaned");
     const panesByWorkspace = new Map<string, HerdrPane[]>();
+    const reconciliationWorkspaceIds = new Set(this.configuredWorkspaceIds);
+    for (const binding of [...allActiveBindings, ...orphanedBindings]) reconciliationWorkspaceIds.add(binding.workspaceId);
     const workspaceIds = requestedWorkspaceIds
-      ? [...requestedWorkspaceIds].filter((workspaceId) => this.configuredWorkspaceIds.has(workspaceId))
-      : [...this.configuredWorkspaceIds];
+      ? [...requestedWorkspaceIds].filter((workspaceId) => reconciliationWorkspaceIds.has(workspaceId))
+      : [...reconciliationWorkspaceIds];
     if (this.options.herdr.listAllPanes) {
       try {
         const requested = new Set(workspaceIds);
@@ -209,7 +213,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
     const paneIdsByWorkspace = new Map<string, Set<string>>();
     for (const [workspaceId, workspacePanes] of panesByWorkspace) paneIdsByWorkspace.set(workspaceId, new Set(workspacePanes.map((pane) => pane.paneId)));
-    const allActiveBindings = this.options.store.listBindingsByState("active");
     const activeBindings = requestedWorkspaceIds
       ? allActiveBindings.filter((binding) => requestedWorkspaceIds.has(binding.workspaceId))
       : allActiveBindings;
@@ -289,12 +292,17 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         if (projects.length === 1) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: projects[0]!.id });
       }
       if (existing.lifecycle === "provisioning") continue;
+      const previous = existing.lastAgentState;
+      if (existing.attachment === "orphaned") {
+        const recovered = await this.recoverOrphanedBinding(existing, pane);
+        if (!recovered) continue;
+        existing = recovered;
+      }
       if (isConfirmedUnregisteredTraexAgent(pane)) {
         await this.degradeUnregisteredAgent(existing, pane);
         continue;
       }
       pane = this.withMonotonicAgentState(pane);
-      const previous = existing.lastAgentState;
       const observation = this.options.store.applyRuntimeObservation({ bindingId: existing.id, expectedPaneId: pane.paneId, expectedGeneration: existing.generation, pane });
       if (observation.outcome === "stale_binding") continue;
       if (observation.outcome === "terminal_identity_changed") {
@@ -330,13 +338,14 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
       }
     }
-    if (requestedWorkspaceIds === undefined && panesByWorkspace.size === this.configuredWorkspaceIds.size) {
+    if (requestedWorkspaceIds === undefined && panesByWorkspace.size === reconciliationWorkspaceIds.size) {
       const livePaneIds = new Set([...panesByWorkspace.values()].flatMap((panes) => panes.map((pane) => pane.paneId)));
       pruneMissingPaneObservations(this.observedAgentStates, livePaneIds);
       pruneMissingPaneObservations(this.observedTabIds, livePaneIds);
       pruneMissingPaneObservations(this.observedWorktreeNames, livePaneIds);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
+    return new Set(workspaceIds);
   }
 
   private withMonotonicAgentState(pane: HerdrPane): HerdrPane {
@@ -380,6 +389,32 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       }
     }
     return result.binding ?? binding;
+  }
+
+  private async recoverOrphanedBinding(binding: Binding, pane: HerdrPane): Promise<Binding | null> {
+    const current = this.options.store.loadTopicView(binding.id) ?? {
+      ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId,
+      spaceName: binding.projectId ? projectSpaceName(this.projectsById.get(binding.projectId)!) : binding.workspaceId, paneId: binding.paneId
+    };
+    const event = createBridgeEvent(binding.id, "BindingActivated", "herdr", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: binding.topicId ?? "unknown" });
+    const view = reduceTopicView(current, event);
+    const result = this.options.store.recoverOrphanBindingWithProjection({
+      bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, pane, view,
+      rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view)
+    });
+    if (result.outcome !== "recovered" || !result.binding) {
+      this.options.logger.warn({
+        event: "binding-orphan-recovery-skipped", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: pane.paneId,
+        outcome: result.outcome, reason: "runtime_identity_not_proven"
+      }, "kept orphaned binding because the live runtime identity did not match");
+      return null;
+    }
+    if (result.outboxReserved) this.options.wakeOutbound?.();
+    await this.options.lifecycleEvents.publish(event);
+    this.options.logger.info({
+      event: "binding-orphan-recovered", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: pane.paneId, outcome: "recovered"
+    }, "restored an orphaned binding from unchanged authoritative runtime identity");
+    return result.binding;
   }
 
   private async degradeUnregisteredAgent(binding: Binding, pane: HerdrPane): Promise<Binding> {

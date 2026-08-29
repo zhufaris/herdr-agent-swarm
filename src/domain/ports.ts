@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RetiredPaneCleanupOperation, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -218,6 +218,7 @@ export interface BindingStorePort {
   reconcileBindingTitleWithProjection(input: BindingTitleProjectionInput): BindingTitleProjectionResult;
   degradeBindingWithProjection(input: RuntimeDegradationInput): RuntimeDegradationResult;
   orphanBindingWithProjection(input: OrphanBindingProjectionInput): OrphanBindingProjectionResult;
+  recoverOrphanBindingWithProjection(input: RecoverOrphanBindingProjectionInput): RecoverOrphanBindingProjectionResult;
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
   attachBindingPane(id: string, pane: HerdrPane, replacement: boolean): Binding;
   findBindingByTopic(topicId: string): Binding | null;
@@ -361,6 +362,7 @@ export type RuntimeReconciliationStore = Pick<BindingStorePort,
   | "loadTopicView"
   | "listBindingsByState"
   | "orphanBindingWithProjection"
+  | "recoverOrphanBindingWithProjection"
   | "transitionBinding"
   | "updateBindingMetadata"
 >;

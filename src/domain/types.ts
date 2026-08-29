@@ -520,6 +520,23 @@ export interface OrphanBindingProjectionResult {
   outboxReserved: boolean;
 }
 
+export interface RecoverOrphanBindingProjectionInput {
+  bindingId: string;
+  expectedPaneId: string;
+  expectedGeneration: number;
+  pane: HerdrPane;
+  view: import("./topic-view.js").TopicViewState;
+  rootMessageId: string | null;
+  mainCard: object;
+}
+
+export interface RecoverOrphanBindingProjectionResult {
+  outcome: "recovered" | "identity_mismatch" | "stale";
+  binding: Binding | null;
+  view: import("./topic-view.js").TopicViewState | null;
+  outboxReserved: boolean;
+}
+
 export type RuntimeObservationApplication =
   | { outcome: "applied"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionMismatch: boolean }
   | { outcome: "terminal_identity_changed"; binding: Binding }
