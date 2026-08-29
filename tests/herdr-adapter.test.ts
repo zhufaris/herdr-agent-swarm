@@ -286,7 +286,7 @@ describe("Herdr adapter", () => {
     expect(peakActive).toBe(4);
   });
 
-  it("waits for composer evidence without restarting an existing TraeX process", async () => {
+  it("does not accept an undetected existing TraeX process as ready", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
       async run(_executable, args) {
@@ -300,20 +300,14 @@ describe("Herdr adapter", () => {
         if (args[0] === "pane" && args[1] === "process-info") {
           return json({ process_info: { foreground_processes: [{ name: "traex", argv: ["/home/user/.local/bin/traex"] }] } });
         }
-        if (args[0] === "pane" && args[1] === "read") {
-          return { stdout: "❯ Use /skills to list available skills", stderr: "" };
-        }
         throw new Error(`unexpected args: ${args.join(" ")}`);
       }
     };
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "traex"))
-      .resolves.toBeUndefined();
-    expect(calls).toEqual([
-      ["api", "snapshot"],
-      ["pane", "process-info", "--pane", "w1:p1"],
-      ["pane", "read", "w1:p1", "--source", "recent-unwrapped", "--lines", "80", "--format", "text"]
-    ]);
+    await expect(new HerdrCliAdapter(runner, "herdr", 20).startTraex("w1:p1", "traex"))
+      .rejects.toThrow("Herdr did not detect a ready TraeX-compatible agent in pane w1:p1");
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "read")).toBe(false);
   });
 
   it("treats an unseen background done agent as composer-ready", async () => {
@@ -325,7 +319,7 @@ describe("Herdr adapter", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).observeRuntime("w1:p1")).resolves.toMatchObject({ composerReady: true, pane: { agentState: "done" } });
   });
 
-  it("times out when an existing TraeX process never renders its composer", async () => {
+  it("times out when an existing TraeX process is never detected as an Agent", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = {
       async run(_executable, args) {
@@ -336,38 +330,32 @@ describe("Herdr adapter", () => {
         if (args[0] === "pane" && args[1] === "process-info") {
           return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
         }
-        if (args[0] === "pane" && args[1] === "read") return { stdout: "", stderr: "" };
         throw new Error(`unexpected args: ${args.join(" ")}`);
       }
     };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 20).startTraex("w1:p1", "traex"))
-      .rejects.toThrow("TraeX composer did not become ready in pane w1:p1");
+      .rejects.toThrow("Herdr did not detect a ready TraeX-compatible agent in pane w1:p1");
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "read")).toBe(false);
   });
 
-  it("uses the visible terminal when a new TraeX TUI has no recent scrollback", async () => {
-    const sources: string[] = [];
+  it("accepts a background done Codex-compatible Agent without terminal reads", async () => {
+    const calls: string[][] = [];
     const runner: CommandRunner = {
       async run(_executable, args) {
+        calls.push(args);
         if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: {
-          panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }], agents: []
+          panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "done" }],
+          agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "done" }]
         } });
-        if (args[0] === "pane" && args[1] === "process-info") {
-          return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        }
-        if (args[0] === "pane" && args[1] === "read") {
-          const source = args[args.indexOf("--source") + 1]!;
-          sources.push(source);
-          return { stdout: source === "visible" ? "────────\n❯ Write tests for @filename\n────────" : "", stderr: "" };
-        }
         throw new Error(`unexpected args: ${args.join(" ")}`);
       }
     };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).startTraex("w1:p1", "traex"))
       .resolves.toBeUndefined();
-    expect(sources).toEqual(["recent-unwrapped", "visible"]);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "read")).toBe(false);
   });
 
   it("detects TraeX through process inspection after starting an unknown snapshot pane", async () => {
@@ -378,15 +366,12 @@ describe("Herdr adapter", () => {
         calls.push(args);
         if (args[0] === "api" && args[1] === "snapshot") {
           return json({ snapshot: {
-            panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }],
-            agents: []
+            panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: started ? "idle" : "unknown" }],
+            agents: started ? [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "idle" }] : []
           } });
         }
         if (args[0] === "pane" && args[1] === "process-info") {
           return json({ process_info: { foreground_processes: started ? [{ name: "traex" }] : [] } });
-        }
-        if (args[0] === "pane" && args[1] === "read") {
-          return { stdout: started ? "❯ Use /skills to list available skills" : "", stderr: "" };
         }
         if (args[0] === "pane" && args[1] === "run") {
           started = true;
@@ -402,7 +387,8 @@ describe("Herdr adapter", () => {
       ["pane", "run", "w1:p1", "/usr/local/bin/traex", "--permission-mode", "auto", "--dangerously-bypass-hook-trust", "-c", expect.stringMatching(/^'hooks\.SessionStart=\[\{matcher=\"startup\|resume\"/)]
     ]);
     expect(calls.flat().join(" ")).not.toContain("startup|resume|clear");
-    expect(calls.filter((args) => args[0] === "pane" && args[1] === "process-info")).toHaveLength(2);
+    expect(calls.filter((args) => args[0] === "pane" && args[1] === "process-info")).toHaveLength(1);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "read")).toBe(false);
   });
 
   it("closes a pane and verifies that it disappeared", async () => {

@@ -148,16 +148,19 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 
   async startTraex(paneId: string, executable: string, args: string[] = []): Promise<void> {
-    const initial = await this.observeRuntime(paneId);
-    if (initial.composerReady) return;
-    if (!initial.traexProcess) {
+    const initial = await this.getPane(paneId);
+    if (isReadyTraexAgent(initial)) return;
+    const foregroundExecutables = initial?.foregroundExecutables.length
+      ? initial.foregroundExecutables
+      : await this.foregroundExecutables(paneId);
+    if (!foregroundExecutables.includes("traex")) {
       await this.runner.run(this.executable, [
         "pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode,
         "--dangerously-bypass-hook-trust",
         "-c", sessionHookOverride(SESSION_REPORTER_PATH), ...args
       ], this.commandTimeoutMs);
     }
-    await this.waitUntilTraexComposer(paneId);
+    await this.waitUntilTraexAgentReady(paneId);
   }
 
   async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void> {
@@ -448,13 +451,13 @@ export class HerdrCliAdapter implements HerdrPort {
     };
   }
 
-  private async waitUntilTraexComposer(paneId: string): Promise<void> {
+  private async waitUntilTraexAgentReady(paneId: string): Promise<void> {
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
-      if ((await this.observeRuntime(paneId)).composerReady) return;
+      if (isReadyTraexAgent(await this.getPane(paneId))) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`TraeX composer did not become ready in pane ${paneId}`);
+    throw new Error(`Herdr did not detect a ready TraeX-compatible agent in pane ${paneId}`);
   }
 
   private runtimeObservation(pane: HerdrPane, state: AgentState, evidenceSource: RuntimeObservation["evidenceSource"]): RuntimeObservation {
@@ -685,6 +688,12 @@ function unwrapText(stdout: string): string {
 
 function isTraexWorking(output: string): boolean {
   return /[✧◆]\s*Work(?:ing|i…)/u.test(output);
+}
+
+function isReadyTraexAgent(pane: HerdrPane | null): boolean {
+  return Boolean(pane
+    && (pane.agentKind === "codex" || pane.agentKind === "traex")
+    && (pane.agentState === "idle" || pane.agentState === "done"));
 }
 
 function isUnknownNativeAgent(error: unknown): boolean {
