@@ -93,7 +93,7 @@
 
 - [ ] Add a failing migration test that opens a legacy database, preserves binding data, and asserts the obsolete columns are absent after initialization.
 - [ ] Run `npx vitest run tests/sqlite-store.test.ts` and confirm the migration test fails.
-- [ ] Add an idempotent transactional `bindings` table rebuild that preserves all canonical columns, constraints, indexes, and rows.
+- [ ] Add an idempotent transactional migration that drops the two obsolete, unreferenced columns while preserving canonical columns, constraints, indexes, and rows.
 - [ ] Remove legacy binding fields, store method, SQL writes, socket server, startup/shutdown ownership, and pane environment injection.
 - [ ] Delete the obsolete reporter modules and their focused tests.
 - [ ] Update shutdown tests so writer ordering and deadline assertions no longer include the removed reporter.

@@ -209,8 +209,11 @@ binary, native Codex behavior, session database, or detection manifests. Interna
 it uses Herdr's Codex-compatible reservation and prompt protocol while executing
 the real TraeX binary; only shim-marked JSON results are projected as
 `agent: "traex"`. A process-fenced reporter establishes the initial idle
-authority, then TraeX `UserPromptSubmit` and `Stop` hooks report working/idle
-transitions without reading terminal content. Forms
+authority. TraeX `SessionStart` reports the exact native session UUID into
+Herdr's `agent_session`; `UserPromptSubmit` and `Stop` report working/idle
+transitions without reading terminal content. The bridge persists that canonical
+Herdr identity and uses it to open the one matching JSONL. There is no separate
+bridge session socket or compatibility identity. Forms
 with leading global routing options such as `herdr --session ...` are delegated
 unchanged; select a session through inherited `HERDR_SESSION` and
 `HERDR_SOCKET_PATH` when the exact TraeX start form must be intercepted.

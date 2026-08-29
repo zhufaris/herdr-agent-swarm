@@ -376,11 +376,10 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-For bridge-started TraeX processes, a process-local `SessionStart` hook reports
-the native session ID to the bridge private capability-authenticated Unix
-socket, which persists the identity in SQLite. Only `startup` and `resume` are
-accepted; a new bridge-owned session uses `/swarm reset` rather than local
-`/clear`.
+For bridge-started TraeX processes, a process-local `SessionStart` hook validates
+`startup` or `resume` and reports the exact native session UUID through Herdr's
+official `pane report-agent --agent-session-id` surface. A new managed session
+uses `/swarm reset` rather than local `/clear`.
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
 bridge still invokes the formal `agent start --kind traex` surface and appends
@@ -395,8 +394,11 @@ The reporter releases only its own source and metadata when the exact TraeX
 process exits.
 The shim projects only those marked JSON entries to `agent=traex`; native Codex
 entries and legacy Codex-observed panes remain unchanged.
-The shim does not replace the bridge's capability-authenticated session report:
-that path remains the durable source of the exact TraeX UUID.
+The adapter normalizes the session agent to `traex` only for shim-marked records.
+Normal Herdr reconciliation then persists `agent_session_source`,
+`agent_session_agent`, `agent_session_kind`, and `agent_session_value` in SQLite.
+This canonical Herdr tuple is the only transcript identity; the bridge has no
+session-report socket or fallback identity.
 
 `PromptRunWorkflow` opens the corresponding
 transcript at EOF before dispatch, but only when exactly one filename matches
@@ -458,7 +460,8 @@ Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A
 fresh bridge-created pane, or a pane explicitly reset through the bridge,
 becomes eligible for typed mode only after its managed `SessionStart` hook has
-registered the exact TraeX UUID in SQLite. The bridge never matches a transcript
+registered the exact TraeX UUID in Herdr and reconciliation has persisted it in
+SQLite. The bridge never matches a transcript
 from cwd, timestamps, titles, or newest-file order, and it does not automatically
 restart or replace existing panes to enable typed output.
 

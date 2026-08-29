@@ -131,10 +131,10 @@ The following bridge-owned surface is removed:
 - `HERDR_BRIDGE_SESSION_CAPABILITY`;
 - binding/generation environment used only by that reporter.
 
-SQLite migration rebuilds `bindings` without the two obsolete columns while
-preserving every canonical column, index, foreign key, and row. The migration is
-transactional and idempotent: databases that never had the legacy columns are
-left unchanged. It does not infer or backfill a canonical identity from the old
+SQLite migration transactionally drops the two obsolete, unreferenced columns
+while preserving every canonical column, index, foreign key, and row. The
+migration is idempotent: databases that never had the legacy columns are left
+unchanged. It does not infer or backfill a canonical identity from the old
 columns, because that would promote a non-Herdr source after the clean cut. Live
 bindings acquire identity from their next authoritative Herdr snapshot.
 
