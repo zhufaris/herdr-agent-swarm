@@ -2555,6 +2555,7 @@ export class SqliteBindingStore implements BindingStorePort {
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
+      CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
       CREATE TABLE IF NOT EXISTS outbound_replies(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
@@ -2792,6 +2793,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS bindings_root_created ON bindings(root_message_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS run_cards_binding_phase_created ON run_cards(binding_id, phase, created_at, prompt_id);
       CREATE INDEX IF NOT EXISTS outbound_replies_prompt_role_state ON outbound_replies(prompt_id, card_role, state);
+      CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
     `);
   }
 

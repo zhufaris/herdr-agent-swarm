@@ -1154,6 +1154,91 @@ describe("SQLite store", () => {
     expect(plan.map((row) => row.detail).join(" ")).toContain("outbound_replies_prompt_role_state");
   });
 
+  it("creates the ordinary prompt queue index with the exact column order", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const columns = store.database.prepare("PRAGMA index_info(prompt_jobs_queue_kind)").all() as Array<{ name: string }>;
+
+    expect(columns.map((column) => column.name)).toEqual(["binding_id", "state", "dispatch_kind", "created_at"]);
+  });
+
+  it("repairs a missing ordinary prompt queue index without changing schema on later reopens", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-prompt-queue-index-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.database.exec("DROP INDEX IF EXISTS prompt_jobs_queue_kind");
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const repaired = store.database.prepare("PRAGMA index_info(prompt_jobs_queue_kind)").all() as Array<{ name: string }>;
+    expect(repaired.map((column) => column.name)).toEqual(["binding_id", "state", "dispatch_kind", "created_at"]);
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const before = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    store.close();
+    store = new SqliteBindingStore(path);
+    const after = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    expect(after.schema_version).toBe(before.schema_version);
+  });
+
+  it("uses the queue-kind index for ordinary prompt hot paths under mixed queue load", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (let bindingIndex = 0; bindingIndex < 4; bindingIndex += 1) {
+      const bindingId = `queue-plan-${bindingIndex}`;
+      store.createPendingBinding({ id: bindingId, workspaceId: `w${bindingIndex}`, chatId: "c1", topicId: `t${bindingIndex}`, rootMessageId: `root-${bindingIndex}`, title: bindingId });
+      store.updateBinding(bindingId, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w${bindingIndex}:p1`, lastAgentState: "idle" });
+    }
+    const insertPrompt = store.database.prepare(`
+      INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at)
+      VALUES (?, ?, ?, 'u1', 'fixture', ?, NULL, NULL, NULL, 0, ?, 'not_started', 0, NULL, ?, ?)
+    `);
+    const insertRunCard = store.database.prepare(`
+      INSERT INTO run_cards(prompt_id, binding_id, answer_message_id, answer_card_id, phase, title, workspace_id, pane_id, answer, progress_events_json, queue_position, activity_at, view_version, delivered_version, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'fixture', ?, ?, '', '[]', 1, ?, 1, 0, ?, ?)
+    `);
+    store.database.exec("BEGIN");
+    for (let index = 0; index < 1_600; index += 1) {
+      const bindingIndex = index % 4;
+      const bindingId = `queue-plan-${bindingIndex}`;
+      const promptId = `queue-plan-prompt-${index}`;
+      const dispatchKind = Math.floor(index / 4) % 2 === 0 ? "turn" : "steering";
+      const state = Math.floor(index / 8) % 20 < 2 ? "queued" : "delivered";
+      const timestamp = `2026-08-29T00:${String(Math.floor(index / 60) % 60).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.${String(index).padStart(4, "0")}Z`;
+      insertPrompt.run(promptId, bindingId, `queue-plan-message-${index}`, dispatchKind, state, timestamp, timestamp);
+      insertRunCard.run(promptId, bindingId, `answer-${index}`, `card-${index}`, state === "queued" ? "queued" : "completed", `w${bindingIndex}`, `w${bindingIndex}:p1`, timestamp, timestamp, timestamp);
+    }
+    store.database.exec("COMMIT; ANALYZE");
+
+    const explain = (sql: string, ...parameters: string[]) => (store!.database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters) as Array<{ detail: string }>)
+      .map((row) => row.detail.toLowerCase().replace(/\s+/g, " "));
+    const expectQueueKindSearch = (details: string[]) => {
+      expect(details.some((detail) => detail.includes("prompt_jobs_queue_kind")
+        && detail.includes("binding_id=?")
+        && detail.includes("state=?") && detail.includes("dispatch_kind=?")), details.join(" | ")).toBe(true);
+    };
+
+    expectQueueKindSearch(explain(
+      "SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn' ORDER BY created_at, rowid",
+      "queue-plan-0"
+    ));
+    expectQueueKindSearch(explain(`
+      SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+      WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
+        AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
+        AND NOT EXISTS (SELECT 1 FROM pane_control_operations control WHERE control.binding_id = p.binding_id AND control.kind = 'model' AND control.state IN ('accepted','running','applied'))
+      ORDER BY p.created_at, p.rowid LIMIT 1
+    `, "queue-plan-0"));
+    expectQueueKindSearch(explain(`
+      SELECT DISTINCT p.binding_id FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id
+      WHERE p.state = 'queued' AND p.dispatch_kind = 'turn'
+        AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached' AND b.pane_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
+      ORDER BY p.binding_id
+    `));
+  });
+
   it("does not change the SQLite schema version on a no-op reopen", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-schema-idempotency-"));
     const path = join(temporaryDirectory, "bridge.db");
