@@ -375,9 +375,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   private async openTranscript(binding: Binding): Promise<TurnOutputSource> {
     if (!this.options.transcriptReader) return { mode: "unavailable", reason: "transcript_not_found" };
-    const session = binding.reportedTraexSessionId
-      ? { source: "bridge", agent: "traex", kind: "id" as const, value: binding.reportedTraexSessionId }
-      : binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+    const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
       : null;
     try {
@@ -397,13 +395,13 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     let source = await this.openTranscript(current);
     const canRetry = () => source.mode === "unavailable" && (
       source.reason === "missing_session_identity" ||
-      source.reason === "transcript_not_found" && Boolean(this.options.transcriptReader) && Boolean(current.reportedTraexSessionId || current.agentSessionValue)
+      source.reason === "transcript_not_found" && Boolean(this.options.transcriptReader) && Boolean(current.agentSessionValue)
     );
     if (!canRetry() || current.hasCompletedTurn) return source;
     const deadline = Date.now() + FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS;
     while (Date.now() < deadline) {
       current = this.options.store.getBinding(binding.id) ?? current;
-      if (current.reportedTraexSessionId || current.agentSessionValue) {
+      if (current.agentSessionValue) {
         source = await this.openTranscript(current);
         if (source.mode === "typed") {
           this.options.logger.info({ event: "traex-transcript-source-upgraded", bindingId: binding.id, paneId: binding.paneId, waitedMs: Date.now() - startedAt, outcome: "typed" }, "acquired delayed TraeX session identity before prompt dispatch");

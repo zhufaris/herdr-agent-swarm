@@ -236,7 +236,7 @@ describe("coordinator concurrency controls", () => {
     ];
     const transcriptReader: TraexTranscriptReaderPort = {
       async open(session) {
-        expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+        expect(session).toEqual({ source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
         return { mode: "typed", cursor: { async readDelta() { return deltas.shift() ?? ""; } } };
       }
     };
@@ -259,7 +259,7 @@ describe("coordinator concurrency controls", () => {
     const { logger, records } = collectingLogger();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 30_000, scheduler, undefined, transcriptReader);
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", reportedTraexSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4", reportedTraexSessionAt: "2026-08-27T12:00:00.000Z" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
     const terminalReadsBeforePrompt = terminalReads;
@@ -305,7 +305,7 @@ describe("coordinator concurrency controls", () => {
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", reportedTraexSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "split-e1", messageId: "split-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "split output", mentionsBot: false, isRootMessage: false });
@@ -347,7 +347,7 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("waits for a first-turn session report before marking structured output unavailable", async () => {
+  it("waits for a first-turn Herdr session identity before marking structured output unavailable", async () => {
     const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
     let store!: SqliteBindingStore;
     const opens: Array<string | null> = [];
@@ -355,10 +355,10 @@ describe("coordinator concurrency controls", () => {
       async open(session) {
         opens.push(session?.value ?? null);
         if (!session) {
-          store.recordReportedTraexSession({ bindingId: "b1", paneId: "w1:p1", generation: 1, sessionId, reportedAt: "2026-08-27T17:24:41.778Z" });
+          store.updateBindingMetadata("b1", { agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: sessionId });
           return { mode: "unavailable", reason: "missing_session_identity" };
         }
-        expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
+        expect(session).toEqual({ source: "herdr-traex-shim", agent: "traex", kind: "id", value: sessionId });
         let read = false;
         return { mode: "typed", cursor: { async readDelta() { if (read) return ""; read = true; return "authoritative JSONL answer"; } } };
       }
@@ -398,7 +398,7 @@ describe("coordinator concurrency controls", () => {
     const transcriptReader: TraexTranscriptReaderPort = {
       async open(session) {
         opens += 1;
-        expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
+        expect(session).toEqual({ source: "herdr-traex-shim", agent: "traex", kind: "id", value: sessionId });
         if (opens === 1) return { mode: "unavailable", reason: "transcript_not_found" };
         let read = false;
         return { mode: "typed", cursor: { async readDelta() { if (read) return ""; read = true; return "JSONL created after session report"; } } };
@@ -420,7 +420,7 @@ describe("coordinator concurrency controls", () => {
     const { logger, records } = collectingLogger();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 30_000, undefined, undefined, transcriptReader);
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", reportedTraexSessionId: sessionId });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: sessionId });
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "late-transcript-e1", messageId: "late-transcript-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
