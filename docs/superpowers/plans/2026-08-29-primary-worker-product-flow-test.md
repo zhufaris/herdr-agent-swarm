@@ -76,7 +76,9 @@ async function callPrimaryTool(name: string, args: Record<string, unknown>) {
 The test submits one human turn to the Primary and expects all of these observable outcomes:
 
 ```ts
-expect(toolCalls).toEqual(["list_instances", "prompt_instance", "wait_instance", "prompt_instance"]);
+expect(toolCalls.slice(0, 2)).toEqual(["list_instances", "prompt_instance"]);
+expect(toolCalls.filter((name) => name === "wait_instance").length).toBeGreaterThanOrEqual(1);
+expect(toolCalls.slice(-2)).toEqual(["inspect_instance", "prompt_instance"]);
 expect(workerTurns).toHaveLength(1);
 expect(workerTurns[0]).toMatchObject({
   state: "completed",
@@ -102,7 +104,7 @@ Expected before the fixture is complete: FAIL because the Primary fake driver ha
 
 - [ ] **Step 5: Implement the deterministic Primary and Worker driver behavior**
 
-In `submit`, distinguish Primary and Worker by `runtime.paneId`. The Worker returns `WORKER_OK`. Configure the messaging workflow's `wake(instanceId)` callback to call `scheduler.wake(instanceId)`, allowing the Worker drain to run while the Primary drain awaits completion. The Primary lists instances, selects the known Worker, submits with idempotency key `primary-to-worker-flow`, polls `wait_instance` from cursor `0` until `turn.completed` appears, repeats `prompt_instance` with the same key to prove deduplication, then returns `PRIMARY_SUMMARY: WORKER_OK`. Bound polling with a fixed deadline so failures cannot hang the suite.
+In `submit`, distinguish Primary and Worker by `runtime.paneId`. The Worker returns `WORKER_OK`. Configure the messaging workflow's `wake(instanceId)` callback to call `scheduler.wake(instanceId)`, allowing the Worker drain to run while the Primary drain awaits completion. The Primary lists instances, selects the known Worker, submits with idempotency key `primary-to-worker-flow`, polls `wait_instance` from cursor `0` until `turn.completed` appears, calls `inspect_instance` to read the completed turn result, repeats `prompt_instance` with the same key to prove deduplication, then returns `PRIMARY_SUMMARY: WORKER_OK`. Bound polling with a fixed deadline so failures cannot hang the suite.
 
 ```ts
 if (runtime.paneId === "worker:pane") {
@@ -115,6 +117,7 @@ await callPrimaryTool("prompt_instance", {
   idempotencyKey: "primary-to-worker-flow"
 });
 await waitForWorkerCompletion();
+const inspected = await callPrimaryTool("inspect_instance", { instanceId: worker.id });
 await callPrimaryTool("prompt_instance", {
   instanceId: worker.id, task: "Reply with WORKER_OK",
   idempotencyKey: "primary-to-worker-flow"
