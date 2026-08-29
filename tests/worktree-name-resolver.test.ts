@@ -19,4 +19,32 @@ describe("worktree name resolver", () => {
     await expect(resolver.resolve("/private/host/path")).resolves.toBeNull();
     expect(run).toHaveBeenCalledOnce();
   });
+
+  it("evicts the least recently used entry when the cache reaches its bound", async () => {
+    const run = vi.fn(async (_command: string, args: string[]) => ({ stdout: `/repo/${args[1]}\n`, stderr: "" }));
+    const resolver = new WorktreeNameResolver({ run } as CommandRunner, 1_000, 30_000, () => 0, 2);
+
+    await resolver.resolve("a");
+    await resolver.resolve("b");
+    await resolver.resolve("a");
+    await resolver.resolve("c");
+    await resolver.resolve("a");
+    await resolver.resolve("b");
+
+    expect(run.mock.calls.map(([, args]) => args[1])).toEqual(["a", "b", "c", "b"]);
+  });
+
+  it("prunes expired entries before applying the capacity limit", async () => {
+    let now = 0;
+    const run = vi.fn(async (_command: string, args: string[]) => ({ stdout: `/repo/${args[1]}\n`, stderr: "" }));
+    const resolver = new WorktreeNameResolver({ run } as CommandRunner, 1_000, 10, () => now, 2);
+
+    await resolver.resolve("expired");
+    now = 11;
+    await resolver.resolve("fresh-a");
+    await resolver.resolve("fresh-b");
+    await resolver.resolve("fresh-a");
+
+    expect(run.mock.calls.map(([, args]) => args[1])).toEqual(["expired", "fresh-a", "fresh-b"]);
+  });
 });
