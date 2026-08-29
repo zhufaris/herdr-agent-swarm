@@ -153,6 +153,18 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("does not discover an unbound compatible native Agent as a TraeX session", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "editor", agentState: "idle" as const, agentKind: "codex", foregroundExecutables: ["codex"] };
+    const store = new SqliteBindingStore(":memory:");
+    const discoverPane = vi.fn();
+
+    await fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, discoverPane).reconcile();
+
+    expect(discoverPane).not.toHaveBeenCalled();
+    expect(store.listBindings()).toEqual([]);
+    store.close();
+  });
+
   it("scans only requested workspaces for event-driven reconciliation", async () => {
     const listPanes = vi.fn(async () => []);
     const store = new SqliteBindingStore(":memory:");
