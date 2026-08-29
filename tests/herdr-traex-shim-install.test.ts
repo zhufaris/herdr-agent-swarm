@@ -38,9 +38,6 @@ describe("Herdr TraeX shim installer", () => {
     const peerResolver = await readFile(join(config.releaseDir, "runtime/traex-session-peer.js"), "utf8");
     expect(peerResolver).toContain("export");
     expect(peerResolver).not.toMatch(/from ["'](?!node:|\.)/);
-    const launcher = await readFile(join(config.releaseDir, "pane-launcher"), "utf8");
-    expect(launcher).toContain('exec "$executable" "${args[@]}"');
-    expect(launcher).not.toContain("exec -a codex");
 
     const status = await install(fixture, ["status"]);
     expect(status).toMatchObject({ code: 0 });

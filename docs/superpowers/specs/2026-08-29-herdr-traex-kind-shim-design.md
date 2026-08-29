@@ -70,17 +70,15 @@ The launcher performs this ordered startup protocol:
 2. Reject a pane that is not an available interactive shell.
 3. Define a one-shot shell-local `codex` function that invokes the fixed private
    launcher, then call official `agent start --kind codex`. This creates Herdr's
-   native name reservation while the launcher executes the configured absolute
-   TraeX binary with its real `traex` process identity. The launcher must not use
-   `exec -a codex`: Herdr 0.7.5's Codex terminal detector otherwise overrides
-   the lifecycle authority reported by the shim. `/proc/<pid>/exe` must resolve
-   to TraeX.
+   native name reservation and prompt/wait lifecycle while the launcher executes
+   the configured absolute TraeX binary. `exec -a codex` supplies the protocol
+   argv expected by Herdr; `/proc/<pid>/exe` must resolve to TraeX.
 4. Start one reporter sidecar keyed by the target pane and TraeX process identity.
    It keeps the internal authority as `codex`, reports `display_agent=traex`,
    `state=unknown`, a monotonic sequence, and a dedicated source.
-5. Poll structured Agent state until the reporter's process-fenced initial idle
-   authority is visible as `codex` internally; never derive it from screen
-   evidence.
+5. Poll the pane from the sidecar until TraeX is present and its Codex-compatible
+   screen evidence resolves to a stable state, then report that state as
+   `codex` internally.
 6. Keep the name created by native `agent start`.
 7. Return success only when `herdr agent get <name>` reports the requested pane,
    `display_agent=traex`, and a non-unknown state; the shim projects that marked

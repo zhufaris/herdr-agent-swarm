@@ -122,9 +122,6 @@ The compatibility shim remains reversible and version-gated. It still maps the
 public `traex` kind onto Herdr's internally reserved Codex-compatible lifecycle
 while executing the configured real TraeX binary. This compatibility identity is
 not a license for bridge-side terminal parsing.
-The pane launcher preserves TraeX's real `argv[0]`; it must not disguise the
-process as `codex`, because Herdr 0.7.5's native Codex detector would then outrank
-and hide the shim's hook-driven lifecycle authority.
 
 The reporter and lifecycle hook form a small structured compatibility layer:
 
