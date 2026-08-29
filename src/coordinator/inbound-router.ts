@@ -258,9 +258,9 @@ export class InboundRouter implements InboundRouterPort {
     if (!inserted) { if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true; }
     const depth = this.options.store.countPendingPrompts(binding.id);
     this.options.logger.info({ event: "prompt-dispatch-decided", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: prompt.id, parentPromptId, workspaceId: binding.workspaceId, paneId: binding.paneId, dispatchKind, queueDepth: depth, outcome: "accepted" }, "accepted Lark prompt dispatch decision");
+    this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId });
     await this.publish(binding.id, "SteeringQueued", "lark", { promptId: prompt.id, parentPromptId, actorOpenId: message.actorOpenId });
     this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.steer", target: binding.id, outcome: "success" });
-    if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
     return true;
   }
 
@@ -290,15 +290,15 @@ export class InboundRouter implements InboundRouterPort {
     const automatic = result.decision === "automatic_steering";
     const parentPromptId = automatic ? result.prompt.parentPromptId! : null;
     const depth = automatic ? 0 : this.options.store.countPendingPrompts(binding.id);
+    this.options.scheduler.wake(automatic
+      ? { kind: "steering-ready", bindingId: binding.id, parentPromptId: parentPromptId! }
+      : { kind: "prompt-ready", bindingId: binding.id });
     if (automatic) this.options.logger.info({ event: "auto-steering-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: result.prompt.id, parentPromptId, reason: result.fallbackReason, outcome: result.decision }, "accepted automatic steering");
     else if (candidate) this.options.logger.info({ event: "auto-steering-fell-back-before-dispatch", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: result.prompt.id, parentPromptId, reason: result.fallbackReason, outcome: result.decision }, "fell back to ordinary prompt before dispatch");
     await this.publish(binding.id, automatic ? "SteeringQueued" : "PromptQueued", "lark", automatic
       ? { promptId: result.prompt.id, parentPromptId: parentPromptId!, actorOpenId: message.actorOpenId }
       : { promptId: result.prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
     this.options.store.audit({ actorOpenId: message.actorOpenId, action: automatic ? "prompt.auto_steer" : "prompt.queue", target: binding.id, outcome: "success" });
-    this.options.scheduler.wake(automatic
-      ? { kind: "steering-ready", bindingId: binding.id, parentPromptId: parentPromptId! }
-      : { kind: "prompt-ready", bindingId: binding.id });
     return true;
   }
 

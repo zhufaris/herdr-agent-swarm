@@ -63,7 +63,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20, steeringResult
   await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "working" }));
   const parent = store.listRunCards(bindingId)[0]!;
   schedulerWake.mockClear();
-  return { bindingId, bridgeEvents, coordinator, error, info, message, parent, projector, publisher, release, replyCard, schedulerWake, send, steering, store, turns, warn, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
+  return { bindingId, bridgeEvents, bus, coordinator, error, info, message, parent, projector, publisher, release, replyCard, schedulerWake, send, steering, store, turns, warn, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }
 
 describe("active-turn steering", () => {
@@ -291,6 +291,34 @@ describe("active-turn steering", () => {
 });
 
 describe("automatic continuation steering", () => {
+  it("wakes durable ordinary work before queued-card projection completes", async () => {
+    const harness = await createAutomaticSteeringHarness();
+    await harness.publisher.stop();
+    harness.schedulerWake.mockClear();
+    let releaseProjection!: () => void;
+    const projectionBlocked = new Promise<void>((resolve) => { releaseProjection = resolve; });
+    let projectionStarted!: () => void;
+    const projectionEntered = new Promise<void>((resolve) => { projectionStarted = resolve; });
+    const unsubscribe = harness.bus.onBridgeEvent("blocked-queue-projection", async (event) => {
+      if (event.type !== "PromptQueued") return;
+      projectionStarted();
+      await projectionBlocked;
+    });
+
+    const handling = harness.send("nonblocking-dispatch", "investigate another issue");
+    await projectionEntered;
+
+    const prompt = harness.store.database.prepare("SELECT id, state FROM prompt_jobs WHERE lark_message_id = ?").get("nonblocking-dispatch") as { id: string; state: string };
+    expect(prompt.state).toBe("queued");
+    expect(harness.store.database.prepare("SELECT kind, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.id)).toEqual({ kind: "stream_card_create", state: "pending" });
+    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
+
+    releaseProjection();
+    await handling;
+    unsubscribe();
+    await harness.close();
+  });
+
   it("routes an eligible continuation to the active parent", async () => {
     const harness = await createAutomaticSteeringHarness();
     await harness.send("auto-message", "继续");
