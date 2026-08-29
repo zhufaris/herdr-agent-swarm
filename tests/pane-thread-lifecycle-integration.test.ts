@@ -152,6 +152,40 @@ describe("pane/thread lifecycle integration", () => {
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
+  it("resets a degraded unregistered TraeX binding without writing to or closing the old pane", async () => {
+    const oldPane = { paneId: "w1:old", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "old", agentKind: null, agentState: "unknown" as const, foregroundExecutables: ["traex"] };
+    const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentKind: "codex" as const, agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const runPrompt = vi.fn(async () => "done");
+    const closePane = vi.fn(async () => undefined);
+    let replacementCreated = false;
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("/swarm reset must reuse the existing topic"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return replacementCreated ? [oldPane, newPane] : [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; },
+      async observeRuntime(id) {
+        const pane = id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null;
+        return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentKind === "codex" && pane.agentState === "idle", evidenceSource: pane ? "structured" : "none" };
+      },
+      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, runPrompt, async readOutput() { return ""; }, async renamePane() {}, closePane
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
+    store.updateBinding("old", { paneId: oldPane.paneId, traexSessionId: oldPane.terminalId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "degraded", lastAgentState: "unknown" });
+    const active = runtime(store, herdr, lark);
+    await active.coordinator.start();
+
+    await active.coordinator.handleMessage({ ...message(1, "/swarm reset recover agent"), mentionsBot: true });
+
+    await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
+    expect(store.findBindingByLarkScope("topic", "root")).toMatchObject({ attachment: "attached", lifecycle: "active", lastAgentState: "idle", paneId: newPane.paneId });
+    expect(store.getBinding("old")).toMatchObject({ lifecycle: "archived", attachment: "degraded", paneId: oldPane.paneId });
+    expect(runPrompt).not.toHaveBeenCalled();
+    expect(closePane).not.toHaveBeenCalled();
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
   it("resets a working topic into a new pane without stopping or delivering the old session", async () => {
     const submitted: string[] = [];
     const created: string[] = [];

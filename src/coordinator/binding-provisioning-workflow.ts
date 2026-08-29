@@ -174,7 +174,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
 
   async reset(message: IncomingLarkMessage, binding: Binding | null, requestedTitle: string | null): Promise<boolean> {
     const { store, config, herdr, scheduler, logger } = this.options;
-    if (!binding || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || !binding.projectId || !binding.topicId || !binding.rootMessageId) {
+    if (!binding || binding.lifecycle !== "active" || binding.state !== "active" || !["attached", "degraded"].includes(binding.attachment) || !binding.projectId || !binding.topicId || !binding.rootMessageId) {
       await this.reject(message, "`/swarm reset` 只能在已连接且活动中的项目话题内使用。"); return false;
     }
     const project = this.projectsById.get(binding.projectId);

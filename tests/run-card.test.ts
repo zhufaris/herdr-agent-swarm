@@ -418,10 +418,21 @@ describe("run card", () => {
     expect(actions).not.toEqual(expect.arrayContaining(["session_stop", "session_model", "session_reset", "session_pane_close"]));
   });
 
+  it("renders degraded recovery guidance and exposes reset only to the creator", () => {
+    const mainCard = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "degraded", notice: "TraeX 正在运行，但未注册为 Herdr Agent。" });
+    const creatorCard = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: true, lifecycle: "active", attachment: "degraded" });
+    const memberCard = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: false, lifecycle: "active", attachment: "degraded" });
+
+    expect(JSON.stringify(mainCard)).toContain("TraeX 正在运行，但未注册为 Herdr Agent。");
+    expect(mainCardCallbackActions(mainCard)).toEqual(["view_recovery", "open_more_actions"]);
+    expect(findTaggedNodes(creatorCard, "button").map(callbackValue).map((value) => value.action)).toContain("session_reset");
+    expect(findTaggedNodes(memberCard, "button").map(callbackValue).map((value) => value.action)).not.toContain("session_reset");
+  });
+
   it("keeps creator-only controls out of the shared Main Card", () => {
     const creatorOnlyActions = ["stop", "reset", "rename", "archive", "close_pane", "select_model", "reattach", "replace", "resume"];
 
-    for (const phase of ["ready", "running", "blocked", "error", "orphaned", "archived"] as const) {
+    for (const phase of ["ready", "running", "blocked", "error", "degraded", "orphaned", "archived"] as const) {
       const actions = mainCardCallbackActions(renderProjectEntryCard({ ...initialTopicView("b1"), phase, queueDepth: 2 }));
       expect(actions).not.toEqual(expect.arrayContaining(creatorOnlyActions));
     }

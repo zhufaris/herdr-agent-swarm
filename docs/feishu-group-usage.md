@@ -84,6 +84,9 @@ Bridge 仍会先要求你明确选择项目；选择成功后，这条原始消�
 如果新 pane 创建或 TraeX 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
 只会自动关闭经过 fresh observation 确认身份匹配且处于 idle/done 的旧 pane；working、
 blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 Herdr 本地检查。
+如果主卡提示 TraeX 仍在运行但未注册为 Herdr Agent，会话创建者也可以使用
+`/swarm reset` 创建一个已验证的新 Agent 并切换话题；Bridge 不会向未注册的旧 pane
+写入 prompt、按键或自动重放请求，也不会自动关闭状态无法确认的旧 pane。
 
 ```text
 /swarm reset 重新排查登录问题
