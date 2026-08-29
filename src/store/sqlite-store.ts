@@ -29,6 +29,7 @@ const FENCED_TABLES = [
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
+const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
@@ -1038,7 +1039,7 @@ export class SqliteBindingStore implements BindingStorePort {
         && persistedSession.source === observedSession.source && persistedSession.agent === observedSession.agent
         && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
       if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId
-        || !nativeSessionMatches || !input.pane.agentKind || !input.pane.foregroundExecutables.includes("traex")) {
+        || !nativeSessionMatches || !isTraexCompatibleNativeAgent(input.pane)) {
         this.database.exec("COMMIT");
         return { outcome: "identity_mismatch", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
       }
@@ -3424,3 +3425,6 @@ function replaceCardElementIds(value: unknown, elementId: string): unknown {
   ]));
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isTraexCompatibleNativeAgent(pane: HerdrPane): boolean {
+  return pane.agentKind !== null && pane.agentKind !== undefined && TRAEX_COMPATIBLE_AGENT_KINDS.has(pane.agentKind);
+}

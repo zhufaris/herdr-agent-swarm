@@ -211,8 +211,8 @@ describe("HerdrRuntimeReconciler", () => {
     store.saveTopicView({ ...initialTopicView("legacy"), title: "repo / legacy", workspaceId: "w-old", spaceName: "repo", paneId: "w-old:p1", phase: "orphaned", notice: "workspace unavailable" });
     const pane = {
       paneId: "w-old:p1", terminalId: "term-1", workspaceId: "w-old", cwd: "/repo", label: "legacy",
-      agentState: "idle" as const, agentKind: "traex", agentSession: { source: "traex-hook", agent: "traex", kind: "id" as const, value: "session-1" },
-      stateChangeSeq: 1, foregroundExecutables: ["traex"]
+      agentState: "idle" as const, agentKind: "codex", agentSession: { source: "traex-hook", agent: "traex", kind: "id" as const, value: "session-1" },
+      stateChangeSeq: 1, foregroundExecutables: ["codex"]
     };
     const wake = vi.fn();
     const scheduler = new InProcessPromptWorkScheduler();

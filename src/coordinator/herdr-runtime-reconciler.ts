@@ -257,7 +257,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
           this.options.logger.warn({ event: "binding-agent-probe-failed", err: safeLogError(error), bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" }, "failed to enrich unknown bound pane");
         }
       }
-      if (!pane.foregroundExecutables.includes("traex")) continue;
+      if (!isTraexCompatiblePane(pane)) continue;
       if (!existing) {
         const projects = this.projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? [];
         if (projects.length !== 1) {
@@ -473,4 +473,9 @@ function pruneMissingPaneObservations<Value>(observations: Map<string, Value>, l
 
 function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean {
   return pane.agentKind === null && pane.foregroundExecutables.includes("traex");
+}
+
+function isTraexCompatiblePane(pane: HerdrPane): boolean {
+  return pane.foregroundExecutables.includes("traex")
+    || pane.agentKind === "traex" || pane.agentKind === "codex" || pane.agentKind === "claude" || pane.agentKind === "pi";
 }
