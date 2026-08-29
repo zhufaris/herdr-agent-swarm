@@ -124,7 +124,7 @@ Expected: every command exits zero.
 
 Confirm every terminal predicate is tested, the active control remains detached, no prompt is requeued, `was_detached` remains true, card and prompt updates share one transaction, the count is observable, and the restart guard is untouched.
 
-- [ ] **Step 4: Commit the implementation batch**
+- [x] **Step 4: Commit the implementation batch**
 
 ```bash
 git add src/domain/types.ts src/store/sqlite-store.ts src/coordinator/prompt-run-workflow.ts tests/sqlite-store.test.ts tests/prompt-run-safety-scan.test.ts tests/health-server.test.ts docs/superpowers/plans/2026-08-29-terminal-binding-detached-prompt-convergence.md
@@ -141,22 +141,28 @@ git commit -m "fix: converge terminal detached prompts"
 - Consumes: committed build, Herdr plugin lifecycle action, loopback status endpoints, and SQLite read-only queries.
 - Produces: a live bridge on the new build with stale running count zero.
 
-- [ ] **Step 1: Capture pre-restart evidence**
+- [x] **Step 1: Capture pre-restart evidence**
 
 Use the plugin status action and read-only SQLite queries to confirm no active worker, no queued prompt, no pending outbox work, and exactly the six known stale detached running prompt IDs.
 
-- [ ] **Step 2: Perform the one-time authorized forced restart**
+- [x] **Step 2: Perform the one-time authorized forced restart**
 
 Run the supported Herdr plugin restart action with its force argument only after the implementation commit exists. Do not edit the database or stop the unit manually.
 
-- [ ] **Step 3: Verify readiness and build identity**
+- [x] **Step 3: Verify readiness and build identity**
 
 Use plugin status and loopback endpoints to confirm `/ready` is ready and the live Git/build identities match the committed build.
 
-- [ ] **Step 4: Verify durable convergence**
+- [x] **Step 4: Verify durable convergence**
 
 Read the six prompt and Run Card rows from SQLite. Confirm `failed/completed`, `was_detached=1`, failed card phase, finished timestamp, and exact no-replay notice. Confirm operational running count, active workers, queued prompts, and pending outbox are all zero.
 
-- [ ] **Step 5: Verify the restart guard is clean**
+- [x] **Step 5: Verify the restart guard is clean**
 
 Invoke the supported non-destructive restart preflight/dry-run if available; otherwise inspect plugin status plus the guard's exact durable inputs. Do not perform a second restart solely for this assertion.
+
+**Execution evidence:** Implementation commit `86dcc41`; 93 test files and
+1014 tests passed. The one-time forced restart converged all six known rows to
+`failed/completed` with `was_detached=1`, matching failed Run Cards and the
+no-replay notice. A later normal guarded restart passed with running, queued,
+active-worker, uncertain-worker, and pending-outbox counts all zero.

@@ -90,17 +90,22 @@ Run: `git diff --check`
 
 Confirm `/health` is no longer the lifecycle gate, startup completion and identity are required in one `/status` sample, two consecutive samples remain required, readiness remains diagnostic, error fields are bounded, and restart guard/systemd unit are unchanged.
 
-- [ ] **Step 3: Commit the implementation**
+- [x] **Step 3: Commit the implementation**
 
 ```bash
 git add src/cli/plugin-lifecycle.ts tests/plugin-lifecycle.test.ts docs/superpowers/plans/2026-08-29-startup-recovery-lifecycle-gate.md
 git commit -m "fix: gate service startup on recovery"
 ```
 
-- [ ] **Step 4: Build the committed identity and perform a normal restart**
+- [x] **Step 4: Build the committed identity and perform a normal restart**
 
 Rebuild after commit, confirm zero active work through `/status`, then invoke the supported normal plugin restart without `--force`. Verify it returns only after the expected build reports completed startup recovery.
 
-- [ ] **Step 5: Verify stable runtime**
+- [x] **Step 5: Verify stable runtime**
 
 After another health cycle, confirm systemd is active with no unexpected restarts, `/ready` is ready or explicitly reports only an external dependency degradation, live identity matches the commit, and durable running/queued/outbox counts remain zero.
+
+**Execution evidence:** Implementation commit `79f272d`; 93 test files and
+1019 tests passed; a normal guarded restart returned only after
+`startupRecovery.state=completed`; the deployed unit then reported `NRestarts=0`,
+`ready`, and the matching build identity.
