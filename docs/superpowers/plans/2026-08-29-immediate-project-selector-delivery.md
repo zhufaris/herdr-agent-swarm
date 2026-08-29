@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `/swarm new` and `/projects` attempt delivery of their durable project selector card before command handling returns.
+**Goal:** Make `/swarm new` and `/swarm projects` attempt delivery of their durable project selector card before command handling returns.
 
 **Architecture:** Keep project selections and CardKit replies in the SQLite outbox, then invoke the existing serialized outbox dispatcher immediately through a narrow injected port. A failed immediate attempt remains durable and is retried by the existing notifier and safety scan.
 
@@ -36,7 +36,7 @@
 
 - [ ] **Step 1: Write failing command-delivery tests**
 
-Add integration assertions that block `replyCard`, invoke `/swarm new` and `/projects`, and prove `handleMessage` remains pending until the selector delivery attempt completes. Add a failure case where `replyCard` rejects and verify the project selection plus outbound row remain persisted for retry.
+Add integration assertions that block `replyCard`, invoke `/swarm new` and `/swarm projects`, and prove `handleMessage` remains pending until the selector delivery attempt completes. Add a failure case where `replyCard` rejects and verify the project selection plus outbound row remain persisted for retry. Preserve the standalone `/projects` instance-overview command.
 
 - [ ] **Step 2: Run the focused tests and confirm the missing immediate drain**
 
@@ -62,13 +62,13 @@ After `createProjectSelection` and `outboundWork.wake()`, await `immediateOutbou
 
 - [ ] **Step 5: Document the command response behavior**
 
-Update `docs/feishu-group-usage.md` to state that `/swarm new` and `/projects` immediately show the project list card and that transient delivery failures remain retryable.
+Update `docs/feishu-group-usage.md` to state that `/swarm new` and `/swarm projects` immediately show the project selection card and that transient delivery failures remain retryable.
 
 - [ ] **Step 6: Verify focused behavior**
 
 Run: `npx vitest run tests/project-selection-integration.test.ts tests/lark-outbox-dispatcher.test.ts`
 
-Expected: all tests pass, including immediate `/swarm new`, immediate `/projects`, and durable failure recovery.
+Expected: all tests pass, including immediate `/swarm new`, immediate `/swarm projects`, and durable failure recovery.
 
 - [ ] **Step 7: Verify the repository and commit**
 

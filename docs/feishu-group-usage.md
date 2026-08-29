@@ -116,7 +116,9 @@ prompt，也不依赖 Herdr 是否识别出 named agent。
 
 ### `/swarm new [说明]`
 
-打开项目选择卡片；选择后创建新的 Herdr pane、启动 TraeX，并建立飞书话题绑定。
+发送后直接展示项目选择卡片；选择后创建新的 Herdr pane、启动 TraeX，并建立飞书话题绑定。
+选择卡先写入 durable outbox，再立即尝试投递；短暂的飞书投递失败不会丢失选择请求，
+Bridge 会继续重试。
 
 ```text
 /swarm new 修复登录超时
@@ -131,7 +133,7 @@ prompt，也不依赖 Herdr 是否识别出 named agent。
 
 ### `/swarm projects`
 
-打开同一个项目选择卡片。只有发起命令的人可以点击，选择结果在当前话题绑定后不可切换。
+直接展示同一个项目选择卡片。只有发起命令的人可以点击，选择结果在当前话题绑定后不可切换。
 
 ### `/swarm spaces`
 

@@ -10,6 +10,59 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project selection flow", () => {
+  for (const command of ["/swarm new", "/swarm projects"] as const) {
+    it(`waits for the immediate selector delivery attempt for ${command}`, async () => {
+      let releaseDelivery!: () => void;
+      let markDeliveryStarted!: () => void;
+      const deliveryStarted = new Promise<void>((resolve) => { markDeliveryStarted = resolve; });
+      const deliveryReleased = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+      const replyCard = vi.fn(async () => { markDeliveryStarted(); await deliveryReleased; return { messageId: "selector-card" }; });
+      const lark: LarkPort = {
+        async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
+        async replyText() { return { messageId: "text" }; }, replyCard, async updateCard() {}
+      };
+      const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} } as HerdrPort;
+      const store = new SqliteBindingStore(":memory:");
+      const bus = new BridgeEventBus();
+      const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+      const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+      await coordinator.start();
+
+      let handled = false;
+      const handling = coordinator.handleMessage({ eventId: `event-${command}`, messageId: `message-${command}`, chatId: "chat", topicId: null, rootMessageId: `message-${command}`, actorOpenId: "user-1", text: command, mentionsBot: true, isRootMessage: true }).then(() => { handled = true; });
+      await deliveryStarted;
+      await Promise.resolve();
+
+      expect(handled).toBe(false);
+      expect(store.listPendingOutboundReplies()).toHaveLength(1);
+      releaseDelivery();
+      await handling;
+      expect(replyCard).toHaveBeenCalledOnce();
+      expect(store.listPendingOutboundReplies()).toHaveLength(0);
+      await coordinator.stop(); await publisher.stop(); store.close();
+    });
+  }
+
+  it("keeps a failed immediate selector delivery durable for retry", async () => {
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { throw new Error("temporary Lark failure"); }, async updateCard() {}
+    };
+    const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} } as HerdrPort;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await expect(coordinator.handleMessage({ eventId: "event-failed-selector", messageId: "message-failed-selector", chatId: "chat", topicId: null, rootMessageId: "message-failed-selector", actorOpenId: "user-1", text: "/swarm new", mentionsBot: true, isRootMessage: true })).resolves.toBeUndefined();
+
+    const selection = store.database.prepare("SELECT id, state FROM project_selections WHERE command_message_id = ?").get("message-failed-selector") as { id: string; state: string };
+    expect(selection.state).toBe("pending");
+    expect(store.database.prepare("SELECT state, attempt_count FROM outbound_replies WHERE selection_id = ?").get(selection.id)).toMatchObject({ state: "pending", attempt_count: 1 });
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("returns the card callback before project provisioning completes", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
     let releasePane!: () => void;

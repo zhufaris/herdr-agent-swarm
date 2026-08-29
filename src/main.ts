@@ -132,7 +132,7 @@ const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork,
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
-const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), sessionReporter: traexSessionReporter, logger });
+const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), sessionReporter: traexSessionReporter, logger });
 const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
 const paneControl = new PaneControlWorkflow({ store, herdr, outbound, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
 const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound, logger });

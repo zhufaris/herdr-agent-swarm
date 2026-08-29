@@ -2,7 +2,7 @@
 
 ## Problem
 
-`/swarm new` and `/projects` persist a project selection and its CardKit reply
+`/swarm new` and `/swarm projects` persist a project selection and its CardKit reply
 intent, then only wake the asynchronous outbound worker. The durable path is
 correct, but the selector can appear noticeably after the command has already
 been accepted. Users expect the project list card to be the immediate response
@@ -13,7 +13,8 @@ to these commands.
 Keep the durable outbox as the only Lark delivery path. After persisting the
 project selection and selector-card intent, request an immediate bounded
 outbound drain before command handling returns. Both `/swarm new` and
-`/projects` use this behavior because they share `selectProject`.
+`/swarm projects` use this behavior because they share `selectProject`. The
+standalone `/projects` command retains its separate instance-overview meaning.
 
 The workflow must not call `LarkPort.replyCard` directly. Persistence remains
 the source of idempotency, ordering, retry, and crash recovery. An immediate
@@ -23,7 +24,7 @@ background worker can retry it.
 ## Flow
 
 ```text
-/swarm new or /projects
+/swarm new or /swarm projects
   -> create durable project selection
   -> reserve selector-card outbox intent
   -> request immediate bounded outbox drain
@@ -57,7 +58,7 @@ startup/outbox recovery exactly as before.
 
 - Verify `/swarm new` attempts selector-card delivery before `handleMessage`
   resolves.
-- Verify `/projects` has the same behavior.
+- Verify `/swarm projects` has the same behavior.
 - Verify a failed immediate delivery leaves a durable selection and retryable
   outbox row.
 - Verify clicking a delivered selector still provisions exactly one project.

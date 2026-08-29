@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 import { renderAttachStatusCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
-import type { BindingProvisioningStore, HerdrPort, LarkPort, OutboundIntentPort } from "../domain/ports.js";
+import type { BindingProvisioningStore, HerdrPort, ImmediateOutboundDispatcher, LarkPort, OutboundIntentPort } from "../domain/ports.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig, ProjectSelection } from "../domain/types.js";
@@ -32,6 +32,7 @@ interface Options {
   lifecycleEvents: LifecycleEventPublisher;
   outbound: OutboundIntentPort;
   outboundWork: OutboundWorkNotifier;
+  immediateOutbound: ImmediateOutboundDispatcher;
   scheduler: PromptWorkScheduler;
   wakeRetiredPaneCleanup?: () => void;
   sessionReporter?: { environment(bindingId: string, generation: number): Record<string, string> };
@@ -97,6 +98,10 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: renderProjectSelectorCard({ selectionId, projects: this.options.config.projects })
     });
     this.options.outboundWork.wake();
+    try { await this.options.immediateOutbound.requestScan(); }
+    catch (error) {
+      this.options.logger.warn({ event: "project-selector-immediate-delivery-failed", err: safeLogError(error), selectionId, eventId: message.eventId, outcome: "deferred" }, "immediate project selector delivery failed; durable outbox retry remains scheduled");
+    }
   }
 
   async completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {

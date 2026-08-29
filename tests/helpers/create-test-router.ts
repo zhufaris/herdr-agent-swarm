@@ -41,7 +41,7 @@ export function createTestRouter(
   outbound.connectPromptScheduler(scheduler);
   const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader });
   const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
-  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
+  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
   const paneControl = new PaneControlWorkflow({ store, herdr, outbound: writer, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, logger });

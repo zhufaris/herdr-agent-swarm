@@ -422,6 +422,10 @@ export interface OutboundCheckpointSubscriber {
   requestScan(force?: boolean): Promise<void>;
 }
 
+export interface ImmediateOutboundDispatcher {
+  requestScan(force?: boolean): Promise<void>;
+}
+
 export interface OutboxDispatcherControl {
   start(): () => void;
   stop(): Promise<void>;
