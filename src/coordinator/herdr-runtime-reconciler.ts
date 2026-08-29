@@ -47,7 +47,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly observedTerminalOutputs = new Map<string, string>();
-  private readonly observedOutputRevisions = new Map<string, number>();
   private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
   private readonly observedTabIds = new Map<string, string | null>();
   private readonly observedWorktreeNames = new Map<string, string | null>();
@@ -265,7 +264,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         bindingByPaneId.set(pane.paneId, existing);
         const output = cleanTerminalOutput(await this.options.herdr.readOutput(pane.paneId, 240));
         this.observedTerminalOutputs.set(pane.paneId, output);
-        if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
         continue;
       }
       if (!existing.projectId) {
@@ -311,10 +309,16 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       // output without changing this value, so content fingerprinting is the
       // authoritative deduplication boundary for bound TraeX panes.
       await this.publishChangedLocalOutput(existing, pane.paneId, existing.generation);
-      if (pane.outputRevision !== null && pane.outputRevision !== undefined) this.observedOutputRevisions.set(pane.paneId, pane.outputRevision);
       } catch (error) {
         this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
       }
+    }
+    if (requestedWorkspaceIds === undefined && panesByWorkspace.size === this.configuredWorkspaceIds.size) {
+      const livePaneIds = new Set([...panesByWorkspace.values()].flatMap((panes) => panes.map((pane) => pane.paneId)));
+      pruneMissingPaneObservations(this.observedTerminalOutputs, livePaneIds);
+      pruneMissingPaneObservations(this.observedAgentStates, livePaneIds);
+      pruneMissingPaneObservations(this.observedTabIds, livePaneIds);
+      pruneMissingPaneObservations(this.observedWorktreeNames, livePaneIds);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
   }
@@ -452,6 +456,10 @@ function terminalObservation(answer: string, model?: string, context?: string): 
 
 function workspaceCwdKey(workspaceId: string, cwd: string | null): string {
   return `${workspaceId}\u0000${cwd ?? ""}`;
+}
+
+function pruneMissingPaneObservations<Value>(observations: Map<string, Value>, livePaneIds: ReadonlySet<string>): void {
+  for (const paneId of observations.keys()) if (!livePaneIds.has(paneId)) observations.delete(paneId);
 }
 
 async function forEachConcurrent<T>(items: readonly T[], limit: number, operation: (item: T) => Promise<void>): Promise<void> {

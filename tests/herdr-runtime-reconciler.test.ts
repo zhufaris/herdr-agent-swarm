@@ -428,6 +428,33 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("forgets observations for panes absent from a complete snapshot", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "old-topic", rootMessageId: "old-root", title: "old task" });
+    store.updateBinding("old", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle" });
+    let panes = [{
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "old task", agentState: "idle" as const,
+      agentKind: "codex", outputRevision: 10, stateChangeSeq: 10, foregroundExecutables: ["traex"]
+    }];
+    const reconciler = fixture(store, { async listPanes() { return panes; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+    panes = [];
+    await reconciler.reconcile();
+    store.database.prepare("UPDATE bindings SET pane_id = NULL WHERE id = 'old'").run();
+    store.createPendingBinding({ id: "new", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "new-topic", rootMessageId: "new-root", title: "new task" });
+    store.updateBinding("new", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle" });
+    panes = [{
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "new task", agentState: "working" as const,
+      agentKind: "codex", outputRevision: 1, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    }];
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("new")?.lastAgentState).toBe("working");
+    store.close();
+  });
+
   it("resets the Agent state sequence fence when the terminal identity changes", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
