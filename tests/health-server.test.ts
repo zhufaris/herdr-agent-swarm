@@ -13,6 +13,40 @@ afterEach(async () => {
 
 describe("health server", () => {
   const buildIdentity = { serviceId: "herdr-lark-bridge" as const, version: "0.2.0", buildId: "sha256:test-build", gitCommit: null };
+  const reconciliationSnapshot = { state: "idle" as const, runCount: 3, successCount: 2, failureCount: 1, coalescedRequestCount: 4, lastStartedAt: "2026-08-29T00:00:00.000Z", lastCompletedAt: "2026-08-29T00:00:00.025Z", lastDurationMs: 25, maxDurationMs: 40, lastOutcome: "succeeded" as const };
+
+  it("reports both reconciliation snapshots without changing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      bindingRuntime: { snapshot: () => reconciliationSnapshot },
+      instanceRuntime: { snapshot: () => ({ ...reconciliationSnapshot, ready: true, lastError: null }) }, readinessTtlMs: 0,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "ok", readiness: { status: "ready" }, reconciliation: { bindingRuntime: reconciliationSnapshot, instanceRuntime: reconciliationSnapshot }
+    });
+  });
+
+  it("isolates reconciliation snapshot failures and degrades only status", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      bindingRuntime: { snapshot: () => { throw new Error("x".repeat(600)); } },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json() as { status: string; reconciliation: { bindingRuntime: { error: string } } };
+    expect(body.status).toBe("degraded");
+    expect(body.reconciliation.bindingRuntime.error).toHaveLength(500);
+  });
 
   it("reports every readiness component and exposes a safe operational status", async () => {
     store = new SqliteBindingStore(":memory:");

@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, ReconciliationDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
@@ -28,7 +28,8 @@ export function startHealthServer(options: {
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
   instanceWorker?: { snapshot(): InstanceWorkerDiagnostics };
-  instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } };
+  bindingRuntime?: { snapshot(): ReconciliationDiagnostics };
+  instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics> };
   herdrSocket?: { status(): HerdrSocketStatus };
   buildIdentity: BuildIdentity;
   readinessTtlMs?: number;
@@ -69,6 +70,13 @@ export function startHealthServer(options: {
       let sqliteIntegrity: SqliteIntegrityDiagnostics | { error: string } | undefined;
       try { sqliteIntegrity = options.sqliteIntegrity?.snapshot(); }
       catch (error) { sqliteIntegrity = { error: boundedError(error) }; }
+      let bindingRuntime: ReconciliationDiagnostics | { error: string } | undefined;
+      try { bindingRuntime = options.bindingRuntime?.snapshot(); }
+      catch (error) { bindingRuntime = { error: boundedError(error) }; }
+      let instanceRuntime: ({ ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics>) | { error: string } | undefined;
+      try { instanceRuntime = options.instanceRuntime?.snapshot(); }
+      catch (error) { instanceRuntime = { error: boundedError(error) }; }
+      const reconciliation = bindingRuntime || instanceRuntime ? { ...(bindingRuntime ? { bindingRuntime } : {}), ...(instanceRuntime ? { instanceRuntime } : {}) } : undefined;
       response.statusCode = 200;
       const operationalDegraded = "error" in operational
         || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
@@ -81,6 +89,7 @@ export function startHealthServer(options: {
           && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
           && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
           && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))
+          && !(bindingRuntime && "error" in bindingRuntime) && !(instanceRuntime && "error" in instanceRuntime)
           && !(sqliteIntegrity && (!("quickCheck" in sqliteIntegrity) || sqliteIntegrity.state === "idle" || sqliteIntegrity.state === "degraded" || sqliteIntegrity.state === "running" && (sqliteIntegrity.quickCheck !== "ok" || sqliteIntegrity.issues.length > 0 || sqliteIntegrity.error !== null))) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
         ...(outboxDispatcher ? { outboxDispatcher } : {}),
@@ -90,6 +99,7 @@ export function startHealthServer(options: {
         ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}),
         ...(startupRecovery ? { startupRecovery } : {}),
         ...(sqliteIntegrity ? { sqliteIntegrity } : {}),
+        ...(reconciliation ? { reconciliation } : {}),
         ...(options.herdrSocket ? { herdrSocket: options.herdrSocket.status() } : {}),
         ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));
