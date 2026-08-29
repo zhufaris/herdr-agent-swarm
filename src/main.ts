@@ -92,7 +92,7 @@ const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
   : null;
 rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
 herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
-herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, 2_000, logger);
+herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, config.runtimeTuning.herdrSnapshotCacheTtlMs, logger);
 const paneHost = new HerdrPaneHost(herdr);
 const [codexAvailable, claudeAvailable, piAvailable] = await Promise.all([
   detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
@@ -119,13 +119,13 @@ const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentD
 const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("./cli/primary-tools-mcp.js", import.meta.url))], store, instanceMessaging, logger);
 const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID, primaryTools: primaryToolGateway });
 const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, operatorOpenIds: config.lark.operatorOpenIds, store, control: instanceControl, messaging: instanceMessaging, drivers: agentDrivers, outbound });
-const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork);
+const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
 const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
 const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
 const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
 const sqliteIntegrity = new SqliteIntegrityAuditor(store, config.sqliteIntegrityAudit, logger);
 const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot });
-const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards);
+const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cardUpdateDebounceMs });
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
@@ -155,7 +155,7 @@ const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEve
 }, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
-  ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), async (workspaceIds) => { await Promise.all([coordinator.reconcileHerdrWorkspaces(workspaceIds), instanceRuntime.reconcile()]); }, logger)
+  ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), async (workspaceIds) => { await Promise.all([coordinator.reconcileHerdrWorkspaces(workspaceIds), instanceRuntime.reconcile()]); }, logger, config.runtimeTuning.herdrEventDebounceMs)
   : null;
 try {
   await herdrEventInbox?.start();
