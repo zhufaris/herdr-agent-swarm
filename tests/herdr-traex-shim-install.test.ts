@@ -30,15 +30,29 @@ describe("Herdr TraeX shim installer", () => {
       launcher: expect.stringMatching(/releases\/[^/]+\/pane-launcher$/),
       reporter: expect.stringMatching(/releases\/[^/]+\/cli\/herdr-traex-reporter\.js$/),
       lifecycleReporter: expect.stringMatching(/releases\/[^/]+\/cli\/report-traex-lifecycle\.js$/),
-      requestDir: join(fixture.runtime, "herdr-traex-shim/run")
+      requestDir: join(fixture.runtime, "herdr-traex-shim/run"),
+      sessionPeersDir: join(fixture.home, ".trae/cli/session-peers")
     });
     expect(await readFile(join(config.releaseDir, "cli/report-traex-lifecycle.js"), "utf8")).toContain("export");
     expect(await readFile(join(config.releaseDir, "runtime/report-traex-lifecycle.js"), "utf8")).toContain("export");
+    expect(await readFile(join(config.releaseDir, "runtime/traex-session-peer.js"), "utf8")).toContain("export");
 
     const status = await install(fixture, ["status"]);
     expect(status).toMatchObject({ code: 0 });
     expect(status.stdout).toContain("status: ready");
     expect(status.stdout).toContain("herdr: 0.7.5");
+  });
+
+  it.each([
+    ["HERDR_TRAEX_HOME over TRAECLI_HOME", (fixture: Fixture) => ({ HERDR_TRAEX_HOME: join(fixture.root, "explicit-traex-home"), TRAECLI_HOME: join(fixture.root, "traecli-home") }), (fixture: Fixture) => join(fixture.root, "explicit-traex-home/session-peers")],
+    ["TRAECLI_HOME over HOME", (fixture: Fixture) => ({ HERDR_TRAEX_HOME: "", TRAECLI_HOME: join(fixture.root, "traecli-home") }), (fixture: Fixture) => join(fixture.root, "traecli-home/session-peers")],
+    ["HOME fallback", () => ({ HERDR_TRAEX_HOME: "", TRAECLI_HOME: "" }), (fixture: Fixture) => join(fixture.home, ".trae/cli/session-peers")]
+  ])("resolves session peers from %s", async (_label, environment, expected) => {
+    const fixture = await createFixture();
+    const result = await install(fixture, ["install"], environment(fixture));
+    expect(result, result.stderr).toMatchObject({ code: 0 });
+    const config = JSON.parse(await readFile(join(fixture.config, "herdr-traex-shim/config.json"), "utf8"));
+    expect(config.sessionPeersDir).toBe(expected(fixture));
   });
 
   it("rejects Herdr without native Agent session reporting", async () => {
@@ -120,7 +134,7 @@ async function createFixture(options: { shimAfterReal?: boolean; missingAgentSes
   ].join("\n"));
   await executable(traex, '#!/usr/bin/env bash\necho "traex 0.201.6"\n');
   for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
   const repo = process.cwd();
   await writeFile(join(source, "scripts/herdr-traex-command-shim.sh"), await readFile(join(repo, "scripts/herdr-traex-command-shim.sh")));
   await writeFile(join(source, "scripts/herdr-traex-pane-launcher.sh"), await readFile(join(repo, "scripts/herdr-traex-pane-launcher.sh")));

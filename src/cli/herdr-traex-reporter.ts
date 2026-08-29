@@ -3,17 +3,18 @@ import { readFile, readlink } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { TraexAgentReporter, type ReporterInput, type ReporterOperations } from "../runtime/herdr-traex-reporter.js";
+import { resolveTraexSessionPeer } from "../runtime/traex-session-peer.js";
 
 async function main(): Promise<void> {
   const configPath = process.env.HERDR_TRAEX_SHIM_CONFIG;
   if (!configPath) throw new Error("Missing installed shim config");
-  const config = JSON.parse(await readFile(configPath, "utf8")) as { realHerdr?: unknown };
-  if (typeof config.realHerdr !== "string" || !config.realHerdr.startsWith("/")) throw new Error("Invalid real Herdr path");
+  const config = JSON.parse(await readFile(configPath, "utf8")) as { realHerdr?: unknown; sessionPeersDir?: unknown };
+  if (typeof config.realHerdr !== "string" || !config.realHerdr.startsWith("/") || typeof config.sessionPeersDir !== "string" || !config.sessionPeersDir.startsWith("/")) throw new Error("Invalid installed shim config");
   const input = parseInput(process.argv[2]);
-  await new TraexAgentReporter(operations(config.realHerdr, input.executable)).run(input);
+  await new TraexAgentReporter(operations(config.realHerdr, input.executable, config.sessionPeersDir)).run(input);
 }
 
-function operations(realHerdr: string, executable: string): ReporterOperations {
+function operations(realHerdr: string, executable: string, sessionPeersDir: string): ReporterOperations {
   return {
     processIdentity: async (paneId, pid) => {
       const result = resultOf(await run(realHerdr, ["pane", "process-info", "--pane", paneId])) as { process_info?: { foreground_processes?: Array<{ pid?: number; argv?: string[] }> } };
@@ -22,6 +23,7 @@ function operations(realHerdr: string, executable: string): ReporterOperations {
       const startTicks = process ? await readStartTicks(pid) : null;
       return process && actualExecutable === executable && startTicks ? { executable, pid, startTicks } : null;
     },
+    resolveSessionPeer: (pid, launchCorrelationId) => resolveTraexSessionPeer(sessionPeersDir, pid, launchCorrelationId),
     reportAgent: async (paneId, state, sequence) => { await run(realHerdr, reportAgentArguments(paneId, state, sequence)); },
     reportAgentSession: async (paneId, sequence, agentSessionId) => { await run(realHerdr, reportAgentSessionArguments(paneId, sequence, agentSessionId)); },
     reportMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--display-agent", "traex", "--seq", sequence]); },
@@ -53,7 +55,7 @@ async function readExecutable(pid: number): Promise<string | null> {
 function parseInput(raw: string | undefined): ReporterInput {
   if (!raw) throw new Error("Missing reporter input");
   const value = JSON.parse(raw) as Partial<ReporterInput>;
-  if (!value.paneId || !value.name || !value.executable?.startsWith("/") || !Number.isInteger(value.pid) || !value.processStartTicks || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.agentSessionId ?? "")) throw new Error("Invalid reporter input");
+  if (!value.paneId || !value.name || !value.executable?.startsWith("/") || !Number.isInteger(value.pid) || !value.processStartTicks || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.launchCorrelationId ?? "")) throw new Error("Invalid reporter input");
   return value as ReporterInput;
 }
 

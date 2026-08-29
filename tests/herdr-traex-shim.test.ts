@@ -148,7 +148,7 @@ describe("Herdr TraeX managed start", () => {
     expect(request).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
     expect(request).toContainEqual(expect.stringContaining("hooks.Stop"));
     expect(request.slice(-5)).toEqual(["--session-id", "01a03eb1-c193-7531-83c0-e6c6f70143d4", "--model", "private model", ""]);
-    expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987", agentSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+    expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987", launchCorrelationId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
   });
 
   it("rejects a busy pane before writing or launching", async () => {

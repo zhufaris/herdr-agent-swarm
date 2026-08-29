@@ -27,6 +27,7 @@ export interface TraexLaunchConfig {
   reporter: string;
   lifecycleReporter: string;
   requestDir: string;
+  sessionPeersDir: string;
   validatedHerdrVersion: string;
 }
 
@@ -36,7 +37,7 @@ export interface TraexStartDependencies {
   removeRequest(requestId: string): Promise<void>;
   processExecutable(pid: number): Promise<string | null>;
   processStartTicks(pid: number): Promise<string | null>;
-  startReporter(input: { paneId: string; name: string; executable: string; pid: number; processStartTicks: string; agentSessionId: string; reporter: string }): void | Promise<void>;
+  startReporter(input: { paneId: string; name: string; executable: string; pid: number; processStartTicks: string; launchCorrelationId: string; reporter: string }): void | Promise<void>;
   sleep(ms: number): Promise<void>;
   now(): number;
   generateSessionId(): string;
@@ -131,7 +132,7 @@ export function encodeLaunchRequest(executable: string, args: readonly string[])
 
 export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLaunchConfig, dependencies: TraexStartDependencies): Promise<Record<string, unknown>> {
   rejectCallerSessionIdentity(input.traexArgs);
-  const agentSessionId = dependencies.generateSessionId();
+  const launchCorrelationId = dependencies.generateSessionId();
   const deadline = dependencies.now() + input.timeoutMs;
   let requestId: string | null = null;
   let launched = false;
@@ -144,7 +145,7 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     if (!isAvailableShell(before)) throw new TraexStartError("agent_start_failed", `Pane ${input.paneId} is not an available shell`);
     requestId = await dependencies.writeRequest(encodeLaunchRequest(config.traex, [
       ...shimLifecycleArguments(config.realHerdr, config.lifecycleReporter),
-      "--session-id", agentSessionId,
+      "--session-id", launchCorrelationId,
       ...input.traexArgs
     ]));
     // Once pane.run is invoked, its command may have reached the terminal even
@@ -154,7 +155,7 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     const process = await waitForTraexProcess(input.paneId, config.traex, deadline, dependencies);
     const processStartTicks = await dependencies.processStartTicks(process.pid);
     if (!processStartTicks) throw new Error("TraeX process identity disappeared before reporter startup");
-    await dependencies.startReporter({ paneId: input.paneId, name: input.name, executable: config.traex, pid: process.pid, processStartTicks, agentSessionId, reporter: config.reporter });
+    await dependencies.startReporter({ paneId: input.paneId, name: input.name, executable: config.traex, pid: process.pid, processStartTicks, launchCorrelationId, reporter: config.reporter });
     const managed = await waitForManagedAgent(input, deadline, dependencies);
     return { type: "agent_started", agent: projectTraexAgentJson(managed.agent), argv: ["traex"] };
   } catch (cause) {
