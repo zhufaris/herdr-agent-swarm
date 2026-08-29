@@ -37,8 +37,14 @@ interface HerdrNativeRequestClient {
   waitForPaneEvent?(paneId: string, timeoutMs: number): Promise<boolean>;
 }
 
+interface NativeReadNegativeCacheOptions {
+  ttlMs?: number;
+  maxEntries?: number;
+  clock?: () => number;
+}
+
 export class HerdrCliAdapter implements HerdrPort {
-  private readonly nativeReadUnsupportedPanes = new Set<string>();
+  private readonly nativeReadUnsupportedPanes = new Map<string, number>();
   private readonly outputReads = new Map<string, Promise<string>>();
 
   constructor(
@@ -46,7 +52,8 @@ export class HerdrCliAdapter implements HerdrPort {
     private readonly executable: string,
     private readonly commandTimeoutMs: number,
     private readonly traexPermissionMode = "auto",
-    private readonly native?: HerdrNativeRequestClient
+    private readonly native?: HerdrNativeRequestClient,
+    private readonly nativeReadNegativeCache: NativeReadNegativeCacheOptions = {}
   ) {}
 
   async assertWorkspace(workspaceId: string): Promise<void> {
@@ -302,14 +309,14 @@ export class HerdrCliAdapter implements HerdrPort {
     // as an agent target. Cache that negative capability: agent.read targets
     // agents rather than arbitrary Panes, and retrying agent_not_found on every
     // observer pass creates an avoidable RPC storm.
-    if (this.native && !this.nativeReadUnsupportedPanes.has(paneId)) {
+    if (this.native && !this.isNativeReadUnsupported(paneId)) {
       try {
         const result = nativeReadSchema.parse(await this.native.request("agent.read", {
           target: paneId, source: source === "recent-unwrapped" ? "recent_unwrapped" : source, lines, format: "text", strip_ansi: true
         }, this.commandTimeoutMs));
         return result.read.text;
       } catch (error) {
-        if (isUnknownNativeAgent(error)) this.nativeReadUnsupportedPanes.add(paneId);
+        if (isUnknownNativeAgent(error)) this.rememberNativeReadUnsupported(paneId);
         // Read-only native failures fall back to the Pane CLI.
       }
     }
@@ -317,6 +324,33 @@ export class HerdrCliAdapter implements HerdrPort {
       "pane", "read", paneId, "--source", source, "--lines", String(lines), "--format", "text"
     ], this.commandTimeoutMs);
     return unwrapText(stdout);
+  }
+
+  private isNativeReadUnsupported(paneId: string): boolean {
+    const expiresAt = this.nativeReadUnsupportedPanes.get(paneId);
+    if (expiresAt === undefined) return false;
+    if (expiresAt <= (this.nativeReadNegativeCache.clock ?? Date.now)()) {
+      this.nativeReadUnsupportedPanes.delete(paneId);
+      return false;
+    }
+    this.nativeReadUnsupportedPanes.delete(paneId);
+    this.nativeReadUnsupportedPanes.set(paneId, expiresAt);
+    return true;
+  }
+
+  private rememberNativeReadUnsupported(paneId: string): void {
+    const now = (this.nativeReadNegativeCache.clock ?? Date.now)();
+    for (const [key, expiresAt] of this.nativeReadUnsupportedPanes) {
+      if (expiresAt <= now) this.nativeReadUnsupportedPanes.delete(key);
+    }
+    this.nativeReadUnsupportedPanes.delete(paneId);
+    this.nativeReadUnsupportedPanes.set(paneId, now + Math.max(0, this.nativeReadNegativeCache.ttlMs ?? 30_000));
+    const maxEntries = Math.max(1, Math.floor(this.nativeReadNegativeCache.maxEntries ?? 256));
+    while (this.nativeReadUnsupportedPanes.size > maxEntries) {
+      const oldest = this.nativeReadUnsupportedPanes.keys().next().value;
+      if (oldest === undefined) break;
+      this.nativeReadUnsupportedPanes.delete(oldest);
+    }
   }
 
   private coalesceOutputRead(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {

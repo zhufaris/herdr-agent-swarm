@@ -101,6 +101,56 @@ describe("Herdr adapter", () => {
     expect(nativeCalls).toEqual(["agent.read"]);
   });
 
+  it("retries native reads after the negative cache expires", async () => {
+    let now = 0;
+    let nativeReads = 0;
+    let cliReads = 0;
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] !== "pane" || args[1] !== "read") throw new Error(`unexpected command: ${args.join(" ")}`);
+      cliReads += 1;
+      return { stdout: "CLI output", stderr: "" };
+    } };
+    const native = { async request(method: string): Promise<unknown> {
+      if (method !== "agent.read") throw new Error(`unexpected native request: ${method}`);
+      nativeReads += 1;
+      if (nativeReads === 1) throw new Error("agent_not_found: agent target w1:p1 not found");
+      return { read: { text: "native output" } };
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native, { clock: () => now });
+
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("CLI output");
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("CLI output");
+    now = 30_001;
+    await expect(adapter.readOutput("w1:p1", 80)).resolves.toBe("native output");
+
+    expect(nativeReads).toBe(2);
+    expect(cliReads).toBe(2);
+  });
+
+  it("evicts the least recently used native-read failure", async () => {
+    const nativePanes: string[] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] !== "pane" || args[1] !== "read") throw new Error(`unexpected command: ${args.join(" ")}`);
+      return { stdout: `CLI ${args[2]}`, stderr: "" };
+    } };
+    const native = { async request(method: string, params: object): Promise<unknown> {
+      if (method !== "agent.read") throw new Error(`unexpected native request: ${method}`);
+      const paneId = (params as { target: string }).target;
+      nativePanes.push(paneId);
+      throw new Error(`agent_not_found: agent target ${paneId} not found`);
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native, { clock: () => 0, maxEntries: 2 });
+
+    await adapter.readOutput("p1", 80);
+    await adapter.readOutput("p2", 80);
+    await adapter.readOutput("p1", 80);
+    await adapter.readOutput("p3", 80);
+    await adapter.readOutput("p1", 80);
+    await adapter.readOutput("p2", 80);
+
+    expect(nativePanes).toEqual(["p1", "p2", "p3", "p2"]);
+  });
+
   it("coalesces concurrent reads of the same Pane output", async () => {
     let reads = 0;
     const runner: CommandRunner = { async run(_executable, args) {
