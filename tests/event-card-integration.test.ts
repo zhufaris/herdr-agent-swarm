@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { QueueFeedbackProjector } from "../src/events/queue-feedback-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
@@ -10,6 +11,32 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("event-driven card projection", () => {
+  it("coalesces repeated queue-feedback ticks to the newest durable answer update", async () => {
+    let clock = "2026-08-29T12:00:20.000Z";
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const active = createQueuedRunCard({ promptId: "active", bindingId: "b1", title: "Active", workspaceId: "w1", paneId: "w1:p1", requestText: "active", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "active", bindingId: "b1", larkMessageId: "m-active", actorOpenId: "u1", body: "active" }, view: active, rootMessageId: "m1", answerCard: {} });
+    store.updatePrompt("active", "running"); store.markPromptDispatched("active");
+    store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T12:00:00.000Z' WHERE prompt_id = 'active'").run();
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m-p1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "m1", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.promptId === "p1" ? "answer-1" : "active-answer", reply.promptId === "p1" ? "card-1" : "active-card");
+    const outboundWork = { subscribe: () => () => {}, wake: vi.fn() };
+    const projector = new QueueFeedbackProjector({ store, outboundWork, logger: pino({ enabled: false }), now: () => clock });
+
+    await projector.refresh("b1");
+    clock = "2026-08-29T12:00:31.000Z";
+    await projector.refresh("b1");
+
+    const updates = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1" && reply.kind === "card_update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ viewVersion: 3, rootMessageId: "answer-1", cardRole: "answer" });
+    expect(updates[0]!.payload).toContain("当前任务已运行 31 秒");
+    await projector.stop(); store.close();
+  });
+
   it("reduces an event, persists the view, then updates the same card", async () => {
     const updates: object[] = [];
     const lark: LarkPort = {

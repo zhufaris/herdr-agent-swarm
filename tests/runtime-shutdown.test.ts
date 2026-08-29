@@ -12,6 +12,7 @@ describe("bridge runtime shutdown", () => {
       herdrEventInbox: { async stop() { calls.push("inbox"); } },
       herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
+      queueFeedbackProjector: { async stop() { calls.push("queue-feedback"); } },
       projector: { async stop() { calls.push("projector:start"); await projectorBlocked; calls.push("projector:end"); } },
       publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
@@ -23,12 +24,12 @@ describe("bridge runtime shutdown", () => {
     const first = runtime.shutdown("SIGTERM");
     const second = runtime.shutdown("SIGINT");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(calls).toEqual(["inbox", "subscriber", "coordinator", "projector:start"]);
+    expect(calls).toEqual(["inbox", "subscriber", "coordinator", "queue-feedback", "projector:start"]);
 
     releaseProjector();
     await Promise.all([first, second]);
 
-    expect(calls).toEqual(["inbox", "subscriber", "coordinator", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
+    expect(calls).toEqual(["inbox", "subscriber", "coordinator", "queue-feedback", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
   });
 
   it("continues releasing resources when an earlier stop fails", async () => {

@@ -808,6 +808,21 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT created_at, updated_at, next_attempt_at FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z", next_attempt_at: "2026-08-29T10:05:00.000Z" });
   });
 
+  it("projects queue feedback and its answer-card outbox intent atomically", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    initial.answerMessageId = "answer-1";
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: initial, rootMessageId: "root", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
+    const next = { ...initial, queueFeedback: { aheadCount: 0, activeElapsedSeconds: 30, elapsedBucket: 1, estimateLowerSeconds: null, estimateUpperSeconds: null, sampleCount: 0 }, viewVersion: initial.viewVersion + 1, updatedAt: "later" };
+
+    store.database.exec("CREATE TRIGGER reject_queue_feedback_outbox BEFORE INSERT ON outbound_replies WHEN NEW.kind = 'card_update' BEGIN SELECT RAISE(ABORT, 'reject outbox'); END");
+    expect(() => store!.projectQueueFeedback({ expectedViewVersion: initial.viewVersion, view: next, card: { card: true } })).toThrow("reject outbox");
+    expect(store.loadRunCard("p1")).toMatchObject({ viewVersion: initial.viewVersion, queueFeedback: null });
+    expect(store.listPendingOutboundReplies()).toHaveLength(0);
+  });
+
   it.each([
     ["no_candidate", null, 3, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
     ["binding_changed", "parent", 2, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
@@ -1980,6 +1995,26 @@ describe("SQLite store", () => {
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。", steeringOrigin: "automatic", steeringFailureKind: "uncertain" });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+  });
+
+  it("reports aggregate-only automatic steering and queue feedback counts", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const makeView = (id: string, queueFeedback: ReturnType<typeof createQueuedRunCard>["queueFeedback"] = null) => ({ ...createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: `secret-${id}`, queuePosition: 1, occurredAt: "now" }), queueFeedback });
+    for (const [id, state, failureKind] of [["queued", "queued", null], ["delivered", "delivered", null], ["rejected", "failed", "rejected"], ["uncertain", "failed", "uncertain"]] as const) {
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: `actor-${id}`, body: `secret-${id}`, dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view: makeView(id), rootMessageId: "m1", answerCard: {} });
+      store.database.prepare("UPDATE prompt_jobs SET state = ? WHERE id = ?").run(state, id);
+      if (failureKind) store.database.prepare("UPDATE run_cards SET phase = 'failed', steering_failure_kind = ? WHERE prompt_id = ?").run(failureKind, id);
+    }
+    const estimate = { aheadCount: 0, activeElapsedSeconds: null, estimateLowerSeconds: 30, estimateUpperSeconds: 90, sampleCount: 3, elapsedBucket: null };
+    for (const [id, feedback] of [["estimated", estimate], ["unestimated", null]] as const) {
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: `actor-${id}`, body: `secret-${id}` }, view: makeView(id, feedback), rootMessageId: "m1", answerCard: {} });
+    }
+
+    const summary = store.getOperationalSummary();
+    expect(summary).toMatchObject({ automaticSteering: { queued: 1, delivered: 1, failed: 2, rejected: 1, uncertain: 1 }, queueFeedback: { withEstimate: 1, withoutEstimate: 1 } });
+    expect(JSON.stringify({ automaticSteering: summary.automaticSteering, queueFeedback: summary.queueFeedback })).not.toContain("secret-");
+    expect(JSON.stringify({ automaticSteering: summary.automaticSteering, queueFeedback: summary.queueFeedback })).not.toContain("actor-");
   });
 
   it("atomically converts only rejected automatic steering into one ordinary prompt", () => {

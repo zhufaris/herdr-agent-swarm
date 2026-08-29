@@ -1145,6 +1145,28 @@ export class SqliteBindingStore implements BindingStorePort {
     return { activeStartedAt: active?.started_at ?? null, queued: this.listQueuedTurnRunCards(bindingId), durationsMs: this.listCompletedOrdinaryTurnDurations(bindingId, 10) };
   }
 
+  projectQueueFeedback(input: { expectedViewVersion: number; view: RunCardView; card: object | null }): { outcome: "projected" | "stale"; view: RunCardView; outboxReserved: boolean } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.loadRunCard(input.view.promptId);
+      if (!current || current.phase !== "queued" || current.viewVersion !== input.expectedViewVersion) {
+        this.database.exec("COMMIT");
+        return { outcome: "stale", view: current ?? input.view, outboxReserved: false };
+      }
+      const view = this.saveRunCard(input.view);
+      let outboxReserved = false;
+      if (view.answerMessageId && input.card) {
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${view.promptId}:answer:${view.viewVersion}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: view.answerMessageId, kind: "card_update", payload: JSON.stringify(input.card) });
+        outboxReserved = true;
+      }
+      this.database.exec("COMMIT");
+      return { outcome: "projected", view, outboxReserved };
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -2173,10 +2195,29 @@ export class SqliteBindingStore implements BindingStorePort {
     const cleanupCandidates = this.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL AND archived_at <= datetime('now', '-30 days')").get() as { count: number };
     const oldestActiveCleanup = this.database.prepare("SELECT MIN(created_at) AS value FROM retired_pane_cleanup_operations WHERE state IN ('pending','waiting_busy','executing')").get() as { value: string | null };
     const latestCleanup = this.database.prepare("SELECT id, state, updated_at, detail FROM retired_pane_cleanup_operations ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; state: RetiredPaneCleanupState; updated_at: string; detail: string | null } | undefined;
+    const automaticSteering = this.database.prepare(`
+      SELECT
+        SUM(CASE WHEN p.state = 'queued' THEN 1 ELSE 0 END) AS queued,
+        SUM(CASE WHEN p.state = 'delivered' THEN 1 ELSE 0 END) AS delivered,
+        SUM(CASE WHEN p.state = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN p.state = 'failed' AND c.steering_failure_kind = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+        SUM(CASE WHEN p.state = 'failed' AND c.steering_failure_kind = 'uncertain' THEN 1 ELSE 0 END) AS uncertain
+      FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+      WHERE p.dispatch_kind = 'steering' AND p.steering_origin = 'automatic'
+    `).get() as Record<"queued" | "delivered" | "failed" | "rejected" | "uncertain", number | null>;
+    const queueFeedback = this.database.prepare(`
+      SELECT
+        SUM(CASE WHEN c.queue_feedback_json IS NOT NULL AND json_extract(c.queue_feedback_json, '$.estimateLowerSeconds') IS NOT NULL AND json_extract(c.queue_feedback_json, '$.estimateUpperSeconds') IS NOT NULL THEN 1 ELSE 0 END) AS with_estimate,
+        SUM(CASE WHEN c.queue_feedback_json IS NULL OR json_extract(c.queue_feedback_json, '$.estimateLowerSeconds') IS NULL OR json_extract(c.queue_feedback_json, '$.estimateUpperSeconds') IS NULL THEN 1 ELSE 0 END) AS without_estimate
+      FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+      WHERE p.state = 'queued' AND p.dispatch_kind = 'turn' AND c.phase = 'queued'
+    `).get() as { with_estimate: number | null; without_estimate: number | null };
     return {
       bindings: groupedCounts<BindingState>("bindings", "state", ["pending", "active", "archived", "orphaned", "failed"]),
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
       promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
+      automaticSteering: { queued: Number(automaticSteering.queued ?? 0), delivered: Number(automaticSteering.delivered ?? 0), failed: Number(automaticSteering.failed ?? 0), rejected: Number(automaticSteering.rejected ?? 0), uncertain: Number(automaticSteering.uncertain ?? 0) },
+      queueFeedback: { withEstimate: Number(queueFeedback.with_estimate ?? 0), withoutEstimate: Number(queueFeedback.without_estimate ?? 0) },
       promptLatency: { windowSize: promptLatencyWindowSize, sampleCount: Number(promptLatency.sample_count ?? 0), queue: latencyPhase("queue"), execution: latencyPhase("execution"), delivery: latencyPhase("delivery") },
       outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       outboxLanes: {

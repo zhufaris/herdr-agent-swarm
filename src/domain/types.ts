@@ -331,6 +331,8 @@ export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;
   promptDispatch: Record<PromptDispatchKind, number>;
+  automaticSteering: { queued: number; delivered: number; failed: number; rejected: number; uncertain: number };
+  queueFeedback: { withEstimate: number; withoutEstimate: number };
   promptLatency: PromptLatencySummary;
   outbound: Record<OutboundReplyState, number>;
   pendingOutbox: number;

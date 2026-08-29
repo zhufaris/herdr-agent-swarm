@@ -231,6 +231,7 @@ export interface BindingStorePort {
   listQueuedTurnRunCards(bindingId: string): RunCardView[];
   listCompletedOrdinaryTurnDurations(bindingId: string, limit: number): number[];
   loadQueueFeedbackInputs(bindingId: string): { activeStartedAt: string | null; queued: RunCardView[]; durationsMs: number[] };
+  projectQueueFeedback(input: { expectedViewVersion: number; view: RunCardView; card: object | null }): { outcome: "projected" | "stale"; view: RunCardView; outboxReserved: boolean };
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean };
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null;
   claimPaneControlOperation(id: string): PaneControlOperation | null;
@@ -379,6 +380,7 @@ export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "ge
 export type MainCardStore = Pick<BindingStorePort, "getBinding" | "loadTopicView" | "reserveMainCard" | "saveTopicView">;
 
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
+export type QueueFeedbackStore = Pick<BindingStorePort, "listBindings" | "loadQueueFeedbackInputs" | "projectQueueFeedback">;
 
 export type OutboxStore = Pick<BindingStorePort,
   | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
