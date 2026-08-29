@@ -7,7 +7,7 @@
     "node": ">=22.5"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/generate-build-info.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/generate-build-info.mjs",
     "config:validate": "node dist/cli/validate-config.js",
     "plugin": "node dist/cli/plugin-lifecycle.js",
     "primary-tools:mcp": "node dist/cli/primary-tools-mcp.js",
