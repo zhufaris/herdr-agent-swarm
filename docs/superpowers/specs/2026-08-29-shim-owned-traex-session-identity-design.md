@@ -25,9 +25,13 @@ is absent, leaving SQLite without a usable transcript identity. The hook
 entrypoint also intentionally suppresses errors, making that divergence hard to
 diagnose.
 
-Herdr 0.7.5 already accepts `--agent-session-id` on `pane report-agent`, and its
-snapshots expose the result as `agent_session`. The shim already owns TraeX
-startup and lifecycle reporting, so it is the correct integration boundary.
+Herdr 0.7.5 accepts session identity through the dedicated
+`pane report-agent-session` command. Live verification exposed an additional
+authority rule: Herdr acknowledges an arbitrary source with `ok`, but only an
+installed integration source such as `herdr:codex` becomes the pane's projected
+`agent_session`. The shim owns TraeX startup and invokes the compatible Codex
+protocol, so it reports session identity through that trusted integration source
+while retaining its own source for process state and display metadata.
 
 ## Chosen architecture
 
@@ -35,18 +39,20 @@ The shim generates one UUID per managed start and injects two lifecycle hooks:
 
 - `--session-id <uuid>` makes TraeX use the shim-selected identity for its
   persisted session and JSONL.
-- The process-fenced reporter reports initial `idle` plus
-  `--agent-session-id <uuid>` to official Herdr.
+- The process-fenced reporter reports initial `idle` under its own state
+  authority and reports the UUID separately through Herdr's trusted Codex
+  session authority.
 - `UserPromptSubmit` reports `working`.
 - `Stop` reports `idle`.
 
 All reports use the existing process-scoped authority:
 
 ```text
-source = herdr-traex-shim
-agent  = codex              # Herdr's internal compatible protocol kind
-display_agent = traex       # external projection owned by the shim
-agent_session.agent = traex # normalized by the bridge at its adapter boundary
+state.source = herdr-traex-shim
+state.agent  = codex              # shim-owned process lifecycle authority
+display_agent = traex             # external projection owned by the shim
+agent_session.source = herdr:codex # trusted built-in session authority
+agent_session.agent = traex       # normalized by the bridge adapter
 agent_session.kind  = id
 agent_session.value = <TraeX session UUID>
 ```
@@ -88,7 +94,7 @@ traex
 
 After the exact TraeX process is observed and fenced by executable path, PID,
 and process start ticks, the detached reporter invokes the official Herdr binary
-with an argv array:
+with separate argv arrays:
 
 ```text
 pane report-agent <pane-id>
@@ -96,7 +102,13 @@ pane report-agent <pane-id>
   --agent codex
   --state idle
   --seq <monotonic-sequence>
+
+pane report-agent-session <pane-id>
+  --source herdr:codex
+  --agent codex
+  --seq <monotonic-sequence>
   --agent-session-id <session-id>
+  --session-start-source startup
 ```
 
 The reporter receives the UUID through its private argv input. It never discovers
@@ -107,8 +119,9 @@ identity, or transcript data.
 
 The installed shim release must contain the hook CLI and its complete local
 JavaScript import closure. Installation validation checks that the installed
-official Herdr supports `--agent-session-id`. The release remains independent of
-repository `node_modules`.
+official Herdr provides `pane report-agent-session` with
+`--agent-session-id` and `--session-start-source`. The release remains
+independent of repository `node_modules`.
 
 ## Herdr adapter normalization
 
@@ -209,7 +222,10 @@ worktree changes are preserved and excluded from these commits.
 
 Focused tests must cover:
 
-- generated UUID propagation into exact TraeX and `report-agent` argv;
+- generated UUID propagation into exact TraeX and
+  `report-agent-session` argv;
+- separation of shim-owned state authority from trusted `herdr:codex`
+  session authority;
 - rejection of caller-provided session/resume identity arguments;
 - startup injection of only the shim-owned state hooks and absence of a
   SessionStart or bridge reporter hook;

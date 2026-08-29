@@ -4,7 +4,7 @@
 
 **Goal:** Make shim-reported Herdr `agent_session` the only TraeX session identity, remove the bridge-owned SessionStart socket and legacy columns, and prove exact JSONL observation across restart and recovery.
 
-**Architecture:** The installed shim generates one UUID per managed start and supplies it independently to TraeX `--session-id` and the process-fenced Herdr reporter. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
+**Architecture:** The installed shim generates one UUID per managed start and supplies it independently to TraeX `--session-id` and the process-fenced Herdr reporter. The reporter keeps process state under `herdr-traex-shim` but publishes identity through the trusted `herdr:codex` session authority. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
 
 **Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, better-sqlite3, Bash, Herdr 0.7.5, TraeX hooks
 
@@ -34,7 +34,7 @@
 
 **Interfaces:**
 - Consumes: a shim-generated UUID, process-fenced reporter input, and installer-owned official Herdr path.
-- Produces: one UUID passed to TraeX `--session-id` and Herdr `pane report-agent ... --agent-session-id`; lifecycle hooks support only prompt/stop state changes.
+- Produces: one UUID passed to TraeX `--session-id` and Herdr `pane report-agent-session --source herdr:codex ... --agent-session-id`; lifecycle hooks support only prompt/stop state changes.
 
 - [ ] Add failing tests asserting one generated UUID appears in TraeX `--session-id` and reporter input, then in exact Herdr `--agent-session-id` argv.
 - [ ] Add rejection tests for caller-provided `--session-id`, `--resume`, and equals-form variants.
@@ -144,6 +144,33 @@
 - [ ] Create or use a fresh managed TraeX pane without sending a synthetic Lark message, then verify Herdr exposes the exact UUID in `agent_session`.
 - [ ] Verify that UUID resolves to exactly one JSONL whose `session_meta.payload.id` matches and that bounded typed reading succeeds.
 - [ ] Confirm `reported_traex_session_id`, `reported_traex_session_at`, the socket file, and bridge SessionStart hook no longer exist.
+
+### Task 6: Separate state and session authority after live Herdr validation
+
+**Files:**
+- Modify: `src/runtime/herdr-traex-reporter.ts`
+- Modify: `src/cli/herdr-traex-reporter.ts`
+- Modify: `scripts/install-herdr-traex-shim.sh`
+- Modify: `tests/herdr-traex-reporter.test.ts`
+- Modify: `tests/herdr-traex-shim-install.test.ts`
+- Modify: `README.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/superpowers/specs/2026-08-29-herdr-traex-kind-shim-design.md`
+
+**Interfaces:**
+- Consumes: the process-fenced generated UUID and official Herdr 0.7.5 CLI.
+- Produces: state under `herdr-traex-shim` and session identity under the trusted `herdr:codex` integration source.
+
+- [ ] Add failing reporter tests requiring separate `reportAgent` and `reportAgentSession` calls with distinct sources.
+- [ ] Add a failing installer test requiring the dedicated `report-agent-session` command and both identity options.
+- [ ] Run the focused tests and confirm the new assertions fail.
+- [ ] Remove session identity from `report-agent`; add a dedicated process-fenced `report-agent-session --source herdr:codex --agent codex --session-start-source startup` call.
+- [ ] Strengthen installer capability validation for the dedicated command.
+- [ ] Update current architecture and operator documentation with the source-authority split.
+- [ ] Run focused tests, typecheck, build, and `git diff --check`.
+- [ ] Commit the implementation and documentation as separate thematic commits.
+- [ ] Install the new release and verify a fresh pane exposes the generated UUID without manual reporting.
+- [ ] Resolve that UUID to exactly one JSONL and verify its `session_meta.payload.id`.
 
 ## Completion audit
 

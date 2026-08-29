@@ -210,7 +210,9 @@ it uses Herdr's Codex-compatible reservation and prompt protocol while executing
 the real TraeX binary; only shim-marked JSON results are projected as
 `agent: "traex"`. The shim generates a session UUID, passes it to TraeX with
 `--session-id`, and gives the same UUID to its process-fenced reporter. The
-reporter establishes initial idle authority and Herdr `agent_session`;
+reporter establishes initial idle authority under `herdr-traex-shim` and
+publishes Herdr `agent_session` separately through the trusted
+`herdr:codex` integration source;
 `UserPromptSubmit` and `Stop` hooks report working/idle
 transitions without reading terminal content. The bridge persists that canonical
 Herdr identity and uses it to open the one matching JSONL. There is no separate

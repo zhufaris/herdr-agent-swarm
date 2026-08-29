@@ -114,8 +114,9 @@ The reporter must preserve these meanings:
 
 The shim generates the native TraeX conversation UUID before launch and supplies
 it to both TraeX `--session-id` and the process-fenced reporter. The reporter
-sends the exact UUID through the official `pane report-agent --agent-session-id` surface using Herdr's internal compatible
-Codex protocol identity. Shim-marked results are projected as `agent=traex`;
+sends the exact UUID through the official `pane report-agent-session` surface
+using the trusted `herdr:codex` source and Herdr's internal compatible Codex
+protocol identity. Shim-marked results are projected as `agent=traex`;
 ordinary Codex results are never rewritten.
 
 Native automatic restore is best-effort in the monkey-patched version because

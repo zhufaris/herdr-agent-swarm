@@ -378,7 +378,9 @@ record.
 
 For shim-started TraeX processes, the shim generates a UUID before launch and
 passes it independently to TraeX `--session-id` and Herdr's official
-`pane report-agent --agent-session-id` surface. A new managed session uses
+`pane report-agent-session --source herdr:codex --agent-session-id` surface.
+State and display metadata remain owned by the separate `herdr-traex-shim`
+source. A new managed session uses
 `/swarm reset` rather than local `/clear`.
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
