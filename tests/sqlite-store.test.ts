@@ -1306,6 +1306,16 @@ describe("SQLite store", () => {
     expect(plan.map((row) => row.detail).join(" ")).toContain("outbound_replies_prompt_role_state");
   });
 
+  it("uses a binding status index when checking whether a Main Card version is already reserved", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const columns = store.database.prepare("PRAGMA index_info(outbound_replies_binding_target_version)").all() as Array<{ name: string }>;
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND view_version >= ? LIMIT 1").all("b1", 1) as Array<{ detail: string }>;
+
+    expect(columns.map((column) => column.name)).toEqual(["binding_id", "target_role", "view_version"]);
+    expect(plan.map((row) => row.detail).join(" ")).toContain("outbound_replies_binding_target_version");
+  });
+
   it("creates the ordinary prompt queue index with the exact column order", () => {
     store = new SqliteBindingStore(":memory:");
 

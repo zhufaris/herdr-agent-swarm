@@ -2300,7 +2300,7 @@ export class SqliteBindingStore implements BindingStorePort {
     if (current.viewVersion <= current.deliveredVersion) return "current";
     const replacementPending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
     if (replacementPending) return "waiting";
-    const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND COALESCE(view_version, 0) >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
+    const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND view_version >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
     if (existingCurrent) return "waiting";
     if (!binding.statusMessageId) {
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
@@ -2830,6 +2830,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS bindings_root_created ON bindings(root_message_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS run_cards_binding_phase_created ON run_cards(binding_id, phase, created_at, prompt_id);
       CREATE INDEX IF NOT EXISTS outbound_replies_prompt_role_state ON outbound_replies(prompt_id, card_role, state);
+      CREATE INDEX IF NOT EXISTS outbound_replies_binding_target_version ON outbound_replies(binding_id, target_role, view_version);
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
     `);
   }

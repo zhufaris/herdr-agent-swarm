@@ -12,6 +12,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private static readonly MAX_CONCURRENT_DELIVERIES = 4;
   private static readonly SCAN_RETRY_BASE_MS = 250;
   private static readonly SCAN_RETRY_MAX_MS = 30_000;
+  private static readonly MAX_DELIVERIES_PER_SCAN = 100;
   private draining: Promise<void> | null = null;
   private readonly activeHandlers = new Set<Promise<unknown>>();
   private unsubscribe: (() => void) | null = null;
@@ -151,18 +152,31 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 
   private async drainPending(force: boolean): Promise<"idle" | "delivered" | "failed"> {
     const blockedTargets = new Set<string>();
+    const attemptedReplyIds = new Set<string>();
+    let deliveryCount = 0;
     let outcome: "idle" | "delivered" | "failed" = "idle";
     while (true) {
       if (this.stopping) return outcome;
       const batch = this.store.listOutboundLaneHeads(
-        LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES,
+        Math.min(LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES, LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN - deliveryCount),
         force ? null : new Date().toISOString(),
         [...blockedTargets]
       );
       if (batch.length === 0) return outcome;
-      const results = await Promise.all(batch.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
+      const repeated = batch.filter((reply) => attemptedReplyIds.has(reply.id));
+      for (const reply of repeated) blockedTargets.add(deliveryTargetKey(reply));
+      const deliverable = batch.filter((reply) => !attemptedReplyIds.has(reply.id));
+      if (deliverable.length === 0) continue;
+      for (const reply of deliverable) attemptedReplyIds.add(reply.id);
+      const results = await Promise.all(deliverable.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
+      deliveryCount += deliverable.length;
       if (results.includes("failed")) outcome = "failed";
       else if (outcome === "idle" && results.includes("delivered")) outcome = "delivered";
+      if (deliveryCount >= LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN) {
+        this.scanRequested = true;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return outcome;
+      }
     }
   }
 
@@ -188,7 +202,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.launchScan();
-    }, Math.max(0, dueAt - Date.now()));
+    }, Math.max(LarkOutboxDispatcher.SCAN_RETRY_BASE_MS, dueAt - Date.now()));
     this.retryTimer.unref?.();
   }
 

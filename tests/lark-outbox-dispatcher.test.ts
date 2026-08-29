@@ -608,6 +608,21 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("stops a scan when a delivered lane head does not advance", async () => {
+    const updateCard = vi.fn(async () => {});
+    const store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "stuck", idempotencyKey: "stuck", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    vi.spyOn(store, "markOutboundReplyDelivered").mockImplementation(() => {});
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(updateCard).toHaveBeenCalledOnce();
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "stuck" })]);
+    await publisher.stop();
+    store.close();
+  });
+
   it("keeps updates for the same target ordered while other targets progress", async () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
