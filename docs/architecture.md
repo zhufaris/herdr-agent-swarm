@@ -376,15 +376,15 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-For shim-started TraeX processes, a shim-owned `SessionStart` hook validates
-`startup` or `resume` and reports the exact native session UUID through Herdr's
-official `pane report-agent --agent-session-id` surface. A new managed session
-uses `/swarm reset` rather than local `/clear`.
+For shim-started TraeX processes, the shim generates a UUID before launch and
+passes it independently to TraeX `--session-id` and Herdr's official
+`pane report-agent --agent-session-id` surface. A new managed session uses
+`/swarm reset` rather than local `/clear`.
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
 bridge invokes the formal `agent start --kind traex` surface without lifecycle
 hooks or hook-trust overrides; the shim injects the required trust flag plus
-SessionStart, UserPromptSubmit, and Stop ahead of caller
+UserPromptSubmit and Stop ahead of caller
 arguments, launches
 the configured real TraeX executable through a private request file and fixed
 opaque launcher, and owns a separate fenced reporter.
@@ -461,8 +461,8 @@ notice instead of trusting content from a previous process.
 Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A
 fresh bridge-created pane, or a pane explicitly reset through the bridge,
-becomes eligible for typed mode only after its managed `SessionStart` hook has
-registered the exact TraeX UUID in Herdr and reconciliation has persisted it in
+becomes eligible for typed mode only after its process-fenced shim reporter has
+registered the assigned TraeX UUID in Herdr and reconciliation has persisted it in
 SQLite. The bridge never matches a transcript
 from cwd, timestamps, titles, or newest-file order, and it does not automatically
 restart or replace existing panes to enable typed output.

@@ -112,9 +112,9 @@ The reporter must preserve these meanings:
 
 ### Session identity
 
-The TraeX `SessionStart` hook remains the source of native conversation identity.
-The shim-owned lifecycle reporter sends the exact UUID through the official
-`pane report-agent --agent-session-id` surface using Herdr's internal compatible
+The shim generates the native TraeX conversation UUID before launch and supplies
+it to both TraeX `--session-id` and the process-fenced reporter. The reporter
+sends the exact UUID through the official `pane report-agent --agent-session-id` surface using Herdr's internal compatible
 Codex protocol identity. Shim-marked results are projected as `agent=traex`;
 ordinary Codex results are never rewritten.
 

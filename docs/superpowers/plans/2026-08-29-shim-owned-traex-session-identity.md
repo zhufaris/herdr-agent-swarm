@@ -4,7 +4,7 @@
 
 **Goal:** Make shim-reported Herdr `agent_session` the only TraeX session identity, remove the bridge-owned SessionStart socket and legacy columns, and prove exact JSONL observation across restart and recovery.
 
-**Architecture:** The installed shim injects a bounded SessionStart hook that calls official Herdr with `pane report-agent --agent-session-id`. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
+**Architecture:** The installed shim generates one UUID per managed start and supplies it independently to TraeX `--session-id` and the process-fenced Herdr reporter. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
 
 **Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, better-sqlite3, Bash, Herdr 0.7.5, TraeX hooks
 
@@ -21,32 +21,32 @@
 
 ---
 
-### Task 1: Shim-owned SessionStart reporting
+### Task 1: Shim-owned session assignment
 
 **Files:**
-- Modify: `src/runtime/report-traex-lifecycle.ts`
-- Modify: `src/cli/report-traex-lifecycle.ts`
-- Modify: `src/adapters/herdr-adapter.ts`
+- Modify: `src/runtime/herdr-traex-shim.ts`
+- Modify: `src/runtime/herdr-traex-reporter.ts`
+- Modify: `src/cli/herdr-traex-reporter.ts`
 - Modify: `scripts/install-herdr-traex-shim.sh`
-- Modify: `tests/report-traex-lifecycle.test.ts`
-- Modify: `tests/herdr-adapter.test.ts`
+- Modify: `tests/herdr-traex-shim.test.ts`
+- Modify: `tests/herdr-traex-reporter.test.ts`
 - Modify: `tests/herdr-traex-shim-install.test.ts`
 
 **Interfaces:**
-- Consumes: TraeX hook JSON and `HERDR_PANE_ID` plus installer-owned `HERDR_TRAEX_REAL_HERDR`.
-- Produces: `reportTraexLifecycle(rawInput, environment, run, sequence)` supporting SessionStart and lifecycle events; SessionStart emits `pane report-agent ... --state idle --agent-session-id <uuid>`.
+- Consumes: a shim-generated UUID, process-fenced reporter input, and installer-owned official Herdr path.
+- Produces: one UUID passed to TraeX `--session-id` and Herdr `pane report-agent ... --agent-session-id`; lifecycle hooks support only prompt/stop state changes.
 
-- [ ] Add a failing SessionStart test with an exact UUID and assert exact Herdr argv.
-- [ ] Add rejection tests for invalid UUID, unsupported source, missing Herdr context, and oversized input.
-- [ ] Run `npx vitest run tests/report-traex-lifecycle.test.ts` and confirm the new assertions fail.
-- [ ] Extend the bounded hook schema so SessionStart validates `session_id` and `startup|resume`, while prompt/stop reports never forward the session ID.
-- [ ] Replace the bridge SessionStart hook in `HerdrCliAdapter.startAgent` with the lifecycle reporter using the official Herdr environment prefix.
-- [ ] Update adapter tests to assert all three shim-owned hook arguments and absence of `report-traex-session.js`.
+- [ ] Add failing tests asserting one generated UUID appears in TraeX `--session-id` and reporter input, then in exact Herdr `--agent-session-id` argv.
+- [ ] Add rejection tests for caller-provided `--session-id`, `--resume`, and equals-form variants.
+- [ ] Run `npx vitest run tests/herdr-traex-shim.test.ts tests/herdr-traex-reporter.test.ts` and confirm the new assertions fail.
+- [ ] Generate the UUID in `runHerdrTraexStart`, reserve identity arguments, and pass the UUID into `ReporterInput`.
+- [ ] Make the reporter's initial authority report include `--agent-session-id`.
+- [ ] Remove SessionStart support and injection from the lifecycle reporter while preserving bounded UserPromptSubmit/Stop handling.
 - [ ] Extend installer contract validation to require `--agent-session-id`; keep the lifecycle reporter in the copied import closure.
 - [ ] Extend installer tests to reject a Herdr contract without that option and accept the supported contract.
-- [ ] Run `npx vitest run tests/report-traex-lifecycle.test.ts tests/herdr-adapter.test.ts tests/herdr-traex-shim-install.test.ts`.
+- [ ] Run `npx vitest run tests/herdr-traex-shim.test.ts tests/herdr-traex-reporter.test.ts tests/report-traex-lifecycle.test.ts tests/herdr-traex-shim-install.test.ts`.
 - [ ] Run `npm run typecheck`, `npm run build`, and `git diff --check`.
-- [ ] Commit only Task 1 files as `feat: report TraeX sessions through Herdr`.
+- [ ] Commit only Task 1 files as `fix: assign TraeX sessions before launch`.
 
 ### Task 2: Normalize native TraeX session identity
 
@@ -133,7 +133,7 @@
 - Consumes: the committed clean-cut implementation.
 - Produces: implementation-backed operational documentation and live verification evidence.
 
-- [ ] Document the authority chain `TraeX SessionStart -> shim -> Herdr agent_session -> SQLite canonical fields -> exact JSONL`.
+- [ ] Document the authority chain `shim UUID -> TraeX --session-id + Herdr agent_session -> SQLite canonical fields -> exact JSONL`.
 - [ ] Document failure behavior: missing identity degrades structured output and never replays a prompt.
 - [ ] Run focused suites for shim, adapter, store, reconciliation, transcript, prompt concurrency, and shutdown.
 - [ ] Run `npm test`, `npm run typecheck`, `npm run build`, and `git diff --check`.

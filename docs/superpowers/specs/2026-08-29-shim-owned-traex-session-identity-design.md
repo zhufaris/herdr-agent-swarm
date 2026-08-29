@@ -3,8 +3,8 @@
 ## Goal
 
 Make Herdr the only live authority for a TraeX conversation identity. The
-installed TraeX shim captures the UUID emitted by the TraeX `SessionStart` hook
-and reports it as the pane's native Agent session. Agent Swarm persists that
+installed TraeX shim generates the UUID before process launch, supplies it to
+TraeX through `--session-id`, and reports it as the pane's native Agent session. Agent Swarm persists that
 identity from Herdr reconciliation and uses it to open the exact TraeX JSONL
 transcript.
 
@@ -31,10 +31,11 @@ startup and lifecycle reporting, so it is the correct integration boundary.
 
 ## Chosen architecture
 
-The shim installs one self-contained TraeX hook reporter and injects all three
-hooks during managed startup:
+The shim generates one UUID per managed start and injects two lifecycle hooks:
 
-- `SessionStart` validates the TraeX session UUID and reports `idle` plus
+- `--session-id <uuid>` makes TraeX use the shim-selected identity for its
+  persisted session and JSONL.
+- The process-fenced reporter reports initial `idle` plus
   `--agent-session-id <uuid>` to official Herdr.
 - `UserPromptSubmit` reports `working`.
 - `Stop` reports `idle`.
@@ -64,23 +65,30 @@ Three approaches were considered:
 2. Let the shim write Agent Swarm SQLite directly. This couples a host-level
    compatibility tool to one application's schema, lease, and generation rules,
    so it is rejected.
-3. Report the native session through Herdr and let normal reconciliation persist
-   it. This preserves the documented authority boundary and works for every
-   Herdr consumer, so it is selected.
+3. Generate the UUID in the shim, pass it independently to TraeX and Herdr, and
+   let normal reconciliation persist it. This avoids startup-hook trust ordering,
+   preserves the authority boundary, and works for every Herdr consumer, so it
+   is selected.
 
-## Shim session reporting
+## Shim session assignment
 
-The hook parser accepts at most 64 KiB of JSON and requires:
+Before launching TraeX, the shim generates a lowercase UUID with
+`crypto.randomUUID()`. It rejects caller-supplied `--session-id`, `--resume`, or
+equivalent `--option=value` arguments so one managed start cannot have competing
+identity sources. It then writes the launch request with:
 
-- `HERDR_ENV=1`;
-- a valid `HERDR_PANE_ID`;
-- an absolute installer-provided official Herdr executable;
-- `hook_event_name=SessionStart`;
-- a UUID-shaped `session_id`;
-- `source` absent, `startup`, or `resume`.
+```text
+traex
+  --dangerously-bypass-hook-trust
+  -c hooks.UserPromptSubmit=...
+  -c hooks.Stop=...
+  --session-id <uuid>
+  <caller arguments>
+```
 
-It invokes the official binary with an argv array, never a shell-interpolated
-command:
+After the exact TraeX process is observed and fenced by executable path, PID,
+and process start ticks, the detached reporter invokes the official Herdr binary
+with an argv array:
 
 ```text
 pane report-agent <pane-id>
@@ -91,9 +99,11 @@ pane report-agent <pane-id>
   --agent-session-id <session-id>
 ```
 
-The reporter never logs hook input, prompt content, or session transcript data.
-Invalid input and Herdr command failure cause the hook command to fail visibly to
-TraeX's hook diagnostics, but do not terminate the TraeX process.
+The reporter receives the UUID through its private argv input. It never discovers
+identity from process environment, terminal output, or newest-file ordering. The
+lifecycle hook parser remains bounded to 64 KiB and accepts only
+`UserPromptSubmit` and `Stop`; it never logs hook input, prompt content, session
+identity, or transcript data.
 
 The installed shim release must contain the hook CLI and its complete local
 JavaScript import closure. Installation validation checks that the installed
@@ -168,14 +178,14 @@ authority and metadata. Herdr then removes the session reference with that
 authority; SQLite converges through the existing reconciliation rules.
 
 No code reads `TRAECLI_THREAD_ID` from `/proc` or scans the sessions directory to
-guess the newest transcript. The UUID comes only from TraeX's typed SessionStart
-event.
+guess the newest transcript. The UUID is generated once by the shim and passed
+to both TraeX and Herdr before any prompt can be accepted.
 
 ## Delivery batches
 
 ### Batch 1: Shim-owned native session identity
 
-Extend the shim hook reporter, startup arguments, installed release closure, and
+Extend the shim startup, process reporter, installed release closure, and
 focused tests. Verify that a fresh managed pane exposes the exact session UUID in
 Herdr `agent_session` and that the matching JSONL can be opened.
 
@@ -199,8 +209,10 @@ worktree changes are preserved and excluded from these commits.
 
 Focused tests must cover:
 
-- bounded SessionStart parsing and exact `report-agent` argv;
-- startup injection of the shim-owned hook and absence of the bridge reporter;
+- generated UUID propagation into exact TraeX and `report-agent` argv;
+- rejection of caller-provided session/resume identity arguments;
+- startup injection of only the shim-owned state hooks and absence of a
+  SessionStart or bridge reporter hook;
 - installed-release completeness and `--agent-session-id` capability validation;
 - snapshot and `agent get` normalization for marked TraeX sessions;
 - no rewriting of ordinary Codex sessions;
@@ -220,7 +232,7 @@ validation.
 
 ## Non-goals
 
-- Keeping any bridge-owned SessionStart compatibility path.
+- Keeping any SessionStart identity hook or bridge-owned compatibility path.
 - Teaching the shim about SQLite, bindings, Lark, or prompt IDs.
 - Guessing sessions from process environment or newest-file ordering.
 - Changing transcript content parsing, CardKit pagination, queue semantics, or
