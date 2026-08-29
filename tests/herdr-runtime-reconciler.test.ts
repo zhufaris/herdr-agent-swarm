@@ -645,8 +645,9 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task",
       agentState: registered ? "idle" as const : "unknown" as const, agentKind: registered ? "codex" : null, foregroundExecutables: ["traex"]
     });
+    const observedPane = () => registered ? pane() : { ...pane(), agentState: "idle" as const };
     const wakeOutbound = vi.fn();
-    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, async observeRuntime() { return { pane: pane(), traexProcess: true, composerReady: registered, evidenceSource: registered ? "structured" : "process" }; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, undefined, undefined, wakeOutbound);
+    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, async observeRuntime() { return { pane: observedPane(), traexProcess: true, composerReady: true, evidenceSource: registered ? "structured" : "visible" }; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, undefined, undefined, wakeOutbound);
 
     await reconciler.reconcile();
     await reconciler.reconcile();
@@ -813,7 +814,7 @@ describe("HerdrRuntimeReconciler", () => {
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "unknown" });
     store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "message-1", actorOpenId: "user", body: "queued work" });
     const countPendingPrompts = vi.spyOn(store, "countPendingPrompts");
-    const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, stateChangeSeq: 9, foregroundExecutables: [] };
+    const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, stateChangeSeq: 9, foregroundExecutables: [] };
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
     const wake = vi.fn();

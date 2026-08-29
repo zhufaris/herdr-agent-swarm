@@ -529,4 +529,6 @@ async function forEachConcurrent<T>(items: readonly T[], limit: number, operatio
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }
-function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean { return pane.agentKind === null && pane.agentState === "unknown"; }
+function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean {
+  return pane.agentKind === null && pane.foregroundExecutables.includes("traex");
+}
