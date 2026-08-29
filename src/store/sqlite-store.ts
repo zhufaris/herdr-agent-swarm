@@ -1363,6 +1363,7 @@ export class SqliteBindingStore implements BindingStorePort {
   scanDurablePromptWork(): DurablePromptWorkScan {
     const timestamp = now();
     const reason = "Session can no longer dispatch queued work";
+    const detachedReason = "Session ended while a dispatched turn was detached; the prompt was not replayed";
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const terminalBindings = `
@@ -1380,6 +1381,21 @@ export class SqliteBindingStore implements BindingStorePort {
           activity_at = ?, view_version = view_version + 1, updated_at = ?
         WHERE phase = 'queued' AND binding_id IN (${terminalBindings})
       `).run(reason, timestamp, timestamp, timestamp);
+      const terminalDetachedPrompts = `
+        SELECT p.id FROM prompt_jobs p
+        WHERE p.state = 'running' AND p.dispatch_kind = 'turn' AND p.observation_state = 'detached'
+          AND p.binding_id IN (${terminalBindings})
+      `;
+      this.database.prepare(`
+        UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0,
+          activity_at = ?, view_version = view_version + 1, updated_at = ?
+        WHERE prompt_id IN (${terminalDetachedPrompts})
+      `).run(detachedReason, timestamp, timestamp, timestamp);
+      const detachedResult = this.database.prepare(`
+        UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', was_detached = 1, error = ?, updated_at = ?
+        WHERE state = 'running' AND dispatch_kind = 'turn' AND observation_state = 'detached'
+          AND binding_id IN (${terminalBindings})
+      `).run(detachedReason, timestamp);
       const hints: PromptWorkHint[] = [];
       const detached = this.database.prepare(`
         SELECT p.id, p.binding_id FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id
@@ -1407,7 +1423,7 @@ export class SqliteBindingStore implements BindingStorePort {
       `).all() as Array<{ binding_id: string }>;
       for (const row of turns) hints.push({ kind: "prompt-ready", bindingId: row.binding_id });
       this.database.exec("COMMIT");
-      return { cancelled: Number(result.changes), hints };
+      return { cancelled: Number(result.changes), failedDetached: Number(detachedResult.changes), hints };
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 

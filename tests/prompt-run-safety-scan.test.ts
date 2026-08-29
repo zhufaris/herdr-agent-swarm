@@ -8,7 +8,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
   it("scans immediately and backs idle scans off to the capped delay with one timer", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
-    const scan = vi.fn(() => ({ cancelled: 0, hints: [] }));
+    const scan = vi.fn(() => ({ cancelled: 0, failedDetached: 0, hints: [] }));
     const workflow = createWorkflow({ scanDurablePromptWork: scan }, 100);
 
     workflow.start();
@@ -41,9 +41,9 @@ describe("PromptRunWorkflow durable safety scan", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
     const scan = vi.fn()
-      .mockReturnValueOnce({ cancelled: 0, hints: [] })
-      .mockReturnValueOnce({ cancelled: 0, hints: [] })
-      .mockReturnValueOnce({ cancelled: 0, hints: [{ kind: "prompt-ready", bindingId: "b1" }] });
+      .mockReturnValueOnce({ cancelled: 0, failedDetached: 0, hints: [] })
+      .mockReturnValueOnce({ cancelled: 0, failedDetached: 0, hints: [] })
+      .mockReturnValueOnce({ cancelled: 0, failedDetached: 0, hints: [{ kind: "prompt-ready", bindingId: "b1" }] });
     const claim = vi.fn(() => null);
     const workflow = createWorkflow({ scanDurablePromptWork: scan, claimNextDispatchablePrompt: claim }, 100);
 
@@ -55,9 +55,30 @@ describe("PromptRunWorkflow durable safety scan", () => {
     expect(claim).toHaveBeenCalledWith("b1");
     expect(workflow.snapshot()).toMatchObject({
       state: "running", lastScanOutcome: "work_found",
-      lastDiscovered: { turns: 1, steering: 0, detached: 0, cancelled: 0 },
+      lastDiscovered: { turns: 1, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 },
       currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.400Z"
     });
+    await workflow.stop();
+  });
+
+  it("reports terminal detached convergence as discovered work without exposing prompt identity", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
+    const info = vi.fn();
+    const scan = vi.fn(() => ({ cancelled: 0, failedDetached: 2, hints: [] }));
+    const workflow = createWorkflow({ scanDurablePromptWork: scan }, 100, vi.fn(), info);
+
+    workflow.start();
+
+    expect(workflow.snapshot()).toMatchObject({
+      state: "running", lastScanOutcome: "work_found",
+      lastDiscovered: { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 2 },
+      currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.100Z"
+    });
+    expect(info).toHaveBeenCalledWith({
+      event: "prompt-backlog-converged", cancelled: 0, failedDetached: 2, outcome: "terminalized"
+    }, "converged prompt work whose bindings can no longer dispatch or observe");
+    expect(JSON.stringify(info.mock.calls)).not.toMatch(/promptId|bindingId|private/);
     await workflow.stop();
   });
 
@@ -66,10 +87,10 @@ describe("PromptRunWorkflow durable safety scan", () => {
     vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
     const error = vi.fn();
     const scan = vi.fn()
-      .mockReturnValueOnce({ cancelled: 0, hints: [] })
-      .mockReturnValueOnce({ cancelled: 0, hints: [] })
+      .mockReturnValueOnce({ cancelled: 0, failedDetached: 0, hints: [] })
+      .mockReturnValueOnce({ cancelled: 0, failedDetached: 0, hints: [] })
       .mockImplementationOnce(() => { throw new Error("private database detail"); })
-      .mockReturnValue({ cancelled: 0, hints: [] });
+      .mockReturnValue({ cancelled: 0, failedDetached: 0, hints: [] });
     const workflow = createWorkflow({ scanDurablePromptWork: scan }, 100, error);
 
     workflow.start();
@@ -90,7 +111,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
   it("handles a wake immediately and replaces a long idle timeout with one base-delay scan", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
-    const scan = vi.fn(() => ({ cancelled: 0, hints: [] }));
+    const scan = vi.fn(() => ({ cancelled: 0, failedDetached: 0, hints: [] }));
     const claim = vi.fn(() => null);
     const workflow = createWorkflow({ scanDurablePromptWork: scan, claimNextDispatchablePrompt: claim }, 100);
     workflow.start();
@@ -111,7 +132,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
 
   it("keeps one timer across repeated starts and wakes and never rearms after stop", async () => {
     vi.useFakeTimers();
-    const scan = vi.fn(() => ({ cancelled: 0, hints: [] }));
+    const scan = vi.fn(() => ({ cancelled: 0, failedDetached: 0, hints: [] }));
     const workflow = createWorkflow({ scanDurablePromptWork: scan, claimNextDispatchablePrompt: () => null }, 100);
 
     workflow.start();
@@ -154,12 +175,12 @@ describe("PromptRunWorkflow durable safety scan", () => {
   });
 });
 
-function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanIntervalMs: number, error = vi.fn()): PromptRunWorkflow {
+function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanIntervalMs: number, error = vi.fn(), info = vi.fn()): PromptRunWorkflow {
   const scheduler = new InProcessPromptWorkScheduler();
-  const store = { scanDurablePromptWork: () => ({ cancelled: 0, hints: [] }), claimNextDispatchablePrompt: () => null, ...storeOverrides };
+  const store = { scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }), claimNextDispatchablePrompt: () => null, ...storeOverrides };
   return new PromptRunWorkflow({
     store: store as never, scheduler, safetyScanIntervalMs, turnTimeoutMs: 1_000,
     herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
-    logger: { info: vi.fn(), warn: vi.fn(), error } as never
+    logger: { info, warn: vi.fn(), error } as never
   });
 }

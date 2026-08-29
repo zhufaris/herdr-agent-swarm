@@ -53,6 +53,7 @@ export interface PaneControlOperation {
 
 export interface DurablePromptWorkScan {
   cancelled: number;
+  failedDetached: number;
   hints: PromptWorkHint[];
 }
 
@@ -403,7 +404,7 @@ export interface PromptWorkerDiagnostics {
   nextSafetyScanAt: string | null;
   lastScanAt: string | null;
   lastScanOutcome: "idle" | "work_found" | "failed" | null;
-  lastDiscovered: { turns: number; steering: number; detached: number; cancelled: number };
+  lastDiscovered: { turns: number; steering: number; detached: number; cancelled: number; failedDetached: number };
   lastScanFailureAt: string | null;
 }
 

@@ -65,7 +65,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private nextSafetyScanAt: string | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
-  private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, cancelled: 0 };
+  private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 };
   private lastScanFailureAt: string | null = null;
 
   constructor(private readonly options: PromptRunWorkflowOptions) {
@@ -94,7 +94,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.nextSafetyScanAt = null;
     try {
       const result = this.options.store.scanDurablePromptWork();
-      const discovered = { turns: 0, steering: 0, detached: 0, cancelled: result.cancelled };
+      const discovered = { turns: 0, steering: 0, detached: 0, cancelled: result.cancelled, failedDetached: result.failedDetached };
       for (const hint of result.hints) {
         if (hint.kind === "prompt-ready") discovered.turns += 1;
         else if (hint.kind === "steering-ready") discovered.steering += 1;
@@ -102,14 +102,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.options.scheduler.wake(hint);
       }
       this.lastDiscovered = discovered;
-      this.lastScanOutcome = result.hints.length > 0 || result.cancelled > 0 ? "work_found" : "idle";
+      this.lastScanOutcome = result.hints.length > 0 || result.cancelled > 0 || result.failedDetached > 0 ? "work_found" : "idle";
       if (this.lastScanOutcome === "idle") this.consecutiveIdleScans += 1;
       else this.consecutiveIdleScans = 0;
-      if (result.cancelled > 0) this.options.logger.info({
-        event: "prompt-backlog-converged", cancelled: result.cancelled, outcome: "cancelled"
-      }, "cancelled queued prompts whose bindings can no longer dispatch");
+      if (result.cancelled > 0 || result.failedDetached > 0) this.options.logger.info({
+        event: "prompt-backlog-converged", cancelled: result.cancelled, failedDetached: result.failedDetached, outcome: "terminalized"
+      }, "converged prompt work whose bindings can no longer dispatch or observe");
     } catch (error) {
-      this.lastDiscovered = { turns: 0, steering: 0, detached: 0, cancelled: 0 };
+      this.lastDiscovered = { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 };
       this.lastScanOutcome = "failed";
       this.consecutiveIdleScans = 0;
       this.lastScanFailureAt = new Date().toISOString();

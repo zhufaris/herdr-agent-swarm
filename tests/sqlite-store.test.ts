@@ -2203,6 +2203,7 @@ describe("SQLite store", () => {
 
     expect(store.scanDurablePromptWork()).toEqual({
       cancelled: 2,
+      failedDetached: 0,
       hints: [{ kind: "prompt-ready", bindingId: "active" }]
     });
     expect(store.getOperationalSummary().prompts).toMatchObject({ queued: 2, cancelled: 2 });
@@ -2214,6 +2215,86 @@ describe("SQLite store", () => {
     expect(JSON.stringify(store.scanDurablePromptWork())).not.toMatch(/private-turn|private-message|private prompt body/);
   });
 
+  it("terminalizes detached running turns owned by terminal bindings", () => {
+    store = new SqliteBindingStore(":memory:");
+    const terminalCases = [
+      ["state-archived", "archived", "active", "attached"],
+      ["state-orphaned", "orphaned", "active", "attached"],
+      ["state-failed", "failed", "active", "attached"],
+      ["lifecycle-archived", "active", "archived", "attached"],
+      ["lifecycle-closed", "active", "closed", "attached"],
+      ["lifecycle-failed", "active", "failed", "attached"],
+      ["attachment-orphaned", "active", "active", "orphaned"]
+    ] as const;
+    const cases = [...terminalCases, ["active", "active", "active", "attached"] as const];
+    for (const [bindingId, state, lifecycle, attachment] of cases) {
+      store.createPendingBinding({ id: bindingId, workspaceId: "w1", chatId: "c1", topicId: bindingId, rootMessageId: bindingId, title: bindingId });
+      store.updateBinding(bindingId, { paneId: `w1:${bindingId}`, state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
+      store.database.prepare("UPDATE bindings SET state = ?, lifecycle = ?, attachment = ? WHERE id = ?").run(state, lifecycle, attachment, bindingId);
+      const promptId = `prompt-${bindingId}`;
+      const view = createQueuedRunCard({
+        promptId, bindingId, title: bindingId, workspaceId: "w1", paneId: `w1:${bindingId}`,
+        requestText: `private-${bindingId}`, queuePosition: 1, occurredAt: "2026-08-29T01:00:00.000Z"
+      });
+      store.acceptPrompt({
+        prompt: { id: promptId, bindingId, larkMessageId: `message-${bindingId}`, actorOpenId: "u1", body: `private-${bindingId}` },
+        view, rootMessageId: bindingId, answerCard: {}
+      });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached', was_detached = ? WHERE id = ?").run(bindingId === "state-archived" ? 0 : 1, promptId);
+      store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T01:00:01.000Z' WHERE prompt_id = ?").run(promptId);
+    }
+
+    const result = store.scanDurablePromptWork();
+    expect(result).toEqual({
+      cancelled: 0, failedDetached: 7,
+      hints: [{ kind: "detached-observer-ready", bindingId: "active", promptId: "prompt-active" }]
+    });
+    const notice = "Session ended while a dispatched turn was detached; the prompt was not replayed";
+    for (const [bindingId] of terminalCases) {
+      expect(store.getPrompt(`prompt-${bindingId}`)).toMatchObject({
+        state: "failed", observationState: "completed", wasDetached: true, error: notice
+      });
+      expect(store.loadRunCard(`prompt-${bindingId}`)).toMatchObject({
+        phase: "failed", notice, queuePosition: 0, viewVersion: 2
+      });
+      expect(store.loadRunCard(`prompt-${bindingId}`)?.finishedAt).toEqual(expect.any(String));
+      expect(store.loadRunCard(`prompt-${bindingId}`)?.activityAt).toEqual(expect.any(String));
+    }
+    expect(store.getPrompt("prompt-active")).toMatchObject({
+      state: "running", observationState: "detached", wasDetached: true
+    });
+    expect(store.loadRunCard("prompt-active")).toMatchObject({ phase: "running", viewVersion: 1 });
+
+    const versions = terminalCases.map(([bindingId]) => store.loadRunCard(`prompt-${bindingId}`)?.viewVersion);
+    expect(store.scanDurablePromptWork()).toEqual({
+      cancelled: 0, failedDetached: 0,
+      hints: [{ kind: "detached-observer-ready", bindingId: "active", promptId: "prompt-active" }]
+    });
+    expect(terminalCases.map(([bindingId]) => store.loadRunCard(`prompt-${bindingId}`)?.viewVersion)).toEqual(versions);
+    expect(JSON.stringify(result)).not.toMatch(/private-|message-/);
+  });
+
+  it("rolls back detached Run Card convergence when the prompt transition fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "archived", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("archived", { paneId: "w1:p1", state: "archived", lifecycle: "archived", attachment: "attached" });
+    const view = createQueuedRunCard({
+      promptId: "prompt-archived", bindingId: "archived", title: "Task", workspaceId: "w1", paneId: "w1:p1",
+      requestText: "private body", queuePosition: 1, occurredAt: "2026-08-29T01:00:00.000Z"
+    });
+    store.acceptPrompt({
+      prompt: { id: "prompt-archived", bindingId: "archived", larkMessageId: "message-1", actorOpenId: "u1", body: "private body" },
+      view, rootMessageId: "m1", answerCard: {}
+    });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached', was_detached = 1 WHERE id = 'prompt-archived'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T01:00:01.000Z' WHERE prompt_id = 'prompt-archived'").run();
+    store.database.exec("CREATE TEMP TRIGGER reject_detached_prompt_failure BEFORE UPDATE OF state ON prompt_jobs WHEN OLD.id = 'prompt-archived' AND NEW.state = 'failed' BEGIN SELECT RAISE(ABORT, 'injected detached convergence failure'); END");
+
+    expect(() => store.scanDurablePromptWork()).toThrow(/injected detached convergence failure/);
+    expect(store.getPrompt("prompt-archived")).toMatchObject({ state: "running", observationState: "detached", wasDetached: true });
+    expect(store.loadRunCard("prompt-archived")).toMatchObject({ phase: "running", notice: null, finishedAt: null, viewVersion: 1 });
+  });
+
   it("discovers steering and detached observer work without claiming or replaying it", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -2223,7 +2304,7 @@ describe("SQLite store", () => {
     }
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'parent'").run();
 
-    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, hints: [
+    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, failedDetached: 0, hints: [
       { kind: "detached-observer-ready", bindingId: "b1", promptId: "parent" },
       { kind: "steering-ready", bindingId: "b1", parentPromptId: "parent" }
     ] });
@@ -2239,7 +2320,7 @@ describe("SQLite store", () => {
     store.enqueuePrompt({ id: "later", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "later" });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'running'").run();
 
-    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, hints: [] });
+    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, failedDetached: 0, hints: [] });
   });
 
   it("claims steering in order and fails leftovers instead of converting them to turns", () => {

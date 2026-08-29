@@ -298,7 +298,12 @@ bridge observes the surviving pane and canonical transcript, then resumes
 delivery only after a matching typed `task_complete` record proves that the
 detached turn finished. Herdr `idle` or composer readiness alone cannot settle a
 detached turn. If completion cannot be proven, the prompt remains explicitly
-uncertain and is never replayed. Jobs that never started remain queued.
+uncertain and is never replayed. If its binding later becomes archived, closed,
+failed, or orphaned, the durable work scan atomically fails both the detached
+prompt and its Run Card with an explicit no-replay notice; this retains audit
+history while preventing an unobservable turn from remaining operationally
+running forever. Detached turns on active, attached bindings remain observable.
+Jobs that never started remain queued.
 
 ## Reconciliation and events
 
