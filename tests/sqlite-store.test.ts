@@ -939,6 +939,42 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'prompt_jobs_source_prompt_once'").get()).toEqual({ name: "prompt_jobs_source_prompt_once" });
   });
 
+  it("drops a stale run-card view before migrating legacy tables", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-stale-run-card-view-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      DROP VIEW run_cards_view;
+      DROP INDEX card_interactions_expiry;
+      ALTER TABLE card_interactions RENAME TO card_interactions_current;
+      CREATE TABLE card_interactions(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
+        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control')),
+        parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
+        expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
+      );
+      DROP TABLE card_interactions_current;
+      CREATE INDEX card_interactions_expiry ON card_interactions(state, expires_at);
+      ALTER TABLE run_cards DROP COLUMN steering_failure_kind;
+      ALTER TABLE run_cards DROP COLUMN steering_origin;
+      CREATE VIEW run_cards_view AS SELECT *, json_object(
+        'promptId', prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind
+      ) AS state_json FROM run_cards;
+    `);
+    legacy.close();
+
+    expect(() => { store = new SqliteBindingStore(path); }).not.toThrow();
+    expect(store!.database.prepare("PRAGMA table_info(run_cards)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "steering_origin" }),
+      expect.objectContaining({ name: "steering_failure_kind" })
+    ]));
+    expect(store!.database.prepare("SELECT state_json FROM run_cards_view LIMIT 1").all()).toEqual([]);
+  });
+
   it("enforces one conversion source and preserves activity across presentation-only changes", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

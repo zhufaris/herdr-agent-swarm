@@ -2496,6 +2496,8 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   private migrate(): void {
+    const runCardViewNeedsRebuild = this.runCardViewNeedsRebuild();
+    if (runCardViewNeedsRebuild) this.database.exec("DROP VIEW IF EXISTS run_cards_view");
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS instance_lease(
@@ -2677,7 +2679,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
     this.ensurePaneControlOperationState();
-    this.ensureRunCardsView();
+    if (runCardViewNeedsRebuild) this.recreateRunCardsView();
     this.ensureQueryIndexes();
     const answerTargetMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
     if (!answerTargetMigration) {
@@ -2843,14 +2845,12 @@ export class SqliteBindingStore implements BindingStorePort {
   private ensureStreamingCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    let changed = false;
-    if (!names.has("answer_card_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_card_id TEXT"); changed = true; }
-    if (!names.has("answer_element_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_element_id TEXT NOT NULL DEFAULT ''"); changed = true; }
-    if (!names.has("answer_sequence")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_sequence INTEGER NOT NULL DEFAULT 0"); changed = true; }
-    if (!names.has("answer_page_index")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_index INTEGER NOT NULL DEFAULT 0"); changed = true; }
-    if (!names.has("answer_page_start")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_start INTEGER NOT NULL DEFAULT 0"); changed = true; }
+    if (!names.has("answer_card_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_card_id TEXT");
+    if (!names.has("answer_element_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_element_id TEXT NOT NULL DEFAULT ''");
+    if (!names.has("answer_sequence")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_sequence INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("answer_page_index")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_index INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("answer_page_start")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_page_start INTEGER NOT NULL DEFAULT 0");
     this.database.exec("UPDATE run_cards SET answer_element_id = 'answer-content-' || replace(prompt_id, ':', '-') WHERE answer_element_id = ''");
-    if (changed) this.recreateRunCardsView();
   }
 
   private ensureAnswerPages(): void {
@@ -3008,23 +3008,19 @@ export class SqliteBindingStore implements BindingStorePort {
     if (columns.some((column) => column.name === "activity_at")) return;
     this.database.exec("ALTER TABLE run_cards ADD COLUMN activity_at TEXT");
     this.database.exec("UPDATE run_cards SET activity_at = created_at WHERE activity_at IS NULL");
-    this.recreateRunCardsView();
   }
 
   private ensureRunCardSteeringColumns(): void {
     const names = new Set((this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
-    let changed = false;
-    if (!names.has("steering_origin")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))"); changed = true; }
-    if (!names.has("steering_failure_kind")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))"); changed = true; }
+    if (!names.has("steering_origin")) this.database.exec("ALTER TABLE run_cards ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))");
+    if (!names.has("steering_failure_kind")) this.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))");
     this.database.exec("UPDATE run_cards SET steering_origin = (SELECT steering_origin FROM prompt_jobs WHERE prompt_jobs.id = run_cards.prompt_id) WHERE steering_origin IS NULL");
-    if (changed) this.recreateRunCardsView();
   }
 
   private ensureRunCardQueueFeedbackColumn(): void {
     const names = new Set((this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!names.has("queue_feedback_json")) {
       this.database.exec("ALTER TABLE run_cards ADD COLUMN queue_feedback_json TEXT");
-      this.recreateRunCardsView();
     }
   }
 
@@ -3193,30 +3189,24 @@ export class SqliteBindingStore implements BindingStorePort {
   private ensureDualRequestCardColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    let changed = false;
-    if (!names.has("answer_message_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_message_id TEXT"); changed = true; }
-    if (!names.has("answer_delivered_version")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_delivered_version INTEGER NOT NULL DEFAULT 0"); changed = true; }
-    if (changed) this.recreateRunCardsView();
+    if (!names.has("answer_message_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_message_id TEXT");
+    if (!names.has("answer_delivered_version")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_delivered_version INTEGER NOT NULL DEFAULT 0");
   }
 
   private ensureRunCardAnswerState(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    let changed = false;
-    if (!names.has("answer_segments_json")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_segments_json TEXT NOT NULL DEFAULT '[]'"); changed = true; }
-    if (!names.has("answer_draft")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft TEXT NOT NULL DEFAULT ''"); changed = true; }
-    if (!names.has("answer_draft_transient")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft_transient INTEGER NOT NULL DEFAULT 0"); changed = true; }
+    if (!names.has("answer_segments_json")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_segments_json TEXT NOT NULL DEFAULT '[]'");
+    if (!names.has("answer_draft")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft TEXT NOT NULL DEFAULT ''");
+    if (!names.has("answer_draft_transient")) this.database.exec("ALTER TABLE run_cards ADD COLUMN answer_draft_transient INTEGER NOT NULL DEFAULT 0");
     this.database.exec("UPDATE run_cards SET answer_segments_json = json_array(answer) WHERE answer <> '' AND answer_segments_json = '[]' AND answer_draft = ''");
-    if (changed) this.recreateRunCardsView();
   }
 
   private ensureRunCardInteractionColumns(): void {
     const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));
-    let changed = false;
-    if (!names.has("binding_generation")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN binding_generation INTEGER NOT NULL DEFAULT 1"); changed = true; }
-    if (!names.has("conversion_parent_prompt_id")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN conversion_parent_prompt_id TEXT"); changed = true; }
-    if (changed) this.recreateRunCardsView();
+    if (!names.has("binding_generation")) this.database.exec("ALTER TABLE run_cards ADD COLUMN binding_generation INTEGER NOT NULL DEFAULT 1");
+    if (!names.has("conversion_parent_prompt_id")) this.database.exec("ALTER TABLE run_cards ADD COLUMN conversion_parent_prompt_id TEXT");
   }
 
   private ensureRunCardRequestText(): void {
@@ -3244,9 +3234,15 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
   }
 
-  private ensureRunCardsView(): void {
+  private runCardViewNeedsRebuild(): boolean {
     const view = this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'run_cards_view'").get();
-    if (!view) this.recreateRunCardsView();
+    if (!view) return true;
+    const columns = new Set((this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
+    return [
+      "binding_generation", "conversion_parent_prompt_id", "steering_origin", "steering_failure_kind", "queue_feedback_json",
+      "answer_message_id", "answer_card_id", "answer_element_id", "answer_sequence", "answer_page_index", "answer_page_start",
+      "request_text", "space_name", "answer_segments_json", "answer_draft", "answer_draft_transient", "activity_at", "answer_delivered_version"
+    ].some((column) => !columns.has(column));
   }
 
   private requireRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation {
