@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { Logger } from "pino";
+import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard, renderSupplementInputCard } from "../cards/interaction-card.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { BindingStorePort } from "../domain/ports.js";
@@ -7,9 +9,10 @@ import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
+import { createQueuedRunCard } from "../domain/run-card-view.js";
 
 interface Options {
-  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "consumeCardInteraction" | "convertQueuedPromptToSteering" | "getBinding" | "countPendingPrompts" | "loadTopicView">;
+  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "consumeCardInteraction" | "convertQueuedPromptToSteering" | "convertFailedSteeringToTurn" | "getBinding" | "getPrompt" | "loadRunCard" | "countPendingPrompts" | "loadTopicView">;
   paneControl: Pick<PaneControlWorkflowPort, "steer" | "stop">;
   sessionAdministration: SessionAdministrationWorkflowPort;
   provisioning: Pick<BindingProvisioningWorkflowPort, "reset" | "reattach" | "replace">;
@@ -18,6 +21,8 @@ interface Options {
   activeTurn(bindingId: string): { promptId: string; paneId: string } | null;
   isSteerable(turn: { promptId: string; paneId: string }): Promise<boolean>;
   wakeSteering(bindingId: string, parentPromptId: string): void;
+  wakePrompt(bindingId: string): void;
+  logger: Pick<Logger, "info" | "warn">;
 }
 
 export interface CardInteractionWorkflowPort {
@@ -33,6 +38,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (value.action === "open_supplement") return this.openSupplement(action, value);
     if (value.action === "submit_supplement") return this.submitSupplement(action, value);
     if (value.action === "convert_queued_prompt") return this.convertQueuedPrompt(action, value);
+    if (value.action === "enqueue_failed_steering") return this.enqueueFailedSteering(action, value);
     if (value.action === "open_more_actions") return this.openMoreActions(action, value);
     if (value.action === "view_queue") return this.viewQueue(action, value);
     if (value.action === "view_recovery") return this.viewRecovery(action, value);
@@ -98,6 +104,34 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (result.outcome === "converted") { this.options.wakeSteering(bindingId, interaction.parentPromptId); return interactionToast("success", "已改为立即补充。"); }
     if (result.outcome === "duplicate") return interactionToast("success", "这条消息已转换。");
     return interactionToast(result.outcome === "unauthorized" ? "error" : "warning", result.outcome === "unauthorized" ? "这项操作不属于当前操作者。" : "当前任务已结束，原消息仍按原顺序排队。");
+  }
+
+  private enqueueFailedSteering(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
+    const bindingId = stringValue(value.bindingId); const generation = numberValue(value.bindingGeneration); const sourcePromptId = stringValue(value.sourcePromptId);
+    const binding = bindingId ? this.options.store.getBinding(bindingId) : null;
+    const source = sourcePromptId ? this.options.store.getPrompt(sourcePromptId) : null;
+    const sourceView = sourcePromptId ? this.options.store.loadRunCard(sourcePromptId) : null;
+    if (!bindingId || generation === null || !sourcePromptId || !binding || !binding.rootMessageId || !source || !sourceView) return interactionToast("warning", "排队入口已失效，请刷新后重试。");
+    if (source.actorOpenId !== action.operatorOpenId) return interactionToast("error", "这项操作不属于当前操作者。");
+    const eligible = binding.chatId === action.chatId && binding.generation === generation && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached"
+      && source.bindingId === bindingId && source.state === "failed" && source.dispatchKind === "steering" && source.steeringOrigin === "automatic"
+      && sourceView.bindingId === bindingId && sourceView.bindingGeneration === generation && sourceView.steeringOrigin === "automatic" && sourceView.steeringFailureKind === "rejected";
+    if (!eligible) return interactionToast("warning", "排队入口已失效，请刷新后重试。");
+    const interactionId = `failed-steering:${action.messageId}:${sourcePromptId}`;
+    let interaction = this.options.store.getCardInteraction(interactionId);
+    if (!interaction) interaction = this.options.store.createCardInteraction({ id: interactionId, bindingId, bindingGeneration: generation, actorOpenId: action.operatorOpenId, actionKind: "enqueue_failed_steering", parentPromptId: null, targetPromptId: sourcePromptId, expiresAt: "9999-12-31T23:59:59.999Z" });
+    const now = new Date().toISOString();
+    const newPromptId = randomUUID();
+    const view = createQueuedRunCard({ promptId: newPromptId, bindingId, bindingGeneration: generation, title: sourceView.title, workspaceId: sourceView.workspaceId, spaceName: sourceView.spaceName, paneId: binding.paneId, requestText: source.body, queuePosition: 1, occurredAt: now });
+    const result = this.options.store.convertFailedSteeringToTurn({ interactionId: interaction.id, actorOpenId: action.operatorOpenId, bindingId, bindingGeneration: generation, sourcePromptId, newPromptId, newLarkMessageId: `card:${interaction.id}`, now, view, rootMessageId: binding.rootMessageId, answerCardFor: renderRequestAnswerCard });
+    if (result.outcome === "converted") {
+      this.options.logger.info({ event: "failed-auto-steering-converted", bindingId, sourcePromptId, promptId: result.prompt!.id, outcome: "converted" }, "queued rejected automatic steering as a new task");
+      this.options.wakePrompt(bindingId);
+      return interactionToast("success", "已作为新任务排队。");
+    }
+    if (result.outcome === "duplicate") return interactionToast("success", "已作为新任务排队。");
+    this.options.logger.warn({ event: "failed-auto-steering-conversion-rejected", bindingId, sourcePromptId, reason: result.outcome, outcome: "rejected" }, "rejected failed automatic steering conversion");
+    return interactionToast(result.outcome === "unauthorized" ? "error" : "warning", result.outcome === "unauthorized" ? "这项操作不属于当前操作者。" : "排队入口已失效，请刷新后重试。");
   }
 
   private openMoreActions(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {

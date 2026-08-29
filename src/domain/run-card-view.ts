@@ -1,6 +1,8 @@
 import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
+export type SteeringFailureKind = "rejected" | "uncertain";
+export type RunCardSteeringOrigin = "explicit" | "automatic" | "converted";
 export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
 export type ProgressEventState = "pending" | "active" | "done" | "failed";
 
@@ -24,6 +26,8 @@ export interface RunCardView {
   bindingId: string;
   bindingGeneration: number;
   conversionParentPromptId: string | null;
+  steeringOrigin: RunCardSteeringOrigin | null;
+  steeringFailureKind: SteeringFailureKind | null;
   larkMessageId: string | null;
   answerMessageId: string | null;
   answerCardId: string | null;
@@ -58,6 +62,7 @@ export type RunCardChange =
   | { type: "queue-position"; occurredAt: string; queuePosition: number }
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
+  | { type: "steering-failed"; occurredAt: string; notice: string; failureKind: SteeringFailureKind }
   | { type: "blocked"; occurredAt: string; notice: string }
   | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string }
@@ -65,10 +70,10 @@ export type RunCardChange =
 
 export function createQueuedRunCard(input: {
   promptId: string; bindingId: string; title: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
-  queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null;
+  queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null; steeringOrigin?: RunCardSteeringOrigin | null;
 }): RunCardView {
   return {
-    promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
+    promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, steeringOrigin: input.steeringOrigin ?? null, steeringFailureKind: null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
@@ -92,7 +97,11 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       break;
     case "steering-delivered":
       if (state.phase === "completed" && state.notice === change.notice) return state;
-      patch = { phase: "completed", answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
+      patch = { phase: "completed", answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice, steeringFailureKind: null };
+      break;
+    case "steering-failed":
+      if (state.phase === "failed" && state.notice === change.notice && state.steeringFailureKind === change.failureKind) return state;
+      patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice, steeringFailureKind: change.failureKind };
       break;
     case "blocked":
       if (state.phase === "blocked" && state.notice === change.notice) return state;

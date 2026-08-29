@@ -183,6 +183,7 @@ export interface BindingStorePort {
   getCardInteraction(id: string): CardInteraction | null;
   consumeCardInteraction(input: { id: string; actorOpenId: string; bindingId: string; bindingGeneration: number; now: string; resultCode: string }): { outcome: "consumed" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null };
   convertQueuedPromptToSteering(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; targetPromptId: string; now: string }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null };
+  convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null };
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean };
   cutoverResetCandidate(input: { oldBindingId: string; newBindingId: string; cleanupOperationId: string; actorOpenId: string; expectedCwd: string }): { previous: Binding; replacement: Binding; cleanup: RetiredPaneCleanupOperation; cancelledPromptIds: string[] };
   listRetiredPaneCleanupOperations(states?: readonly RetiredPaneCleanupOperation["state"][]): RetiredPaneCleanupOperation[];
@@ -266,7 +267,7 @@ export interface BindingStorePort {
   cancelQueuedPrompts(bindingId: string, reason: string): number;
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
-  failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
+  failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void;
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean;

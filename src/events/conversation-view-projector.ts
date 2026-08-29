@@ -144,8 +144,8 @@ function runCardChange(event: BridgeEvent): RunCardChange | null {
     case "RunQueuePositionChanged": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queuePosition };
     case "TurnStarted": return { type: "started", occurredAt: event.occurredAt };
     case "SteeringStarted": return { type: "started", occurredAt: event.occurredAt };
-    case "SteeringDelivered": return { type: "steering-delivered", occurredAt: event.occurredAt, notice: "已加入当前执行" };
-    case "SteeringFailed": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.error };
+    case "SteeringDelivered": return { type: "steering-delivered", occurredAt: event.occurredAt, notice: event.payload.automatic ? "已自动加入当前执行" : "已加入当前执行" };
+    case "SteeringFailed": return { type: "steering-failed", occurredAt: event.occurredAt, notice: event.payload.error, failureKind: event.payload.failureKind };
     case "TurnOutputObserved": {
       const answer = normalizeTurnOutputObservation(event.payload).answer;
       return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };

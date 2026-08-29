@@ -51,7 +51,7 @@ export function createTestRouter(
   const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), isSteerable: async (turn) => {
     const observation = await herdr.observeRuntime(turn.paneId);
     return observation.pane?.agentState === "working" || observation.pane?.agentState === "blocked";
-  }, wakeSteering: (bindingId, parentPromptId) => scheduler.wake({ kind: "steering-ready", bindingId, parentPromptId }) });
+  }, wakeSteering: (bindingId, parentPromptId) => scheduler.wake({ kind: "steering-ready", bindingId, parentPromptId }), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,

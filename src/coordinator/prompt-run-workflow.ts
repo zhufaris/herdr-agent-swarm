@@ -188,20 +188,26 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         const result = this.options.herdr.steerPrompt ? await this.options.herdr.steerPrompt(activeRun.paneId, prompt.body) : "not_working";
         if (result === "not_working") {
-          const message = "TraeX 已不在可 steering 的状态，本次 `/swarm steer` 未注入，也不会转为普通任务。";
-          this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
-          await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+          const message = prompt.steeringOrigin === "automatic"
+            ? "当前任务已结束，未自动注入"
+            : "TraeX 已不在可 steering 的状态，本次 `/swarm steer` 未注入，也不会转为普通任务。";
+          this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString(), steeringFailureKind: "rejected" });
+          await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message, failureKind: "rejected", automatic: prompt.steeringOrigin === "automatic" });
+          if (prompt.steeringOrigin === "automatic") this.options.logger.warn({ event: "auto-steering-delivery-failed", bindingId, promptId: prompt.id, parentPromptId, failureKind: "rejected", outcome: "failed" }, "automatic steering delivery failed");
           this.options.logger.warn({ event: "steering-rejected", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "failed", reason: "not_working" }, "steering target was no longer steerable");
           continue;
         }
         await this.publish(bindingId, "SteeringStarted", "bridge", { promptId: prompt.id, parentPromptId });
-        this.options.store.completeSteering({ promptId: prompt.id, notice: "已加入当前执行", occurredAt: new Date().toISOString() });
-        await this.publish(bindingId, "SteeringDelivered", "herdr", { promptId: prompt.id, parentPromptId });
+        this.options.store.completeSteering({ promptId: prompt.id, notice: prompt.steeringOrigin === "automatic" ? "已自动加入当前执行" : "已加入当前执行", occurredAt: new Date().toISOString() });
+        await this.publish(bindingId, "SteeringDelivered", "herdr", { promptId: prompt.id, parentPromptId, automatic: prompt.steeringOrigin === "automatic" });
         this.options.logger.info({ event: "steering-delivered", bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "delivered" }, "steering delivered to active turn");
       } catch (error) {
-        const message = `Steering 注入结果无法确认，请检查 Herdr pane 后按需重试：${errorMessage(error)}`;
-        this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString() });
-        await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message });
+        const message = prompt.steeringOrigin === "automatic"
+          ? "自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。"
+          : `Steering 注入结果无法确认，请检查 Herdr pane 后按需重试：${errorMessage(error)}`;
+        this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString(), steeringFailureKind: "uncertain" });
+        await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message, failureKind: "uncertain", automatic: prompt.steeringOrigin === "automatic" });
+        if (prompt.steeringOrigin === "automatic") this.options.logger.error({ event: "auto-steering-delivery-failed", bindingId, promptId: prompt.id, parentPromptId, failureKind: "uncertain", outcome: "failed" }, "automatic steering delivery failed");
         this.options.logger.error({ event: "steering-failed", err: safeLogError(error), bindingId, promptId: prompt.id, parentPromptId, paneId: activeRun.paneId, outcome: "uncertain" }, "steering delivery failed");
       }
     }
@@ -302,7 +308,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (steeringWorker) await steeringWorker;
         const notice = "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。";
         const orphaned = this.options.store.failQueuedSteering(bindingId, prompt.id, notice);
-        for (const steeringId of orphaned) await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: notice });
+        for (const steeringId of orphaned) {
+          const steering = this.options.store.getPrompt(steeringId);
+          const automatic = steering?.steeringOrigin === "automatic";
+          await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: automatic ? "当前任务已结束，未自动注入" : notice, failureKind: "rejected", automatic });
+        }
         if (orphaned.length > 0) await this.refreshQueuePositions(bindingId);
         this.turns.detach(bindingId, prompt.id);
         this.options.scheduler.wake({ kind: "control-ready", bindingId });

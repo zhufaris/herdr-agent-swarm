@@ -592,6 +592,37 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
+  convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const interaction = this.getCardInteraction(input.interactionId);
+      if (!interaction) { this.database.exec("COMMIT"); return { outcome: "missing", prompt: null }; }
+      if (interaction.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", prompt: null }; }
+      const source = this.database.prepare(`SELECT p.*, c.steering_origin AS card_steering_origin, c.steering_failure_kind FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.id = ?`).get(input.sourcePromptId) as (PromptRow & { card_steering_origin: string | null; steering_failure_kind: string | null }) | undefined;
+      if (source && source.actor_open_id !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", prompt: null }; }
+      const existing = this.database.prepare("SELECT * FROM prompt_jobs WHERE source_prompt_id = ?").get(input.sourcePromptId) as PromptRow | undefined;
+      if (interaction.state === "consumed" || existing) { this.database.exec("COMMIT"); return { outcome: "duplicate", prompt: existing ? mapPrompt(existing) : null }; }
+      const binding = this.getBinding(input.bindingId);
+      const valid = interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
+        && interaction.actionKind === "enqueue_failed_steering" && interaction.targetPromptId === input.sourcePromptId
+        && binding?.generation === input.bindingGeneration && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.rootMessageId === input.rootMessageId
+        && source?.binding_id === input.bindingId && source.state === "failed" && source.dispatch_kind === "steering"
+        && source.steering_origin === "automatic" && source.card_steering_origin === "automatic" && source.steering_failure_kind === "rejected";
+      if (!valid) { this.database.exec("COMMIT"); return { outcome: "stale", prompt: null }; }
+      const queuePosition = Number((this.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn'").get(input.bindingId) as { count: number }).count) + 1;
+      const view: RunCardView = { ...input.view, steeringOrigin: null, steeringFailureKind: null, queuePosition, createdAt: input.now, updatedAt: input.now, activityAt: input.now };
+      this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'turn', NULL, NULL, ?, 0, 'queued', 'not_started', 0, NULL, ?, ?)`)
+        .run(input.newPromptId, input.bindingId, input.newLarkMessageId, input.actorOpenId, source.body, input.sourcePromptId, input.now, input.now);
+      this.insertRunCard(view);
+      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`)
+        .run(randomUUID(), `run-card:create:${input.newPromptId}:answer`, input.bindingId, input.newPromptId, view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCardFor(view)), `answer:${input.newPromptId}`, input.now, input.now, input.now);
+      this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = 'converted', consumed_at = ? WHERE id = ? AND state = 'active'").run(input.now, input.interactionId);
+      const prompt = this.requirePrompt(input.newPromptId);
+      this.database.exec("COMMIT");
+      return { outcome: "converted", prompt };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -1210,24 +1241,27 @@ export class SqliteBindingStore implements BindingStorePort {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE state = 'queued' AND dispatch_kind = 'steering'")
-        .run("Bridge 重启，本次 `/swarm steer` 未注入，也不会转为普通任务。", timestamp);
-      const orphanedSteering = this.database.prepare("SELECT prompt_id FROM run_cards c JOIN prompt_jobs p ON p.id = c.prompt_id WHERE p.dispatch_kind = 'steering' AND p.state = 'failed' AND c.phase = 'queued'").all() as Array<{ prompt_id: string }>;
+      this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = CASE steering_origin WHEN 'automatic' THEN '当前任务已结束，未自动注入' ELSE 'Bridge 重启，本次 `/swarm steer` 未注入，也不会转为普通任务。' END, updated_at = ? WHERE state = 'queued' AND dispatch_kind = 'steering'")
+        .run(timestamp);
+      const orphanedSteering = this.database.prepare("SELECT prompt_id, p.steering_origin FROM run_cards c JOIN prompt_jobs p ON p.id = c.prompt_id WHERE p.dispatch_kind = 'steering' AND p.state = 'failed' AND c.phase = 'queued'").all() as Array<{ prompt_id: string; steering_origin: string | null }>;
       for (const card of orphanedSteering) {
-        this.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0, activity_at = ?, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
-          .run("Bridge 重启，本次 `/swarm steer` 未注入，也不会转为普通任务。", timestamp, timestamp, timestamp, card.prompt_id);
+        const notice = card.steering_origin === "automatic" ? "当前任务已结束，未自动注入" : "Bridge 重启，本次 `/swarm steer` 未注入，也不会转为普通任务。";
+        this.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, steering_failure_kind = 'rejected', finished_at = ?, queue_position = 0, activity_at = ?, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
+          .run(notice, timestamp, timestamp, timestamp, card.prompt_id);
       }
       const undispatched = this.database.prepare("SELECT id FROM prompt_jobs WHERE state = 'running' AND observation_state = 'not_started'").all() as Array<{ id: string }>;
       this.database.prepare("UPDATE prompt_jobs SET state = 'queued', observation_state = 'not_started', error = NULL, updated_at = ? WHERE state = 'running' AND observation_state = 'not_started'").run(timestamp);
       for (const prompt of undispatched) {
         this.database.prepare("UPDATE run_cards SET phase = 'queued', started_at = NULL, notice = NULL, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?").run(timestamp, prompt.id);
       }
-      const running = this.database.prepare("SELECT id, dispatch_kind FROM prompt_jobs WHERE state = 'running'").all() as Array<{ id: string; dispatch_kind: string }>;
-      const result = this.database.prepare("UPDATE prompt_jobs SET state = CASE dispatch_kind WHEN 'steering' THEN 'failed' ELSE state END, observation_state = CASE dispatch_kind WHEN 'steering' THEN 'completed' ELSE 'detached' END, was_detached = 1, error = CASE dispatch_kind WHEN 'steering' THEN 'Steering delivery may already have reached Herdr; inspect the pane before retrying' ELSE 'Bridge restarted after dispatch; observing the existing TraeX turn without replay' END, updated_at = ? WHERE state = 'running'").run(timestamp);
+      const running = this.database.prepare("SELECT id, dispatch_kind, steering_origin FROM prompt_jobs WHERE state = 'running'").all() as Array<{ id: string; dispatch_kind: string; steering_origin: string | null }>;
+      const result = this.database.prepare("UPDATE prompt_jobs SET state = CASE dispatch_kind WHEN 'steering' THEN 'failed' ELSE state END, observation_state = CASE dispatch_kind WHEN 'steering' THEN 'completed' ELSE 'detached' END, was_detached = 1, error = CASE WHEN dispatch_kind = 'steering' AND steering_origin = 'automatic' THEN '自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。' WHEN dispatch_kind = 'steering' THEN 'Steering delivery may already have reached Herdr; inspect the pane before retrying' ELSE 'Bridge restarted after dispatch; observing the existing TraeX turn without replay' END, updated_at = ? WHERE state = 'running'").run(timestamp);
       for (const prompt of running) {
-        const notice = prompt.dispatch_kind === "steering" ? "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" : "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求";
-        this.database.prepare("UPDATE run_cards SET phase = CASE WHEN ? = 'steering' THEN 'failed' ELSE 'running' END, finished_at = CASE WHEN ? = 'steering' THEN ? ELSE NULL END, queue_position = 0, notice = ?, activity_at = CASE WHEN ? = 'steering' THEN ? ELSE activity_at END, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
-          .run(prompt.dispatch_kind, prompt.dispatch_kind, timestamp, notice, prompt.dispatch_kind, timestamp, timestamp, prompt.id);
+        const notice = prompt.dispatch_kind !== "steering"
+          ? "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求"
+          : prompt.steering_origin === "automatic" ? "自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。" : "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试";
+        this.database.prepare("UPDATE run_cards SET phase = CASE WHEN ? = 'steering' THEN 'failed' ELSE 'running' END, steering_failure_kind = CASE WHEN ? = 'steering' THEN 'uncertain' ELSE steering_failure_kind END, finished_at = CASE WHEN ? = 'steering' THEN ? ELSE NULL END, queue_position = 0, notice = ?, activity_at = CASE WHEN ? = 'steering' THEN ? ELSE activity_at END, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?")
+          .run(prompt.dispatch_kind, prompt.dispatch_kind, prompt.dispatch_kind, timestamp, notice, prompt.dispatch_kind, timestamp, timestamp, prompt.id);
       }
       this.database.exec("COMMIT");
       return undispatched.length + Number(result.changes);
@@ -1352,12 +1386,13 @@ export class SqliteBindingStore implements BindingStorePort {
       const steeringOrigin = input.prompt.steeringOrigin ?? (dispatchKind === "steering" ? "explicit" : null);
       this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`)
         .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, dispatchKind, input.prompt.parentPromptId ?? null, steeringOrigin, input.prompt.sourcePromptId ?? null, input.prompt.wasDetached ? 1 : 0, timestamp, timestamp);
-      this.insertRunCard(input.view);
+      const view = { ...input.view, steeringOrigin, steeringFailureKind: null };
+      this.insertRunCard(view);
       const createCard = this.database.prepare(`
         INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
       `);
-      createCard.run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, input.view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
+      createCard.run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
       this.database.exec("COMMIT");
       return { prompt: this.requirePrompt(input.prompt.id), view: this.loadRunCard(input.prompt.id)!, inserted: true };
     } catch (error) {
@@ -1396,7 +1431,7 @@ export class SqliteBindingStore implements BindingStorePort {
       const automatic = fallbackReason === null;
       const queuePosition = automatic ? 0 : Number((this.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn'").get(input.prompt.bindingId) as { count: number }).count) + 1;
       const sourceView = automatic ? input.steeringView : input.ordinaryView;
-      const view: RunCardView = { ...sourceView, queuePosition, activityAt: input.acceptedAt, createdAt: input.acceptedAt, updatedAt: input.acceptedAt };
+      const view: RunCardView = { ...sourceView, steeringOrigin: automatic ? "automatic" : null, steeringFailureKind: null, queuePosition, activityAt: input.acceptedAt, createdAt: input.acceptedAt, updatedAt: input.acceptedAt };
       const dispatchKind = automatic ? "steering" : "turn";
       const parentPromptId = automatic ? input.candidateParentPromptId : null;
       const steeringOrigin = automatic ? "automatic" : null;
@@ -1474,12 +1509,13 @@ export class SqliteBindingStore implements BindingStorePort {
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[] {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const rows = this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND parent_prompt_id = ? AND dispatch_kind = 'steering' AND state = 'queued'")
-        .all(bindingId, parentPromptId) as Array<{ id: string }>;
+      const rows = this.database.prepare("SELECT id, steering_origin FROM prompt_jobs WHERE binding_id = ? AND parent_prompt_id = ? AND dispatch_kind = 'steering' AND state = 'queued'")
+        .all(bindingId, parentPromptId) as Array<{ id: string; steering_origin: string | null }>;
       const timestamp = now();
       for (const row of rows) {
-        this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run(notice, timestamp, row.id);
-        this.persistTerminalRunCard(row.id, { type: "failed", occurredAt: timestamp, notice });
+        const failureNotice = row.steering_origin === "automatic" ? "当前任务已结束，未自动注入" : notice;
+        this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run(failureNotice, timestamp, row.id);
+        this.persistTerminalRunCard(row.id, { type: "steering-failed", occurredAt: timestamp, notice: failureNotice, failureKind: "rejected" });
       }
       this.database.exec("COMMIT");
       return rows.map((row) => row.id);
@@ -1505,12 +1541,14 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  failPrompt(input: { promptId: string; error: string; occurredAt: string }): void {
+  failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?")
         .run(input.error, input.occurredAt, input.promptId);
-      this.persistTerminalRunCard(input.promptId, { type: "failed", occurredAt: input.occurredAt, notice: input.error });
+      this.persistTerminalRunCard(input.promptId, input.steeringFailureKind
+        ? { type: "steering-failed", occurredAt: input.occurredAt, notice: input.error, failureKind: input.steeringFailureKind }
+        : { type: "failed", occurredAt: input.occurredAt, notice: input.error });
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
@@ -2196,8 +2234,8 @@ export class SqliteBindingStore implements BindingStorePort {
     const ownsTransaction = !this.database.isTransaction;
     if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
-        .run(view.bindingGeneration, view.conversionParentPromptId, view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
+      this.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, steering_origin = ?, steering_failure_kind = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
+        .run(view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
       const result = this.loadRunCard(view.promptId)!;
       if (ownsTransaction) this.database.exec("COMMIT");
       return result;
@@ -2357,8 +2395,8 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   private insertRunCard(view: RunCardView): void {
-    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, steering_origin, steering_failure_kind, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
     this.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
   }
@@ -2459,7 +2497,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE IF NOT EXISTS bridge_messages(message_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_interactions(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
-        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control')),
+        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','enqueue_failed_steering','more_actions','session_control')),
         parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
         expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
       );
@@ -2516,7 +2554,7 @@ export class SqliteBindingStore implements BindingStorePort {
         binding_id TEXT PRIMARY KEY REFERENCES bindings(id), state_json TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS run_cards(
-        prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL DEFAULT 1, conversion_parent_prompt_id TEXT, lark_message_id TEXT, answer_message_id TEXT, answer_card_id TEXT, answer_element_id TEXT NOT NULL DEFAULT '', answer_sequence INTEGER NOT NULL DEFAULT 0, answer_page_index INTEGER NOT NULL DEFAULT 0, answer_page_start INTEGER NOT NULL DEFAULT 0,
+        prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL DEFAULT 1, conversion_parent_prompt_id TEXT, steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain')), lark_message_id TEXT, answer_message_id TEXT, answer_card_id TEXT, answer_element_id TEXT NOT NULL DEFAULT '', answer_sequence INTEGER NOT NULL DEFAULT 0, answer_page_index INTEGER NOT NULL DEFAULT 0, answer_page_start INTEGER NOT NULL DEFAULT 0,
         phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, space_name TEXT NOT NULL DEFAULT 'unknown', pane_id TEXT,
         answer TEXT NOT NULL, answer_segments_json TEXT NOT NULL DEFAULT '[]', answer_draft TEXT NOT NULL DEFAULT '', answer_draft_transient INTEGER NOT NULL DEFAULT 0, progress_events_json TEXT NOT NULL, queue_position INTEGER NOT NULL, started_at TEXT, finished_at TEXT, notice TEXT, activity_at TEXT NOT NULL,
         view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, answer_delivered_version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -2547,6 +2585,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
     this.ensureBindingCreatorColumn();
+    this.ensureFailedSteeringInteractionKind();
     this.ensureAgentSessionColumns();
     this.ensureReportedTraexSessionColumns();
     this.ensureBindingResetColumns();
@@ -2555,6 +2594,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptObservationColumn();
     this.ensurePromptProvenanceColumns();
     this.ensureRunCardActivityColumn();
+    this.ensureRunCardSteeringColumns();
     this.ensureOutboundDeliveryOrder();
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
@@ -2820,6 +2860,29 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
   }
 
+  private ensureFailedSteeringInteractionKind(): void {
+    const schema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'card_interactions'").get() as { sql: string } | undefined;
+    if (!schema || schema.sql.includes("'enqueue_failed_steering'")) return;
+    this.database.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN IMMEDIATE;
+      ALTER TABLE card_interactions RENAME TO card_interactions_legacy;
+      CREATE TABLE card_interactions(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
+        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','enqueue_failed_steering','more_actions','session_control')),
+        parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
+        expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
+      );
+      INSERT INTO card_interactions SELECT * FROM card_interactions_legacy;
+      DROP TABLE card_interactions_legacy;
+      CREATE INDEX card_interactions_expiry ON card_interactions(state, expires_at);
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+    if (violation) throw new Error(`Card-interaction migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
+  }
+
   private ensureAgentSessionColumns(): void {
     const names = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!names.has("agent_session_source")) this.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_source TEXT");
@@ -2873,6 +2936,15 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("ALTER TABLE run_cards ADD COLUMN activity_at TEXT");
     this.database.exec("UPDATE run_cards SET activity_at = created_at WHERE activity_at IS NULL");
     this.recreateRunCardsView();
+  }
+
+  private ensureRunCardSteeringColumns(): void {
+    const names = new Set((this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
+    let changed = false;
+    if (!names.has("steering_origin")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))"); changed = true; }
+    if (!names.has("steering_failure_kind")) { this.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))"); changed = true; }
+    this.database.exec("UPDATE run_cards SET steering_origin = (SELECT steering_origin FROM prompt_jobs WHERE prompt_jobs.id = run_cards.prompt_id) WHERE steering_origin IS NULL");
+    if (changed) this.recreateRunCardsView();
   }
 
   private ensurePaneCloseOperationState(): void {
@@ -3083,7 +3155,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec(`
       DROP VIEW IF EXISTS run_cards_view;
       CREATE VIEW run_cards_view AS SELECT *, json_object(
-        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'requestText', request_text,
+        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'requestText', request_text,
         'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END, 'progressEvents', json(progress_events_json),
         'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'activityAt', activity_at,
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'answerDeliveredVersion', answer_delivered_version, 'createdAt', created_at, 'updatedAt', updated_at

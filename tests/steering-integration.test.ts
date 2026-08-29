@@ -13,13 +13,15 @@ import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-schedule
 
 const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
 
-async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
+async function createAutomaticSteeringHarness(maxQueueDepth = 20, steeringResult: "injected" | "not_working" | "throw" = "injected") {
   let release!: () => void;
   const hold = new Promise<void>((resolve) => { release = resolve; });
   const turns: string[] = [];
   const steering: string[] = [];
   const info = vi.fn();
-  const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+  const error = vi.fn();
+  const warn = vi.fn();
+  const logger = { info, warn, error, debug: vi.fn() } as unknown as Logger;
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,
     async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
@@ -39,12 +41,14 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
       await onObservation?.({ state: "done", stateSource: "structured", output: "◆ done\n────────" });
       return "done";
     },
-    async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },
+    async steerPrompt(_paneId, text) { steering.push(text); if (steeringResult === "throw") throw new Error("delivery unavailable"); return steeringResult; },
     async sendEscape() {}, async readOutput() { return "working"; }, async renamePane() {}
   };
   const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
+  const bridgeEvents: Array<{ type: string; payload: unknown }> = [];
+  bus.onBridgeEvent("automatic-steering-test", (event) => { bridgeEvents.push(event); });
   const scheduler = new InProcessPromptWorkScheduler(logger);
   const schedulerWake = vi.spyOn(scheduler, "wake");
   const publisher = createTestPublisher(store, lark, logger); publisher.start();
@@ -58,7 +62,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
   await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "working" }));
   const parent = store.listRunCards(bindingId)[0]!;
   schedulerWake.mockClear();
-  return { bindingId, coordinator, info, message, parent, projector, publisher, release, schedulerWake, send, steering, store, turns, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
+  return { bindingId, bridgeEvents, coordinator, error, info, message, parent, projector, publisher, release, schedulerWake, send, steering, store, turns, warn, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }
 
 describe("active-turn steering", () => {
@@ -388,6 +392,25 @@ describe("automatic continuation steering", () => {
     expect(prompt).toMatchObject({ dispatchKind: "turn", parentPromptId: null, steeringOrigin: null });
     expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(2);
     expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-fell-back-before-dispatch", reason: "parent_detached" }), "fell back to ordinary prompt before dispatch"]);
+    await harness.close();
+  });
+
+  it.each([
+    ["not_working", "rejected"],
+    ["throw", "uncertain"]
+  ] as const)("records automatic %s delivery as %s without creating an ordinary prompt", async (steeringResult, failureKind) => {
+    const harness = await createAutomaticSteeringHarness(20, steeringResult);
+    await harness.send(`automatic-${failureKind}`, "继续");
+    const expectedNotice = failureKind === "rejected"
+      ? "当前任务已结束，未自动注入"
+      : "自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。";
+    await vi.waitFor(() => expect(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")).toMatchObject({ phase: "failed", steeringOrigin: "automatic", steeringFailureKind: failureKind, notice: expectedNotice }));
+    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId)!;
+    expect(prompt).toMatchObject({ dispatchKind: "steering", steeringOrigin: "automatic", state: "failed" });
+    expect(harness.store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE source_prompt_id = ?").get(prompt.id)).toEqual({ count: 0 });
+    expect(harness.bridgeEvents).toContainEqual(expect.objectContaining({ type: "SteeringFailed", payload: expect.objectContaining({ promptId: prompt.id, parentPromptId: harness.parent.promptId, failureKind, automatic: true }) }));
+    const calls = failureKind === "uncertain" ? harness.error.mock.calls : harness.warn.mock.calls;
+    expect(calls).toContainEqual([expect.objectContaining({ event: "auto-steering-delivery-failed", bindingId: harness.bindingId, promptId: prompt.id, parentPromptId: harness.parent.promptId, failureKind }), "automatic steering delivery failed"]);
     await harness.close();
   });
 });

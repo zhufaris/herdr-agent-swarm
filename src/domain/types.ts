@@ -193,7 +193,7 @@ export interface Binding {
   updatedAt: string;
 }
 
-export type CardInteractionActionKind = "supplement" | "convert_queued_prompt" | "more_actions" | "session_control";
+export type CardInteractionActionKind = "supplement" | "convert_queued_prompt" | "enqueue_failed_steering" | "more_actions" | "session_control";
 export type CardInteractionState = "active" | "claimed" | "consumed" | "expired";
 export interface CardInteraction {
   id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind;

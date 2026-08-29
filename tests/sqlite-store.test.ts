@@ -1876,9 +1876,9 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
     const makeView = (promptId: string) => createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 0, occurredAt: new Date().toISOString() });
-    for (const [id, messageId] of [["s1", "m2"], ["s2", "m3"]] as const) {
+    for (const [id, messageId, steeringOrigin] of [["s1", "m2", "explicit"], ["s2", "m3", "automatic"], ["s3", "m4", "explicit"], ["s4", "m5", "converted"]] as const) {
       store.acceptPrompt({
-        prompt: { id, bindingId: "b1", larkMessageId: messageId, actorOpenId: "u1", body: id, dispatchKind: "steering", parentPromptId: "parent" },
+        prompt: { id, bindingId: "b1", larkMessageId: messageId, actorOpenId: "u1", body: id, dispatchKind: "steering", parentPromptId: "parent", steeringOrigin },
         view: makeView(id), rootMessageId: "m1", taskCard: {}, answerCard: {}
       });
     }
@@ -1893,8 +1893,10 @@ describe("SQLite store", () => {
 
     // A queued steering job whose parent ended is failed, never promoted to a turn.
     store.updatePrompt("s2", "queued");
-    expect(store.failQueuedSteering("b1", "parent", "父任务已结束")).toEqual(["s2"]);
-    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed", notice: "父任务已结束" });
+    expect(store.failQueuedSteering("b1", "parent", "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。")).toEqual(["s2", "s3", "s4"]);
+    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed", notice: "当前任务已结束，未自动注入", steeringFailureKind: "rejected" });
+    expect(store.loadRunCard("s3")).toMatchObject({ phase: "failed", notice: "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。", steeringFailureKind: "rejected" });
+    expect(store.loadRunCard("s4")).toMatchObject({ phase: "failed", notice: "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。", steeringFailureKind: "rejected" });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
     expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
   });
@@ -1904,12 +1906,12 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
     const view = createQueuedRunCard({ promptId: "s2", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "s2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "s2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`, `cardkit-${reply.promptId}`);
 
     expect(store.recoverRunningPrompts()).toBe(0);
     expect(store.getPrompt("s2")).toMatchObject({ dispatchKind: "steering", state: "failed" });
-    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed" });
+    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed", notice: "当前任务已结束，未自动注入", steeringOrigin: "automatic", steeringFailureKind: "rejected" });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
@@ -1917,14 +1919,55 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "s1", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `${reply.cardRole}-card-s1`, "cardkit-s1");
     expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
     store.markPromptDispatched("s1");
 
     expect(store.recoverRunningPrompts()).toBe(1);
-    expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "Steering 投递结果无法确认，请检查 Herdr pane 后按需重试" });
+    expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。", steeringOrigin: "automatic", steeringFailureKind: "uncertain" });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+  });
+
+  it("atomically converts only rejected automatic steering into one ordinary prompt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "creator", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const sourceView = createQueuedRunCard({ promptId: "source", bindingId: "b1", bindingGeneration: 1, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "2026-08-29T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "source-message", actorOpenId: "member", body: "继续", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view: sourceView, rootMessageId: "root", answerCard: {} });
+    store.failPrompt({ promptId: "source", error: "not working", occurredAt: "2026-08-29T00:01:00.000Z", steeringFailureKind: "rejected" });
+    const interaction = store.createCardInteraction({ id: "interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "member", actionKind: "enqueue_failed_steering", parentPromptId: null, targetPromptId: "source", expiresAt: "2026-08-29T01:00:00.000Z" });
+    const replacementView = createQueuedRunCard({ promptId: "replacement", bindingId: "b1", bindingGeneration: 1, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "2026-08-29T00:02:00.000Z" });
+    const input = { interactionId: interaction.id, actorOpenId: "member", bindingId: "b1", bindingGeneration: 1, sourcePromptId: "source", newPromptId: "replacement", newLarkMessageId: "card:interaction", now: "2026-08-29T00:02:00.000Z", view: replacementView, rootMessageId: "root", answerCardFor: () => ({ kind: "replacement" }) };
+
+    expect(store.convertFailedSteeringToTurn({ ...input, actorOpenId: "other" })).toEqual({ outcome: "unauthorized", prompt: null });
+    for (const [column, value] of [["state", "orphaned"], ["lifecycle", "draining"], ["attachment", "degraded"]] as const) {
+      store.database.prepare(`UPDATE bindings SET ${column} = ? WHERE id = 'b1'`).run(value);
+      expect(store.convertFailedSteeringToTurn(input)).toEqual({ outcome: "stale", prompt: null });
+      expect(store.getCardInteraction("interaction")).toMatchObject({ state: "active" });
+      store.database.prepare("UPDATE bindings SET state = 'active', lifecycle = 'active', attachment = 'attached' WHERE id = 'b1'").run();
+    }
+    expect(store.convertFailedSteeringToTurn(input)).toMatchObject({ outcome: "converted", prompt: { id: "replacement", dispatchKind: "turn", steeringOrigin: null, sourcePromptId: "source", body: "继续" } });
+    expect(store.loadRunCard("replacement")).toMatchObject({ queuePosition: 1, steeringOrigin: null, steeringFailureKind: null });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "replacement")).toHaveLength(1);
+    store.createCardInteraction({ id: "forged-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "other", actionKind: "enqueue_failed_steering", parentPromptId: null, targetPromptId: "source", expiresAt: "2026-08-29T01:00:00.000Z" });
+    expect(store.convertFailedSteeringToTurn({ ...input, interactionId: "forged-interaction", actorOpenId: "other", newPromptId: "forged-replacement" })).toEqual({ outcome: "unauthorized", prompt: null });
+    expect(store.convertFailedSteeringToTurn({ ...input, newPromptId: "replacement-2" })).toMatchObject({ outcome: "duplicate", prompt: { id: "replacement" } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE source_prompt_id = 'source'").get()).toEqual({ count: 1 });
+  });
+
+  it("preserves automatic steering provenance and failure kind across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-steering-failure-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "source-message", actorOpenId: "member", body: "继续", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "root", answerCard: {} });
+    store.failPrompt({ promptId: "source", error: "not working", occurredAt: "later", steeringFailureKind: "rejected" });
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.loadRunCard("source")).toMatchObject({ steeringOrigin: "automatic", steeringFailureKind: "rejected", phase: "failed" });
   });
 
   it("deduplicates control operations and gives accepted model control priority over queued turns", () => {

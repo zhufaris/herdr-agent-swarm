@@ -201,6 +201,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   if (input.phase === "queued" && input.conversionParentPromptId) elements.push(callbackButton("改为立即补充", { action: "convert_queued_prompt", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.conversionParentPromptId, targetPromptId: input.promptId }, "primary"));
+  if (input.phase === "failed" && input.steeringOrigin === "automatic" && input.steeringFailureKind === "rejected") elements.push(callbackButton("作为新任务排队", { action: "enqueue_failed_steering", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, sourcePromptId: input.promptId }, "primary"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {
