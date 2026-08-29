@@ -12,7 +12,8 @@ export interface ReporterInput {
 
 export interface ReporterOperations {
   processIdentity(paneId: string, pid: number): Promise<{ executable: string; pid: number; startTicks: string } | null>;
-  reportAgent(paneId: string, state: ReportableAgentState, sequence: string, agentSessionId: string): Promise<void>;
+  reportAgent(paneId: string, state: ReportableAgentState, sequence: string): Promise<void>;
+  reportAgentSession(paneId: string, sequence: string, agentSessionId: string): Promise<void>;
   renameAgent(paneId: string, name: string): Promise<void>;
   reportMetadata(paneId: string, sequence: string): Promise<void>;
   clearMetadata(paneId: string, sequence: string): Promise<void>;
@@ -45,7 +46,8 @@ export class TraexAgentReporter {
       if (!initialIdentity || initialIdentity.pid !== input.pid || initialIdentity.executable !== input.executable || initialIdentity.startTicks !== input.processStartTicks) {
         return "lost-pane";
       }
-      await this.operations.reportAgent(input.paneId, "idle", this.nextSequence(), input.agentSessionId);
+      await this.operations.reportAgent(input.paneId, "idle", this.nextSequence());
+      await this.operations.reportAgentSession(input.paneId, this.nextSequence(), input.agentSessionId);
       await this.operations.reportMetadata(input.paneId, this.nextSequence());
       await this.operations.renameAgent(input.paneId, input.name);
       for (let cycle = 0; cycle < this.maxCycles && !signal?.aborted; cycle += 1) {

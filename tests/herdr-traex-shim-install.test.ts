@@ -48,6 +48,13 @@ describe("Herdr TraeX shim installer", () => {
     expect(result.stderr).toMatch(/agent-session-id/);
   });
 
+  it("rejects Herdr without session start provenance reporting", async () => {
+    const fixture = await createFixture({ missingSessionStartSource: true });
+    const result = await install(fixture, ["install"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/session-start-source/);
+  });
+
   it("refuses unsafe PATH order and preserves an unrelated target", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.shimBin, "herdr"), "keep me");
@@ -89,7 +96,7 @@ describe("Herdr TraeX shim installer", () => {
 
 interface Fixture { root: string; home: string; data: string; config: string; state: string; runtime: string; shimBin: string; realBin: string; realHerdr: string; traex: string; source: string; path: string }
 
-async function createFixture(options: { shimAfterReal?: boolean; missingAgentSession?: boolean } = {}): Promise<Fixture> {
+async function createFixture(options: { shimAfterReal?: boolean; missingAgentSession?: boolean; missingSessionStartSource?: boolean } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "herdr-traex-install-"));
   roots.push(root);
   const home = join(root, "home");
@@ -106,8 +113,8 @@ async function createFixture(options: { shimAfterReal?: boolean; missingAgentSes
   await executable(realHerdr, [
     "#!/usr/bin/env bash",
     "if [[ $1 == --version ]]; then echo 'herdr 0.7.5'",
-    `elif [[ $1 == pane && $2 == report-agent && $3 == --help ]]; then echo '${options.missingAgentSession ? "Usage: report-agent" : "Usage: report-agent --agent-session-id <ID>"}'`,
-    "else echo '{\"methods\":[\"pane.report_agent\",\"pane.report_metadata\",\"pane.release_agent\"]}'",
+    `elif [[ $1 == pane && $2 == report-agent-session && $3 == --help ]]; then echo '${options.missingAgentSession ? "Usage: report-agent-session" : options.missingSessionStartSource ? "Usage: report-agent-session --agent-session-id <ID>" : "Usage: report-agent-session --agent-session-id <ID> --session-start-source <SOURCE>"}'`,
+    "else echo '{\"methods\":[\"pane.report_agent\",\"pane.report_agent_session\",\"pane.report_metadata\",\"pane.release_agent\"]}'",
     "fi",
     ""
   ].join("\n"));

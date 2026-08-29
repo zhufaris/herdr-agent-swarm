@@ -57,12 +57,13 @@ write_config() {
 
 read_config() { node -e 'const c=require(process.argv[1]); console.log(c[process.argv[2]] ?? "")' "$config_path" "$1"; }
 validate_contract() {
-  local real_herdr=$1 schema report_agent_help
-  report_agent_help=$("$real_herdr" pane report-agent --help)
-  [[ $report_agent_help == *--agent-session-id* ]] || fail "Herdr pane report-agent lacks --agent-session-id"
+  local real_herdr=$1 schema report_session_help
+  report_session_help=$("$real_herdr" pane report-agent-session --help)
+  [[ $report_session_help == *--agent-session-id* ]] || fail "Herdr pane report-agent-session lacks --agent-session-id"
+  [[ $report_session_help == *--session-start-source* ]] || fail "Herdr pane report-agent-session lacks --session-start-source"
   "$real_herdr" pane release-agent --help >/dev/null
   schema=$("$real_herdr" api schema --json)
-  [[ $schema == *pane.report_agent* && $schema == *pane.report_metadata* && $schema == *pane.release_agent* ]] || fail "Herdr socket schema lacks reporter lifecycle methods"
+  [[ $schema == *pane.report_agent* && $schema == *pane.report_agent_session* && $schema == *pane.report_metadata* && $schema == *pane.release_agent* ]] || fail "Herdr socket schema lacks reporter lifecycle methods"
 }
 
 case $action in

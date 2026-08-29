@@ -22,13 +22,22 @@ function operations(realHerdr: string, executable: string): ReporterOperations {
       const startTicks = process ? await readStartTicks(pid) : null;
       return process && actualExecutable === executable && startTicks ? { executable, pid, startTicks } : null;
     },
-    reportAgent: async (paneId, state, sequence, agentSessionId) => { await run(realHerdr, ["pane", "report-agent", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--state", state, "--seq", sequence, "--agent-session-id", agentSessionId]); },
+    reportAgent: async (paneId, state, sequence) => { await run(realHerdr, reportAgentArguments(paneId, state, sequence)); },
+    reportAgentSession: async (paneId, sequence, agentSessionId) => { await run(realHerdr, reportAgentSessionArguments(paneId, sequence, agentSessionId)); },
     reportMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--display-agent", "traex", "--seq", sequence]); },
     clearMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--clear-display-agent", "--seq", sequence]); },
     renameAgent: async (paneId, name) => { await run(realHerdr, ["agent", "rename", paneId, name]); },
     releaseAgent: async (paneId, source, agent, sequence) => { await run(realHerdr, ["pane", "release-agent", paneId, "--source", source, "--agent", agent, "--seq", sequence]); },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   };
+}
+
+export function reportAgentArguments(paneId: string, state: string, sequence: string): string[] {
+  return ["pane", "report-agent", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--state", state, "--seq", sequence];
+}
+
+export function reportAgentSessionArguments(paneId: string, sequence: string, agentSessionId: string): string[] {
+  return ["pane", "report-agent-session", paneId, "--source", "herdr:codex", "--agent", "codex", "--seq", sequence, "--agent-session-id", agentSessionId, "--session-start-source", "startup"];
 }
 
 function run(executable: string, args: string[]): Promise<string> {
