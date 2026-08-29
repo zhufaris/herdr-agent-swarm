@@ -18,12 +18,15 @@ describe("TraeX authority reporter", () => {
     expect(operations.reportAgent.mock.calls.map((call) => call[1])).toEqual(["unknown", "working", "blocked", "idle"]);
     expect(operations.renameAgent).toHaveBeenCalledTimes(1);
     expect(operations.renameAgent).toHaveBeenCalledWith("w1:p1", "reviewer");
-    expect(operations.releaseAgent).toHaveBeenCalledWith("w1:p1", "herdr-traex-shim", "traex", expect.any(String));
+    expect(operations.reportMetadata).toHaveBeenCalledWith("w1:p1", expect.any(String));
+    expect(operations.releaseAgent).toHaveBeenCalledWith("w1:p1", "herdr-traex-shim", "codex", expect.any(String));
+    expect(operations.clearMetadata).toHaveBeenCalledWith("w1:p1", expect.any(String));
   });
 
   it("maps unsupported explanation output to unknown and never reports done", async () => {
     const operations = fakeOperations({ explainCodexSnapshot: vi.fn(async () => "done") });
     await new TraexAgentReporter(operations, { pollIntervalMs: 1, maxCycles: 1 }).run(input);
+    expect(operations.reportAgent).toHaveBeenCalledTimes(1);
     expect(operations.reportAgent).toHaveBeenCalledWith("w1:p1", "unknown", expect.any(String));
     expect(operations.reportAgent).not.toHaveBeenCalledWith("w1:p1", "done", expect.any(String));
   });
@@ -32,7 +35,7 @@ describe("TraeX authority reporter", () => {
     const operations = fakeOperations({ processIdentity: vi.fn(async () => ({ executable: "/opt/traex", pid: 44, startTicks: "different" })) });
     await expect(new TraexAgentReporter(operations).run(input)).resolves.toBe("lost-pane");
     expect(operations.explainCodexSnapshot).not.toHaveBeenCalled();
-    expect(operations.releaseAgent).toHaveBeenCalledWith("w1:p1", "herdr-traex-shim", "traex", expect.any(String));
+    expect(operations.releaseAgent).toHaveBeenCalledWith("w1:p1", "herdr-traex-shim", "codex", expect.any(String));
   });
 
   it("releases authority after an observation error", async () => {
@@ -58,9 +61,12 @@ function fakeOperations(overrides: Partial<ReporterOperations> = {}) {
     processIdentity: vi.fn(async () => ({ executable: "/opt/traex", pid: 44, startTicks: "987" })),
     readPane: vi.fn(async () => "bounded terminal snapshot"),
     explainCodexSnapshot: vi.fn(async () => "idle"),
+    currentAgentState: vi.fn(async () => null),
     reportAgent: vi.fn(async () => undefined),
+    reportMetadata: vi.fn(async () => undefined),
     renameAgent: vi.fn(async () => undefined),
     releaseAgent: vi.fn(async () => undefined),
+    clearMetadata: vi.fn(async () => undefined),
     sleep: vi.fn(async () => undefined),
     ...overrides
   };

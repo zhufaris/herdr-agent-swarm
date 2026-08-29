@@ -371,11 +371,14 @@ accepted; a new bridge-owned session uses `/swarm reset` rather than local
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
 bridge still invokes the formal `agent start --kind traex` surface and appends
-its SessionStart hook after `--`; the shim preserves those arguments, launches
-the configured real TraeX executable through a private request file, and owns a
-separate fenced reporter. That reporter maps Herdr's Codex-compatible screen
-explanation to `agent=traex` authority and releases only its own source when the
-exact TraeX process exits. Legacy panes observed as `codex` remain compatible.
+its SessionStart hook after `--`; the shim preserves those arguments, creates a
+native Codex-compatible managed reservation, launches the configured real TraeX
+executable through a private request file, and owns a separate fenced reporter.
+The reporter keeps Herdr's internal known-agent protocol as Codex, publishes
+`display_agent=traex`, maps Codex-compatible screen explanations into state, and
+releases only its own source and metadata when the exact TraeX process exits.
+The shim projects only those marked JSON entries to `agent=traex`; native Codex
+entries and legacy Codex-observed panes remain unchanged.
 The shim does not replace the bridge's capability-authenticated session report:
 that path remains the durable source of the exact TraeX UUID.
 

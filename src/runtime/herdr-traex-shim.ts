@@ -2,6 +2,7 @@ import { isAbsolute, resolve } from "node:path";
 
 export type HerdrShimInvocation =
   | { kind: "delegate"; argv: string[] }
+  | { kind: "project"; argv: string[] }
   | { kind: "start-traex"; name: string; paneId: string; timeoutMs: number; traexArgs: string[] };
 
 export interface ShimConfig {
@@ -32,6 +33,7 @@ export interface TraexStartDependencies {
   runHerdr(args: string[], timeoutMs?: number): Promise<{ stdout: string; stderr: string }>;
   writeRequest(bytes: Buffer): Promise<string>;
   removeRequest(requestId: string): Promise<void>;
+  processExecutable(pid: number): Promise<string | null>;
   processStartTicks(pid: number): Promise<string | null>;
   startReporter(input: { paneId: string; name: string; executable: string; pid: number; processStartTicks: string; reporter: string }): void | Promise<void>;
   sleep(ms: number): Promise<void>;
@@ -47,6 +49,7 @@ export class TraexStartError extends Error {
 
 export function parseHerdrShimInvocation(argv: readonly string[]): HerdrShimInvocation {
   const delegated = { kind: "delegate" as const, argv: [...argv] };
+  if (projectsAgentJson(argv)) return { kind: "project", argv: [...argv] };
   if (argv[0] !== "agent" || argv[1] !== "start") return delegated;
 
   const separator = argv.indexOf("--", 2);
@@ -89,6 +92,20 @@ export function parseHerdrShimInvocation(argv: readonly string[]): HerdrShimInvo
   return { kind: "start-traex", name, paneId, timeoutMs, traexArgs };
 }
 
+function projectsAgentJson(argv: readonly string[]): boolean {
+  if (argv[0] === "api" && argv[1] === "snapshot") return true;
+  if (argv[0] === "pane" && ["list", "get", "current"].includes(argv[1] ?? "")) return true;
+  return argv[0] === "agent" && ["list", "get", "prompt", "wait", "focus", "rename"].includes(argv[1] ?? "");
+}
+
+export function projectTraexAgentJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(projectTraexAgentJson);
+  if (!value || typeof value !== "object") return value;
+  const projected = Object.fromEntries(Object.entries(value).map(([key, child]) => [key, projectTraexAgentJson(child)]));
+  if (projected.display_agent === "traex" && projected.agent === "codex") projected.agent = "traex";
+  return projected;
+}
+
 export function validateShimPaths(config: ShimConfig): void {
   for (const [label, value] of [["real Herdr", config.realHerdr], ["TraeX", config.traex], ["shim", config.shim]] as const) {
     if (!isAbsolute(value)) throw new Error(`${label} path must be absolute`);
@@ -119,12 +136,18 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     // Once pane.run is invoked, its command may have reached the terminal even
     // if the CLI later returns an error. Fence all later failures as uncertain.
     launched = true;
-    await dependencies.runHerdr(["pane", "run", input.paneId, config.launcher, requestId], input.timeoutMs);
+    await dependencies.runHerdr(["pane", "run", input.paneId, `${shellFunction(config.launcher, requestId)}`], input.timeoutMs);
+    launched = true;
+    const started = parseEnvelope((await dependencies.runHerdr([
+      "agent", "start", input.name, "--kind", "codex", "--pane", input.paneId, "--timeout", String(input.timeoutMs), "--", ...input.traexArgs
+    ], input.timeoutMs + 1_000)).stdout) as Record<string, unknown>;
     const process = await waitForTraexProcess(input.paneId, config.traex, deadline, dependencies);
     const processStartTicks = await dependencies.processStartTicks(process.pid);
     if (!processStartTicks) throw new Error("TraeX process identity disappeared before reporter startup");
     await dependencies.startReporter({ paneId: input.paneId, name: input.name, executable: config.traex, pid: process.pid, processStartTicks, reporter: config.reporter });
-    return await waitForManagedAgent(input, deadline, dependencies);
+    const managed = await waitForManagedAgent(input, deadline, dependencies);
+    started.agent = managed.agent;
+    return projectTraexAgentJson(started) as Record<string, unknown>;
   } catch (cause) {
     if (!launched) {
       if (requestId) await dependencies.removeRequest(requestId).catch(() => undefined);
@@ -133,6 +156,11 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     }
     throw new TraexStartError("agent_start_uncertain", `TraeX may have started in pane ${input.paneId}; inspect it before retrying`, { cause });
   }
+}
+
+function shellFunction(launcher: string, requestId: string): string {
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(launcher) || !/^[a-f0-9-]+$/.test(requestId)) throw new Error("Unsafe TraeX launcher path or request ID");
+  return `codex() { ${launcher} ${requestId}; }`;
 }
 
 interface ProcessRecord { pid: number; name?: string; argv: string[] }
@@ -158,20 +186,25 @@ function isAvailableShell(info: ProcessInfo): boolean {
 }
 
 async function waitForTraexProcess(paneId: string, executable: string, deadline: number, dependencies: TraexStartDependencies): Promise<ProcessRecord> {
-  while (dependencies.now() <= deadline) {
+  let first = true;
+  while (first || dependencies.now() <= deadline) {
+    first = false;
     const info = parseProcessInfo((await dependencies.runHerdr(["pane", "process-info", "--pane", paneId])).stdout);
-    const process = info.foreground.find((candidate) => candidate.argv[0] === executable);
-    if (process) return process;
+    for (const process of info.foreground) {
+      if (await dependencies.processExecutable(process.pid) === executable) return process;
+    }
     await dependencies.sleep(50);
   }
   throw new Error("Timed out waiting for the TraeX process");
 }
 
 async function waitForManagedAgent(input: TraexStartInput, deadline: number, dependencies: TraexStartDependencies): Promise<Record<string, unknown>> {
-  while (dependencies.now() <= deadline) {
+  let first = true;
+  while (first || dependencies.now() <= deadline) {
+    first = false;
     const result = parseEnvelope((await dependencies.runHerdr(["agent", "get", input.name])).stdout) as { agent?: Record<string, unknown> };
     const agent = result.agent;
-    if (agent?.pane_id === input.paneId && agent.agent === "traex" && agent.agent_status !== "unknown") return result;
+    if (agent?.pane_id === input.paneId && agent.agent === "codex" && agent.display_agent === "traex" && agent.agent_status !== "unknown") return result;
     await dependencies.sleep(50);
   }
   throw new Error("Timed out waiting for managed TraeX identity");

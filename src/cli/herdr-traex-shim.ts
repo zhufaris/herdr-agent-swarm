@@ -1,17 +1,41 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { parseHerdrShimInvocation, runHerdrTraexStart, type TraexLaunchConfig, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexStart, type TraexLaunchConfig, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
 
 async function main(): Promise<void> {
   const configPath = process.env.HERDR_TRAEX_SHIM_CONFIG;
   if (!configPath) throw new Error("HERDR_TRAEX_SHIM_CONFIG is not set by the installed launcher");
   const config = parseConfig(JSON.parse(await readFile(configPath, "utf8")));
   const invocation = parseHerdrShimInvocation(process.argv.slice(2));
-  if (invocation.kind !== "start-traex") throw new Error("Shim entrypoint accepts only agent start --kind traex");
+  if (invocation.kind === "project") {
+    await markManagedPromptWorking(config.realHerdr, invocation.argv);
+    const delegated = await runProjected(config.realHerdr, invocation.argv);
+    let stdout = delegated.stdout;
+    try { stdout = `${JSON.stringify(projectTraexAgentJson(JSON.parse(stdout)))}\n`; } catch { /* Preserve non-JSON native output. */ }
+    if (stdout) process.stdout.write(stdout);
+    if (delegated.stderr) process.stderr.write(delegated.stderr);
+    process.exitCode = delegated.exitCode;
+    return;
+  }
+  if (invocation.kind !== "start-traex") throw new Error("Shim entrypoint accepts only managed TraeX commands");
   const result = await runHerdrTraexStart(invocation, config, dependencies(config));
   process.stdout.write(`${JSON.stringify({ id: "cli:agent:start", result })}\n`);
+}
+
+async function markManagedPromptWorking(realHerdr: string, argv: string[]): Promise<void> {
+  if (argv[0] !== "agent" || argv[1] !== "prompt" || !argv[2]) return;
+  const target = argv[2];
+  const inspected = await runProjected(realHerdr, ["agent", "get", target]);
+  if (inspected.exitCode !== 0) return;
+  try {
+    const result = (JSON.parse(inspected.stdout) as { result?: { agent?: Record<string, unknown> } }).result?.agent;
+    if (result?.display_agent !== "traex" || typeof result.pane_id !== "string") return;
+    await run(realHerdr, ["pane", "report-agent", result.pane_id, "--source", "herdr-traex-shim", "--agent", "codex", "--state", "working", "--seq", process.hrtime.bigint().toString(10)]);
+  } catch { /* Native prompt remains authoritative if the pre-report cannot be prepared. */ }
 }
 
 function dependencies(config: TraexLaunchConfig): TraexStartDependencies {
@@ -25,6 +49,7 @@ function dependencies(config: TraexLaunchConfig): TraexStartDependencies {
       return id;
     },
     removeRequest: (id) => rm(`${config.requestDir}/${id}`, { force: true }),
+    processExecutable: async (pid) => { try { return realpathSync(await readlink(`/proc/${pid}/exe`)); } catch { return null; } },
     processStartTicks: async (pid) => processStartTicks(pid),
     startReporter: (input) => {
       const child = spawn(process.execPath, [config.reporter, JSON.stringify(input)], { detached: true, stdio: "ignore", env: process.env });
@@ -39,6 +64,13 @@ function run(executable: string, args: string[], timeoutMs = 30_000): Promise<{ 
   return new Promise((resolve, reject) => execFile(executable, args, { timeout: timeoutMs, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
     if (error) reject(new Error(`Official Herdr command failed (${args.slice(0, 2).join(" " )})`, { cause: error }));
     else resolve({ stdout, stderr });
+  }));
+}
+
+function runProjected(executable: string, args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => execFile(executable, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const exitCode = error && typeof error === "object" && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+    resolve({ stdout, stderr, exitCode });
   }));
 }
 
@@ -58,7 +90,7 @@ function parseConfig(value: unknown): TraexLaunchConfig {
   return Object.fromEntries(keys.map((key) => [key, record[key]])) as unknown as TraexLaunchConfig;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   main().catch((error) => {
     const code = typeof error === "object" && error && "code" in error ? String(error.code) : "agent_start_failed";
     process.stderr.write(`${code}: ${error instanceof Error ? error.message : "TraeX start failed"}\n`);

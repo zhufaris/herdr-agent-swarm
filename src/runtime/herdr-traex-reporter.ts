@@ -12,9 +12,12 @@ export interface ReporterOperations {
   processIdentity(paneId: string, pid: number): Promise<{ executable: string; pid: number; startTicks: string } | null>;
   readPane(paneId: string): Promise<string>;
   explainCodexSnapshot(snapshot: string): Promise<unknown>;
+  currentAgentState(paneId: string): Promise<ReportableAgentState | null>;
   reportAgent(paneId: string, state: ReportableAgentState, sequence: string): Promise<void>;
   renameAgent(paneId: string, name: string): Promise<void>;
-  releaseAgent(paneId: string, source: "herdr-traex-shim", agent: "traex", sequence: string): Promise<void>;
+  reportMetadata(paneId: string, sequence: string): Promise<void>;
+  clearMetadata(paneId: string, sequence: string): Promise<void>;
+  releaseAgent(paneId: string, source: "herdr-traex-shim", agent: "codex", sequence: string): Promise<void>;
   sleep(ms: number): Promise<void>;
 }
 
@@ -40,6 +43,9 @@ export class TraexAgentReporter {
     let previous: ReportableAgentState | null = null;
     let renamed = false;
     try {
+      await this.operations.reportMetadata(input.paneId, this.nextSequence());
+      await this.operations.reportAgent(input.paneId, "unknown", this.nextSequence());
+      previous = "unknown";
       for (let cycle = 0; cycle < this.maxCycles && !signal?.aborted; cycle += 1) {
         const identity = await this.operations.processIdentity(input.paneId, input.pid);
         if (!identity || identity.pid !== input.pid || identity.executable !== input.executable || identity.startTicks !== input.processStartTicks) {
@@ -47,7 +53,8 @@ export class TraexAgentReporter {
           break;
         }
         const state = normalizeState(await this.operations.explainCodexSnapshot(await this.operations.readPane(input.paneId)));
-        if (state !== previous) {
+        const current = await this.operations.currentAgentState(input.paneId);
+        if (state !== previous || (current !== null && current !== state)) {
           await this.operations.reportAgent(input.paneId, state, this.nextSequence());
           previous = state;
         }
@@ -59,7 +66,8 @@ export class TraexAgentReporter {
       }
       return outcome;
     } finally {
-      await this.operations.releaseAgent(input.paneId, "herdr-traex-shim", "traex", this.nextSequence());
+      await this.operations.releaseAgent(input.paneId, "herdr-traex-shim", "codex", this.nextSequence());
+      await this.operations.clearMetadata(input.paneId, this.nextSequence());
     }
   }
 

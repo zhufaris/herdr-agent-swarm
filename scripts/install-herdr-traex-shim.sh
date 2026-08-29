@@ -79,7 +79,7 @@ case $action in
     target=$bin_dir/herdr
     if [[ -e $target || -L $target ]]; then
       owned=0
-      if [[ -L $target ]]; then [[ $(readlink -f -- "$target") == "$data_root"/releases/*/herdr ]] && owned=1; fi
+      if [[ -L $target ]]; then [[ $(readlink -f -- "$target") == "$(readlink -m -- "$data_root")"/releases/*/herdr ]] && owned=1; fi
       (( owned )) || fail "refusing to replace unrelated $target"
     fi
     [[ ${HERDR_TRAEX_SKIP_BUILD:-0} == 1 ]] || (cd "$source_root" && npm run build)
@@ -90,7 +90,7 @@ case $action in
     traex_version=$($traex --version | sed -E 's/^[^0-9]*//')
     [[ -n $herdr_version && -n $traex_version ]] || fail "could not determine Herdr or TraeX version"
     validate_contract "$real_herdr"
-    build_id=$(sha256sum "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" | sha256sum | cut -c1-16)
+    build_id=$(sha256sum "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/scripts/herdr-traex-command-shim.sh" "$source_root/scripts/herdr-traex-pane-launcher.sh" | sha256sum | cut -c1-16)
     release=$data_root/releases/$build_id
     mkdir -p "$release/cli" "$release/runtime" "$config_root" "$request_dir" "$bin_dir"
     chmod 700 "$config_root" "$request_dir"
@@ -119,7 +119,7 @@ case $action in
         paths_tmp=$release/paths.sh.tmp.$$; sed -E "s/^validated_herdr_version=.*/validated_herdr_version=$(printf '%q' "$current")/" "$release/paths.sh" > "$paths_tmp"; chmod 600 "$paths_tmp"; mv -f "$paths_tmp" "$release/paths.sh"
       else fail "Herdr version mismatch: validated $validated, current $current; run status --accept-version after compatibility checks"; fi
     fi
-    [[ -L $bin_dir/herdr && $(readlink -f -- "$bin_dir/herdr") == "$release/herdr" ]] || fail "shim link is missing or inconsistent"
+    [[ -L $bin_dir/herdr && $(readlink -f -- "$bin_dir/herdr") == $(readlink -f -- "$release/herdr") ]] || fail "shim link is missing or inconsistent"
     [[ -x $traex ]] || fail "configured TraeX binary is unavailable"
     echo "status: ready"; echo "release: $(basename "$release")"; echo "herdr: $validated"; echo "traex: $($traex --version | sed -E 's/^[^0-9]*//')"
     ;;
@@ -127,7 +127,7 @@ case $action in
     [[ -f $config_path ]] || { echo "status: not installed"; exit 0; }
     bin_dir=$(read_config binDir); release=$(read_config releaseDir)
     target=$bin_dir/herdr
-    if [[ -L $target && $(readlink -f -- "$target") == "$release/herdr" ]]; then rm -f -- "$target"; fi
+    if [[ -L $target && $(readlink -f -- "$target") == $(readlink -f -- "$release/herdr") ]]; then rm -f -- "$target"; fi
     rm -f -- "$config_path"
     echo "uninstalled: shim link and active config removed; releases retained for rollback"
     ;;

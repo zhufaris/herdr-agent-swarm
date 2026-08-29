@@ -205,7 +205,10 @@ npm run herdr:traex:status
 
 Set `HERDR_BIN` to the absolute shim symlink and `TRAEX_BIN` to the same absolute
 TraeX binary reported by status. The shim does not modify the official Herdr
-binary, native Codex behavior, session database, or detection manifests. Forms
+binary, native Codex behavior, session database, or detection manifests. Internally
+it uses Herdr's Codex-compatible reservation and prompt protocol while executing
+the real TraeX binary; only shim-marked JSON results are projected as
+`agent: "traex"`. Forms
 with leading global routing options such as `herdr --session ...` are delegated
 unchanged; select a session through inherited `HERDR_SESSION` and
 `HERDR_SOCKET_PATH` when the exact TraeX start form must be intercepted.

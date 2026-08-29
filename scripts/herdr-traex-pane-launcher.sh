@@ -15,4 +15,7 @@ rm -f -- "$request_path"
 (( ${#values[@]} >= 1 )) || { echo "empty TraeX request" >&2; exit 1; }
 executable=${values[0]}
 args=("${values[@]:1}")
-exec -- "$executable" "${args[@]}"
+# Herdr 0.7.5's native prompt guard recognizes the managed Codex protocol by
+# argv[0]. The executable fence remains /proc/<pid>/exe, which resolves to the
+# real TraeX binary.
+exec -a codex "$executable" "${args[@]}"

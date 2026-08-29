@@ -29,13 +29,16 @@ is therefore incorrect.
 
 Install a small `herdr` command shim earlier in `PATH` and preserve the official
 binary at a stable explicit path. The shim intercepts only the exact
-`agent start` form whose kind is `traex`; every other invocation uses `exec` to
+`agent start` form whose kind is `traex`. Agent-bearing JSON queries are
+delegated and then project only shim-marked managed agents from the internal
+Codex protocol identity to `traex`; every other invocation uses `exec` to
 delegate unchanged to the official Herdr binary.
 
 For a TraeX start, the shim validates the supported arguments, confirms that the
-target is an available shell pane, starts a bridge-owned launcher in that pane,
-starts a bounded reporter sidecar outside that pane, waits until the reporter has
-established TraeX authority, and returns a response compatible with native
+target is an available shell pane, installs a one-shot shell function for the
+native `codex` command, asks official Herdr to establish a Codex managed-agent
+reservation, starts a bounded reporter sidecar outside that pane, waits until
+the reporter has established TraeX display metadata, and returns a response compatible with native
 `herdr agent start`. The command running in the pane is the real TraeX process,
 not a persistent wrapper.
 
@@ -65,18 +68,21 @@ The launcher performs this ordered startup protocol:
 
 1. Ask the official Herdr CLI for the target pane and process state.
 2. Reject a pane that is not an available interactive shell.
-3. Run the configured absolute TraeX executable in the pane with the forwarded
-   arguments and the existing hook-trust/session-reporting configuration.
+3. Define a one-shot shell-local `codex` function that invokes the fixed private
+   launcher, then call official `agent start --kind codex`. This creates Herdr's
+   native name reservation and prompt/wait lifecycle while the launcher executes
+   the configured absolute TraeX binary. `exec -a codex` supplies the protocol
+   argv expected by Herdr; `/proc/<pid>/exe` must resolve to TraeX.
 4. Start one reporter sidecar keyed by the target pane and TraeX process identity.
-   It reports `agent=traex`, `state=unknown`, a monotonic sequence, and a
-   dedicated source through `pane.report_agent`. This grants the reporter source
-   runtime authority over screen detection.
+   It keeps the internal authority as `codex`, reports `display_agent=traex`,
+   `state=unknown`, a monotonic sequence, and a dedicated source.
 5. Poll the pane from the sidecar until TraeX is present and its Codex-compatible
    screen evidence resolves to a stable state, then report that state as
-   `traex`.
-6. Assign the requested managed agent name using Herdr's native rename command.
-7. Return success only when `herdr agent get <pane-id>` reports the requested
-   name, `agent=traex`, and a non-unknown state.
+   `codex` internally.
+6. Keep the name created by native `agent start`.
+7. Return success only when `herdr agent get <name>` reports the requested pane,
+   `display_agent=traex`, and a non-unknown state; the shim projects that marked
+   entry to `agent=traex`.
 
 If startup fails before TraeX is launched, the shim returns a normal failure. If
 the process may have launched, it returns an explicit uncertain-start failure and
@@ -89,8 +95,8 @@ the existing Codex manifest outcome onto TraeX without duplicating the detection
 rules. Its authority is scoped by a unique source name and increasing sequence.
 
 The reporter runs only while the TraeX process exists. It reports transitions,
-not every poll, and releases its authority with `pane.release_agent` when the
-process exits. Herdr can then return the pane to ordinary shell detection. A
+not every poll, and releases its scoped Codex authority plus TraeX display
+metadata when the process exits. Herdr can then return the pane to ordinary shell detection. A
 bounded heartbeat may repeat the current state only if the server requires it to
 retain authority.
 
