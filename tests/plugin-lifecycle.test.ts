@@ -14,10 +14,10 @@ describe("plugin lifecycle", () => {
     mkdirSync(standaloneConfig);
     writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
     writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
-    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SOLO_AGENT_ROOT: fixture.root, SOLO_AGENT_CONFIG_DIR: standaloneConfig, SOLO_AGENT_STATE_DIR: standaloneState, BRIDGE_SYSTEMD_SERVICE_NAME: "solo-agent.service" };
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState, BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-agent-swarm.service" };
 
     await expect(runPluginLifecycle("install", environment)).resolves.toBe(0);
-    const unit = readFileSync(join(fixture.units, "solo-agent.service"), "utf8");
+    const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
     expect(unit).toContain(`EnvironmentFile=${standaloneConfig}/.env`);
     expect(unit).toContain(`Environment=PROJECTS_CONFIG_PATH=${standaloneConfig}/projects.json`);
     expect(unit).toContain(`Environment=BRIDGE_DATABASE_PATH=${standaloneState}/bridge.db`);
@@ -32,13 +32,21 @@ describe("plugin lifecycle", () => {
     mkdirSync(config, { recursive: true });
     writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
     writeFileSync(join(config, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
-    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SOLO_AGENT_ROOT: fixture.root, SOLO_AGENT_CONFIG_DIR: undefined, SOLO_AGENT_STATE_DIR: undefined, BRIDGE_SYSTEMD_SERVICE_NAME: undefined, XDG_CONFIG_HOME: xdgConfig, XDG_STATE_HOME: xdgState };
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: undefined, SWARM_STATE_DIR: undefined, BRIDGE_SYSTEMD_SERVICE_NAME: undefined, XDG_CONFIG_HOME: xdgConfig, XDG_STATE_HOME: xdgState };
 
     await expect(runPluginLifecycle("install", environment)).resolves.toBe(0);
     const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
     expect(unit).toContain("Description=Herdr Agent Swarm");
     expect(unit).toContain(`EnvironmentFile=${config}/.env`);
     expect(unit).toContain(`Environment=BRIDGE_DATABASE_PATH=${xdgState}/herdr-agent-swarm/bridge.db`);
+  });
+
+  it("exposes only canonical swarm lifecycle package commands", () => {
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> };
+    for (const action of ["init", "install", "start", "status", "restart", "stop", "logs"]) {
+      expect(packageJson.scripts[`swarm:${action}`]).toBe(`bash scripts/swarm-service.sh ${action}`);
+      expect(packageJson.scripts[`solo:${action}`]).toBeUndefined();
+    }
   });
 
   it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {

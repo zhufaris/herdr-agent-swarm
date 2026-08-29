@@ -16,7 +16,7 @@ Options:
   --setup  Open the interactive setup action after installation. This validates
            configuration, installs the systemd user service, and starts it.
   --standalone
-           Build and install solo-agent.service without linking a Herdr plugin.
+           Build and install herdr-agent-swarm.service without linking a Herdr plugin.
   -h, --help
            Show this help.
 EOF
@@ -41,8 +41,8 @@ done
 if [ "$STANDALONE" -eq 1 ]; then
     npm ci
     npm run build
-    bash "$ROOT/scripts/solo-agent.sh" install
-    echo "Standalone service installed. Run 'npm run solo:start' after configuration is ready."
+    bash "$ROOT/scripts/swarm-service.sh" install
+    echo "Standalone service installed. Run 'npm run swarm:start' after configuration is ready."
     exit 0
 fi
 

@@ -82,10 +82,10 @@ function nonNegativeInteger(value: unknown): number | null {
 }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
-  const standalone = Boolean(environment.SOLO_AGENT_ROOT);
-  const root = requiredDirectory(environment.SOLO_AGENT_ROOT || environment.HERDR_PLUGIN_ROOT, standalone ? "SOLO_AGENT_ROOT" : "HERDR_PLUGIN_ROOT");
-  const configDirectory = requiredDirectory(environment.SOLO_AGENT_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || (standalone ? `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm` : undefined), standalone ? "SOLO_AGENT_CONFIG_DIR" : "HERDR_PLUGIN_CONFIG_DIR", false);
-  const stateDirectory = requiredDirectory(environment.SOLO_AGENT_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || (standalone ? `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm` : undefined), standalone ? "SOLO_AGENT_STATE_DIR" : "HERDR_PLUGIN_STATE_DIR", false);
+  const standalone = Boolean(environment.SWARM_ROOT);
+  const root = requiredDirectory(environment.SWARM_ROOT || environment.HERDR_PLUGIN_ROOT, standalone ? "SWARM_ROOT" : "HERDR_PLUGIN_ROOT");
+  const configDirectory = requiredDirectory(environment.SWARM_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || (standalone ? `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm` : undefined), standalone ? "SWARM_CONFIG_DIR" : "HERDR_PLUGIN_CONFIG_DIR", false);
+  const stateDirectory = requiredDirectory(environment.SWARM_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || (standalone ? `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm` : undefined), standalone ? "SWARM_STATE_DIR" : "HERDR_PLUGIN_STATE_DIR", false);
   const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || (standalone ? "herdr-agent-swarm.service" : "herdr-lark-bridge.service");
   if (!/^[A-Za-z0-9_.@-]+\.service$/.test(serviceName)) throw new Error(`invalid systemd service name: ${serviceName}`);
   const unitDirectory = resolve(environment.BRIDGE_SYSTEMD_UNIT_DIR || `${homedir()}/.config/systemd/user`);
@@ -108,7 +108,7 @@ function requiredDirectory(value: string | undefined, name: string, mustExist = 
 function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (!existsSync(paths.environmentFile)) throw new Error(`configuration file not found: ${paths.environmentFile}; run the setup action first`);
   const environment = { ...readEnvironmentFile(paths.environmentFile), ...base };
-  if (!base.SOLO_AGENT_ROOT) {
+  if (!base.SWARM_ROOT) {
     environment.HERDR_PLUGIN_ROOT = paths.root;
     environment.HERDR_PLUGIN_CONFIG_DIR = paths.configDirectory;
     environment.HERDR_PLUGIN_STATE_DIR = paths.stateDirectory;
@@ -141,7 +141,7 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
 }
 
 function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): string {
-  const standalone = Boolean(environment.SOLO_AGENT_ROOT);
+  const standalone = Boolean(environment.SWARM_ROOT);
   return [
     "[Unit]",
     `Description=${standalone ? "Herdr Agent Swarm" : "Herdr Lark Bridge"}`,

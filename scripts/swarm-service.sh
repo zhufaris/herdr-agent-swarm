@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ACTION="${1:-}"
 FORCE="${2:-}"
-CONFIG_DIR="${SOLO_AGENT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
-STATE_DIR="${SOLO_AGENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
+CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
+STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
 SERVICE_NAME="${BRIDGE_SYSTEMD_SERVICE_NAME:-herdr-agent-swarm.service}"
 
 case "$ACTION" in
@@ -13,7 +13,7 @@ case "$ACTION" in
     install -d -m 700 "$CONFIG_DIR" "$STATE_DIR"
     if [ ! -e "$CONFIG_DIR/.env" ]; then install -m 600 "$ROOT/.env.example" "$CONFIG_DIR/.env"; fi
     if [ ! -e "$CONFIG_DIR/projects.json" ]; then install -m 600 "$ROOT/config/projects.example.json" "$CONFIG_DIR/projects.json"; fi
-    printf 'Created private Herdr Agent Swarm configuration in %s\nEdit .env and projects.json, then run: npm run solo:install\n' "$CONFIG_DIR"
+    printf 'Created private Herdr Agent Swarm configuration in %s\nEdit .env and projects.json, then run: npm run swarm:install\n' "$CONFIG_DIR"
     exit 0
     ;;
   install|uninstall|start|status|restart|stop|logs) ;;
@@ -24,9 +24,9 @@ if { [ -n "$FORCE" ] && { [ "$ACTION" != "restart" ] || [ "$FORCE" != "--force" 
   exit 2
 fi
 
-export SOLO_AGENT_ROOT="$ROOT"
-export SOLO_AGENT_CONFIG_DIR="$CONFIG_DIR"
-export SOLO_AGENT_STATE_DIR="$STATE_DIR"
+export SWARM_ROOT="$ROOT"
+export SWARM_CONFIG_DIR="$CONFIG_DIR"
+export SWARM_STATE_DIR="$STATE_DIR"
 export BRIDGE_SYSTEMD_SERVICE_NAME="$SERVICE_NAME"
 args=("$ROOT/dist/cli/plugin-lifecycle.js" "$ACTION")
 if [ -n "$FORCE" ]; then args+=("$FORCE"); fi
