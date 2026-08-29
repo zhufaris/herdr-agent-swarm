@@ -572,13 +572,21 @@ export class HerdrCliAdapter implements HerdrPort {
   private async waitForPaneChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     if (!this.native?.waitForPaneEvent) { await abortableDelay(timeoutMs, signal); return; }
     throwIfAborted(signal);
-    if (!signal) { await this.native.waitForPaneEvent(paneId, timeoutMs); return; }
+    const startedAt = Date.now();
+    if (!signal) {
+      const changed = await this.native.waitForPaneEvent(paneId, timeoutMs);
+      if (!changed) await abortableDelay(Math.max(0, timeoutMs - (Date.now() - startedAt)));
+      return;
+    }
     let onAbort!: () => void;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(new Error("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed"));
       signal.addEventListener("abort", onAbort, { once: true });
     });
-    try { await Promise.race([this.native.waitForPaneEvent(paneId, timeoutMs), aborted]); }
+    try {
+      const changed = await Promise.race([this.native.waitForPaneEvent(paneId, timeoutMs), aborted]);
+      if (!changed) await abortableDelay(Math.max(0, timeoutMs - (Date.now() - startedAt)), signal);
+    }
     finally { signal.removeEventListener("abort", onAbort); }
   }
 

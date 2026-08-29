@@ -358,7 +358,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (this.workers.has(prompt.bindingId)) return;
     const worker = this.observeDetachedTurn(prompt).finally(() => {
       if (this.workers.get(prompt.bindingId) === worker) this.workers.delete(prompt.bindingId);
-      if (!this.stopping) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: prompt.bindingId });
+      const latest = this.options.store.getPrompt(prompt.id);
+      if (!this.stopping && latest && !(latest.state === "running" && latest.observationState === "detached")) {
+        this.options.scheduler.wake({ kind: "prompt-ready", bindingId: prompt.bindingId });
+      }
     });
     this.workers.set(prompt.bindingId, worker);
   }

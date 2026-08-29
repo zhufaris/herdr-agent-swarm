@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 
@@ -12,6 +12,28 @@ const nativeClient = (calls: Array<{ method: string; params: object }>) => ({
 });
 
 describe("Herdr adapter", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("does not busy-poll when the native Pane waiter returns without a change", async () => {
+    vi.useFakeTimers();
+    const waitForPaneEvent = vi.fn(async () => false);
+    const adapter = new HerdrCliAdapter({ async run() { throw new Error("not used"); } }, "herdr", 1000, "auto", {
+      async request() { throw new Error("not used"); },
+      waitForPaneEvent
+    });
+    let settled = false;
+    const waiting = adapter.waitForRuntimeChange("w1:p1", 500).then(() => { settled = true; });
+
+    await Promise.resolve();
+    expect(waitForPaneEvent).toHaveBeenCalledWith("w1:p1", 500);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await waiting;
+    expect(settled).toBe(true);
+  });
+
   it("starts a named Codex agent through argv-only Herdr control and verifies detection", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args, _timeout, onStarted) {

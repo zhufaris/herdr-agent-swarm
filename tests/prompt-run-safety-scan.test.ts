@@ -130,6 +130,28 @@ describe("PromptRunWorkflow durable safety scan", () => {
     expect(scan).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("does not immediately wake ordinary work when detached observation remains uncertain", async () => {
+    const wake = vi.fn();
+    const prompt = { id: "p1", bindingId: "b1", state: "running", observationState: "detached" };
+    const workflow = new PromptRunWorkflow({
+      store: {
+        getPrompt: vi.fn(() => prompt),
+        getBinding: vi.fn(() => null)
+      } as never,
+      scheduler: { subscribe: () => () => {}, wake },
+      turnTimeoutMs: 1_000,
+      herdr: {} as never, bus: { async publish() {} },
+      outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    workflow.wake({ kind: "detached-observer-ready", bindingId: "b1", promptId: "p1" });
+    await vi.waitFor(() => expect(workflow.snapshot().activeTurnWorkers).toBe(0));
+
+    expect(wake).not.toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
+    await workflow.stop();
+  });
 });
 
 function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanIntervalMs: number, error = vi.fn()): PromptRunWorkflow {
