@@ -671,6 +671,18 @@ describe("run card", () => {
     expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed", answer }, { initialContent: "canonical page content" }))).toContain("canonical page content");
   });
 
+  it("does not inspect accumulated answer fields when canonical page content is supplied", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prepared", workspaceId: "w1", paneId: "p1", requestText: "show", queuePosition: 0, occurredAt: "now" });
+    const prepared = { ...view, phase: "running" as const };
+    for (const field of ["answer", "answerSegments", "answerDraft"] as const) {
+      Object.defineProperty(prepared, field, { get() { throw new Error(`unexpected ${field} read`); } });
+    }
+
+    const card = renderRequestAnswerCard(prepared, { initialContent: "" }) as { body: { elements: Array<{ content?: string; element_id?: string }> } };
+
+    expect(card.body.elements.find((element) => element.element_id)?.content).toBe("");
+  });
+
   it("renders stable answer segments followed by only the current draft", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stable answer", workspaceId: "w1", paneId: "p1", requestText: "Run", queuePosition: 1, occurredAt: "now" });
     const card = renderRequestAnswerCard({

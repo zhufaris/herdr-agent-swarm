@@ -180,20 +180,10 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
   const streaming = options.streaming ?? input.phase !== "completed";
-  const structuredAnswer = structuredAnswerContent(input);
-  const answer = structuredAnswer || input.answer;
-  const prose = stripNativeTraexStatus(answer);
   const stepProgress = progressSummary(input.progressEvents);
-  const baseContent = prose
-    ? normalizeLarkPreview(prose)
-    : input.phase === "running" && stepProgress.total > 0
-      ? `TraeX 正在执行 · ${stepProgress.done}/${stepProgress.total}`
-    : input.phase === "running" ? "⏳ 已接收请求"
-      : input.phase === "queued" ? "⏳ 已接收请求"
-        : input.phase === "completed" ? "本次未产生可展示的回答。"
-          : input.phase === "failed" ? "本次未产生可展示的回答。"
-            : "暂无回答。";
-  const content = options.initialContent ?? truncateLarkMarkdownMiddle(baseContent, ANSWER_CARD_PREVIEW_LIMIT);
+  const content = options.initialContent !== undefined
+    ? options.initialContent
+    : defaultAnswerContent(input, stepProgress);
   const elements: object[] = [
     { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
     ...renderProgressTimeline(input.progressEvents, input.phase)
@@ -216,6 +206,22 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     },
     body: { elements }
   };
+}
+
+function defaultAnswerContent(input: RunCardView, stepProgress: { done: number; total: number }): string {
+  const structuredAnswer = structuredAnswerContent(input);
+  const answer = structuredAnswer || input.answer;
+  const prose = stripNativeTraexStatus(answer);
+  const baseContent = prose
+    ? normalizeLarkPreview(prose)
+    : input.phase === "running" && stepProgress.total > 0
+      ? `TraeX 正在执行 · ${stepProgress.done}/${stepProgress.total}`
+    : input.phase === "running" ? "⏳ 已接收请求"
+      : input.phase === "queued" ? "⏳ 已接收请求"
+        : input.phase === "completed" ? "本次未产生可展示的回答。"
+          : input.phase === "failed" ? "本次未产生可展示的回答。"
+            : "暂无回答。";
+  return truncateLarkMarkdownMiddle(baseContent, ANSWER_CARD_PREVIEW_LIMIT);
 }
 
 export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string }): object | null {
