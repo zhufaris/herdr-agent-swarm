@@ -32,7 +32,7 @@ describe("agent driver contract", () => {
     const traex = new TraexDriver({ startAgent } as unknown as HerdrPort, "traex", 1_000);
     const primaryTools = { command: process.execPath, args: ["shim.js", "--instance", "primary"] };
     await traex.start(runtime, { name: "primary", model: null, primaryTools });
-    expect(startAgent).toHaveBeenCalledWith("w1:p1", { name: "agent-primary", kind: "traex", executable: "traex", args: ["-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.command=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.args=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.env_vars=.*'$/)] });
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", { name: "agent-primary", kind: "traex", executable: "traex", args: ["-c", expect.stringMatching(/^mcp_servers\.herdr_agent_swarm\.command=.*$/), "-c", expect.stringMatching(/^mcp_servers\.herdr_agent_swarm\.args=.*$/), "-c", expect.stringMatching(/^mcp_servers\.herdr_agent_swarm\.env_vars=.*$/)] });
 
     const codexStartAgent = vi.fn(async () => undefined);
     const codex = new CodexDriver({ startAgent: codexStartAgent } as unknown as HerdrPort, "codex", 1_000, true);

@@ -68,7 +68,8 @@ describe("Herdr TraeX managed start", () => {
           }
           if (args[0] === "agent" && args[1] === "get") {
             agentReads += 1;
-            return { stdout: envelope({ agent: { pane_id: "w1:p1", name: "reviewer", agent: "traex", agent_status: agentReads > 1 ? "idle" : "unknown" } }), stderr: "" };
+            expect(args[2]).toBe("reviewer");
+            return { stdout: envelope({ agent: { pane_id: "w1:p1", agent: "traex", agent_status: agentReads > 1 ? "idle" : "unknown" } }), stderr: "" };
           }
           return { stdout: envelope({}), stderr: "" };
         },
@@ -81,7 +82,7 @@ describe("Herdr TraeX managed start", () => {
       }
     );
 
-    expect(result).toMatchObject({ agent: { name: "reviewer", agent: "traex", agent_status: "idle" } });
+    expect(result).toMatchObject({ agent: { pane_id: "w1:p1", agent: "traex", agent_status: "idle" } });
     expect(calls.filter((args) => args[0] === "pane" && args[1] === "run")).toEqual([["pane", "run", "w1:p1", "/opt/shim/pane-launcher", "abc-123"]]);
     expect(calls.flat()).not.toContain("private model");
     expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987" });

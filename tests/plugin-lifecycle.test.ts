@@ -45,8 +45,13 @@ describe("plugin lifecycle", () => {
     const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> };
     for (const action of ["init", "install", "start", "status", "restart", "stop", "logs"]) {
       expect(packageJson.scripts[`swarm:${action}`]).toBe(`bash scripts/swarm-service.sh ${action}`);
-      expect(Object.keys(packageJson.scripts).filter((name) => name.endsWith(`:${action}`))).toEqual([`swarm:${action}`]);
     }
+    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
+    expect(packageJson.scripts).toMatchObject({
+      "herdr:traex:install": "bash scripts/install-herdr-traex-shim.sh install",
+      "herdr:traex:status": "bash scripts/install-herdr-traex-shim.sh status",
+      "herdr:traex:uninstall": "bash scripts/install-herdr-traex-shim.sh uninstall"
+    });
   });
 
   it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {

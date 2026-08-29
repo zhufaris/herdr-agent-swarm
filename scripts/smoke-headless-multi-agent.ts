@@ -21,6 +21,7 @@ import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
 import { APPROVAL_POLICY_VERSION, classifyAction, fingerprintAction } from "../src/domain/approval-policy.js";
 
 const execute = process.argv.includes("--execute");
+const traexKind = process.argv.includes("--traex-kind");
 const herdrBin = process.env.HERDR_BIN || "herdr";
 const codexBin = process.env.CODEX_BIN || "codex";
 const traexBin = process.env.TRAEX_BIN || "traex";
@@ -31,7 +32,13 @@ const mcpEntrypoint = join(root, "dist/cli/primary-tools-mcp.js");
 const versions = { herdr: await version(herdrBin), traex: await version(traexBin), codex: await version(codexBin), claudeCode: await version(claudeBin), pi: await optionalVersion(piBin) };
 const help = await command(herdrBin, ["agent", "start", "--help"]);
 const available = { traex: await executableExists(traexBin), codex: help.includes("codex") && await executableExists(codexBin), claudeCode: help.includes("claude") && await executableExists(claudeBin), pi: help.includes("pi") && await executableExists(piBin) };
-const evidence: Record<string, unknown> = { mode: execute ? "execute" : "preflight", versions, available, productPath: false, executed: [] };
+let traexKindStatus: string | null = null;
+if (traexKind) {
+  const status = await runnerCommand("bash", [join(root, "scripts/install-herdr-traex-shim.sh"), "status"]);
+  traexKindStatus = `${status.stdout}${status.stderr}`.trim();
+  if (!traexKindStatus.includes("status: ready")) throw new Error(`TraeX kind shim is not ready: ${traexKindStatus}`);
+}
+const evidence: Record<string, unknown> = { mode: execute ? "execute" : "preflight", versions, available, traexKind: traexKind ? traexKindStatus : "not requested", productPath: false, executed: [] };
 if (!execute) { process.stdout.write(`${JSON.stringify(evidence, null, 2)}\nRun with --execute inside a Herdr pane for the bounded product acceptance.\n`); process.exit(available.codex && available.traex ? 0 : 2); }
 if (!process.env.HERDR_PANE_ID || !process.env.HERDR_WORKSPACE_ID) throw new Error("--execute requires a current Herdr pane and workspace");
 if (!available.codex || !available.traex) throw new Error("--execute requires Codex and TraeX");

@@ -367,7 +367,19 @@ For bridge-started TraeX processes, a process-local `SessionStart` hook reports
 the native session ID to the bridge private capability-authenticated Unix
 socket, which persists the identity in SQLite. Only `startup` and `resume` are
 accepted; a new bridge-owned session uses `/swarm reset` rather than local
-`/clear`. `PromptRunWorkflow` opens the corresponding
+`/clear`.
+
+Managed TraeX startup uses the optional local `herdr` compatibility shim. The
+bridge still invokes the formal `agent start --kind traex` surface and appends
+its SessionStart hook after `--`; the shim preserves those arguments, launches
+the configured real TraeX executable through a private request file, and owns a
+separate fenced reporter. That reporter maps Herdr's Codex-compatible screen
+explanation to `agent=traex` authority and releases only its own source when the
+exact TraeX process exits. Legacy panes observed as `codex` remain compatible.
+The shim does not replace the bridge's capability-authenticated session report:
+that path remains the durable source of the exact TraeX UUID.
+
+`PromptRunWorkflow` opens the corresponding
 transcript at EOF before dispatch, but only when exactly one filename matches
 the UUID and its `session_meta` record carries the same ID. It reads complete
 newline-terminated records from a byte cursor. `history_mutation.payload.items`

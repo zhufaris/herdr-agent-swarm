@@ -180,6 +180,56 @@ To continue directly into interactive configuration and systemd service setup:
 The plugin requires Herdr 0.7.5 or newer on Linux and a working user systemd
 session. Action IDs are local to the plugin namespace.
 
+### Install the local TraeX agent kind
+
+Herdr 0.7.5 does not compile `traex` into its native kind list. This repository
+provides a reversible local compatibility shim so the exact command below is a
+managed start while every other Herdr command delegates to the official binary:
+
+```bash
+herdr agent start reviewer --kind traex --pane w1:p1 -- --model GPT-5.6-Terra
+```
+
+Choose a dedicated user-owned bin directory that is already before the official
+Herdr directory in `PATH`; do not use the directory containing the official
+binary itself. Then install and inspect the shim:
+
+```bash
+export HERDR_TRAEX_SHIM_BIN_DIR="$HOME/.npm-global/bin"
+export HERDR_TRAEX_REAL_HERDR="$HOME/.local/bin/herdr"
+export HERDR_TRAEX_BIN="$HOME/.local/bin/traex"
+npm run herdr:traex:install
+command -v herdr
+npm run herdr:traex:status
+```
+
+Set `HERDR_BIN` to the absolute shim symlink and `TRAEX_BIN` to the same absolute
+TraeX binary reported by status. The shim does not modify the official Herdr
+binary, native Codex behavior, session database, or detection manifests. Forms
+with leading global routing options such as `herdr --session ...` are delegated
+unchanged; select a session through inherited `HERDR_SESSION` and
+`HERDR_SOCKET_PATH` when the exact TraeX start form must be intercepted.
+
+After `herdr update`, delegated commands continue with a version-mismatch
+warning, but `--kind traex` starts are refused until the reporter contract has
+been checked and accepted:
+
+```bash
+npm run herdr:traex:status -- --accept-version
+```
+
+Rollback removes only the shim-owned symlink and active config. Versioned
+releases are retained so the official binary and existing Herdr sessions remain
+untouched:
+
+```bash
+npm run herdr:traex:uninstall
+```
+
+This is local compatibility, not upstream Herdr support. Interactive start,
+prompt, wait, read, focus, send-keys, rename, and attach are supported; native
+automatic restore across a Herdr server restart is not claimed.
+
 ## Configure the bridge
 
 Invoke the setup action:
@@ -247,7 +297,9 @@ config directory) and replace the workspace ID and cwd with your own values.
 
 The plugin defaults `PROJECTS_CONFIG_PATH` to its config directory and
 `BRIDGE_DATABASE_PATH` to `$HERDR_PLUGIN_STATE_DIR/bridge.db`. Explicit absolute
-values still override those locations. Use absolute `HERDR_BIN` and `TRAEX_BIN`
+values still override those locations. When managed TraeX starts are enabled,
+use the absolute shim symlink for `HERDR_BIN` and the installer's recorded real
+TraeX path for `TRAEX_BIN`; otherwise use the official Herdr path. Absolute paths
 paths because plugin commands do not depend on an interactive shell's `PATH`.
 Every project `cwd` must be absolute and accessible. Keep `.env` private because
 it contains the Lark app secret. The plugin parses it as data and never evaluates

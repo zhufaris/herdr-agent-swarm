@@ -169,9 +169,9 @@ async function waitForTraexProcess(paneId: string, executable: string, deadline:
 
 async function waitForManagedAgent(input: TraexStartInput, deadline: number, dependencies: TraexStartDependencies): Promise<Record<string, unknown>> {
   while (dependencies.now() <= deadline) {
-    const result = parseEnvelope((await dependencies.runHerdr(["agent", "get", input.paneId])).stdout) as { agent?: Record<string, unknown> };
+    const result = parseEnvelope((await dependencies.runHerdr(["agent", "get", input.name])).stdout) as { agent?: Record<string, unknown> };
     const agent = result.agent;
-    if (agent?.name === input.name && agent.agent === "traex" && agent.agent_status !== "unknown") return result;
+    if (agent?.pane_id === input.paneId && agent.agent === "traex" && agent.agent_status !== "unknown") return result;
     await dependencies.sleep(50);
   }
   throw new Error("Timed out waiting for managed TraeX identity");

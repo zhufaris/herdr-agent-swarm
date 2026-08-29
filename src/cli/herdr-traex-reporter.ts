@@ -21,10 +21,7 @@ function operations(realHerdr: string, executable: string): ReporterOperations {
       const startTicks = process ? await readStartTicks(pid) : null;
       return process && startTicks ? { executable, pid, startTicks } : null;
     },
-    readPane: async (paneId) => {
-      const result = resultOf(await run(realHerdr, ["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", "240"])) as { read?: { text?: unknown } };
-      return typeof result.read?.text === "string" ? result.read.text : "";
-    },
+    readPane: (paneId) => run(realHerdr, ["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]),
     explainCodexSnapshot: async (snapshot) => {
       const directory = await mkdtemp(join(tmpdir(), "herdr-traex-explain-"));
       const path = join(directory, "snapshot.txt");
