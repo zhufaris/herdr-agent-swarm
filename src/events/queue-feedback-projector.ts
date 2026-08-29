@@ -13,7 +13,7 @@ type SetIntervalFn = (callback: () => void, intervalMs: number) => IntervalHandl
 type ClearIntervalFn = (handle: IntervalHandle) => void;
 
 const REFRESH_EVENTS = new Set<BridgeEvent["type"]>([
-  "PromptQueued", "TurnStarted", "TurnCompleted", "TurnFailed", "PromptCancelled", "RunQueuePositionChanged"
+  "PromptQueued", "TurnStarted", "TurnCompleted", "TurnFailed", "PromptCancelled"
 ]);
 
 export class QueueFeedbackProjector {

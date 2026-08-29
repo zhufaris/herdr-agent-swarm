@@ -15,6 +15,23 @@ function event(type: "PromptQueued" | "TurnStarted" | "TurnCompleted" | "TurnFai
 }
 
 describe("QueueFeedbackProjector", () => {
+  it("does not rescan the binding for a per-card queue position event", async () => {
+    const store = {
+      listBindings: () => [],
+      loadQueueFeedbackInputs: vi.fn(() => ({ activeStartedAt: null, queued: [], durationsMs: [] })),
+      projectQueueFeedback: vi.fn()
+    };
+    const bus = new BridgeEventBus();
+    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: pino({ enabled: false }) });
+    projector.start(bus);
+
+    await bus.publish(event("RunQueuePositionChanged"));
+
+    expect(store.loadQueueFeedbackInputs).not.toHaveBeenCalled();
+    expect(store.projectQueueFeedback).not.toHaveBeenCalled();
+    await projector.stop();
+  });
+
   it("refreshes lifecycle changes, persists only changed queued cards, and coalesces elapsed buckets", async () => {
     let clock = "2026-08-29T12:00:20.000Z";
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
