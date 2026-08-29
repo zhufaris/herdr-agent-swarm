@@ -1639,15 +1639,41 @@ export class SqliteBindingStore implements BindingStorePort {
     if (topic) this.saveTopicView(mirrorRunCardToTopic(topic, next));
   }
 
-  cancelQueuedPrompts(bindingId: string, reason: string): number {
-    const timestamp = now();
+  cancelQueuedPromptsWithProjection(input: { bindingId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): { cancelledPromptIds: string[]; outboxReserved: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const result = this.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'queued'").run(reason, timestamp, bindingId);
-      this.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, finished_at = ?, queue_position = 0, activity_at = ?, view_version = view_version + 1, updated_at = ? WHERE binding_id = ? AND phase = 'queued'").run(reason, timestamp, timestamp, timestamp, bindingId);
+      const rows = this.database.prepare(`
+        SELECT p.id FROM prompt_jobs p
+        JOIN run_cards c ON c.prompt_id = p.id
+        WHERE p.binding_id = ? AND p.state = 'queued'
+        ORDER BY p.created_at, p.rowid
+      `).all(input.bindingId) as Array<{ id: string }>;
+      if (rows.length === 0) { this.database.exec("COMMIT"); return { cancelledPromptIds: [], outboxReserved: false }; }
+      let outboxReserved = false;
+      for (const row of rows) {
+        const updated = this.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ? AND binding_id = ? AND state = 'queued'")
+          .run(input.reason, input.occurredAt, row.id, input.bindingId);
+        if (Number(updated.changes) !== 1) throw new Error(`Queued prompt changed during cancellation: ${row.id}`);
+        const current = this.loadRunCard(row.id);
+        if (!current) throw new Error(`Run card missing for prompt: ${row.id}`);
+        const next = reduceRunCard(current, { type: "failed", occurredAt: input.occurredAt, notice: input.reason });
+        this.saveRunCard(next);
+        const card = input.renderRunCard(next);
+        if (!next.answerCardId && next.answerMessageId) {
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(card) });
+          outboxReserved = true;
+        } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
+          const create = this.database.prepare("SELECT card_id_checkpoint FROM outbound_replies WHERE idempotency_key = ? AND state = 'pending'")
+            .get(`run-card:create:${next.promptId}:answer`) as { card_id_checkpoint: string | null } | undefined;
+          if (create && !create.card_id_checkpoint) {
+            this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${next.promptId}:answer`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(card) });
+            outboxReserved = true;
+          }
+        }
+      }
       this.database.exec("COMMIT");
-      return Number(result.changes);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+      return { cancelledPromptIds: rows.map((row) => row.id), outboxReserved };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {

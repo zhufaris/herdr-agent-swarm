@@ -7,8 +7,58 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SessionAdministrationWorkflow } from "../src/coordinator/session-administration-workflow.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("pane/thread lifecycle integration", () => {
+  it("commits queued cancellation before FIFO events and wakes outbound work once", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    for (const id of ["p1", "p2"]) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "start" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "user", body: id }, view, rootMessageId: "root", answerCard: {} });
+    }
+    const bus = new BridgeEventBus(); const observed: Array<{ promptId: string; occurredAt: string }> = [];
+    bus.onBridgeEvent("assert-durable-cancellation", (event) => {
+      if (event.type !== "PromptCancelled") return;
+      expect(store.getPrompt(event.payload.promptId)).toMatchObject({ state: "cancelled", observationState: "completed" });
+      expect(store.loadRunCard(event.payload.promptId)).toMatchObject({ phase: "failed", notice: event.payload.reason, updatedAt: event.occurredAt });
+      observed.push({ promptId: event.payload.promptId, occurredAt: event.occurredAt });
+    });
+    const wake = vi.fn(() => {
+      expect(store.getBinding("b1")).toMatchObject({ lifecycle: "archived", state: "archived" });
+      expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" }));
+    }); const workflow = new SessionAdministrationWorkflow({
+      config: config(), store, herdr: {} as never, lifecycleEvents: bus, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false
+    });
+
+    await workflow.archive(message(1, "/swarm close"), store.getBinding("b1"));
+
+    expect(observed.map(({ promptId }) => promptId)).toEqual(["p1", "p2"]);
+    expect(new Set(observed.map(({ occurredAt }) => occurredAt)).size).toBe(1);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(store.getBinding("b1")).toMatchObject({ lifecycle: "archived", state: "archived" });
+    store.close();
+  });
+
+  it("does not publish, wake, transition, or audit when queued cancellation rolls back", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active" });
+    vi.spyOn(store, "cancelQueuedPromptsWithProjection").mockImplementation(() => { throw new Error("cancel failed"); });
+    const transition = vi.spyOn(store, "transitionBinding"); const audit = vi.spyOn(store, "audit");
+    const publish = vi.fn(); const wake = vi.fn(); const workflow = new SessionAdministrationWorkflow({
+      config: config(), store, herdr: {} as never, lifecycleEvents: { publish }, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false
+    });
+
+    await expect(workflow.archive(message(1, "/swarm close"), store.getBinding("b1"))).rejects.toThrow("cancel failed");
+
+    expect(publish).not.toHaveBeenCalled(); expect(wake).not.toHaveBeenCalled(); expect(transition).not.toHaveBeenCalled(); expect(audit).not.toHaveBeenCalled();
+    expect(store.getBinding("b1")).toMatchObject({ lifecycle: "active", state: "active" });
+    store.close();
+  });
+
   it("persists the post-start native identity when replacing an orphaned pane", async () => {
     const createdPane = { paneId: "w1:new", terminalId: null, workspaceId: "w1", cwd: "/repo", label: "replacement", agentState: "unknown" as const, foregroundExecutables: [] };
     const startedPane = {

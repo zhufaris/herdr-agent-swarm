@@ -560,15 +560,71 @@ describe("SQLite store", () => {
     expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
   });
 
-  it("cancels queued turns and steering when a session archives", () => {
+  it("atomically cancels queued turns and steering with terminal delivery intents", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    for (const [id, kind] of [["p1", "turn"], ["p2", "steering"]] as const) {
-      store.enqueuePrompt({ id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id, dispatchKind: kind, parentPromptId: kind === "steering" ? "running" : null });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const seed = (id: string, kind: "turn" | "steering" = "turn") => {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "2026-08-29T00:00:00.000Z" });
+      store!.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id, dispatchKind: kind, parentPromptId: kind === "steering" ? "running" : null }, view, rootMessageId: "m1", answerCard: { phase: "queued", id } });
+      return store!.listPendingOutboundReplies().find((reply) => reply.promptId === id)!;
+    };
+    const runningCreate = seed("running");
+    store.markOutboundReplyDelivered(runningCreate.id, "answer-running", "card-running");
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("running");
+    const pendingCreate = seed("pending");
+    const checkpointedCreate = seed("checkpointed", "steering");
+    store.checkpointOutboundReplyCard(checkpointedCreate.id, "card-checkpointed");
+    const deliveredCreate = seed("delivered");
+    store.markOutboundReplyDelivered(deliveredCreate.id, "answer-delivered");
+    const cardTargetCreate = seed("card-target");
+    store.markOutboundReplyDelivered(cardTargetCreate.id, "answer-card-target", "card-target");
+    const pendingBefore = store.listPendingOutboundReplies().find((reply) => reply.id === pendingCreate.id)!;
+    const checkpointedBefore = store.listPendingOutboundReplies().find((reply) => reply.id === checkpointedCreate.id)!;
+
+    const result = store.cancelQueuedPromptsWithProjection({
+      bindingId: "b1", reason: "Topic archived", occurredAt: "2026-08-29T01:02:03.000Z", rootMessageId: "m1",
+      renderRunCard: (view) => ({ phase: view.phase, notice: view.notice, version: view.viewVersion })
+    });
+
+    expect(result).toEqual({ cancelledPromptIds: ["pending", "checkpointed", "delivered", "card-target"], outboxReserved: true });
+    expect(store.getPrompt("running")).toMatchObject({ state: "running" });
+    for (const id of result.cancelledPromptIds) {
+      expect(store.getPrompt(id)).toMatchObject({ state: "cancelled", observationState: "completed", error: "Topic archived", updatedAt: "2026-08-29T01:02:03.000Z" });
+      expect(store.loadRunCard(id)).toMatchObject({ phase: "failed", notice: "Topic archived", queuePosition: 0, finishedAt: "2026-08-29T01:02:03.000Z", activityAt: "2026-08-29T01:02:03.000Z", updatedAt: "2026-08-29T01:02:03.000Z" });
     }
-    expect(store.cancelQueuedPrompts("b1", "Topic archived")).toBe(2);
-    expect(store.getOperationalSummary().prompts.cancelled).toBe(2);
-    expect(store.countPendingPrompts("b1")).toBe(0);
+    const pendingAfter = store.listPendingOutboundReplies().find((reply) => reply.id === pendingCreate.id)!;
+    expect(pendingAfter).toMatchObject({ idempotencyKey: "run-card:create:pending:answer", kind: "stream_card_create", viewVersion: 2 });
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(pendingAfter.id)).toEqual({ lane_key: "answer:pending" });
+    expect(pendingAfter.payload).toBe(JSON.stringify({ phase: "failed", notice: "Topic archived", version: 2 }));
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "pending")).toHaveLength(1);
+    expect(store.listPendingOutboundReplies().find((reply) => reply.id === checkpointedCreate.id)).toMatchObject({ payload: checkpointedBefore.payload, viewVersion: checkpointedBefore.viewVersion, cardIdCheckpoint: "card-checkpointed" });
+    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ idempotencyKey: "run-card:update:delivered:answer:2", kind: "card_update", rootMessageId: "answer-delivered" }));
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "answer:delivered" });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "card-target")).toEqual([]);
+    expect(store.getOperationalSummary().prompts.cancelled).toBe(4);
+    expect(store.countPendingPrompts("b1")).toBe(1);
+    expect(store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "again", occurredAt: "later", rootMessageId: "m1", renderRunCard: () => ({}) })).toEqual({ cancelledPromptIds: [], outboxReserved: false });
+    expect(store.loadRunCard("pending")?.viewVersion).toBe(2);
+    expect(pendingBefore.id).toBe(pendingAfter.id);
+  });
+
+  it("rolls back every queued cancellation when terminal outbox projection fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    for (const id of ["p1", "p2"]) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "start" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "m1", answerCard: {} });
+    }
+    store.database.exec(`CREATE TRIGGER fail_second_cancel_outbox BEFORE UPDATE ON outbound_replies WHEN OLD.prompt_id = 'p2' BEGIN SELECT RAISE(ABORT, 'injected cancellation outbox failure'); END`);
+
+    expect(() => store!.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "archive", occurredAt: "later", rootMessageId: "m1", renderRunCard: (view) => ({ phase: view.phase }) })).toThrow("injected cancellation outbox failure");
+
+    for (const id of ["p1", "p2"]) {
+      expect(store.getPrompt(id)).toMatchObject({ state: "queued", observationState: "not_started", error: null });
+      expect(store.loadRunCard(id)).toMatchObject({ phase: "queued", viewVersion: 1, notice: null });
+      expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === id)).toMatchObject({ viewVersion: 1, payload: "{}" });
+    }
   });
 
   it("summarizes durable failures without exposing prompt bodies or outbox payloads", () => {

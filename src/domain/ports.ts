@@ -279,7 +279,13 @@ export interface BindingStorePort {
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];
-  cancelQueuedPrompts(bindingId: string, reason: string): number;
+  cancelQueuedPromptsWithProjection(input: {
+    bindingId: string;
+    reason: string;
+    occurredAt: string;
+    rootMessageId: string | null;
+    renderRunCard(view: RunCardView): object;
+  }): { cancelledPromptIds: string[]; outboxReserved: boolean };
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
   failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void;
@@ -380,7 +386,7 @@ export type RetiredPaneCleanupStore = Pick<BindingStorePort,
 >;
 
 export type OperationsStore = Pick<BindingStorePort,
-  | "audit" | "cancelQueuedPrompts" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
+  | "audit" | "cancelQueuedPromptsWithProjection" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
   | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "finishPaneControlWithResult" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
   | "claimAppliedPaneControlOperation" | "rejectAppliedPaneControlOperation"
   | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"

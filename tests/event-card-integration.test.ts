@@ -11,6 +11,24 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("event-driven card projection", () => {
+  it("keeps an atomically terminal cancellation version and still converges delivery", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Queued", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: queued, rootMessageId: "root", answerCard: {} });
+    store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "cancelled", occurredAt: "later", rootMessageId: null, renderRunCard: () => ({}) });
+    const version = store.loadRunCard("p1")!.viewVersion; const converge = vi.fn(async () => undefined);
+    const bus = new BridgeEventBus(); const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined });
+    projector.start();
+
+    await bus.publish({ eventId: "cancel", bindingId: "b1", type: "PromptCancelled", origin: "bridge", occurredAt: "later", payload: { promptId: "p1", reason: "cancelled" } });
+    await vi.waitFor(() => expect(converge).toHaveBeenCalledWith("p1"));
+
+    expect(store.loadRunCard("p1")?.viewVersion).toBe(version);
+    await projector.stop(); store.close();
+  });
+
   it("preserves the FIFO position assigned during acceptance when pending depth includes an active turn", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

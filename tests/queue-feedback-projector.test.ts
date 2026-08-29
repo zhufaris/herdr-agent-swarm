@@ -15,7 +15,7 @@ function event(type: "PromptQueued" | "TurnStarted" | "TurnCompleted" | "TurnFai
 }
 
 describe("QueueFeedbackProjector", () => {
-  it("does not rescan the binding for a per-card queue position event", async () => {
+  it.each(["RunQueuePositionChanged", "PromptCancelled"] as const)("does not rescan the binding for %s", async (type) => {
     const store = {
       listBindings: () => [],
       loadQueueFeedbackInputs: vi.fn(() => ({ activeStartedAt: null, queued: [], durationsMs: [] })),
@@ -25,7 +25,7 @@ describe("QueueFeedbackProjector", () => {
     const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: pino({ enabled: false }) });
     projector.start(bus);
 
-    await bus.publish(event("RunQueuePositionChanged"));
+    await bus.publish(event(type));
 
     expect(store.loadQueueFeedbackInputs).not.toHaveBeenCalled();
     expect(store.projectQueuedRunCards).not.toHaveBeenCalled();
@@ -58,7 +58,7 @@ describe("QueueFeedbackProjector", () => {
     const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: outboundWork as never, logger: pino({ enabled: false }), now: () => clock, intervalMs: 30_000, setIntervalFn: setIntervalFn as never, clearIntervalFn: clearIntervalFn as never });
     projector.start(bus);
 
-    for (const type of ["PromptQueued", "TurnStarted", "TurnCompleted", "TurnFailed", "PromptCancelled", "RunQueuePositionChanged"] as const) await bus.publish(event(type));
+    for (const type of ["PromptQueued", "TurnStarted", "TurnCompleted", "TurnFailed", "RunQueuePositionChanged"] as const) await bus.publish(event(type));
     expect(store.projectQueuedRunCards).toHaveBeenCalledTimes(1);
     const firstBatch = store.projectQueuedRunCards.mock.calls[0]![0].projections;
     expect(firstBatch.map(({ expectedViewVersion, view }: { expectedViewVersion: number; view: RunCardView }) => ({ expectedViewVersion, promptId: view.promptId, queuePosition: view.queuePosition, aheadCount: view.queueFeedback?.aheadCount, viewVersion: view.viewVersion }))).toEqual([
