@@ -107,6 +107,29 @@ describe("health server", () => {
     expect(assertWorkspace).toHaveBeenCalledOnce();
   });
 
+  it("refreshes volatile readiness state while reusing the workspace probe", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const assertWorkspace = vi.fn(async () => undefined);
+    let larkReady = true;
+    let leaseHeld = true;
+    let runtimeReady = true;
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => larkReady } as never, herdr: { assertWorkspace } as never, readinessTtlMs: 60_000,
+      lease: { snapshot: () => ({ held: leaseHeld, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: leaseHeld ? null : "lease lost" }) },
+      instanceRuntime: { snapshot: () => ({ ready: runtimeReady, lastError: runtimeReady ? null : "runtime stale" }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    larkReady = false; leaseHeld = false; runtimeReady = false;
+    const response = await fetch(`http://127.0.0.1:${port}/ready`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ status: "not_ready", components: { lark: { ok: false }, lease: { ok: false }, instanceRuntime: { ok: false } } });
+    expect(assertWorkspace).toHaveBeenCalledOnce();
+  });
+
   it("degrades status for SQLite inconsistencies without failing readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({

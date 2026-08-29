@@ -7,12 +7,13 @@ import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
 import type { HerdrSocketStatus } from "../runtime/herdr-socket-subscriber.js";
 
 interface ComponentState { ok: boolean; error?: string }
+type HerdrReadiness = ComponentState & { workspaces: Array<{ workspaceId: string; ok: boolean; error?: string }> };
 interface Readiness {
   status: "ready" | "not_ready";
   components: {
     database: ComponentState; projects: ComponentState; lark: ComponentState;
     lease: InstanceLeaseStatus & { ok: boolean };
-    herdr: ComponentState & { workspaces: Array<{ workspaceId: string; ok: boolean; error?: string }> };
+    herdr: HerdrReadiness;
     instanceRuntime?: ComponentState;
   };
 }
@@ -34,7 +35,7 @@ export function startHealthServer(options: {
   buildIdentity: BuildIdentity;
   readinessTtlMs?: number;
 }): Promise<Server> {
-  const readinessCache = new ReadinessCache(() => inspectReadiness(options), options.readinessTtlMs ?? 2_000);
+  const workspaceReadinessCache = new ReadinessCache(() => inspectHerdrReadiness(options.herdr, options.projects), options.readinessTtlMs ?? 2_000);
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.url === "/health") {
@@ -42,13 +43,13 @@ export function startHealthServer(options: {
       response.statusCode = 200; response.end(JSON.stringify({ status: "ok", serviceId, version, buildId })); return;
     }
     if (request.url === "/ready") {
-      const readiness = await readinessCache.read();
+      const readiness = inspectReadiness(options, await workspaceReadinessCache.read());
       response.statusCode = readiness.status === "ready" ? 200 : 503;
       response.end(JSON.stringify(readiness));
       return;
     }
     if (request.url === "/status") {
-      const readiness = await readinessCache.read();
+      const readiness = inspectReadiness(options, await workspaceReadinessCache.read());
       let operational: ReturnType<HealthStore["getOperationalSummary"]> | { error: string };
       try { operational = options.store.getOperationalSummary(); }
       catch (error) { operational = { error: boundedError(error) }; }
@@ -114,14 +115,14 @@ export function startHealthServer(options: {
   });
 }
 
-class ReadinessCache {
-  private value: Readiness | null = null;
+class ReadinessCache<T> {
+  private value: T | null = null;
   private refreshedAt = 0;
-  private refresh: Promise<Readiness> | null = null;
+  private refresh: Promise<T> | null = null;
 
-  constructor(private readonly inspect: () => Promise<Readiness>, private readonly ttlMs: number, private readonly clock: () => number = Date.now) {}
+  constructor(private readonly inspect: () => Promise<T>, private readonly ttlMs: number, private readonly clock: () => number = Date.now) {}
 
-  async read(): Promise<Readiness> {
+  async read(): Promise<T> {
     if (this.value && this.clock() - this.refreshedAt < this.ttlMs) return this.value;
     if (this.refresh) return this.refresh;
     const refresh = this.inspect().then((value) => { this.value = value; this.refreshedAt = this.clock(); return value; });
@@ -130,22 +131,25 @@ class ReadinessCache {
   }
 }
 
-async function inspectReadiness(options: { store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; workspaceCache?: { status(): WorkspaceCacheStatus }; instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } } }): Promise<Readiness> {
+function inspectReadiness(options: { store: HealthStore; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } } }, herdr: HerdrReadiness): Readiness {
   const database = check(() => options.store.listBindings());
   const projects = check(() => validateProjectDirectories(options.projects));
   const lark = options.lark.isReady() ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };
   const leaseStatus = options.lease.snapshot();
   const lease = { ...leaseStatus, ok: leaseStatus.held, ...(leaseStatus.held ? {} : { error: leaseStatus.error ?? "Instance lease is not held" }) };
-  const workspaces = await Promise.all([...new Set(options.projects.map((project) => project.workspaceId))].map(async (workspaceId) => {
-    try { await options.herdr.assertWorkspace(workspaceId); return { workspaceId, ok: true }; }
-    catch (error) { return { workspaceId, ok: false, error: boundedError(error) }; }
-  }));
-  const failedWorkspace = workspaces.find((workspace) => !workspace.ok);
-  const herdr = failedWorkspace ? { ok: false, error: "One or more Herdr workspaces are unavailable", workspaces } : { ok: true, workspaces };
   const runtime = options.instanceRuntime?.snapshot();
   const instanceRuntime = runtime ? { ok: runtime.ready, ...(runtime.ready ? {} : { error: runtime.lastError ?? "Instance runtime reconciliation has not completed" }) } : undefined;
   const components = { database, projects, herdr, lark, lease, ...(instanceRuntime ? { instanceRuntime } : {}) };
   return { status: Object.values(components).every((component) => component.ok) ? "ready" : "not_ready", components };
+}
+
+async function inspectHerdrReadiness(herdr: HerdrPort, projects: readonly ProjectConfig[]): Promise<HerdrReadiness> {
+  const workspaces = await Promise.all([...new Set(projects.map((project) => project.workspaceId))].map(async (workspaceId) => {
+    try { await herdr.assertWorkspace(workspaceId); return { workspaceId, ok: true }; }
+    catch (error) { return { workspaceId, ok: false, error: boundedError(error) }; }
+  }));
+  const failedWorkspace = workspaces.find((workspace) => !workspace.ok);
+  return failedWorkspace ? { ok: false, error: "One or more Herdr workspaces are unavailable", workspaces } : { ok: true, workspaces };
 }
 
 function check(operation: () => void): ComponentState {
