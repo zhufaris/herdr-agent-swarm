@@ -22,7 +22,7 @@ function operations(realHerdr: string, executable: string): ReporterOperations {
       const startTicks = process ? await readStartTicks(pid) : null;
       return process && actualExecutable === executable && startTicks ? { executable, pid, startTicks } : null;
     },
-    reportAgent: async (paneId, state, sequence) => { await run(realHerdr, ["pane", "report-agent", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--state", state, "--seq", sequence]); },
+    reportAgent: async (paneId, state, sequence, agentSessionId) => { await run(realHerdr, ["pane", "report-agent", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--state", state, "--seq", sequence, "--agent-session-id", agentSessionId]); },
     reportMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--display-agent", "traex", "--seq", sequence]); },
     clearMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--clear-display-agent", "--seq", sequence]); },
     renameAgent: async (paneId, name) => { await run(realHerdr, ["agent", "rename", paneId, name]); },
@@ -44,7 +44,7 @@ async function readExecutable(pid: number): Promise<string | null> {
 function parseInput(raw: string | undefined): ReporterInput {
   if (!raw) throw new Error("Missing reporter input");
   const value = JSON.parse(raw) as Partial<ReporterInput>;
-  if (!value.paneId || !value.name || !value.executable?.startsWith("/") || !Number.isInteger(value.pid) || !value.processStartTicks) throw new Error("Invalid reporter input");
+  if (!value.paneId || !value.name || !value.executable?.startsWith("/") || !Number.isInteger(value.pid) || !value.processStartTicks || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.agentSessionId ?? "")) throw new Error("Invalid reporter input");
   return value as ReporterInput;
 }
 

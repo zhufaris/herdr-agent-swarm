@@ -2,20 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { reportTraexLifecycle } from "../src/runtime/report-traex-lifecycle.js";
 
 describe("TraeX lifecycle hook reporter", () => {
-  it("reports the SessionStart UUID as the native Herdr Agent session", async () => {
-    const run = vi.fn(async () => undefined);
-    const sessionId = "01a03eb1-c193-7531-83c0-e6c6f70143d4";
-
-    await reportTraexLifecycle(
-      JSON.stringify({ hook_event_name: "SessionStart", session_id: sessionId, source: "startup" }),
-      { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" },
-      run,
-      () => 122n
-    );
-
-    expect(run).toHaveBeenCalledWith("/opt/herdr", ["pane", "report-agent", "w1:p1", "--source", "herdr-traex-shim", "--agent", "codex", "--state", "idle", "--seq", "122", "--agent-session-id", sessionId]);
-  });
-
   it.each([
     ["UserPromptSubmit", "working"],
     ["Stop", "idle"]
@@ -32,8 +18,7 @@ describe("TraeX lifecycle hook reporter", () => {
 
   it.each([
     [JSON.stringify({ hook_event_name: "SessionStart" }), { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" }],
-    [JSON.stringify({ hook_event_name: "SessionStart", session_id: "latest" }), { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" }],
-    [JSON.stringify({ hook_event_name: "SessionStart", session_id: "01a03eb1-c193-7531-83c0-e6c6f70143d4", source: "clear" }), { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" }],
+    [JSON.stringify({ hook_event_name: "SessionStart", session_id: "01a03eb1-c193-7531-83c0-e6c6f70143d4", source: "startup" }), { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" }],
     [JSON.stringify({ hook_event_name: "Stop" }), { HERDR_ENV: "1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" }],
     ["x".repeat(65_537), { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_TRAEX_REAL_HERDR: "/opt/herdr" }]
   ])("rejects unsupported or unsafe hook input", async (raw, environment) => {

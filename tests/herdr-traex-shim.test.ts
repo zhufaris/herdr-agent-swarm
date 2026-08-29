@@ -81,12 +81,25 @@ describe("Herdr TraeX managed start", () => {
 
   it("owns all TraeX lifecycle hooks and preserves caller arguments after them", () => {
     const args = shimLifecycleArguments("/opt/herdr", "/opt/shim/report-traex-lifecycle.js");
-    expect(args).toHaveLength(7);
+    expect(args).toHaveLength(5);
     expect(args[0]).toBe("--dangerously-bypass-hook-trust");
-    expect(args).toContainEqual(expect.stringContaining("hooks.SessionStart"));
+    expect(args).not.toContainEqual(expect.stringContaining("hooks.SessionStart"));
     expect(args).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
     expect(args).toContainEqual(expect.stringContaining("hooks.Stop"));
     expect(args.slice(1).every((value, index) => index % 2 === 0 ? value === "-c" : value.includes("HERDR_TRAEX_REAL_HERDR"))).toBe(true);
+  });
+
+  it.each([
+    ["--session-id", "01a03eb1-c193-7531-83c0-e6c6f70143d4"],
+    ["--session-id=01a03eb1-c193-7531-83c0-e6c6f70143d4"],
+    ["--resume"],
+    ["--resume=01a03eb1-c193-7531-83c0-e6c6f70143d4"]
+  ])("rejects caller-owned TraeX session identity %j", async (...traexArgs) => {
+    const dependencies = fakeStartDependencies(async (args) => {
+      if (args[0] === "--version") return { stdout: "0.7.5", stderr: "" };
+      return { stdout: envelope(processInfo(10, "bash", ["bash"])), stderr: "" };
+    });
+    await expect(runHerdrTraexStart({ ...startInput(), traexArgs }, startConfig(), dependencies)).rejects.toThrow(/session identity/i);
   });
 
   it("launches once, fences the process, and waits for managed identity", async () => {
@@ -119,7 +132,8 @@ describe("Herdr TraeX managed start", () => {
         processStartTicks: async () => "987",
         startReporter: (input) => { reports.push(input); },
         sleep: async () => undefined,
-        now: (() => { let now = 0; return () => ++now; })()
+        now: (() => { let now = 0; return () => ++now; })(),
+        generateSessionId: () => "01a03eb1-c193-7531-83c0-e6c6f70143d4"
       }
     );
 
@@ -130,11 +144,11 @@ describe("Herdr TraeX managed start", () => {
     expect(calls.filter((args) => args[0] === "agent" && args[1] === "start")).toEqual([]);
     const request = (reports[0] as Buffer).toString("utf8").split("\0");
     expect(request.slice(0, 3)).toEqual(["/opt/traex", "--dangerously-bypass-hook-trust", "-c"]);
-    expect(request).toContainEqual(expect.stringContaining("hooks.SessionStart"));
+    expect(request).not.toContainEqual(expect.stringContaining("hooks.SessionStart"));
     expect(request).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
     expect(request).toContainEqual(expect.stringContaining("hooks.Stop"));
-    expect(request.slice(-3)).toEqual(["--model", "private model", ""]);
-    expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987" });
+    expect(request.slice(-5)).toEqual(["--session-id", "01a03eb1-c193-7531-83c0-e6c6f70143d4", "--model", "private model", ""]);
+    expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987", agentSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
   });
 
   it("rejects a busy pane before writing or launching", async () => {
@@ -186,5 +200,5 @@ function processInfo(pid: number, name: string, argv: string[]): object {
 function startInput() { return { name: "reviewer", paneId: "w1:p1", timeoutMs: 5, traexArgs: [] }; }
 function startConfig() { return { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", lifecycleReporter: "/opt/shim/report-traex-lifecycle.js", requestDir: "/run/user/1/shim", validatedHerdrVersion: "0.7.5" }; }
 function fakeStartDependencies(runHerdr: (args: string[]) => Promise<{ stdout: string; stderr: string }>, onWrite = () => undefined) {
-  return { runHerdr, writeRequest: async () => { onWrite(); return "abc"; }, removeRequest: async () => undefined, processExecutable: async () => null, processStartTicks: async () => null, startReporter: () => undefined, sleep: async () => undefined, now: (() => { let now = 0; return () => ++now; })() };
+  return { runHerdr, writeRequest: async () => { onWrite(); return "abc"; }, removeRequest: async () => undefined, processExecutable: async () => null, processStartTicks: async () => null, startReporter: () => undefined, sleep: async () => undefined, now: (() => { let now = 0; return () => ++now; })(), generateSessionId: () => "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
 }

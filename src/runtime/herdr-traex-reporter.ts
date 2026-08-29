@@ -1,4 +1,5 @@
 export type ReportableAgentState = "idle" | "working" | "blocked" | "unknown";
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ReporterInput {
   paneId: string;
@@ -6,11 +7,12 @@ export interface ReporterInput {
   executable: string;
   pid: number;
   processStartTicks: string;
+  agentSessionId: string;
 }
 
 export interface ReporterOperations {
   processIdentity(paneId: string, pid: number): Promise<{ executable: string; pid: number; startTicks: string } | null>;
-  reportAgent(paneId: string, state: ReportableAgentState, sequence: string): Promise<void>;
+  reportAgent(paneId: string, state: ReportableAgentState, sequence: string, agentSessionId: string): Promise<void>;
   renameAgent(paneId: string, name: string): Promise<void>;
   reportMetadata(paneId: string, sequence: string): Promise<void>;
   clearMetadata(paneId: string, sequence: string): Promise<void>;
@@ -36,13 +38,14 @@ export class TraexAgentReporter {
   }
 
   async run(input: ReporterInput, signal?: AbortSignal): Promise<"released" | "lost-pane"> {
+    if (!SESSION_ID.test(input.agentSessionId)) throw new Error("Invalid TraeX session identity");
     let outcome: "released" | "lost-pane" = "released";
     try {
       const initialIdentity = await this.operations.processIdentity(input.paneId, input.pid);
       if (!initialIdentity || initialIdentity.pid !== input.pid || initialIdentity.executable !== input.executable || initialIdentity.startTicks !== input.processStartTicks) {
         return "lost-pane";
       }
-      await this.operations.reportAgent(input.paneId, "idle", this.nextSequence());
+      await this.operations.reportAgent(input.paneId, "idle", this.nextSequence(), input.agentSessionId);
       await this.operations.reportMetadata(input.paneId, this.nextSequence());
       await this.operations.renameAgent(input.paneId, input.name);
       for (let cycle = 0; cycle < this.maxCycles && !signal?.aborted; cycle += 1) {

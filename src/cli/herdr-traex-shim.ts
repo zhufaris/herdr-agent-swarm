@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
@@ -43,7 +43,8 @@ function dependencies(config: TraexLaunchConfig): TraexStartDependencies {
       child.unref();
     },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    now: Date.now
+    now: Date.now,
+    generateSessionId: randomUUID
   };
 }
 

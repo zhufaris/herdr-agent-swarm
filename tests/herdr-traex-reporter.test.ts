@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { TraexAgentReporter, type ReporterOperations } from "../src/runtime/herdr-traex-reporter.js";
 
-const input = { paneId: "w1:p1", name: "reviewer", executable: "/opt/traex", pid: 44, processStartTicks: "987" };
+const input = { paneId: "w1:p1", name: "reviewer", executable: "/opt/traex", pid: 44, processStartTicks: "987", agentSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
 
 describe("TraeX metadata reporter", () => {
   it("publishes initial idle authority, display metadata, and the managed name", async () => {
@@ -9,7 +9,7 @@ describe("TraeX metadata reporter", () => {
 
     await expect(new TraexAgentReporter(operations, { pollIntervalMs: 1, maxCycles: 1 }).run(input)).resolves.toBe("released");
     expect(operations.reportMetadata).toHaveBeenCalledOnce();
-    expect(operations.reportAgent).toHaveBeenCalledWith("w1:p1", "idle", expect.any(String));
+    expect(operations.reportAgent).toHaveBeenCalledWith("w1:p1", "idle", expect.any(String), "01a03eb1-c193-7531-83c0-e6c6f70143d4");
     expect(operations.renameAgent).toHaveBeenCalledOnce();
     expect(operations.renameAgent).toHaveBeenCalledWith("w1:p1", "reviewer");
     expect(operations.releaseAgent).toHaveBeenCalledWith("w1:p1", "herdr-traex-shim", "codex", expect.any(String));
@@ -21,6 +21,12 @@ describe("TraeX metadata reporter", () => {
     await expect(new TraexAgentReporter(operations).run(input)).resolves.toBe("lost-pane");
     expect(operations.reportAgent).not.toHaveBeenCalled();
     expect(operations.releaseAgent).toHaveBeenCalledOnce();
+  });
+
+  it("does not publish an invalid session identity", async () => {
+    const operations = fakeOperations();
+    await expect(new TraexAgentReporter(operations).run({ ...input, agentSessionId: "latest" })).rejects.toThrow(/session identity/i);
+    expect(operations.reportAgent).not.toHaveBeenCalled();
   });
 
   it("clears metadata after an authority report error", async () => {
