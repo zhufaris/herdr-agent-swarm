@@ -223,6 +223,10 @@ COMMAND_TIMEOUT_MS=30000
 LARK_REQUEST_TIMEOUT_MS=30000
 TURN_TIMEOUT_MS=3600000
 RECONCILE_INTERVAL_MS=30000
+HERDR_SNAPSHOT_CACHE_TTL_MS=2000
+OUTBOX_SAFETY_SCAN_INTERVAL_MS=30000
+CARD_UPDATE_DEBOUNCE_MS=750
+HERDR_EVENT_DEBOUNCE_MS=100
 HERDR_CIRCUIT_FAILURE_THRESHOLD=3
 HERDR_CIRCUIT_OPEN_MS=15000
 SQLITE_INTEGRITY_AUDIT_INTERVAL_MS=900000
@@ -318,6 +322,10 @@ session reference, and Agent state. Terminal parsing still supplies answer
 content, Model/Mode selectors, and the bounded `unknown` fallback.
 `RECONCILE_INTERVAL_MS` is the full-scan recovery fallback and defaults to five
 minutes in the plugin template.
+`HERDR_SNAPSHOT_CACHE_TTL_MS`, `OUTBOX_SAFETY_SCAN_INTERVAL_MS`,
+`CARD_UPDATE_DEBOUNCE_MS`, and `HERDR_EVENT_DEBOUNCE_MS` tune cache freshness
+and background coalescing. Their defaults preserve the built-in behavior; they
+do not change durable ordering, replay, or recovery semantics.
 
 Disabling or exiting Herdr does not stop the user service. Invoke
 `uninstall-service` before unlinking the plugin so the unit never points at a
