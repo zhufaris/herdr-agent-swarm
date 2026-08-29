@@ -396,6 +396,7 @@ describe("project selection flow", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd) { return { paneId: "w1:p7", workspaceId, cwd, label: null, agentState: "unknown", foregroundExecutables: [] }; },
+      async observeRuntime() { return { pane: { paneId: "w1:p7", terminalId: "term-7", workspaceId: "w1", cwd: "/work/alpha", label: null, agentState: "unknown", foregroundExecutables: [] }, traexProcess: false, composerReady: false, evidenceSource: "process" }; },
       async startTraex() { throw new Error("TraeX composer did not become ready in pane w1:p7"); },
       async runPrompt() { return "done"; }, async renamePane() {}
     };

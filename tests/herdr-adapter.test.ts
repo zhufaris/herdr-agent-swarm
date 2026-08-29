@@ -45,6 +45,19 @@ describe("Herdr adapter structured control", () => {
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });
 
+  it("verifies a newly started TraeX agent through targeted agent get when the snapshot is stale", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "api") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" }], agents: [] } });
+      if (args[0] === "agent" && args[1] === "get") return json({ agent: { pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "idle" } });
+      return { stdout: "", stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex" })).resolves.toBeUndefined();
+    expect(calls).toContainEqual(["agent", "get", "w1:p1"]);
+  });
+
   it("starts supported native agents and forwards argv without shell interpolation", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

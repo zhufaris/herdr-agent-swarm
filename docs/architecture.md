@@ -252,6 +252,11 @@ change during the target decomposition without changing these steps.
    the command process starts is potentially delivered and is never replayed.
 5. Herdr runs or observes TraeX. Structured Agent state is authoritative; process
    evidence can confirm that TraeX exists but cannot turn `unknown` into ready or done.
+   During startup recovery, a `pane_created` checkpoint occupied by an older TraeX
+   process without structured Agent readiness is not hot-adopted. The bridge retains
+   that pane for operator inspection, creates a lifecycle-aware replacement, and
+   atomically advances the binding generation only after it owns the replacement
+   pane identity. No prompt is replayed as part of this replacement.
 6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
    process-local lifecycle events. For structured tab/worktree changes, the
    sanitized desired TopicView and Main Card delivery intent are one transaction.

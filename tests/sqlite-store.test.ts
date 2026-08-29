@@ -535,6 +535,20 @@ describe("SQLite store", () => {
     expect(replaced).toMatchObject({ paneId: "w1:p2", generation: 2, reportedTraexSessionId: null, reportedTraexSessionAt: null });
   });
 
+  it("replaces only the owned pane_created provisioning generation", () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "provisioning", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Task" });
+    binding = store.updateBindingMetadata(binding.id, { paneId: "w1:p1", traexSessionId: "term-1" });
+    binding = store.transitionBinding(binding.id, { type: "pane_created" });
+    const replacement = { paneId: "w1:p2", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"] };
+
+    expect(store.replaceProvisioningPane({ bindingId: binding.id, expectedPaneId: "w1:p1", expectedGeneration: 1, pane: replacement })).toMatchObject({
+      paneId: "w1:p2", traexSessionId: "term-2", generation: 2, lifecycle: "provisioning", provisioningCheckpoint: "pane_created"
+    });
+    expect(() => store.replaceProvisioningPane({ bindingId: binding.id, expectedPaneId: "w1:p1", expectedGeneration: 1, pane: replacement })).toThrow(/lost ownership/);
+    store.close();
+  });
+
   it("atomically applies an authoritative pane observation behind binding identity fences", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

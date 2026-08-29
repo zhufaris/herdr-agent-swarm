@@ -850,6 +850,22 @@ export class SqliteBindingStore implements BindingStorePort {
 
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.updateBinding(id, patch); }
 
+  replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding {
+    const timestamp = now();
+    const result = this.database.prepare(`UPDATE bindings SET
+      pane_id = ?, traex_session_id = ?, reported_traex_session_id = NULL, reported_traex_session_at = NULL,
+      agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?,
+      workspace_id = ?, generation = generation + 1, last_agent_state = ?, last_observed_at = NULL, updated_at = ?
+      WHERE id = ? AND pane_id = ? AND generation = ? AND lifecycle = 'provisioning' AND provisioning_checkpoint = 'pane_created'`)
+      .run(
+        input.pane.paneId, input.pane.terminalId ?? null, input.pane.agentSession?.source ?? null, input.pane.agentSession?.agent ?? null,
+        input.pane.agentSession?.kind ?? null, input.pane.agentSession?.value ?? null, input.pane.workspaceId, input.pane.agentState, timestamp,
+        input.bindingId, input.expectedPaneId, input.expectedGeneration
+      );
+    if (result.changes !== 1) throw new Error(`Provisioning pane replacement lost ownership for binding ${input.bindingId}`);
+    return this.requireBinding(input.bindingId);
+  }
+
   recordReportedTraexSession(input: { bindingId: string; paneId: string; generation: number; sessionId: string; reportedAt: string }): "recorded" | "duplicate" | "rejected" {
     this.database.exec("BEGIN IMMEDIATE");
     try {

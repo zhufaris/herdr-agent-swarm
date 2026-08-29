@@ -160,8 +160,16 @@ export class HerdrCliAdapter implements HerdrPort {
       if (input.args?.length) args.push("--", ...input.args);
       await this.startWhenShellReady(args);
     }
-    const pane = await this.getPane(paneId);
+    const pane = await this.getAgentPane(paneId) ?? await this.getPane(paneId);
     if (!pane || pane.agentKind !== input.kind || pane.agentState === "unknown") throw new Error(`Herdr did not verify ${input.kind} in pane ${paneId}`);
+  }
+
+  private async getAgentPane(paneId: string): Promise<HerdrPane | null> {
+    try {
+      const result = await this.json(["agent", "get", paneId]);
+      const agent = z.object({ agent: snapshotPaneSchema }).parse(result).agent;
+      return this.fromSnapshot(agent, agent);
+    } catch { return null; }
   }
 
   private async startWhenShellReady(args: string[]): Promise<void> {

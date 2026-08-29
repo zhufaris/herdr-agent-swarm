@@ -88,3 +88,21 @@
 - [ ] Install the rebuilt shim atomically and confirm `status: ready`.
 - [ ] Confirm 8788 has no active dispatch/turn workers, then restart through `bash scripts/swarm-service.sh restart` without force.
 - [ ] Verify `/ready`, matching build identity, `agent get` readiness for the surviving process or a safe reset path, and durable provisioning recovery without a duplicate prompt.
+
+### Task 5: Replace legacy occupied provisioning panes
+
+**Files:**
+- Modify: `src/coordinator/binding-provisioning-workflow.ts`
+- Modify: `src/domain/ports.ts`
+- Modify: `src/store/sqlite-store.ts`
+- Modify: `tests/provisioning-recovery.test.ts`
+- Modify: `tests/sqlite-store.test.ts`
+
+**Interfaces:**
+- Produces: `replaceProvisioningPane({ bindingId, expectedPaneId, expectedGeneration, pane }): Binding`.
+- Consumes: structured `observeRuntime`; process evidence only selects replacement and never establishes readiness.
+
+- [x] Detect a `pane_created` checkpoint whose retained pane has a TraeX process but no structured ready Agent.
+- [x] Start a new lifecycle-aware pane, fence the binding update by old pane ID and generation, and retain the old pane for inspection.
+- [x] Continue normal provisioning only from the replacement pane; do not replay a prompt or close the old pane.
+- [x] Cover replacement recovery and stale concurrent ownership with focused tests.

@@ -303,29 +303,38 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
     if (!binding) { binding = store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title, creatorOpenId: selection.actorOpenId }); store.linkProjectSelectionBinding(selection.id, binding.id); await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null }); }
+    let current = binding;
     try {
-      let pane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
-      if (binding.paneId && !pane) throw new ProvisionedPaneMissingError(binding.paneId);
-      if (pane && binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${binding.paneId}`);
-      if (binding.provisioningCheckpoint === "selected") {
+      let pane = current.paneId ? await herdr.getPane(current.paneId) : null;
+      if (current.paneId && !pane) throw new ProvisionedPaneMissingError(current.paneId);
+      if (pane && current.traexSessionId && pane.terminalId && current.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${current.paneId}`);
+      if (current.provisioningCheckpoint === "selected") {
         if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
-        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, binding.generation, project.id, paneTitle, this.options.sessionReporter));
-        binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane)); binding = store.transitionBinding(binding.id, { type: "pane_created" });
+        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation, project.id, paneTitle, this.options.sessionReporter));
+        current = store.updateBindingMetadata(current.id, paneIdentityPatch(pane)); current = store.transitionBinding(current.id, { type: "pane_created" });
       }
-      if (!pane && binding.paneId) pane = await herdr.getPane(binding.paneId);
-      if (!pane) throw new Error(`Provisioning checkpoint ${binding.provisioningCheckpoint} has no Herdr pane`);
-      if (binding.provisioningCheckpoint === "pane_created") {
+      if (!pane && current.paneId) pane = await herdr.getPane(current.paneId);
+      if (!pane) throw new Error(`Provisioning checkpoint ${current.provisioningCheckpoint} has no Herdr pane`);
+      if (current.provisioningCheckpoint === "pane_created") {
+        const observation = await herdr.observeRuntime(pane.paneId);
+        if (observation?.traexProcess && !observation.composerReady) {
+          const replacementTitle = randomPaneName();
+          const replacement = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation + 1, project.id, replacementTitle, this.options.sessionReporter));
+          current = store.replaceProvisioningPane({ bindingId: current.id, expectedPaneId: pane.paneId, expectedGeneration: current.generation, pane: replacement });
+          pane = replacement;
+          logger.warn({ event: "project-provisioning-pane-replaced", selectionId: selection.id, bindingId: current.id, retainedPaneId: observation.pane?.paneId ?? null, paneId: pane.paneId, generation: current.generation, outcome: "replacement_created" }, "replaced an occupied provisioning pane that lacked structured Agent readiness");
+        }
         await herdr.startTraex(pane.paneId, config.traex.executable);
-        pane = await this.requireStartedPane(project, pane.paneId, binding.traexSessionId);
-        binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
-        binding = store.transitionBinding(binding.id, { type: "runtime_started", runtime: pane.agentState });
+        pane = await this.requireStartedPane(project, pane.paneId, current.traexSessionId);
+        current = store.updateBindingMetadata(current.id, paneIdentityPatch(pane));
+        current = store.transitionBinding(current.id, { type: "runtime_started", runtime: pane.agentState });
       }
-      const activatedEvent = createBridgeEvent(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: "pending" });
-      const activeView = reduceTopicView(store.loadTopicView(binding.id) ?? initialTopicView(binding.id), activatedEvent);
-      if (binding.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(renderProjectEntryCard(activeView), binding.id); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); binding = store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); binding = store.transitionBinding(binding.id, { type: "thread_created" }); }
-      if (binding.provisioningCheckpoint === "thread_created") binding = store.transitionBinding(binding.id, { type: "activate" });
-      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: binding.topicId! }); return binding;
-    } catch (error) { logger.warn({ event: "project-provisioning-paused", err: safeLogError(error), selectionId: selection.id, bindingId: binding.id, checkpoint: binding.provisioningCheckpoint, outcome: "retry_on_restart" }, "project provisioning paused at a durable checkpoint"); throw error; }
+      const activatedEvent = createBridgeEvent(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: "pending" });
+      const activeView = reduceTopicView(store.loadTopicView(current.id) ?? initialTopicView(current.id), activatedEvent);
+      if (current.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(renderProjectEntryCard(activeView), current.id); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); current = store.updateBindingMetadata(current.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); current = store.transitionBinding(current.id, { type: "thread_created" }); }
+      if (current.provisioningCheckpoint === "thread_created") current = store.transitionBinding(current.id, { type: "activate" });
+      await this.publish(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: current.topicId! }); return current;
+    } catch (error) { logger.warn({ event: "project-provisioning-paused", err: safeLogError(error), selectionId: selection.id, bindingId: current.id, checkpoint: current.provisioningCheckpoint, outcome: "retry_on_restart" }, "project provisioning paused at a durable checkpoint"); throw error; }
   }
 
   private async recoverProjectSelection(selection: ProjectSelection): Promise<void> {

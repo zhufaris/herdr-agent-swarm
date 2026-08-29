@@ -55,6 +55,27 @@ describe("project provisioning recovery", () => {
     await harness.close();
   });
 
+  it("replaces an old-hook TraeX pane before resuming a pane_created checkpoint", async () => {
+    const harness = createHarness({ occupiedUnreadyPane: true });
+    const selection = createProcessingSelection(harness.store);
+    let binding = harness.store.createPendingBinding({ id: "binding-1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Alpha / task" });
+    harness.store.linkProjectSelectionBinding(selection.id, binding.id);
+    binding = harness.store.updateBinding(binding.id, { paneId: "w1:p9", traexSessionId: "term-1" });
+    harness.store.transitionBinding(binding.id, { type: "pane_created" });
+
+    await harness.coordinator.start();
+
+    expect(harness.created).toBe(1);
+    expect(harness.startedPaneIds).toEqual(["w1:p10"]);
+    expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "completed" });
+    expect(harness.store.getBinding(binding.id)).toMatchObject({
+      state: "active", lifecycle: "active", provisioningCheckpoint: "activated",
+      paneId: "w1:p10", traexSessionId: "term-2", generation: 2, lastAgentState: "idle"
+    });
+    expect(harness.store.findBindingByPane("w1:p9")).toBeNull();
+    await harness.close();
+  });
+
   it("refuses a reused pane id whose terminal identity changed", async () => {
     const harness = createHarness({ terminalId: "different-terminal" });
     const selection = createProcessingSelection(harness.store);
@@ -107,14 +128,20 @@ function createProcessingSelection(store: SqliteBindingStore) {
   return selection;
 }
 
-function createHarness(options: { terminalId?: string; paneMissing?: boolean } = {}) {
+function createHarness(options: { terminalId?: string; paneMissing?: boolean; occupiedUnreadyPane?: boolean } = {}) {
   const store = new SqliteBindingStore(":memory:");
-  let created = 0; let started = 0; let topics = 0; const topicKeys: Array<string | undefined> = [];
+  let created = 0; let started = 0; let topics = 0; const topicKeys: Array<string | undefined> = []; const startedPaneIds: string[] = [];
   const pane: HerdrPane = { paneId: "w1:p9", terminalId: options.terminalId ?? "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
+  const replacement: HerdrPane = { paneId: "w1:p10", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
-    async assertWorkspace() {}, async listPanes() { return options.paneMissing ? [] : [pane]; }, async getPane() { return options.paneMissing ? null : pane; },
-    async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-    async createPane() { created += 1; return pane; }, async startTraex() { started += 1; }, async runPrompt() { return "done"; }, async renamePane() {}
+    async assertWorkspace() {}, async listPanes() { return options.paneMissing ? [] : [pane]; },
+    async getPane(paneId) { return options.paneMissing ? null : paneId === replacement.paneId ? replacement : pane; },
+    async observeRuntime(paneId) {
+      if (paneId === replacement.paneId) return { pane: replacement, traexProcess: true, composerReady: true, evidenceSource: "structured" };
+      return { pane, traexProcess: true, composerReady: !options.occupiedUnreadyPane, evidenceSource: options.occupiedUnreadyPane ? "process" : "structured" };
+    },
+    async createPane() { created += 1; return options.occupiedUnreadyPane ? replacement : pane; },
+    async startTraex(paneId) { started += 1; startedPaneIds.push(paneId); }, async runPrompt() { return "done"; }, async renamePane() {}
   };
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,
@@ -124,7 +151,7 @@ function createHarness(options: { terminalId?: string; paneMissing?: boolean } =
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
-  return { store, coordinator, get created() { return created; }, get started() { return started; }, get topics() { return topics; }, get topicKeys() { return topicKeys; }, async close() { await coordinator.stop(); await publisher.stop(); store.close(); } };
+  return { store, coordinator, get created() { return created; }, get started() { return started; }, get startedPaneIds() { return startedPaneIds; }, get topics() { return topics; }, get topicKeys() { return topicKeys; }, async close() { await coordinator.stop(); await publisher.stop(); store.close(); } };
 }
 
 function config(): BridgeConfig {

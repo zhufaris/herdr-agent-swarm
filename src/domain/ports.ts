@@ -211,6 +211,7 @@ export interface BindingStorePort {
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[];
   updateBinding(id: string, patch: Partial<Binding>): Binding;
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding;
+  replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding;
   recordReportedTraexSession(input: { bindingId: string; paneId: string; generation: number; sessionId: string; reportedAt: string }): "recorded" | "duplicate" | "rejected";
   transitionBinding(id: string, transition: SessionTransition): Binding;
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication;
@@ -369,7 +370,7 @@ export type BindingProvisioningStore = Pick<BindingStorePort,
   | "countPendingPrompts" | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
   | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindingsByState"
   | "listProcessingProjectSelections" | "loadTopicView" | "pauseProjectSelection" | "recordBridgeMessage"
-  | "createResetCandidate" | "cutoverResetCandidate" | "saveTopicView" | "transitionBinding" | "updateBindingMetadata"
+  | "createResetCandidate" | "cutoverResetCandidate" | "replaceProvisioningPane" | "saveTopicView" | "transitionBinding" | "updateBindingMetadata"
 >;
 
 export type RetiredPaneCleanupStore = Pick<BindingStorePort,
