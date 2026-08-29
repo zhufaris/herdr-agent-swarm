@@ -121,6 +121,18 @@ describe("Herdr adapter structured control", () => {
     });
   });
 
+  it("normalizes a shim-marked native session to TraeX", async () => {
+    const native = { async request(method: string) {
+      if (method === "session.snapshot") return { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle", agent: "codex", display_agent: "traex", agent_session: { source: "herdr-traex-shim", agent: "codex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } }], agents: [] } };
+      throw new Error(`unexpected method: ${method}`);
+    } };
+    const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).observeRuntime("w1:p1")).resolves.toMatchObject({
+      pane: { agentKind: "codex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } }
+    });
+  });
+
   it("submits prompts through agent prompt --wait and emits structured completion", async () => {
     const calls: string[][] = [];
     const observations: object[] = [];

@@ -102,7 +102,14 @@ export function projectTraexAgentJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(projectTraexAgentJson);
   if (!value || typeof value !== "object") return value;
   const projected = Object.fromEntries(Object.entries(value).map(([key, child]) => [key, projectTraexAgentJson(child)]));
-  if (projected.display_agent === "traex" && projected.agent === "codex") projected.agent = "traex";
+  if (projected.display_agent === "traex" && projected.agent === "codex") {
+    projected.agent = "traex";
+    const session = projected.agent_session;
+    if (session && typeof session === "object" && !Array.isArray(session)) {
+      const record = session as Record<string, unknown>;
+      if (record.agent === "codex") projected.agent_session = { ...record, agent: "traex" };
+    }
+  }
   return projected;
 }
 

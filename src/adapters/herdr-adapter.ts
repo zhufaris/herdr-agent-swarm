@@ -19,6 +19,7 @@ const agentSessionSchema = z.object({
 });
 const snapshotPaneSchema = paneSchema.extend({
   agent: z.string().nullish(),
+  display_agent: z.string().nullish(),
   agent_session: agentSessionSchema.nullish(),
   revision: z.number().int().nullish(),
   state_change_seq: z.number().int().nullish()
@@ -284,12 +285,17 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
+    const displayAgent = agent?.display_agent ?? raw.display_agent ?? null;
+    const reportedSession = agent?.agent_session ?? raw.agent_session ?? null;
+    const agentSession = displayAgent === "traex" && reportedSession?.agent === "codex"
+      ? { ...reportedSession, agent: "traex" }
+      : reportedSession;
     const foregroundCwd = raw.foreground_cwd ?? agent?.foreground_cwd ?? null;
     const foregroundExecutables = kind ? [kind] : [];
     return {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
       ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,
-      agentKind: kind, agentSession: agent?.agent_session ?? raw.agent_session ?? null, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
+      agentKind: kind, agentSession, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       agentState: agent?.agent_status ?? raw.agent_status ?? "unknown", foregroundExecutables
     };
   }
