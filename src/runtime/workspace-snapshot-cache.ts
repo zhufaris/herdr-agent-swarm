@@ -4,13 +4,17 @@ import type { HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, Workspace
 import { safeLogError } from "./safe-error.js";
 
 interface Snapshot { panes: HerdrPane[]; capturedAt: number }
+interface Refresh<T> { generation: number; resetGeneration: number; promise: Promise<T> }
 
 export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly paneWorkspaceIds = new Map<string, string>();
-  private readonly refreshes = new Map<string, Promise<HerdrPane[]>>();
-  private allRefresh: Promise<HerdrPane[]> | null = null;
+  private readonly refreshes = new Map<string, Refresh<HerdrPane[]>>();
+  private readonly workspaceGenerations = new Map<string, number>();
+  private allRefresh: Refresh<HerdrPane[]> | null = null;
   private allSnapshot: Snapshot | null = null;
+  private allGeneration = 0;
+  private resetGeneration = 0;
   private hits = 0;
   private misses = 0;
   private coalescedRefreshes = 0;
@@ -29,16 +33,18 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       this.hits += 1;
       return clonePanes(snapshot.panes);
     }
+    const generation = this.workspaceGeneration(workspaceId);
+    const resetGeneration = this.resetGeneration;
     const active = this.refreshes.get(workspaceId);
-    if (active) {
+    if (active && active.generation === generation && active.resetGeneration === resetGeneration) {
       this.coalescedRefreshes += 1;
-      return clonePanes(await active);
+      return clonePanes(await active.promise);
     }
     this.misses += 1;
-    const refresh = this.refresh(workspaceId, options);
-    this.refreshes.set(workspaceId, refresh);
+    const refresh = this.refresh(workspaceId, options, generation, resetGeneration);
+    this.refreshes.set(workspaceId, { generation, resetGeneration, promise: refresh });
     try { return clonePanes(await refresh); }
-    finally { this.refreshes.delete(workspaceId); }
+    finally { if (this.refreshes.get(workspaceId)?.promise === refresh) this.refreshes.delete(workspaceId); }
   }
 
   async listAllPanes(options: { forceRefresh?: boolean } = {}): Promise<HerdrPane[]> {
@@ -49,17 +55,24 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       this.hits += 1;
       return clonePanes(this.allSnapshot.panes);
     }
-    if (this.allRefresh) {
+    const generation = this.allGeneration;
+    const resetGeneration = this.resetGeneration;
+    if (this.allRefresh?.generation === generation && this.allRefresh.resetGeneration === resetGeneration) {
       this.coalescedRefreshes += 1;
-      return clonePanes(await this.allRefresh);
+      return clonePanes(await this.allRefresh.promise);
     }
     this.misses += 1;
-    const refresh = this.delegate.listAllPanes();
-    this.allRefresh = refresh;
+    const refresh = this.refreshAll(generation, resetGeneration);
+    this.allRefresh = { generation, resetGeneration, promise: refresh };
+    try { return clonePanes(await refresh); }
+    finally { if (this.allRefresh?.promise === refresh) this.allRefresh = null; }
+  }
+
+  private async refreshAll(generation: number, resetGeneration: number): Promise<HerdrPane[]> {
     let panes: HerdrPane[];
-    try { panes = await refresh; }
+    try { panes = await this.delegate.listAllPanes!(); }
     catch (error) { this.refreshFailures += 1; throw error; }
-    finally { this.allRefresh = null; }
+    if (generation !== this.allGeneration || resetGeneration !== this.resetGeneration) return panes;
     const capturedAt = this.clock();
     const byWorkspace = new Map<string, HerdrPane[]>();
     for (const pane of panes) {
@@ -72,10 +85,12 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     this.allSnapshot = { panes: clonePanes(panes), capturedAt };
     for (const [workspaceId, workspacePanes] of byWorkspace) this.snapshots.set(workspaceId, { panes: clonePanes(workspacePanes), capturedAt });
     for (const pane of panes) this.paneWorkspaceIds.set(pane.paneId, pane.workspaceId);
-    return clonePanes(panes);
+    return panes;
   }
 
   invalidate(workspaceId: string): void {
+    this.workspaceGenerations.set(workspaceId, this.workspaceGeneration(workspaceId) + 1);
+    this.allGeneration += 1;
     this.snapshots.delete(workspaceId);
     this.allSnapshot = null;
     this.forgetWorkspacePanes(workspaceId);
@@ -158,7 +173,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     this.paneWorkspaceIds.delete(paneId);
   }
 
-  private async refresh(workspaceId: string, options: { forceRefresh?: boolean }): Promise<HerdrPane[]> {
+  private async refresh(workspaceId: string, options: { forceRefresh?: boolean }, generation: number, resetGeneration: number): Promise<HerdrPane[]> {
     try {
       if (this.delegate.listAllPanes) {
         try {
@@ -168,6 +183,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
         }
       }
       const panes = await this.delegate.listPanes(workspaceId, { forceRefresh: true });
+      if (generation !== this.workspaceGeneration(workspaceId) || resetGeneration !== this.resetGeneration) return panes;
       const capturedAt = this.clock();
       this.rememberWorkspaceSnapshot(workspaceId, panes);
       this.snapshots.set(workspaceId, { panes: clonePanes(panes), capturedAt });
@@ -197,7 +213,12 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     }
   }
 
+  private workspaceGeneration(workspaceId: string): number { return this.workspaceGenerations.get(workspaceId) ?? 0; }
+
   private invalidateAll(): void {
+    this.resetGeneration += 1;
+    this.allGeneration += 1;
+    this.workspaceGenerations.clear();
     this.snapshots.clear();
     this.allSnapshot = null;
     this.paneWorkspaceIds.clear();
