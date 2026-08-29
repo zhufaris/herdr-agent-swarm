@@ -45,7 +45,7 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
     : ["--user", action, paths.serviceName];
   const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
-  return waitForHealth(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment));
+  return waitForStartupCompletion(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment));
 }
 
 async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<void> {
@@ -188,29 +188,32 @@ function requireInstalled(paths: RuntimePaths): void {
   if (!existsSync(paths.unitFile)) throw new Error(`service is not installed: ${paths.unitFile}; run the setup action first`);
 }
 
-async function waitForHealth(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number): Promise<number> {
+async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
   const deadline = Date.now() + timeoutMs;
   let consecutiveHealthyChecks = 0;
   let observedBuildId = "unavailable";
+  let observedStartupState = "unavailable";
   let unitState = "inactive";
   do {
     const active = isUnitActive(paths.serviceName, base);
     unitState = active ? "active" : "inactive";
-    const health = active ? await probeHealthIdentity(config.http.host, config.http.port) : null;
-    observedBuildId = health?.buildId ?? "unavailable";
-    const healthy = health?.status === "ok" && health.serviceId === BRIDGE_SERVICE_ID && health.buildId === expected.buildId;
+    const startup = active ? await probeStartupStatus(config.http.host, config.http.port) : null;
+    observedBuildId = startup?.buildId ?? "unavailable";
+    observedStartupState = startup?.startupRecoveryState ?? "unavailable";
+    const healthy = startup?.status === "ok" && startup.serviceId === BRIDGE_SERVICE_ID
+      && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed";
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
       const readiness = await probeStatus(config.http.host, config.http.port, "/ready");
-      process.stdout.write(`bridge service is healthy (${paths.serviceName}); readiness=${readiness.status}\n`);
+      process.stdout.write(`bridge startup completed (${paths.serviceName}); readiness=${readiness.status}\n`);
       if (readiness.status !== "ready") process.stdout.write(`bridge dependencies are degraded: ${readiness.detail}\n`);
       return 0;
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   } while (Date.now() < deadline);
-  throw new Error(`bridge ${action} did not become active with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; observed ${observedBuildId}; inspect systemctl --user status ${paths.serviceName}`);
+  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; observed build ${observedBuildId}; startup ${observedStartupState}; inspect systemctl --user status ${paths.serviceName}`);
 }
 
 function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.BRIDGE_PLUGIN_START_TIMEOUT_MS, 15_000); }
@@ -241,12 +244,18 @@ function delegate(command: string, args: string[], environment: NodeJS.ProcessEn
   return result.status ?? 1;
 }
 
-async function probeHealthIdentity(host: string, port: number): Promise<{ status?: unknown; serviceId?: unknown; buildId?: string } | null> {
+async function probeStartupStatus(host: string, port: number): Promise<{ status?: string; serviceId?: string; buildId?: string; startupRecoveryState?: string } | null> {
   try {
-    const result = await getJson(host, port, "/health");
-    if (!result || typeof result !== "object") return null;
-    const record = result as Record<string, unknown>;
-    return { status: record.status, serviceId: record.serviceId, ...(typeof record.buildId === "string" ? { buildId: record.buildId } : {}) };
+    const record = asRecord(await getJson(host, port, "/status"));
+    if (!record) return null;
+    const identity = asRecord(record.identity);
+    const startupRecovery = asRecord(record.startupRecovery);
+    return {
+      ...(typeof record.status === "string" ? { status: record.status } : {}),
+      ...(typeof identity?.serviceId === "string" ? { serviceId: identity.serviceId } : {}),
+      ...(typeof identity?.buildId === "string" ? { buildId: identity.buildId } : {}),
+      ...(typeof startupRecovery?.state === "string" ? { startupRecoveryState: startupRecovery.state } : {})
+    };
   } catch { return null; }
 }
 
