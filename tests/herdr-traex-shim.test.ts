@@ -107,6 +107,17 @@ describe("Herdr TraeX managed start", () => {
     await expect(runHerdrTraexStart(startInput(), startConfig(), dependencies)).rejects.toMatchObject<TraexStartError>({ code: "agent_start_uncertain" });
     expect(launches).toBe(1);
   });
+
+  it("treats a pane-run command error as uncertain because dispatch may have occurred", async () => {
+    let launches = 0;
+    const dependencies = fakeStartDependencies(async (args) => {
+      if (args[0] === "--version") return { stdout: "0.7.5", stderr: "" };
+      if (args[0] === "pane" && args[1] === "run") { launches += 1; throw new Error("connection lost"); }
+      return { stdout: envelope(processInfo(10, "bash", ["bash"])), stderr: "" };
+    });
+    await expect(runHerdrTraexStart(startInput(), startConfig(), dependencies)).rejects.toMatchObject<TraexStartError>({ code: "agent_start_uncertain" });
+    expect(launches).toBe(1);
+  });
 });
 
 function envelope(result: unknown): string { return JSON.stringify({ id: "test", result }); }

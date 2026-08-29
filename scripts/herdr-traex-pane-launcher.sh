@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-request_dir=@HERDR_TRAEX_REQUEST_DIR@
+release_dir=$(dirname "$(readlink -f -- "$0")")
+# shellcheck source=/dev/null
+source "$release_dir/paths.sh"
 request_id=${1:-}
 [[ $request_id =~ ^[a-f0-9-]+$ ]] || { echo "invalid TraeX request ID" >&2; exit 2; }
 request_path="$request_dir/$request_id"

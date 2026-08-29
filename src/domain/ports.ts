@@ -107,7 +107,7 @@ export interface HerdrPort {
   waitForRuntimeChange?(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void>;
   createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string, args?: string[]): Promise<void>;
-  startAgent?(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void>;
+  startAgent?(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void>;
   runPrompt(
     paneId: string,
     text: string,

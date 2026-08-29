@@ -116,8 +116,10 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
   let launched = false;
   try {
     requestId = await dependencies.writeRequest(encodeLaunchRequest(config.traex, input.traexArgs));
-    await dependencies.runHerdr(["pane", "run", input.paneId, config.launcher, requestId], input.timeoutMs);
+    // Once pane.run is invoked, its command may have reached the terminal even
+    // if the CLI later returns an error. Fence all later failures as uncertain.
     launched = true;
+    await dependencies.runHerdr(["pane", "run", input.paneId, config.launcher, requestId], input.timeoutMs);
     const process = await waitForTraexProcess(input.paneId, config.traex, deadline, dependencies);
     const processStartTicks = await dependencies.processStartTicks(process.pid);
     if (!processStartTicks) throw new Error("TraeX process identity disappeared before reporter startup");

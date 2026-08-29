@@ -134,7 +134,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     return pane;
   }
   async startTraex(paneId: string, executable: string, args?: string[]): Promise<void> { await this.delegate.startTraex(paneId, executable, args); }
-  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void> {
+  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void> {
     if (!this.delegate.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
     await this.delegate.startAgent(paneId, input);
   }

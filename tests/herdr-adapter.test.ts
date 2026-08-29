@@ -47,6 +47,18 @@ describe("Herdr adapter", () => {
     expect(calls[0]).toEqual(["agent", "start", "p1-reviewer", "--kind", "codex", "--pane", "w1:p1", "--timeout", "1000", "--", "--model", "gpt"]);
   });
 
+  it("starts managed TraeX through the formal shim command with bridge hook arguments", async () => {
+    const calls: string[][] = [];
+    const runner = { run: vi.fn(async (_executable: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "api") return { stdout: JSON.stringify({ id: "x", result: { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "idle" }], agents: [] } } }), stderr: "" };
+      return { stdout: "", stderr: "" };
+    }) };
+    await new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex", args: ["--model", "x"] });
+    expect(calls[0]).toEqual(["agent", "start", "demo-primary", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto", "--dangerously-bypass-hook-trust", "-c", expect.stringContaining("hooks.SessionStart"), "--model", "x"]);
+    expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
+  });
+
   it("passes per-primary MCP arguments through Herdr without shell interpolation", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

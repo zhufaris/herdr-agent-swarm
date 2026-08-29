@@ -163,9 +163,15 @@ export class HerdrCliAdapter implements HerdrPort {
     await this.waitUntilTraexAgentReady(paneId);
   }
 
-  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex"; executable: string; args?: string[] }): Promise<void> {
+  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void> {
     const canonical = input.kind === "claude" ? "claude" : input.kind;
-    if (input.executable === canonical) {
+    if (input.kind === "traex") {
+      const args = [
+        "agent", "start", input.name, "--kind", "traex", "--pane", paneId, "--timeout", String(this.commandTimeoutMs), "--",
+        "--permission-mode", this.traexPermissionMode, "--dangerously-bypass-hook-trust", "-c", sessionHookArgument(SESSION_REPORTER_PATH), ...(input.args ?? [])
+      ];
+      await this.startWhenShellReady(args);
+    } else if (input.executable === canonical) {
       const args = ["agent", "start", input.name, "--kind", input.kind, "--pane", paneId, "--timeout", String(this.commandTimeoutMs)];
       if (input.args?.length) args.push("--", ...input.args);
       await this.startWhenShellReady(args);
@@ -611,11 +617,15 @@ export class HerdrCliAdapter implements HerdrPort {
 }
 
 function sessionHookOverride(reporterPath: string): string {
-  const command = `node ${shellQuote(reporterPath)}`;
-  const override = `hooks.SessionStart=[{matcher="startup|resume",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+  const override = sessionHookArgument(reporterPath);
   // `herdr pane run` passes its command through the pane shell, so quote the
   // complete TOML override as one shell argument rather than only its command.
   return shellQuote(override);
+}
+
+function sessionHookArgument(reporterPath: string): string {
+  const command = `node ${shellQuote(reporterPath)}`;
+  return `hooks.SessionStart=[{matcher="startup|resume",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
 }
 
 function shellQuote(value: string): string {

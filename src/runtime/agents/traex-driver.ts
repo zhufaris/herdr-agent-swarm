@@ -22,8 +22,8 @@ export class TraexDriver implements AgentRuntimeDriver {
 
   async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
     const args = options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...mcpArguments(options.primaryTools)] : undefined;
-    if (args) await this.herdr.startTraex(runtime.paneId, this.executable, args);
-    else await this.herdr.startTraex(runtime.paneId, this.executable);
+    if (!this.herdr.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
+    await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: "traex", executable: this.executable, args: args ?? [] });
   }
 
   async submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt> {
@@ -57,3 +57,7 @@ function mcpArguments(server: { command: string; args: string[] }): string[] {
 }
 
 function shellQuote(value: string): string { return `'${value.replace(/'/g, `'"'"'`)}'`; }
+function managedName(projectId: string | undefined, name: string): string {
+  const prefix = `${projectId ?? "agent"}-${name}`.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z]+/, "a-");
+  return prefix.slice(0, 32).replace(/[-_]$/, "") || "agent";
+}

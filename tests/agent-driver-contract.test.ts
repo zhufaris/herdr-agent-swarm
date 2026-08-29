@@ -20,24 +20,24 @@ describe("agent driver contract", () => {
   });
 
   it("launches TraeX and declares its verified capabilities", async () => {
-    const startTraex = vi.fn(async () => undefined);
-    const driver = new TraexDriver({ startTraex } as unknown as HerdrPort, "/bin/traex", 1_000);
+    const startAgent = vi.fn(async () => undefined);
+    const driver = new TraexDriver({ startAgent } as unknown as HerdrPort, "/bin/traex", 1_000);
     expect(driver.describe()).toMatchObject({ available: true, primaryTools: true, steering: "unsupported", approvals: "terminal" });
-    await driver.start(runtime);
-    expect(startTraex).toHaveBeenCalledWith("w1:p1", "/bin/traex");
+    await driver.start(runtime, { projectId: "demo", name: "primary", model: null });
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", { name: "demo-primary", kind: "traex", executable: "/bin/traex", args: [] });
   });
 
   it("injects the scoped MCP server into capable Primary drivers only", async () => {
-    const startTraex = vi.fn(async () => undefined);
-    const traex = new TraexDriver({ startTraex } as unknown as HerdrPort, "traex", 1_000);
+    const startAgent = vi.fn(async () => undefined);
+    const traex = new TraexDriver({ startAgent } as unknown as HerdrPort, "traex", 1_000);
     const primaryTools = { command: process.execPath, args: ["shim.js", "--instance", "primary"] };
     await traex.start(runtime, { name: "primary", model: null, primaryTools });
-    expect(startTraex).toHaveBeenCalledWith("w1:p1", "traex", ["-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.command=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.args=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.env_vars=.*'$/)]);
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", { name: "agent-primary", kind: "traex", executable: "traex", args: ["-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.command=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.args=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.env_vars=.*'$/)] });
 
-    const startAgent = vi.fn(async () => undefined);
-    const codex = new CodexDriver({ startAgent } as unknown as HerdrPort, "codex", 1_000, true);
+    const codexStartAgent = vi.fn(async () => undefined);
+    const codex = new CodexDriver({ startAgent: codexStartAgent } as unknown as HerdrPort, "codex", 1_000, true);
     await codex.start(runtime, { name: "primary", model: null, primaryTools });
-    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["-c", expect.stringContaining("mcp_servers.herdr_agent_swarm.command"), "-c", expect.stringContaining("mcp_servers.herdr_agent_swarm.args"), "-c", expect.stringContaining("SWARM_PRIMARY_CAPABILITY")] }));
+    expect(codexStartAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["-c", expect.stringContaining("mcp_servers.herdr_agent_swarm.command"), "-c", expect.stringContaining("mcp_servers.herdr_agent_swarm.args"), "-c", expect.stringContaining("SWARM_PRIMARY_CAPABILITY")] }));
   });
 
   it("returns an uncertain receipt when a submitted prompt may have reached TraeX", async () => {
