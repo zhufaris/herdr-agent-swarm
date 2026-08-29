@@ -444,6 +444,13 @@ function requestSummaryLabel(phase: RunCardView["phase"]): string {
 }
 function conversationalMetadata(input: RunCardView, duration: string | null, pageNumber?: number): string {
   const state = RUN_STATE_VIEW[input.phase];
+  if (input.phase === "queued" && input.queueFeedback) {
+    const feedback = input.queueFeedback;
+    const lines = [`⏳ 已排队 · 前方 ${feedback.aheadCount} 条`];
+    if (feedback.activeElapsedSeconds !== null) lines.push(`当前任务已运行 ${feedback.activeElapsedSeconds} 秒`);
+    if (feedback.estimateLowerSeconds !== null && feedback.estimateUpperSeconds !== null) lines.push(`预计等待约 ${Math.floor(feedback.estimateLowerSeconds / 60)}–${Math.ceil(feedback.estimateUpperSeconds / 60)} 分钟`);
+    return lines.join("\n");
+  }
   const details = input.phase === "queued"
     ? `队列第 ${input.queuePosition} 位`
     : duration ? `用时 ${duration}` : null;

@@ -696,6 +696,23 @@ describe("run card", () => {
     expect(serialized).toContain("🧠 TraeX 正在处理  ·  Pane `p1`");
     expect(serialized).not.toContain("执行计划");
   });
+
+  it("renders exact durable queue feedback and keeps the conversion action", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, conversionParentPromptId: "parent", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
+    const card = renderRequestAnswerCard({ ...view, queueFeedback: { aheadCount: 2, activeElapsedSeconds: 48, estimateLowerSeconds: 60, estimateUpperSeconds: 180, sampleCount: 3, elapsedBucket: 1 } });
+    expect(findTaggedNodes(card, "markdown").map((node) => node.content)).toContain("⏳ 已排队 · 前方 2 条\n当前任务已运行 48 秒\n预计等待约 1–3 分钟");
+    expect(JSON.stringify(card)).toContain("改为立即补充");
+  });
+
+  it("omits only unavailable queue feedback lines", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 1, occurredAt: "now" });
+    const insufficient = renderRequestAnswerCard({ ...view, queueFeedback: { aheadCount: 0, activeElapsedSeconds: 48, estimateLowerSeconds: null, estimateUpperSeconds: null, sampleCount: 2, elapsedBucket: 1 } });
+    expect(findTaggedNodes(insufficient, "markdown").map((node) => node.content)).toContain("⏳ 已排队 · 前方 0 条\n当前任务已运行 48 秒");
+    expect(JSON.stringify(insufficient)).not.toContain("预计等待");
+    const noActive = renderRequestAnswerCard({ ...view, queueFeedback: { aheadCount: 0, activeElapsedSeconds: null, estimateLowerSeconds: 0, estimateUpperSeconds: 30, sampleCount: 3, elapsedBucket: null } });
+    expect(findTaggedNodes(noActive, "markdown").map((node) => node.content)).toContain("⏳ 已排队 · 前方 0 条\n预计等待约 0–1 分钟");
+    expect(JSON.stringify(noActive)).not.toContain("当前任务已运行");
+  });
 });
 
 function mainCardCallbackActions(card: object): string[] {

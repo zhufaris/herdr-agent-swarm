@@ -229,6 +229,8 @@ export interface BindingStorePort {
   countPendingPrompts(bindingId: string): number;
   listQueuedTurnPromptIds(bindingId: string): string[];
   listQueuedTurnRunCards(bindingId: string): RunCardView[];
+  listCompletedOrdinaryTurnDurations(bindingId: string, limit: number): number[];
+  loadQueueFeedbackInputs(bindingId: string): { activeStartedAt: string | null; queued: RunCardView[]; durationsMs: number[] };
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean };
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null;
   claimPaneControlOperation(id: string): PaneControlOperation | null;

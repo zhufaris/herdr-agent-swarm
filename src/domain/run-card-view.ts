@@ -1,4 +1,5 @@
 import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
+import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
 export type SteeringFailureKind = "rejected" | "uncertain";
@@ -47,6 +48,7 @@ export interface RunCardView {
   answerDraftTransient: boolean;
   progressEvents: RunProgressEvent[];
   queuePosition: number;
+  queueFeedback: QueueWaitFeedback | null;
   startedAt: string | null;
   finishedAt: string | null;
   notice: string | null;
@@ -60,6 +62,7 @@ export interface RunCardView {
 
 export type RunCardChange =
   | { type: "queue-position"; occurredAt: string; queuePosition: number }
+  | { type: "queue-feedback"; occurredAt: string; feedback: QueueWaitFeedback | null }
   | { type: "started"; occurredAt: string }
   | { type: "steering-delivered"; occurredAt: string; notice: string }
   | { type: "steering-failed"; occurredAt: string; notice: string; failureKind: SteeringFailureKind }
@@ -75,7 +78,7 @@ export function createQueuedRunCard(input: {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, steeringOrigin: input.steeringOrigin ?? null, steeringFailureKind: null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
-    progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
+    progressEvents: [], queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
@@ -90,6 +93,10 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
     case "queue-position":
       if (state.queuePosition === change.queuePosition) return state;
       patch = { queuePosition: change.queuePosition };
+      break;
+    case "queue-feedback":
+      if (sameQueueFeedback(state.queueFeedback, change.feedback)) return state;
+      patch = { queueFeedback: change.feedback };
       break;
     case "started":
       if (state.phase === "running" && state.notice === null) return state;
@@ -138,8 +145,15 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }
-  const activityAt = change.type === "queue-position" || change.type === "steering-delivered" ? state.activityAt : change.occurredAt;
+  const activityAt = change.type === "queue-position" || change.type === "queue-feedback" || change.type === "steering-delivered" ? state.activityAt : change.occurredAt;
   return { ...state, ...patch, activityAt, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
+}
+
+function sameQueueFeedback(left: QueueWaitFeedback | null, right: QueueWaitFeedback | null): boolean {
+  if (left === right) return true;
+  return left !== null && right !== null && left.aheadCount === right.aheadCount && left.activeElapsedSeconds === right.activeElapsedSeconds
+    && left.estimateLowerSeconds === right.estimateLowerSeconds && left.estimateUpperSeconds === right.estimateUpperSeconds
+    && left.sampleCount === right.sampleCount && left.elapsedBucket === right.elapsedBucket;
 }
 
 type AnswerParts = Pick<RunCardView, "answerSegments" | "answerDraft" | "answerDraftTransient">;

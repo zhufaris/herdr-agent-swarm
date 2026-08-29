@@ -129,6 +129,14 @@ describe("request run-card view", () => {
     expect(reduceRunCard(blocked, { type: "blocked", occurredAt: "later", notice: "approval needed" })).toBe(blocked);
   });
 
+  it("persists queue feedback and ignores an identical estimate", () => {
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 3, occurredAt: "start" });
+    const feedback = { aheadCount: 2, activeElapsedSeconds: 48, estimateLowerSeconds: 60, estimateUpperSeconds: 180, sampleCount: 3, elapsedBucket: 1 };
+    const updated = reduceRunCard(queued, { type: "queue-feedback", occurredAt: "later", feedback });
+    expect(updated).toMatchObject({ queueFeedback: feedback, activityAt: "start", viewVersion: 2, updatedAt: "later" });
+    expect(reduceRunCard(updated, { type: "queue-feedback", occurredAt: "latest", feedback })).toBe(updated);
+  });
+
   it("completes a steering card with an acknowledgement instead of a copied answer", () => {
     const queued = createQueuedRunCard({
       promptId: "s1", bindingId: "b1", title: "Change course", workspaceId: "w1",

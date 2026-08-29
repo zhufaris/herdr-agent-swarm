@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createBridgeEvent } from "../src/domain/create-bridge-event.js";
 import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 let store: SqliteBindingStore | undefined;
@@ -838,6 +839,57 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ count: 1 });
   });
 
+  it("filters recent eligible ordinary durations and enriches the initial ordinary card atomically", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "idle" });
+    for (const [index, duration] of [30, 60, 90, 120].entries()) {
+      const id = `history-${index}`;
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: `2026-08-29T09:0${index}:00.000Z` });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', was_detached = 0 WHERE id = ?").run(id);
+      store.database.prepare("UPDATE run_cards SET phase = 'completed', started_at = ?, finished_at = ? WHERE prompt_id = ?").run(`2026-08-29T09:0${index}:00.000Z`, new Date(Date.parse(`2026-08-29T09:0${index}:00.000Z`) + duration * 1_000).toISOString(), id);
+    }
+    store.database.prepare("UPDATE prompt_jobs SET was_detached = 1 WHERE id = 'history-0'").run();
+    const invalid = createQueuedRunCard({ promptId: "invalid", bindingId: "b1", title: "invalid", workspaceId: "w1", paneId: "w1:p1", requestText: "invalid", queuePosition: 1, occurredAt: "2026-08-29T09:04:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "invalid", bindingId: "b1", larkMessageId: "m-invalid", actorOpenId: "u1", body: "invalid" }, view: invalid, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed' WHERE id = 'invalid'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'completed', started_at = '2026-08-29T09:05:00.000Z', finished_at = '2026-08-29T09:05:00.000Z' WHERE prompt_id = 'invalid'").run();
+    expect(store.listCompletedOrdinaryTurnDurations("b1", 20)).toEqual([120_000, 90_000, 60_000]);
+
+    const active = createQueuedRunCard({ promptId: "active", bindingId: "b1", title: "active", workspaceId: "w1", paneId: "w1:p1", requestText: "active", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "active", bindingId: "b1", larkMessageId: "m-active", actorOpenId: "u1", body: "active" }, view: active, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("active", "running");
+    store.markPromptDispatched("active");
+    store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T10:00:00.000Z' WHERE prompt_id = 'active'").run();
+    const ahead = createQueuedRunCard({ promptId: "ahead", bindingId: "b1", title: "ahead", workspaceId: "w1", paneId: "w1:p1", requestText: "ahead", queuePosition: 1, occurredAt: "2026-08-29T10:00:10.000Z" });
+    store.acceptPrompt({ prompt: { id: "ahead", bindingId: "b1", larkMessageId: "m-ahead", actorOpenId: "u1", body: "ahead" }, view: ahead, rootMessageId: "root", answerCard: {} });
+    const next = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "next", workspaceId: "w1", paneId: "w1:p1", requestText: "next", queuePosition: 99, occurredAt: "old" });
+    const answerCardFor = vi.fn(renderRequestAnswerCard);
+    const accepted = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "next" }, ordinaryView: next, steeringView: next, rootMessageId: "root", expectedBindingGeneration: 3, candidateParentPromptId: null, activeAfter: "2026-08-29T09:00:00.000Z", acceptedAt: "2026-08-29T10:00:20.000Z", answerCardFor });
+    expect(accepted.view.queueFeedback).toMatchObject({ aheadCount: 1, activeElapsedSeconds: 20, sampleCount: 3, estimateLowerSeconds: 60, estimateUpperSeconds: 240 });
+    expect(answerCardFor).toHaveBeenCalledWith(expect.objectContaining({ queuePosition: 2, queueFeedback: expect.objectContaining({ aheadCount: 1, activeElapsedSeconds: 20 }) }));
+    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "next")!.payload).toContain("⏳ 已排队 · 前方 1 条\\n当前任务已运行 20 秒\\n预计等待约 1–4 分钟");
+  });
+
+  it.each([
+    ["detached", false],
+    ["recovered but previously detached", true]
+  ] as const)("omits active queue timing for a %s running prompt", (_label, recover) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const active = createQueuedRunCard({ promptId: "active", bindingId: "b1", title: "active", workspaceId: "w1", paneId: "w1:p1", requestText: "active", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "active", bindingId: "b1", larkMessageId: "m-active", actorOpenId: "u1", body: "active" }, view: active, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("active", "running");
+    store.markPromptDispatched("active");
+    store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T10:00:00.000Z' WHERE prompt_id = 'active'").run();
+    store.markPromptObservationDetached("active", "observer interrupted");
+    if (recover) store.markPromptDispatched("active");
+
+    expect(store.loadQueueFeedbackInputs("b1").activeStartedAt).toBeNull();
+  });
+
   it.each([
     ["archived binding", { state: "archived", lifecycle: "archived", attachment: "attached" }],
     ["degraded attachment", { state: "active", lifecycle: "active", attachment: "degraded" }]
@@ -861,13 +913,14 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m-legacy", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root", answerCard: {} });
-    store.database.exec("DROP INDEX prompt_jobs_source_prompt_once; DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN steering_origin; ALTER TABLE prompt_jobs DROP COLUMN source_prompt_id; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at;");
+    store.database.exec("DROP INDEX prompt_jobs_source_prompt_once; DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN steering_origin; ALTER TABLE prompt_jobs DROP COLUMN source_prompt_id; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at; ALTER TABLE run_cards DROP COLUMN queue_feedback_json;");
     store.close();
     store = undefined;
 
     store = new SqliteBindingStore(path);
     expect(store.getPrompt("legacy")).toMatchObject({ steeringOrigin: null, sourcePromptId: null, wasDetached: false });
     expect(store.loadRunCard("legacy")?.activityAt).toBe("2026-08-29T09:00:00.000Z");
+    expect(store.loadRunCard("legacy")?.queueFeedback).toBeNull();
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'prompt_jobs_source_prompt_once'").get()).toEqual({ name: "prompt_jobs_source_prompt_once" });
   });
 
