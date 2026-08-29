@@ -149,7 +149,10 @@ const reconciler = new HerdrRuntimeReconciler({
   worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
 });
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
+const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, automaticSteeringTarget: (bindingId) => {
+  const turn = promptRun.activeTurn(bindingId);
+  return turn && (turn.state === "working" || turn.state === "blocked") ? { promptId: turn.promptId, paneId: turn.paneId, state: turn.state } : null;
+}, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), async (workspaceIds) => { await Promise.all([coordinator.reconcileHerdrWorkspaces(workspaceIds), instanceRuntime.reconcile()]); }, logger)

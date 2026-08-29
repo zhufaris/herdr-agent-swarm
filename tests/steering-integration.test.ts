@@ -9,8 +9,57 @@ import { ConversationViewProjector } from "../src/events/conversation-view-proje
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 
 const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
+
+async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const turns: string[] = [];
+  const steering: string[] = [];
+  const info = vi.fn();
+  const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+  const lark: LarkPort = {
+    async start() {}, async stop() {}, isReady: () => true,
+    async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
+    async replyText() { return { messageId: "text-1" }; },
+    async replyCard() { return { messageId: `card-${Math.random()}` }; },
+    async updateCard() {}
+  };
+  const herdr: HerdrPort = {
+    async assertWorkspace() {},
+    async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+    async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+    async runPrompt(_paneId, text, _timeoutMs, onObservation, _signal, onDispatched) {
+      turns.push(text);
+      onDispatched?.();
+      await onObservation?.({ state: "working", stateSource: "structured", output: "working" });
+      if (turns.length === 1) await hold;
+      await onObservation?.({ state: "done", stateSource: "structured", output: "◆ done\n────────" });
+      return "done";
+    },
+    async steerPrompt(_paneId, text) { steering.push(text); return "injected"; },
+    async sendEscape() {}, async readOutput() { return "working"; }, async renamePane() {}
+  };
+  const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
+  const store = new SqliteBindingStore(":memory:");
+  const bus = new BridgeEventBus();
+  const scheduler = new InProcessPromptWorkScheduler(logger);
+  const schedulerWake = vi.spyOn(scheduler, "wake");
+  const publisher = createTestPublisher(store, lark, logger); publisher.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, logger); projector.start();
+  const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger, 30_000, scheduler);
+  await coordinator.start();
+  const bindingId = store.findBindingByPane("w1:p1")!.id;
+  const message = (id: string, text: string, hasUnsupportedContent = false) => ({ eventId: `event-${id}`, messageId: id, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false, hasUnsupportedContent });
+  const send = (id: string, text: string, hasUnsupportedContent = false) => coordinator.handleMessage(message(id, text, hasUnsupportedContent));
+  await send("parent-message", "parent");
+  await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "working" }));
+  const parent = store.listRunCards(bindingId)[0]!;
+  schedulerWake.mockClear();
+  return { bindingId, coordinator, info, message, parent, projector, publisher, release, schedulerWake, send, steering, store, turns, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
+}
 
 describe("active-turn steering", () => {
   it("injects ordered steering into one active waiter and keeps final output on the parent card", async () => {
@@ -233,5 +282,112 @@ describe("active-turn steering", () => {
     expect(turns[1]).toBe("later turn");
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+});
+
+describe("automatic continuation steering", () => {
+  it("routes an eligible continuation to the active parent", async () => {
+    const harness = await createAutomaticSteeringHarness();
+    await harness.send("auto-message", "继续");
+    expect(harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId)).toMatchObject({
+      dispatchKind: "steering", parentPromptId: harness.parent.promptId, steeringOrigin: "automatic"
+    });
+    expect(harness.schedulerWake.mock.calls.map(([hint]) => hint)).not.toContainEqual({ kind: "prompt-ready", bindingId: harness.bindingId });
+    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "steering-ready", bindingId: harness.bindingId, parentPromptId: harness.parent.promptId });
+    await vi.waitFor(() => expect(harness.steering).toEqual(["继续"]));
+    await harness.close();
+  });
+
+  it.each([
+    ["ambiguous new work", "修复另一个问题", false, "not_allowlisted"],
+    ["unsupported rich content", "继续", true, "unsupported_content"]
+  ])("keeps %s as an ordinary FIFO turn", async (_label, text, hasUnsupportedContent, reason) => {
+    const harness = await createAutomaticSteeringHarness();
+    await harness.send(`ordinary-${reason}`, text, hasUnsupportedContent);
+    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === text)!.promptId);
+    expect(prompt).toMatchObject({ dispatchKind: "turn", parentPromptId: null, steeringOrigin: null });
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
+    expect(harness.steering).toEqual([]);
+    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-classified", outcome: "ordinary", reason }), "classified continuation message"]);
+    await harness.close();
+  });
+
+  it.each([
+    ["stale parent", "parent_stale", (harness: Awaited<ReturnType<typeof createAutomaticSteeringHarness>>) => {
+      harness.store.database.prepare("UPDATE run_cards SET activity_at = ? WHERE prompt_id = ?").run("2000-01-01T00:00:00.000Z", harness.parent.promptId);
+    }],
+    ["detached observation", "parent_detached", (harness: Awaited<ReturnType<typeof createAutomaticSteeringHarness>>) => {
+      harness.store.markPromptObservationDetached(harness.parent.promptId, "test detach");
+    }],
+    ["unknown runtime state", "parent_state", (harness: Awaited<ReturnType<typeof createAutomaticSteeringHarness>>) => {
+      harness.store.updateBinding(harness.bindingId, { lastAgentState: "unknown" });
+    }]
+  ])("falls back exactly once for a %s", async (_label, reason, arrange) => {
+    const harness = await createAutomaticSteeringHarness();
+    arrange(harness);
+    await harness.send(`fallback-${reason}`, "继续");
+    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId);
+    expect(prompt).toMatchObject({ dispatchKind: "turn", parentPromptId: null, steeringOrigin: null });
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
+    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-fell-back-before-dispatch", reason }), "fell back to ordinary prompt before dispatch"]);
+    await harness.close();
+  });
+
+  it("retains /instances command semantics instead of classifying it as a prompt", async () => {
+    const harness = await createAutomaticSteeringHarness();
+    await harness.send("instances-message", "/instances");
+    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.info.mock.calls.some(([record]) => record.event === "auto-steering-classified" && record.messageId === "instances-message")).toBe(false);
+    await harness.close();
+  });
+
+  it("preserves one durable automatic decision and one scheduler wake for duplicate delivery", async () => {
+    const harness = await createAutomaticSteeringHarness();
+    const duplicate = harness.message("duplicate-message", "继续");
+    await harness.coordinator.handleMessage(duplicate);
+    await harness.coordinator.handleMessage(duplicate);
+    const rows = harness.store.database.prepare("SELECT id, dispatch_kind, parent_prompt_id, steering_origin FROM prompt_jobs WHERE lark_message_id = ?").all(duplicate.messageId);
+    expect(rows).toEqual([{ id: expect.any(String), dispatch_kind: "steering", parent_prompt_id: harness.parent.promptId, steering_origin: "automatic" }]);
+    expect(harness.schedulerWake.mock.calls.map(([hint]) => hint)).not.toContainEqual({ kind: "prompt-ready", bindingId: harness.bindingId });
+    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "steering-ready", bindingId: harness.bindingId, parentPromptId: harness.parent.promptId });
+    await vi.waitFor(() => expect(harness.steering).toEqual(["继续"]));
+    await harness.close();
+  });
+
+  it("accepts an eligible continuation as steering when the ordinary queue is full", async () => {
+    const harness = await createAutomaticSteeringHarness(1);
+    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
+    await harness.send("full-auto-message", "继续");
+    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId);
+    expect(prompt).toMatchObject({ dispatchKind: "steering", parentPromptId: harness.parent.promptId, steeringOrigin: "automatic" });
+    await vi.waitFor(() => expect(harness.steering).toEqual(["继续"]));
+    await harness.close();
+  });
+
+  it("rejects ambiguous ordinary work when the queue is full", async () => {
+    const harness = await createAutomaticSteeringHarness(1);
+    await harness.send("full-ordinary-message", "修复另一个问题");
+    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
+    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
+    await harness.close();
+  });
+
+  it("durably queues an eligible continuation when its full-queue parent invalidates before acceptance", async () => {
+    const harness = await createAutomaticSteeringHarness(1);
+    const acceptClassifiedPrompt = harness.store.acceptClassifiedPrompt.bind(harness.store);
+    vi.spyOn(harness.store, "acceptClassifiedPrompt").mockImplementation((input) => {
+      harness.store.markPromptObservationDetached(harness.parent.promptId, "test race");
+      return acceptClassifiedPrompt(input);
+    });
+    await harness.send("full-fallback-message", "继续");
+    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId);
+    expect(prompt).toMatchObject({ dispatchKind: "turn", parentPromptId: null, steeringOrigin: null });
+    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(2);
+    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-fell-back-before-dispatch", reason: "parent_detached" }), "fell back to ordinary prompt before dispatch"]);
+    await harness.close();
   });
 });

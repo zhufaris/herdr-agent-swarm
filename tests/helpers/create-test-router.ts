@@ -59,6 +59,9 @@ export function createTestRouter(
   });
   return new InboundRouter({
     config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
+    promptRun, automaticSteeringTarget: (bindingId) => {
+      const turn = promptRun.activeTurn(bindingId);
+      return turn && (turn.state === "working" || turn.state === "blocked") ? { promptId: turn.promptId, paneId: turn.paneId, state: turn.state } : null;
+    }, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
   });
 }
