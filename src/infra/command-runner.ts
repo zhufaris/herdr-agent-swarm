@@ -58,7 +58,7 @@ function redactCommandArgs(args: string[]): string[] {
   if (safe[0] === "agent" && safe[1] === "prompt" && safe.length > 3) safe[3] = "[REDACTED]";
   for (let index = 0; index < safe.length - 1; index += 1) {
     if (safe[index] !== "--env") continue;
-    const secret = /^(HERDR_BRIDGE_SESSION_CAPABILITY|SWARM_PRIMARY_CAPABILITY)=/.exec(safe[index + 1]!);
+    const secret = /^(SWARM_PRIMARY_CAPABILITY)=/.exec(safe[index + 1]!);
     if (secret) safe[index + 1] = `${secret[1]}=[REDACTED]`;
   }
   return safe;
@@ -69,7 +69,7 @@ function sensitiveCommandArgValues(args: string[]): string[] {
   if (args[0] === "agent" && args[1] === "prompt" && args.length > 3) values.push(args[3]!);
   for (let index = 0; index < args.length - 1; index += 1) {
     if (args[index] !== "--env") continue;
-    const match = /^(?:HERDR_BRIDGE_SESSION_CAPABILITY|SWARM_PRIMARY_CAPABILITY)=(.*)$/.exec(args[index + 1]!);
+    const match = /^SWARM_PRIMARY_CAPABILITY=(.*)$/.exec(args[index + 1]!);
     if (match) values.push(args[index + 1]!, match[1]!);
   }
   return values;

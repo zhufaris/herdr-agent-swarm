@@ -515,26 +515,6 @@ describe("SQLite store", () => {
     });
   });
 
-  it("persists a bridge-reported TraeX session only for the current pane generation", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
-    const input = { bindingId: "b1", paneId: "w1:p1", generation: 1, sessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4", reportedAt: "2026-08-27T12:00:00.000Z" };
-    expect(store.recordReportedTraexSession(input)).toBe("recorded");
-    expect(store.recordReportedTraexSession(input)).toBe("duplicate");
-    expect(store.recordReportedTraexSession({ ...input, sessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d5" })).toBe("rejected");
-    expect(store.recordReportedTraexSession({ ...input, generation: 2 })).toBe("rejected");
-    expect(store.getBinding("b1")).toMatchObject({ reportedTraexSessionId: input.sessionId, reportedTraexSessionAt: input.reportedAt });
-  });
-
-  it("clears a bridge-reported identity when a binding receives a replacement pane", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", reportedTraexSessionId: "01a03eb1-c193-7531-83c0-e6c6f70143d4", reportedTraexSessionAt: "2026-08-27T12:00:00.000Z", state: "orphaned", lifecycle: "active", attachment: "orphaned" });
-    const replaced = store.attachBindingPane("b1", { paneId: "w1:p2", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }, true);
-    expect(replaced).toMatchObject({ paneId: "w1:p2", generation: 2, reportedTraexSessionId: null, reportedTraexSessionAt: null });
-  });
-
   it("replaces only the owned pane_created provisioning generation", () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "provisioning", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Task" });
@@ -1434,6 +1414,24 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
     const after = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
     expect(after.schema_version).toBe(before.schema_version);
+  });
+
+  it("removes obsolete bridge-reported session columns without losing bindings", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-session-column-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.database.exec("ALTER TABLE bindings ADD COLUMN reported_traex_session_id TEXT");
+    store.database.exec("ALTER TABLE bindings ADD COLUMN reported_traex_session_at TEXT");
+    store.database.prepare("UPDATE bindings SET reported_traex_session_id = ?, reported_traex_session_at = ? WHERE id = ?").run("legacy-session", "2026-08-27T12:00:00.000Z", "b1");
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const names = (store.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name);
+    expect(names).not.toContain("reported_traex_session_id");
+    expect(names).not.toContain("reported_traex_session_at");
+    expect(store.getBinding("b1")).toMatchObject({ id: "b1", title: "Task" });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   it("atomically persists a Main Card view with one versioned delivery intent", () => {

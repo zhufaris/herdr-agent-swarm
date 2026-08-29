@@ -212,7 +212,6 @@ export interface BindingStorePort {
   updateBinding(id: string, patch: Partial<Binding>): Binding;
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding;
   replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding;
-  recordReportedTraexSession(input: { bindingId: string; paneId: string; generation: number; sessionId: string; reportedAt: string }): "recorded" | "duplicate" | "rejected";
   transitionBinding(id: string, transition: SessionTransition): Binding;
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication;
   reconcileBindingTitleWithProjection(input: BindingTitleProjectionInput): BindingTitleProjectionResult;

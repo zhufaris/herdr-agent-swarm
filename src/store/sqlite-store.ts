@@ -33,7 +33,7 @@ const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"])
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
-    rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id", reportedTraexSessionId: "reported_traex_session_id", reportedTraexSessionAt: "reported_traex_session_at",
+    rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
   agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value",
   title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
   lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
@@ -854,7 +854,7 @@ export class SqliteBindingStore implements BindingStorePort {
   replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding {
     const timestamp = now();
     const result = this.database.prepare(`UPDATE bindings SET
-      pane_id = ?, traex_session_id = ?, reported_traex_session_id = NULL, reported_traex_session_at = NULL,
+      pane_id = ?, traex_session_id = ?,
       agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?,
       workspace_id = ?, generation = generation + 1, last_agent_state = ?, last_observed_at = NULL, updated_at = ?
       WHERE id = ? AND pane_id = ? AND generation = ? AND lifecycle = 'provisioning' AND provisioning_checkpoint = 'pane_created'`)
@@ -865,22 +865,6 @@ export class SqliteBindingStore implements BindingStorePort {
       );
     if (result.changes !== 1) throw new Error(`Provisioning pane replacement lost ownership for binding ${input.bindingId}`);
     return this.requireBinding(input.bindingId);
-  }
-
-  recordReportedTraexSession(input: { bindingId: string; paneId: string; generation: number; sessionId: string; reportedAt: string }): "recorded" | "duplicate" | "rejected" {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const binding = this.getBinding(input.bindingId);
-      if (!binding || binding.paneId !== input.paneId || binding.generation !== input.generation || binding.runtime !== "traex" || binding.state === "archived" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed") {
-        this.database.exec("COMMIT"); return "rejected";
-      }
-      if (binding.reportedTraexSessionId === input.sessionId) { this.database.exec("COMMIT"); return "duplicate"; }
-      if (binding.reportedTraexSessionId) { this.database.exec("COMMIT"); return "rejected"; }
-      const result = this.database.prepare("UPDATE bindings SET reported_traex_session_id = ?, reported_traex_session_at = ?, updated_at = ? WHERE id = ? AND pane_id = ? AND generation = ? AND reported_traex_session_id IS NULL")
-        .run(input.sessionId, input.reportedAt, now(), input.bindingId, input.paneId, input.generation);
-      this.database.exec("COMMIT");
-      return result.changes === 1 ? "recorded" : "rejected";
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   transitionBinding(id: string, transition: SessionTransition): Binding {
@@ -1077,7 +1061,7 @@ export class SqliteBindingStore implements BindingStorePort {
     const suspended = transitionSession(next, { type: "archive_requested", hasActiveTurn: false });
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, reported_traex_session_id = NULL, reported_traex_session_at = NULL, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
+      this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
         .run(pane.paneId, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
       this.database.exec("COMMIT");
       return this.requireBinding(id);
@@ -2562,7 +2546,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS bindings(
         id TEXT PRIMARY KEY, creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
-        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, reported_traex_session_id TEXT, reported_traex_session_at TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
+        root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
         status_message_id TEXT,
@@ -2719,7 +2703,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureBindingCreatorColumn();
     this.ensureFailedSteeringInteractionKind();
     this.ensureAgentSessionColumns();
-    this.ensureReportedTraexSessionColumns();
+    this.removeReportedTraexSessionColumns();
     this.ensureBindingResetColumns();
     this.ensureTwoPhaseResetState();
     this.ensurePromptCancelledState();
@@ -3024,10 +3008,15 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!names.has("agent_session_value")) this.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_value TEXT");
   }
 
-  private ensureReportedTraexSessionColumns(): void {
+  private removeReportedTraexSessionColumns(): void {
     const names = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
-    if (!names.has("reported_traex_session_id")) this.database.exec("ALTER TABLE bindings ADD COLUMN reported_traex_session_id TEXT");
-    if (!names.has("reported_traex_session_at")) this.database.exec("ALTER TABLE bindings ADD COLUMN reported_traex_session_at TEXT");
+    const obsolete = ["reported_traex_session_id", "reported_traex_session_at"].filter((name) => names.has(name));
+    if (!obsolete.length) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const name of obsolete) this.database.exec(`ALTER TABLE bindings DROP COLUMN ${name}`);
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   private ensureProjectSelectionColumns(): void {

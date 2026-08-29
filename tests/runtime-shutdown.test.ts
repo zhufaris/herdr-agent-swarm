@@ -15,7 +15,6 @@ describe("bridge runtime shutdown", () => {
         context?.signal.addEventListener("abort", () => { integrityAborted = true; }, { once: true });
         await new Promise(() => {});
       } },
-      traexSessionReporter: { async stop() { calls.push("reporter"); } },
       primaryToolGateway: { async stop() { calls.push("gateway"); } },
       lease: { release() { calls.push("lease"); } },
       store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
@@ -25,23 +24,22 @@ describe("bridge runtime shutdown", () => {
     await vi.advanceTimersByTimeAsync(70);
     await expect(cleanup).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
     expect(integrityAborted).toBe(true);
-    expect(calls).toEqual(["reporter", "gateway", "fence", "lease", "store"]);
+    expect(calls).toEqual(["gateway", "fence", "lease", "store"]);
   });
 
   it("retains startup SQLite ownership when a write-capable stop remains hung", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
     const cleanup = cleanupStartupFailure({
-      traexSessionReporter: { async stop() { await new Promise(() => {}); } },
-      primaryToolGateway: { async stop() { calls.push("gateway"); } },
+      primaryToolGateway: { async stop() { await new Promise(() => {}); } },
       lease: { release() { calls.push("lease"); } },
       store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
       logger: { info() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
     });
 
     await vi.advanceTimersByTimeAsync(70);
-    await expect(cleanup).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["traexSessionReporter"] });
-    expect(calls).toEqual(["gateway"]);
+    await expect(cleanup).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["primaryToolGateway"] });
+    expect(calls).toEqual([]);
   });
 
   it("waits for async components and closes the store last", async () => {
@@ -199,13 +197,13 @@ describe("bridge runtime shutdown", () => {
     vi.useRealTimers();
   });
 
-  it("returns ownership retained when the session reporter does not settle", async () => {
+  it("returns ownership retained when the primary tool gateway does not settle", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
-    let settleReporter!: () => void;
-    const reporter = new Promise<void>((resolve) => { settleReporter = resolve; });
+    let settleGateway!: () => void;
+    const gateway = new Promise<void>((resolve) => { settleGateway = resolve; });
     const runtime = new BridgeRuntimeShutdown({
-      traexSessionReporter: { async stop() { calls.push("reporter:start"); await reporter; calls.push("reporter:end"); } },
+      primaryToolGateway: { async stop() { calls.push("gateway:start"); await gateway; calls.push("gateway:end"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       projector: { async stop() { calls.push("projector"); } },
       publisher: { async stop() { calls.push("publisher"); } },
@@ -221,8 +219,8 @@ describe("bridge runtime shutdown", () => {
     expect(calls).not.toContain("lease");
     expect(calls).not.toContain("store");
 
-    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["traexSessionReporter"] });
-    settleReporter();
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["primaryToolGateway"] });
+    settleGateway();
     await Promise.resolve();
     vi.useRealTimers();
   });

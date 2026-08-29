@@ -168,8 +168,6 @@ export interface Binding {
   resetMessageId: string | null;
   paneId: string | null;
   traexSessionId: string | null;
-  reportedTraexSessionId?: string | null;
-  reportedTraexSessionAt?: string | null;
   agentSessionSource?: string | null;
   agentSessionAgent?: string | null;
   agentSessionKind?: "id" | "path" | null;
@@ -204,7 +202,6 @@ export interface CardInteraction {
 export type BindingMetadataPatch = Partial<Pick<Binding,
   | "projectId" | "topicId" | "rootMessageId" | "retiredTopicId" | "retiredRootMessageId"
   | "reservedTopicId" | "reservedRootMessageId" | "resetMessageId" | "paneId" | "traexSessionId"
-  | "reportedTraexSessionId" | "reportedTraexSessionAt"
   | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"
   | "title" | "statusMessageId" | "lastOutputFingerprint" | "lastActivityAt"
 >>;

@@ -35,13 +35,11 @@ interface Options {
   immediateOutbound: ImmediateOutboundDispatcher;
   scheduler: PromptWorkScheduler;
   wakeRetiredPaneCleanup?: () => void;
-  sessionReporter?: { environment(bindingId: string, generation: number): Record<string, string> };
   logger: Logger;
 }
 
-function paneCreationOptions(bindingId: string, generation: number, projectId: string, title: string, reporter: Options["sessionReporter"]): import("../domain/types.js").HerdrPaneCreationOptions {
-  const environment = reporter?.environment(bindingId, generation);
-  return { bindingId, generation, projectId, placement: "dedicated-tab", title, ...(environment ? { environment } : {}) };
+function paneCreationOptions(bindingId: string, generation: number, projectId: string, title: string): import("../domain/types.js").HerdrPaneCreationOptions {
+  return { bindingId, generation, projectId, placement: "dedicated-tab", title };
 }
 
 export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowPort {
@@ -71,7 +69,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     });
     await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
     try {
-      const pane = await herdr.createPane(binding.workspaceId, project.cwd, paneCreationOptions(binding.id, binding.generation, project.id, paneTitle, this.options.sessionReporter));
+      const pane = await herdr.createPane(binding.workspaceId, project.cwd, paneCreationOptions(binding.id, binding.generation, project.id, paneTitle));
       binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
       binding = store.transitionBinding(binding.id, { type: "pane_created" });
       await herdr.startTraex(pane.paneId, config.traex.executable);
@@ -192,7 +190,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (!candidate.created && replacement.provisioningCheckpoint === "selected") throw new Error("Reset candidate may already have created a pane; inspect the Space and attach the surviving pane instead of retrying creation");
       let pane = replacement.paneId ? await herdr.getPane(replacement.paneId) : null;
       if (replacement.provisioningCheckpoint === "selected") {
-        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(replacement.id, replacement.generation, project.id, paneTitle, this.options.sessionReporter));
+        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(replacement.id, replacement.generation, project.id, paneTitle));
         replacement = store.updateBindingMetadata(replacement.id, paneIdentityPatch(pane));
         replacement = store.transitionBinding(replacement.id, { type: "pane_created" });
       }
@@ -288,7 +286,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const existingPane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
     const paneTitle = randomPaneName();
     const nextGeneration = binding.generation + 1;
-    const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle, this.options.sessionReporter));
+    const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle));
     await herdr.startTraex(pane.paneId, config.traex.executable);
     const startedPane = await this.requireStartedPane(project, pane.paneId, pane.terminalId ?? null);
     const next = store.transitionBinding(store.attachBindingPane(binding.id, startedPane, true).id, { type: "pane_observed", runtime: startedPane.agentState });
@@ -310,7 +308,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       if (pane && current.traexSessionId && pane.terminalId && current.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${current.paneId}`);
       if (current.provisioningCheckpoint === "selected") {
         if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
-        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation, project.id, paneTitle, this.options.sessionReporter));
+        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation, project.id, paneTitle));
         current = store.updateBindingMetadata(current.id, paneIdentityPatch(pane)); current = store.transitionBinding(current.id, { type: "pane_created" });
       }
       if (!pane && current.paneId) pane = await herdr.getPane(current.paneId);
@@ -319,7 +317,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
         const observation = await herdr.observeRuntime(pane.paneId);
         if (observation?.traexProcess && !observation.composerReady) {
           const replacementTitle = randomPaneName();
-          const replacement = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation + 1, project.id, replacementTitle, this.options.sessionReporter));
+          const replacement = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation + 1, project.id, replacementTitle));
           current = store.replaceProvisioningPane({ bindingId: current.id, expectedPaneId: pane.paneId, expectedGeneration: current.generation, pane: replacement });
           pane = replacement;
           logger.warn({ event: "project-provisioning-pane-replaced", selectionId: selection.id, bindingId: current.id, retainedPaneId: observation.pane?.paneId ?? null, paneId: pane.paneId, generation: current.generation, outcome: "replacement_created" }, "replaced an occupied provisioning pane that lacked structured Agent readiness");

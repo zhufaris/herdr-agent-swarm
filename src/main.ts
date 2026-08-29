@@ -57,7 +57,6 @@ import { InstanceTurnSupervisor } from "./coordinator/instance-turn-supervisor.j
 import { randomUUID } from "node:crypto";
 import { safeLogError } from "./runtime/safe-error.js";
 import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
-import { TraexSessionReporter } from "./runtime/traex-session-reporter.js";
 import { PrimaryToolGateway } from "./runtime/primary-tool-gateway.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
 
@@ -70,7 +69,6 @@ const logger = pino({ level: config.logLevel, serializers: { err: safeLogError }
 ] });
 const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
-const traexSessionReporter = new TraexSessionReporter(join(dirname(config.databasePath), "traex-session-reporter.sock"), store, logger);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
 const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
 const worktreeNameResolver = new WorktreeNameResolver(runner, config.commandTimeoutMs);
@@ -132,7 +130,7 @@ const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork,
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
-const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), sessionReporter: traexSessionReporter, logger });
+const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
 const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
 const paneControl = new PaneControlWorkflow({ store, herdr, outbound, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
 const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound, logger });
@@ -164,7 +162,6 @@ try {
     process.kill(process.pid, "SIGTERM");
   });
   instanceTurns.prepareRecovery();
-  await traexSessionReporter.start();
   await primaryToolGateway.start();
   sqliteIntegrity.start();
   await sqliteIntegrity.run();
@@ -175,7 +172,7 @@ try {
     return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure };
   } };
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => {
     outboxRetention.stop();
@@ -202,7 +199,7 @@ try {
   outboxRetention.stop();
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
   else {
-    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, lease, store, logger });
+    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, lease, store, logger });
   }
   process.exitCode = 1;
 }
