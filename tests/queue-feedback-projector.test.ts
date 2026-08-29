@@ -19,7 +19,7 @@ describe("QueueFeedbackProjector", () => {
     const store = {
       listBindings: () => [],
       loadQueueFeedbackInputs: vi.fn(() => ({ activeStartedAt: null, queued: [], durationsMs: [] })),
-      projectQueueFeedback: vi.fn()
+      projectQueuedRunCards: vi.fn()
     };
     const bus = new BridgeEventBus();
     const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: pino({ enabled: false }) });
@@ -28,20 +28,26 @@ describe("QueueFeedbackProjector", () => {
     await bus.publish(event("RunQueuePositionChanged"));
 
     expect(store.loadQueueFeedbackInputs).not.toHaveBeenCalled();
-    expect(store.projectQueueFeedback).not.toHaveBeenCalled();
+    expect(store.projectQueuedRunCards).not.toHaveBeenCalled();
     await projector.stop();
   });
 
   it("refreshes lifecycle changes, persists only changed queued cards, and coalesces elapsed buckets", async () => {
     let clock = "2026-08-29T12:00:20.000Z";
-    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
-    queued.answerMessageId = "answer-1";
+    const queued = ["p1", "p2", "p3"].map((promptId) => {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 9, occurredAt: "start" });
+      view.answerMessageId = `answer-${promptId}`;
+      return view;
+    });
     const terminal = { ...createQueuedRunCard({ promptId: "done", bindingId: "b1", title: "Done", workspaceId: "w1", paneId: "w1:p1", requestText: "done", queuePosition: 0, occurredAt: "start" }), phase: "completed" as const };
-    const cards = new Map<string, RunCardView>([[queued.promptId, queued], [terminal.promptId, terminal]]);
+    const cards = new Map<string, RunCardView>([...queued.map((view) => [view.promptId, view] as const), [terminal.promptId, terminal]]);
     const store = {
       listBindings: () => [{ id: "b1" }],
       loadQueueFeedbackInputs: vi.fn(() => ({ activeStartedAt: "2026-08-29T12:00:00.000Z", queued: [...cards.values()], durationsMs: [60_000, 60_000, 60_000] })),
-      projectQueueFeedback: vi.fn(({ view, card }: { view: RunCardView; card: object | null }) => { cards.set(view.promptId, view); return { outcome: "projected" as const, view, outboxReserved: card !== null }; })
+      projectQueuedRunCards: vi.fn(({ projections }: { projections: Array<{ view: RunCardView; card: object | null }> }) => {
+        for (const { view } of projections) cards.set(view.promptId, view);
+        return { projected: projections.map(({ view }) => view), stalePromptIds: [], outboxReserved: projections.some(({ card }) => card !== null) };
+      })
     };
     const outboundWork = { wake: vi.fn() };
     const timers: Array<() => void> = [];
@@ -53,7 +59,13 @@ describe("QueueFeedbackProjector", () => {
     projector.start(bus);
 
     for (const type of ["PromptQueued", "TurnStarted", "TurnCompleted", "TurnFailed", "PromptCancelled", "RunQueuePositionChanged"] as const) await bus.publish(event(type));
-    expect(store.projectQueueFeedback).toHaveBeenCalledTimes(1);
+    expect(store.projectQueuedRunCards).toHaveBeenCalledTimes(1);
+    const firstBatch = store.projectQueuedRunCards.mock.calls[0]![0].projections;
+    expect(firstBatch.map(({ expectedViewVersion, view }: { expectedViewVersion: number; view: RunCardView }) => ({ expectedViewVersion, promptId: view.promptId, queuePosition: view.queuePosition, aheadCount: view.queueFeedback?.aheadCount, viewVersion: view.viewVersion }))).toEqual([
+      { expectedViewVersion: 1, promptId: "p1", queuePosition: 1, aheadCount: 0, viewVersion: 2 },
+      { expectedViewVersion: 1, promptId: "p2", queuePosition: 2, aheadCount: 1, viewVersion: 2 },
+      { expectedViewVersion: 1, promptId: "p3", queuePosition: 3, aheadCount: 2, viewVersion: 2 }
+    ]);
     expect(outboundWork.wake).toHaveBeenCalledTimes(1);
     expect(cards.get("done")!.queueFeedback).toBeNull();
     expect(setIntervalFn).toHaveBeenCalledOnce();
@@ -61,10 +73,11 @@ describe("QueueFeedbackProjector", () => {
 
     clock = "2026-08-29T12:00:29.000Z";
     timers[0]!(); await projector.settle();
-    expect(store.projectQueueFeedback).toHaveBeenCalledTimes(1);
+    expect(store.projectQueuedRunCards).toHaveBeenCalledTimes(1);
     clock = "2026-08-29T12:00:31.000Z";
     timers[0]!(); await projector.settle();
-    expect(store.projectQueueFeedback).toHaveBeenCalledTimes(2);
+    expect(store.projectQueuedRunCards).toHaveBeenCalledTimes(2);
+    expect(outboundWork.wake).toHaveBeenCalledTimes(2);
 
     await projector.stop();
     expect(clearIntervalFn).toHaveBeenCalledWith(interval);
@@ -73,7 +86,7 @@ describe("QueueFeedbackProjector", () => {
   it("converges durable queued cards after restart without prompt workflow wake-up and stops scheduling when empty", async () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     const queuedRows: RunCardView[] = [queued];
-    const store = { listBindings: () => [{ id: "b1" }], loadQueueFeedbackInputs: () => ({ activeStartedAt: null, queued: [...queuedRows], durationsMs: [] }), projectQueueFeedback: vi.fn(({ view }: { view: RunCardView }) => ({ outcome: "projected" as const, view, outboxReserved: false })) };
+    const store = { listBindings: () => [{ id: "b1" }], loadQueueFeedbackInputs: () => ({ activeStartedAt: null, queued: [...queuedRows], durationsMs: [] }), projectQueuedRunCards: vi.fn(({ projections }: { projections: Array<{ view: RunCardView }> }) => ({ projected: projections.map(({ view }) => view), stalePromptIds: [], outboxReserved: false })) };
     const outboundWork = { wake: vi.fn() };
     const promptWake = vi.fn();
     const interval = { unref: vi.fn() };
@@ -81,7 +94,7 @@ describe("QueueFeedbackProjector", () => {
     const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: outboundWork as never, logger: pino({ enabled: false }), now: () => "2026-08-29T12:00:00.000Z", intervalMs: 30_000, setIntervalFn: (() => interval) as never, clearIntervalFn: clearIntervalFn as never });
 
     await projector.converge();
-    expect(store.projectQueueFeedback).toHaveBeenCalledOnce();
+    expect(store.projectQueuedRunCards).toHaveBeenCalledOnce();
     expect(promptWake).not.toHaveBeenCalled();
 
     queuedRows.length = 0;

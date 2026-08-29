@@ -69,21 +69,24 @@ export class QueueFeedbackProjector {
     if (queued.length > 0) this.queuedBindings.add(bindingId);
     else this.queuedBindings.delete(bindingId);
     this.syncTimer();
-    let enqueued = false;
+    const projections = [];
     for (const [index, view] of queued.entries()) {
-      const feedback = estimateQueueWait({ queuePosition: index + 1, activeStartedAt: snapshot.activeStartedAt, now: occurredAt, completedDurationsMs: snapshot.durationsMs });
-      const current = view.queueFeedback;
-      if (current && current.aheadCount === feedback.aheadCount && current.elapsedBucket === feedback.elapsedBucket
-        && current.estimateLowerSeconds === feedback.estimateLowerSeconds && current.estimateUpperSeconds === feedback.estimateUpperSeconds
-        && current.sampleCount === feedback.sampleCount) continue;
-      const next = reduceRunCard(view, { type: "queue-feedback", occurredAt, feedback });
+      const queuePosition = index + 1;
+      const feedback = estimateQueueWait({ queuePosition, activeStartedAt: snapshot.activeStartedAt, now: occurredAt, completedDurationsMs: snapshot.durationsMs });
+      const positioned = reduceRunCard(view, { type: "queue-position", occurredAt, queuePosition });
+      const current = positioned.queueFeedback;
+      const feedbackChanged = !current || current.aheadCount !== feedback.aheadCount || current.elapsedBucket !== feedback.elapsedBucket
+        || current.estimateLowerSeconds !== feedback.estimateLowerSeconds || current.estimateUpperSeconds !== feedback.estimateUpperSeconds
+        || current.sampleCount !== feedback.sampleCount;
+      const reduced = feedbackChanged ? reduceRunCard(positioned, { type: "queue-feedback", occurredAt, feedback }) : positioned;
+      const next = reduced === view ? view : { ...reduced, viewVersion: view.viewVersion + 1 };
       if (next === view) continue;
-      const projection = this.options.store.projectQueueFeedback({ expectedViewVersion: view.viewVersion, view: next, card: next.answerMessageId ? renderRequestAnswerCard(next) : null });
-      if (projection.outcome === "stale") continue;
-      this.options.logger.info({ event: "queue-estimate-projected", bindingId, promptId: projection.view.promptId, aheadCount: feedback.aheadCount, sampleCount: feedback.sampleCount, estimateLowerSeconds: feedback.estimateLowerSeconds, estimateUpperSeconds: feedback.estimateUpperSeconds }, "projected queued wait estimate");
-      enqueued ||= projection.outboxReserved;
+      projections.push({ expectedViewVersion: view.viewVersion, view: next, card: next.answerMessageId ? renderRequestAnswerCard(next) : null });
     }
-    if (enqueued) this.options.outboundWork.wake();
+    if (projections.length === 0) return;
+    const result = this.options.store.projectQueuedRunCards({ bindingId, projections });
+    this.options.logger.info({ event: "queued-run-cards-projected", bindingId, candidateCount: projections.length, projectedCount: result.projected.length, staleCount: result.stalePromptIds.length, outboxReserved: result.outboxReserved }, "projected queued run cards");
+    if (result.outboxReserved) this.options.outboundWork.wake();
   }
 
   private syncTimer(): void {

@@ -11,6 +11,30 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("event-driven card projection", () => {
+  it("preserves the FIFO position assigned during acceptance when pending depth includes an active turn", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Queued", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "t1", rootMessageId: "root" }; },
+      async replyText() { return { messageId: "text" }; },
+      async replyCard() { return { messageId: "card" }; },
+      async updateCard() {}
+    }, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+    projector.start();
+
+    await bus.publish({ eventId: "queued", bindingId: "b1", type: "PromptQueued", origin: "bridge", occurredAt: "later", payload: { promptId: "p1", queueDepth: 2, actorOpenId: "u1" } });
+
+    expect(store.loadRunCard("p1")).toMatchObject({ queuePosition: 1, viewVersion: 1 });
+    await projector.stop();
+    await publisher.stop();
+    store.close();
+  });
+
   it("coalesces repeated queue-feedback ticks to the newest durable answer update", async () => {
     let clock = "2026-08-29T12:00:20.000Z";
     const store = new SqliteBindingStore(":memory:");

@@ -267,7 +267,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       let observerDetached = false;
       let dispatched = false;
       try {
-        await this.refreshQueuePositions(bindingId);
         await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
         let outputSource = await this.acquireTranscript(binding, abortController.signal);
         this.options.logger.info({
@@ -323,7 +322,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
-        await this.refreshQueuePositions(bindingId);
       } catch (error) {
         if (!this.isBindingActive(bindingId)) { observerDetached = true; return; }
         if (dispatched) {
@@ -337,7 +335,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.options.store.failPrompt({ promptId: prompt.id, error: errorMessage(error), occurredAt: new Date().toISOString() });
         await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
-        await this.refreshQueuePositions(bindingId);
         if (binding.lastAgentState === "blocked") return;
       } finally {
         const steeringWorker = this.steeringWorkers.get(bindingId);
@@ -349,7 +346,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           const automatic = steering?.steeringOrigin === "automatic";
           await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: automatic ? "当前任务已结束，未自动注入" : notice, failureKind: "rejected", automatic });
         }
-        if (orphaned.length > 0) await this.refreshQueuePositions(bindingId);
         this.turns.detach(bindingId, prompt.id);
         this.options.scheduler.wake({ kind: "control-ready", bindingId });
         const latestBinding = this.options.store.getBinding(bindingId);
@@ -468,13 +464,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       const outcome = source.emitted ? "terminal_fallback_suppressed" : "terminal_fallback";
       this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, fallbackReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
       return { source: source.emitted ? source : { mode: "terminal", fallbackReason: "transcript_read_failed", warningPublished: false }, observation: { answerDelta: "" } };
-    }
-  }
-
-  private async refreshQueuePositions(bindingId: string): Promise<void> {
-    for (const [index, view] of this.options.store.listQueuedTurnRunCards(bindingId).entries()) {
-      const queuePosition = index + 1;
-      if (view.queuePosition !== queuePosition) await this.publish(bindingId, "RunQueuePositionChanged", "bridge", { promptId: view.promptId, queuePosition });
     }
   }
 

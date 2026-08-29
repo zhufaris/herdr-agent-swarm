@@ -834,19 +834,89 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ count: 0 });
   });
 
-  it("projects queue feedback and its answer-card outbox intent atomically", () => {
+  it("projects changed queued run cards in one batch with per-card answer lanes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const views = ["p1", "p2", "p3"].map((promptId, index) => createQueuedRunCard({
+      promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: index + 1, occurredAt: "start"
+    }));
+    for (const view of views) {
+      store.acceptPrompt({ prompt: { id: view.promptId, bindingId: "b1", larkMessageId: `m-${view.promptId}`, actorOpenId: "u1", body: view.promptId }, view, rootMessageId: "root", answerCard: {} });
+      const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === view.promptId)!;
+      store.markOutboundReplyDelivered(create.id, `answer-${view.promptId}`, `card-${view.promptId}`);
+    }
+    const first = store.loadRunCard("p1")!;
+    const third = store.loadRunCard("p3")!;
+    const firstNext = { ...first, queuePosition: 2, viewVersion: first.viewVersion + 1, updatedAt: "later" };
+    const thirdNext = { ...third, queuePosition: 4, viewVersion: third.viewVersion + 1, updatedAt: "later" };
+
+    expect(store.projectQueuedRunCards({
+      bindingId: "b1",
+      projections: [
+        { expectedViewVersion: first.viewVersion, view: firstNext, card: { promptId: "p1" } },
+        { expectedViewVersion: third.viewVersion, view: thirdNext, card: { promptId: "p3" } }
+      ]
+    })).toEqual({ projected: [firstNext, thirdNext], stalePromptIds: [], outboxReserved: true });
+    expect(store.loadRunCard("p1")).toMatchObject({ queuePosition: 2, viewVersion: first.viewVersion + 1 });
+    expect(store.loadRunCard("p2")).toMatchObject({ queuePosition: 2, viewVersion: views[1]!.viewVersion });
+    expect(store.loadRunCard("p3")).toMatchObject({ queuePosition: 4, viewVersion: third.viewVersion + 1 });
+    expect(store.database.prepare("SELECT idempotency_key, lane_key FROM outbound_replies WHERE kind = 'card_update' ORDER BY prompt_id").all()).toEqual([
+      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "answer:p1" },
+      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "answer:p3" }
+    ]);
+  });
+
+  it("skips stale queued card projections while committing valid siblings", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const cards = ["stale", "valid"].map((promptId, index) => {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: index + 1, occurredAt: "start" });
+      view.answerMessageId = `answer-${promptId}`;
+      store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      return view;
+    });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `delivered-${reply.promptId}`, `card-${reply.promptId}`);
+
+    const result = store.projectQueuedRunCards({ bindingId: "b1", projections: cards.map((view) => ({ expectedViewVersion: view.promptId === "stale" ? 0 : 1, view: { ...view, queuePosition: 9, viewVersion: 2 }, card: {} })) });
+
+    expect(result).toMatchObject({ projected: [expect.objectContaining({ promptId: "valid" })], stalePromptIds: ["stale"], outboxReserved: true });
+    expect(store.loadRunCard("stale")).toMatchObject({ queuePosition: 1, viewVersion: 1 });
+    expect(store.loadRunCard("valid")).toMatchObject({ queuePosition: 9, viewVersion: 2 });
+  });
+
+  it("projects a queued card without reserving outbox work when no answer message exists", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
-    initial.answerMessageId = "answer-1";
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: initial, rootMessageId: "root", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
-    const next = { ...initial, queueFeedback: { aheadCount: 0, activeElapsedSeconds: 30, elapsedBucket: 1, estimateLowerSeconds: null, estimateUpperSeconds: null, sampleCount: 0 }, viewVersion: initial.viewVersion + 1, updatedAt: "later" };
 
-    store.database.exec("CREATE TRIGGER reject_queue_feedback_outbox BEFORE INSERT ON outbound_replies WHEN NEW.kind = 'card_update' BEGIN SELECT RAISE(ABORT, 'reject outbox'); END");
-    expect(() => store!.projectQueueFeedback({ expectedViewVersion: initial.viewVersion, view: next, card: { card: true } })).toThrow("reject outbox");
-    expect(store.loadRunCard("p1")).toMatchObject({ viewVersion: initial.viewVersion, queueFeedback: null });
+    expect(store.projectQueuedRunCards({ bindingId: "b1", projections: [{ expectedViewVersion: 1, view: { ...initial, queuePosition: 2, viewVersion: 2 }, card: {} }] })).toMatchObject({
+      projected: [expect.objectContaining({ promptId: "p1", queuePosition: 2 })], stalePromptIds: [], outboxReserved: false
+    });
     expect(store.listPendingOutboundReplies()).toHaveLength(0);
+  });
+
+  it("rolls back every queued card and outbox intent when one batch insert fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const cards = ["p1", "p2"].map((promptId, index) => {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: index + 1, occurredAt: "start" });
+      view.answerMessageId = `answer-${promptId}`;
+      store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      return view;
+    });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `delivered-${reply.promptId}`, `card-${reply.promptId}`);
+    store.database.exec("CREATE TEMP TRIGGER reject_second_queue_card BEFORE INSERT ON outbound_replies WHEN NEW.kind = 'card_update' AND NEW.prompt_id = 'p2' BEGIN SELECT RAISE(ABORT, 'reject second outbox'); END");
+
+    try {
+      expect(() => store!.projectQueuedRunCards({ bindingId: "b1", projections: cards.map((view) => ({ expectedViewVersion: 1, view: { ...view, queuePosition: view.queuePosition + 1, viewVersion: 2 }, card: {} })) })).toThrow("reject second outbox");
+      expect(store.loadRunCard("p1")).toMatchObject({ queuePosition: 1, viewVersion: 1 });
+      expect(store.loadRunCard("p2")).toMatchObject({ queuePosition: 2, viewVersion: 1 });
+      expect(store.listPendingOutboundReplies()).toHaveLength(0);
+    } finally {
+      store.database.exec("DROP TRIGGER IF EXISTS reject_second_queue_card");
+    }
   });
 
   it.each([

@@ -140,7 +140,7 @@ function promptIdOf(event: BridgeEvent): string | null {
 
 function runCardChange(event: BridgeEvent): RunCardChange | null {
   switch (event.type) {
-    case "PromptQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queueDepth };
+    case "PromptQueued": return null;
     case "PromptCancelled": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.reason };
     case "SteeringQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: 0 };
     case "RunQueuePositionChanged": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queuePosition };

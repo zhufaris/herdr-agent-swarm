@@ -1146,22 +1146,28 @@ export class SqliteBindingStore implements BindingStorePort {
     return { activeStartedAt: active?.started_at ?? null, queued: this.listQueuedTurnRunCards(bindingId), durationsMs: this.listCompletedOrdinaryTurnDurations(bindingId, 10) };
   }
 
-  projectQueueFeedback(input: { expectedViewVersion: number; view: RunCardView; card: object | null }): { outcome: "projected" | "stale"; view: RunCardView; outboxReserved: boolean } {
+  projectQueuedRunCards(input: { bindingId: string; projections: Array<{ expectedViewVersion: number; view: RunCardView; card: object | null }> }): { projected: RunCardView[]; stalePromptIds: string[]; outboxReserved: boolean } {
+    if (input.projections.length === 0) return { projected: [], stalePromptIds: [], outboxReserved: false };
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const current = this.loadRunCard(input.view.promptId);
-      if (!current || current.phase !== "queued" || current.viewVersion !== input.expectedViewVersion) {
-        this.database.exec("COMMIT");
-        return { outcome: "stale", view: current ?? input.view, outboxReserved: false };
-      }
-      const view = this.saveRunCard(input.view);
+      const projected: RunCardView[] = [];
+      const stalePromptIds: string[] = [];
       let outboxReserved = false;
-      if (view.answerMessageId && input.card) {
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${view.promptId}:answer:${view.viewVersion}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: view.answerMessageId, kind: "card_update", payload: JSON.stringify(input.card) });
-        outboxReserved = true;
+      for (const projection of input.projections) {
+        const current = this.loadRunCard(projection.view.promptId);
+        if (!current || current.bindingId !== input.bindingId || current.phase !== "queued" || current.viewVersion !== projection.expectedViewVersion) {
+          stalePromptIds.push(projection.view.promptId);
+          continue;
+        }
+        const view = this.saveRunCard(projection.view);
+        projected.push(view);
+        if (view.answerMessageId && projection.card) {
+          const reply = this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${view.promptId}:answer:${view.viewVersion}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: view.answerMessageId, kind: "card_update", payload: JSON.stringify(projection.card) });
+          outboxReserved ||= reply.state === "pending";
+        }
       }
       this.database.exec("COMMIT");
-      return { outcome: "projected", view, outboxReserved };
+      return { projected, stalePromptIds, outboxReserved };
     } catch (error) {
       if (this.database.isTransaction) this.database.exec("ROLLBACK");
       throw error;
