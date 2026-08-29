@@ -208,11 +208,12 @@ TraeX binary reported by status. The shim does not modify the official Herdr
 binary, native Codex behavior, session database, or detection manifests. Internally
 it uses Herdr's Codex-compatible reservation and prompt protocol while executing
 the real TraeX binary; only shim-marked JSON results are projected as
-`agent: "traex"`. The shim generates a session UUID, passes it to TraeX with
-`--session-id`, and gives the same UUID to its process-fenced reporter. The
-reporter establishes initial idle authority under `herdr-traex-shim` and
-publishes Herdr `agent_session` separately through the trusted
-`herdr:codex` integration source;
+`agent: "traex"`. The shim generates a correlation UUID and passes it to
+TraeX's legacy `--session-id` naming option. Its process-fenced reporter uses
+that name plus the TraeX PID to resolve the canonical thread ID from TraeX's
+bounded `session-peers` registry. The reporter establishes initial idle
+authority under `herdr-traex-shim` and publishes the canonical Herdr
+`agent_session` separately through the trusted `herdr:codex` integration source;
 `UserPromptSubmit` and `Stop` hooks report working/idle
 transitions without reading terminal content. The bridge persists that canonical
 Herdr identity and uses it to open the one matching JSONL. There is no separate

@@ -4,7 +4,7 @@
 
 **Goal:** Make shim-reported Herdr `agent_session` the only TraeX session identity, remove the bridge-owned SessionStart socket and legacy columns, and prove exact JSONL observation across restart and recovery.
 
-**Architecture:** The installed shim generates one UUID per managed start and supplies it independently to TraeX `--session-id` and the process-fenced Herdr reporter. The reporter keeps process state under `herdr-traex-shim` but publishes identity through the trusted `herdr:codex` session authority. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
+**Architecture:** The installed shim generates one correlation UUID per managed start and supplies it to TraeX's legacy `--session-id` naming option. The process-fenced reporter resolves the canonical thread ID from TraeX's peer registry, keeps process state under `herdr-traex-shim`, and publishes the canonical identity through the trusted `herdr:codex` session authority. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
 
 **Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, better-sqlite3, Bash, Herdr 0.7.5, TraeX hooks
 
@@ -34,9 +34,9 @@
 
 **Interfaces:**
 - Consumes: a shim-generated UUID, process-fenced reporter input, and installer-owned official Herdr path.
-- Produces: one UUID passed to TraeX `--session-id` and Herdr `pane report-agent-session --source herdr:codex ... --agent-session-id`; lifecycle hooks support only prompt/stop state changes.
+- Produces: one correlation UUID passed to TraeX `--session-id`; Task 7 resolves the separate canonical UUID for Herdr. Lifecycle hooks support only prompt/stop state changes.
 
-- [ ] Add failing tests asserting one generated UUID appears in TraeX `--session-id` and reporter input, then in exact Herdr `--agent-session-id` argv.
+- [ ] Add failing tests asserting one generated correlation UUID appears in TraeX `--session-id` and reporter input.
 - [ ] Add rejection tests for caller-provided `--session-id`, `--resume`, and equals-form variants.
 - [ ] Run `npx vitest run tests/herdr-traex-shim.test.ts tests/herdr-traex-reporter.test.ts` and confirm the new assertions fail.
 - [ ] Generate the UUID in `runHerdrTraexStart`, reserve identity arguments, and pass the UUID into `ReporterInput`.
@@ -133,7 +133,7 @@
 - Consumes: the committed clean-cut implementation.
 - Produces: implementation-backed operational documentation and live verification evidence.
 
-- [ ] Document the authority chain `shim UUID -> TraeX --session-id + Herdr agent_session -> SQLite canonical fields -> exact JSONL`.
+- [ ] Document the authority chain `shim correlation UUID -> TraeX peer threadId -> Herdr agent_session -> SQLite canonical fields -> exact JSONL`.
 - [ ] Document failure behavior: missing identity degrades structured output and never replays a prompt.
 - [ ] Run focused suites for shim, adapter, store, reconciliation, transcript, prompt concurrency, and shutdown.
 - [ ] Run `npm test`, `npm run typecheck`, `npm run build`, and `git diff --check`.
@@ -171,6 +171,32 @@
 - [ ] Commit the implementation and documentation as separate thematic commits.
 - [ ] Install the new release and verify a fresh pane exposes the generated UUID without manual reporting.
 - [ ] Resolve that UUID to exactly one JSONL and verify its `session_meta.payload.id`.
+
+### Task 7: Resolve TraeX's canonical thread ID from its process registry
+
+**Files:**
+- Create: `src/runtime/traex-session-peer.ts`
+- Create: `tests/traex-session-peer.test.ts`
+- Modify: `src/runtime/herdr-traex-shim.ts`
+- Modify: `src/runtime/herdr-traex-reporter.ts`
+- Modify: `src/cli/herdr-traex-shim.ts`
+- Modify: `src/cli/herdr-traex-reporter.ts`
+- Modify: `scripts/install-herdr-traex-shim.sh`
+- Modify: `tests/herdr-traex-shim.test.ts`
+- Modify: `tests/herdr-traex-reporter.test.ts`
+- Modify: `tests/herdr-traex-shim-install.test.ts`
+
+**Interfaces:**
+- Consumes: `sessionPeersDir`, fenced TraeX PID, and generated launch correlation UUID.
+- Produces: exactly one canonical TraeX thread UUID, or no identity on bounded uncertainty.
+
+- [ ] Add failing resolver tests for a valid peer plus malformed, oversized, symlinked, PID-mismatched, name-mismatched, filename-mismatched, and ambiguous records.
+- [ ] Implement a bounded resolver with a 4 KiB file limit, 10,000-entry scan cap, exact schema checks, and no timestamp ordering.
+- [ ] Rename reporter input from `agentSessionId` to `launchCorrelationId` and poll resolution for at most 10 seconds while continuously process-fenced.
+- [ ] Report only the resolved canonical `threadId` through `herdr:codex`; return no managed identity if resolution remains uncertain.
+- [ ] Resolve and persist an absolute `sessionPeersDir` during installation, with `HERDR_TRAEX_HOME` as the explicit override.
+- [ ] Run focused tests, typecheck, build, and `git diff --check`; commit resolver and integration changes separately if independently reviewable.
+- [ ] Install the release and verify `Herdr agent_session.value === session_meta.payload.id` for a newly created pane without manual session reporting.
 
 ## Completion audit
 

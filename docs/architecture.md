@@ -376,8 +376,11 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-For shim-started TraeX processes, the shim generates a UUID before launch and
-passes it independently to TraeX `--session-id` and Herdr's official
+For shim-started TraeX processes, the shim generates a correlation UUID before
+launch and passes it to TraeX's legacy `--session-id` naming option. The
+process-fenced reporter resolves the canonical thread ID from TraeX's bounded
+`session-peers` registry using both that name and the exact PID, then passes the
+canonical ID to Herdr's official
 `pane report-agent-session --source herdr:codex --agent-session-id` surface.
 State and display metadata remain owned by the separate `herdr-traex-shim`
 source. A new managed session uses

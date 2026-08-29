@@ -3,10 +3,11 @@
 ## Goal
 
 Make Herdr the only live authority for a TraeX conversation identity. The
-installed TraeX shim generates the UUID before process launch, supplies it to
-TraeX through `--session-id`, and reports it as the pane's native Agent session. Agent Swarm persists that
-identity from Herdr reconciliation and uses it to open the exact TraeX JSONL
-transcript.
+installed TraeX shim generates a launch correlation UUID before process launch,
+supplies it to TraeX through the legacy `--session-id` naming option, resolves
+TraeX's canonical thread ID from its process registry, and reports that canonical
+ID as the pane's native Agent session. Agent Swarm persists the identity from
+Herdr reconciliation and uses it to open the exact TraeX JSONL transcript.
 
 Remove the bridge-owned SessionStart socket, reporter process, environment
 capability, and `reported_traex_session_*` persistence without a compatibility
@@ -35,10 +36,11 @@ while retaining its own source for process state and display metadata.
 
 ## Chosen architecture
 
-The shim generates one UUID per managed start and injects two lifecycle hooks:
+The shim generates one correlation UUID per managed start and injects two
+lifecycle hooks:
 
-- `--session-id <uuid>` makes TraeX use the shim-selected identity for its
-  persisted session and JSONL.
+- `--session-id <uuid>` gives the TraeX process a unique thread name that can
+  be correlated with its canonical thread ID.
 - The process-fenced reporter reports initial `idle` under its own state
   authority and reports the UUID separately through Herdr's trusted Codex
   session authority.
@@ -76,12 +78,16 @@ Three approaches were considered:
    preserves the authority boundary, and works for every Herdr consumer, so it
    is selected.
 
-## Shim session assignment
+## Shim launch correlation and canonical identity
 
-Before launching TraeX, the shim generates a lowercase UUID with
-`crypto.randomUUID()`. It rejects caller-supplied `--session-id`, `--resume`, or
-equivalent `--option=value` arguments so one managed start cannot have competing
-identity sources. It then writes the launch request with:
+Before launching TraeX, the shim generates a lowercase launch correlation UUID
+with `crypto.randomUUID()`. TraeX 0.201.6 documents `--session-id` as a legacy
+session selection or naming option; live validation proves it becomes
+`threadName`, while TraeX independently generates the canonical `threadId`
+stored in `session_meta.payload.id` and the JSONL filename. The shim rejects
+caller-supplied `--session-id`, `--resume`, or equivalent
+`--option=value` arguments so one managed start cannot have competing
+correlation sources. It writes the launch request with:
 
 ```text
 traex
@@ -93,8 +99,20 @@ traex
 ```
 
 After the exact TraeX process is observed and fenced by executable path, PID,
-and process start ticks, the detached reporter invokes the official Herdr binary
-with separate argv arrays:
+and process start ticks, the detached reporter waits a bounded interval for one
+TraeX `session-peers` record satisfying all of these conditions:
+
+- a regular, non-symlink file no larger than 4 KiB;
+- `protocolVersion === 1` and `location === `local``;
+- `pid` equals the fenced TraeX PID;
+- `threadName` equals the generated launch correlation UUID;
+- `threadId` is a UUID and the filename equals that UUID without hyphens plus
+  `.json`.
+
+The directory scan is capped at 10,000 entries and the wait at 10 seconds. Zero,
+multiple, malformed, oversized, or changing matches fail closed. No newest-file
+ordering is used. The reporter rechecks the pane process identity before
+publishing the resolved canonical `threadId` through separate Herdr argv arrays:
 
 ```text
 pane report-agent <pane-id>
@@ -107,12 +125,15 @@ pane report-agent-session <pane-id>
   --source herdr:codex
   --agent codex
   --seq <monotonic-sequence>
-  --agent-session-id <session-id>
+  --agent-session-id <canonical-thread-id>
   --session-start-source startup
 ```
 
-The reporter receives the UUID through its private argv input. It never discovers
-identity from process environment, terminal output, or newest-file ordering. The
+The reporter receives the launch correlation UUID through its private argv input.
+It never discovers identity from process environment, terminal output, or
+newest-file ordering. The configured session-peer directory is resolved at
+installation from `HERDR_TRAEX_HOME`, then `TRAECLI_HOME`, then
+`$HOME/.trae/cli`, and stored as an absolute private config path. The
 lifecycle hook parser remains bounded to 64 KiB and accepts only
 `UserPromptSubmit` and `Stop`; it never logs hook input, prompt content, session
 identity, or transcript data.
@@ -191,8 +212,9 @@ authority and metadata. Herdr then removes the session reference with that
 authority; SQLite converges through the existing reconciliation rules.
 
 No code reads `TRAECLI_THREAD_ID` from `/proc` or scans the sessions directory to
-guess the newest transcript. The UUID is generated once by the shim and passed
-to both TraeX and Herdr before any prompt can be accepted.
+guess the newest transcript. The correlation UUID is generated once by the shim;
+the canonical identity comes only from the PID-correlated TraeX peer record and
+is published to Herdr before the managed start returns.
 
 ## Delivery batches
 
@@ -222,8 +244,11 @@ worktree changes are preserved and excluded from these commits.
 
 Focused tests must cover:
 
-- generated UUID propagation into exact TraeX and
-  `report-agent-session` argv;
+- generated correlation UUID propagation into exact TraeX argv;
+- PID- and thread-name-fenced resolution of the canonical thread UUID into the
+  exact `report-agent-session` argv;
+- bounded rejection of malformed, oversized, symlinked, ambiguous, stale, and
+  mismatched peer records;
 - separation of shim-owned state authority from trusted `herdr:codex`
   session authority;
 - rejection of caller-provided session/resume identity arguments;
@@ -250,7 +275,8 @@ validation.
 
 - Keeping any SessionStart identity hook or bridge-owned compatibility path.
 - Teaching the shim about SQLite, bindings, Lark, or prompt IDs.
-- Guessing sessions from process environment or newest-file ordering.
+- Guessing sessions from process environment, session-index ordering, or
+  newest-file ordering.
 - Changing transcript content parsing, CardKit pagination, queue semantics, or
   approval handling.
 - Replaying a prompt when identity or transcript observation is uncertain.
