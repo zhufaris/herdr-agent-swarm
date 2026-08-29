@@ -1,20 +1,19 @@
 import { constants } from "node:fs";
 import { open, opendir } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { z } from "zod";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PEER_FILENAME = /^[0-9a-f]{32}.json$/i;
 const DEFAULT_MAX_BYTES = 4 * 1024;
 const DEFAULT_MAX_ENTRIES = 10_000;
 
-const peerSchema = z.object({
-  protocolVersion: z.literal(1),
-  threadName: z.string(),
-  threadId: z.string(),
-  location: z.literal("local"),
-  pid: z.number().int().positive()
-}).passthrough();
+interface TraexSessionPeerRecord {
+  protocolVersion: 1;
+  threadName: string;
+  threadId: string;
+  location: "local";
+  pid: number;
+}
 
 export type TraexSessionPeerResolution =
   | { status: "resolved"; threadId: string }
@@ -62,18 +61,30 @@ export async function resolveTraexSessionPeer(
   return threadId ? { status: "resolved", threadId } : { status: "pending" };
 }
 
-async function readPeer(path: string, maxBytes: number): Promise<z.infer<typeof peerSchema> | null> {
+async function readPeer(path: string, maxBytes: number): Promise<TraexSessionPeerRecord | null> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const metadata = await handle.stat();
     if (!metadata.isFile() || metadata.size < 2 || metadata.size > maxBytes) return null;
     const raw = await handle.readFile("utf8");
-    const parsed = peerSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : null;
+    const parsed: unknown = JSON.parse(raw);
+    return isPeerRecord(parsed) ? parsed : null;
   } catch {
     return null;
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+function isPeerRecord(value: unknown): value is TraexSessionPeerRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const peer = value as Record<string, unknown>;
+  return peer.protocolVersion === 1
+    && peer.location === "local"
+    && typeof peer.threadName === "string"
+    && typeof peer.threadId === "string"
+    && typeof peer.pid === "number"
+    && Number.isInteger(peer.pid)
+    && peer.pid > 0;
 }

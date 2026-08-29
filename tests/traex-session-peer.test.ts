@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +15,11 @@ afterEach(async () => {
 });
 
 describe("TraeX session peer resolution", () => {
+  it("has no third-party runtime dependency in the standalone shim release", async () => {
+    const source = await readFile(join(process.cwd(), "src/runtime/traex-session-peer.ts"), "utf8");
+    expect(source).not.toMatch(/from ["'](?!node:|\.)/);
+  });
+
   it("resolves the canonical thread ID from an exact PID and thread-name match", async () => {
     const root = await fixture();
     await peer(root, threadId, { protocolVersion: 1, threadName: correlationId, threadId, location: "local", socketPath: "/tmp/peer.sock", pid: 44, startedAtMs: 10 });
