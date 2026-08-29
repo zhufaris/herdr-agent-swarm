@@ -44,6 +44,7 @@ export interface HerdrRuntimeReconcilerPort {
 export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private reconciliation: Promise<void> | null = null;
   private pendingReconciliation: Set<string> | null | undefined;
+  private activeReconciliation: Set<string> | null | undefined;
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly observedTerminalOutputs = new Map<string, string>();
@@ -105,6 +106,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
   async requestReconciliation(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
+    if (this.reconciliation && this.activeReconciliationCovers(workspaceIds)) {
+      this.coalescedRequestCount += 1;
+      return this.reconciliation;
+    }
     this.enqueueReconciliation(workspaceIds);
     if (this.reconciliation) { this.coalescedRequestCount += 1; return this.reconciliation; }
     const work = this.drainReconciliations();
@@ -119,11 +124,20 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     for (const workspaceId of workspaceIds) this.pendingReconciliation.add(workspaceId);
   }
 
+  private activeReconciliationCovers(workspaceIds?: readonly string[]): boolean {
+    if (this.activeReconciliation === undefined) return false;
+    if (this.activeReconciliation === null) return true;
+    if (workspaceIds === undefined) return false;
+    return workspaceIds.every((workspaceId) => this.activeReconciliation!.has(workspaceId));
+  }
+
   private async drainReconciliations(): Promise<void> {
     while (this.pendingReconciliation !== undefined && !this.stopping) {
       const requested = this.pendingReconciliation;
       this.pendingReconciliation = undefined;
-      await this.runMeasured(requested === null ? undefined : requested);
+      this.activeReconciliation = requested;
+      try { await this.runMeasured(requested === null ? undefined : requested); }
+      finally { this.activeReconciliation = undefined; }
     }
   }
 
