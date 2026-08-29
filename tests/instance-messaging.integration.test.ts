@@ -160,4 +160,26 @@ describe("instance messaging", () => {
     expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "dispatch-uncertain", error: "driver crashed" });
     expect(scheduler.snapshot()).toMatchObject({ activeDispatchWorkers: 0, lastFailure: "driver crashed" });
   });
+
+  it("detaches an in-flight driver at the shutdown deadline without later writes", async () => {
+    const { create, workflow, scheduler, driver } = setup();
+    const worker = create("worker");
+    let release!: () => void;
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, onDispatched) => {
+      onDispatched?.();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { status: "confirmed-delivered" };
+    });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
+    scheduler.wake(worker.id);
+    await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running" }));
+    const controller = new AbortController();
+    const stopped = scheduler.stop({ signal: controller.signal, deadlineAt: Date.now(), remainingMs: () => 0 });
+    controller.abort();
+    await expect(stopped).resolves.toBeUndefined();
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
+  });
 });

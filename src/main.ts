@@ -51,6 +51,7 @@ import { InstanceMessagingWorkflow } from "./coordinator/instance-messaging-work
 import { InstanceWorkScheduler } from "./events/instance-work-scheduler.js";
 import { InstanceInteractionWorkflow } from "./coordinator/instance-interaction-workflow.js";
 import { InstanceRuntimeReconciler } from "./coordinator/instance-runtime-reconciler.js";
+import { InstanceTurnSupervisor } from "./coordinator/instance-turn-supervisor.js";
 import { randomUUID } from "node:crypto";
 import { safeLogError } from "./runtime/safe-error.js";
 import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
@@ -105,7 +106,8 @@ const agentDrivers = new AgentDriverRegistry([
   new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, piAvailable)
 ]);
 const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
-const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers });
+const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, logger });
+const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
 instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId) });
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
@@ -157,13 +159,19 @@ try {
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
+  instanceTurns.prepareRecovery();
   await traexSessionReporter.start();
   await primaryToolGateway.start();
   sqliteIntegrity.start();
   await sqliteIntegrity.run();
   await instanceRuntime.reconcile();
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, instanceRuntime, sqliteIntegrity, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker: instanceWork, coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  await instanceTurns.reconcile();
+  const instanceWorker = { snapshot() {
+    const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot();
+    return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure };
+  } };
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, coordinator, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => { outboxRetention.stop(); await sqliteIntegrity.stop(); return shutdown.shutdown(signal); };
   lease.start(() => stopRuntime("lease-lost").then(() => { process.exitCode = 1; }));
@@ -175,6 +183,7 @@ try {
   logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
   instanceRuntime.start(config.reconcileIntervalMs);
+  instanceTurns.start(config.reconcileIntervalMs);
   herdrEventInbox?.activate();
   herdrSocketSubscriber?.startEvents();
   logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");

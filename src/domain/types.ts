@@ -390,6 +390,18 @@ export interface PromptWorkerDiagnostics {
   lastScanFailureAt: string | null;
 }
 
+export interface InstanceWorkerDiagnostics {
+  state: "idle" | "running" | "stopping";
+  activeDispatchWorkers: number;
+  activeObservers: number;
+  queuedTurns: number;
+  activeTurns: number;
+  uncertainTurns: number;
+  lastScanAt: string | null;
+  lastFailureAt: string | null;
+  lastFailure: string | null;
+}
+
 export interface ProjectSelection {
   id: string;
   commandMessageId: string;

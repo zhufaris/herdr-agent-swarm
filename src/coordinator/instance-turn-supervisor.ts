@@ -21,10 +21,7 @@ export class InstanceTurnSupervisor {
     if (this.recovered) return;
     const result = this.options.store.recoverInterruptedInstanceTurns();
     this.recovered = true;
-    for (const turnId of result.requeuedTurnIds) {
-      const turn = this.options.store.getInstanceTurn(turnId);
-      if (turn) this.options.wake(turn.instanceId);
-    }
+    if (result.requeuedTurnIds.length > 0) this.options.logger?.info({ event: "instance-turns-requeued-after-restart", count: result.requeuedTurnIds.length, outcome: "awaiting_runtime_reconciliation" }, "requeued pre-dispatch instance turns");
   }
 
   reconcile(): Promise<void> {
@@ -41,8 +38,8 @@ export class InstanceTurnSupervisor {
 
   async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
 
-  snapshot(): { activeObservers: number; observableTurns: number; lastScanAt: string | null; lastFailureAt: string | null; lastFailure: string | null } {
-    return { activeObservers: this.running ? 1 : 0, observableTurns: this.options.store.listObservableInstanceTurns().length, lastScanAt: this.lastScanAt, lastFailureAt: this.lastFailureAt, lastFailure: this.lastFailure };
+  snapshot(): { activeObservers: number; queuedTurns: number; activeTurns: number; uncertainTurns: number; lastScanAt: string | null; lastFailureAt: string | null; lastFailure: string | null } {
+    return { activeObservers: this.running ? 1 : 0, ...this.options.store.getInstanceTurnDiagnostics(), lastScanAt: this.lastScanAt, lastFailureAt: this.lastFailureAt, lastFailure: this.lastFailure };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -77,7 +74,7 @@ export class InstanceTurnSupervisor {
     if (pane.agentState === "idle" || pane.agentState === "done") {
       if (turn.state === "running" || turn.state === "blocked") {
         this.options.store.completeInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, result: `observed:${pane.agentState}` });
-        this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: instance.desiredState, observedState: "idle" });
+        this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState: "idle" });
         this.options.wake(instance.id);
         this.options.logger?.info({ event: "instance-turn-recovered", instanceId: instance.id, turnId, outcome: "observed_without_replay" }, "observed recovered instance turn completion");
       } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, state: "dispatch-uncertain", error: "Agent is idle but dispatch completion was never proven; prompt was not replayed", eventKind: "turn.dispatch-uncertain" });

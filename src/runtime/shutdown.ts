@@ -13,7 +13,7 @@ interface ShutdownDependencies {
   herdrEventInbox?: { stop(): Promise<void> };
   herdrSocketSubscriber?: { stop(): Promise<void> };
   instanceRuntime?: { stop(): Promise<void> };
-  instanceWorker?: { stop(): Promise<void> };
+  instanceWorker?: { stop(context?: ShutdownContext): Promise<void> };
   coordinator: { stop(context?: ShutdownContext): Promise<void> };
   projector: { stop(context?: ShutdownContext): Promise<void> };
   publisher: { stop(context?: ShutdownContext): Promise<void> };
@@ -59,7 +59,7 @@ export class BridgeRuntimeShutdown {
     if (primaryToolGateway) writers.push({ component: "primaryToolGateway", ...(await this.stopComponent("primaryToolGateway", () => primaryToolGateway.stop(), context, logger, failures, timeouts)) });
     if (herdrSocketSubscriber) await this.stopComponent("herdrSocketSubscriber", () => herdrSocketSubscriber.stop(), context, logger, failures, timeouts);
     if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
-    if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(), context, logger, failures, timeouts)) });
+    if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "publisher", ...(await this.stopComponent("publisher", () => publisher.stop(context), context, logger, failures, timeouts)) });

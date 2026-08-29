@@ -94,8 +94,12 @@ export class InstanceControlWorkflow {
   async stop(input: { actor: ControlActor; instanceId: string }): Promise<AgentInstance> {
     this.requireHuman(input.actor);
     const instance = this.requireInstance(input.instanceId);
-    if (instance.runtimeRef) await this.options.paneHost.releasePane(instance.runtimeRef.paneId);
-    const stopped = this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "stopped", observedState: "stopped", clearRuntime: true });
+    const reservation = this.options.store.reserveAgentInstanceStop(instance.id, instance.generation);
+    if (reservation.outcome === "busy") throw new Error("Instance has an active or uncertain turn; interrupt it or wait for durable completion before stopping");
+    if (reservation.outcome !== "reserved") throw new Error("Instance generation changed while stopping");
+    try { if (reservation.instance.runtimeRef) await this.options.paneHost.releasePane(reservation.instance.runtimeRef.paneId); }
+    catch (error) { this.options.store.rollbackAgentInstanceStop(instance.id, instance.generation, safeLogError(error).message); throw error; }
+    const stopped = this.options.store.finishAgentInstanceStop(instance.id, instance.generation);
     if (!stopped) throw new Error("Instance generation changed while stopping");
     return stopped;
   }

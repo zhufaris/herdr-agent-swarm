@@ -40,6 +40,7 @@ export interface InstanceStore {
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
+  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null;
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null;
   rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null;
@@ -59,6 +60,7 @@ export interface InstanceStore {
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] };
   listObservableInstanceTurns(): InstanceTurn[];
+  getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number };
   updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
   listInstanceEvents(instanceId: string, afterId?: number): InstanceEvent[];

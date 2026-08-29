@@ -64,8 +64,13 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): 
   const running = nonNegativeInteger(prompts?.running);
   const queued = nonNegativeInteger(prompts?.queued) ?? 0;
   const activeWorkers = nonNegativeInteger(promptWorker?.activeTurnWorkers);
-  if (running === null && activeWorkers === null) return;
-  if ((running ?? 0) > 0 || (activeWorkers ?? 0) > 0) throw new Error(`restart blocked: ${running ?? "unknown"} running prompts, ${queued} queued prompts, ${activeWorkers ?? "unknown"} active turn workers; wait for active work to drain or retry with --force`);
+  const instanceWorker = asRecord(record?.instanceWorker);
+  const instanceDispatchers = nonNegativeInteger(instanceWorker?.activeDispatchWorkers) ?? 0;
+  const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers) ?? 0;
+  const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns) ?? 0;
+  const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns) ?? 0;
+  if (running === null && activeWorkers === null && !instanceWorker) return;
+  if ((running ?? 0) > 0 || (activeWorkers ?? 0) > 0 || instanceDispatchers > 0 || instanceObservers > 0 || activeInstanceTurns > 0 || uncertainInstanceTurns > 0) throw new Error(`restart blocked: ${running ?? "unknown"} running prompts, ${queued} queued prompts, ${activeWorkers ?? "unknown"} active turn workers; instance work has ${instanceDispatchers} dispatchers, ${instanceObservers} observers, ${activeInstanceTurns} active turns, ${uncertainInstanceTurns} uncertain turns; wait for active work to drain or retry with --force`);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

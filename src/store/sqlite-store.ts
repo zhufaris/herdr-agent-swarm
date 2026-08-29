@@ -243,6 +243,11 @@ export class SqliteBindingStore implements BindingStorePort {
     return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
   }
 
+  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null {
+    const result = this.database.prepare("UPDATE agent_instances SET observed_state = ?, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.observedState, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
+    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+  }
+
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -393,6 +398,15 @@ export class SqliteBindingStore implements BindingStorePort {
 
   listObservableInstanceTurns(): InstanceTurn[] {
     return (this.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!);
+  }
+
+  getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number } {
+    const row = this.database.prepare(`SELECT
+      SUM(CASE WHEN t.state = 'queued' THEN 1 ELSE 0 END) AS queued_turns,
+      SUM(CASE WHEN t.state IN ('claimed','dispatching','running','blocked') THEN 1 ELSE 0 END) AS active_turns,
+      SUM(CASE WHEN t.state = 'dispatch-uncertain' THEN 1 ELSE 0 END) AS uncertain_turns
+      FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation`).get() as { queued_turns: number | null; active_turns: number | null; uncertain_turns: number | null };
+    return { queuedTurns: row.queued_turns ?? 0, activeTurns: row.active_turns ?? 0, uncertainTurns: row.uncertain_turns ?? 0 };
   }
 
   updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null {

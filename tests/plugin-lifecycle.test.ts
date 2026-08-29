@@ -108,6 +108,33 @@ describe("plugin lifecycle", () => {
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
+  it("refuses restart while multi-agent work remains active or uncertain", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { running: 0, queued: 0 } }, promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 1, activeTurns: 1, uncertainTurns: 2 } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", fixture.environment)).rejects.toThrow(/instance.*observer.*uncertain.*--force/i);
+      expect(readFileSync(fixture.calls, "utf8")).not.toContain("restart --no-block");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("uses instance work to block restart even when legacy prompt metrics are absent", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, instanceWorker: { activeDispatchWorkers: 1, activeObservers: 0, activeTurns: 1, uncertainTurns: 0 } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", fixture.environment)).rejects.toThrow(/instance work/i);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it("allows restart when status is unavailable or belongs to another service", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");

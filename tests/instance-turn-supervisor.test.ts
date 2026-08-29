@@ -20,6 +20,19 @@ function setup(state: "dispatching" | "running") {
 }
 
 describe("InstanceTurnSupervisor", () => {
+  it("does not wake recovered claims before fresh runtime reconciliation", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
+    store.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(instance.id, instance.generation);
+    const wake = vi.fn();
+    const supervisor = new InstanceTurnSupervisor({ store, paneHost: {} as PaneHost, wake });
+    supervisor.prepareRecovery();
+    expect(store.getInstanceTurn("turn")).toMatchObject({ state: "queued" });
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("observes a proven running turn to completion without dispatching it again", async () => {
     const { supervisor, wake } = setup("running");
     supervisor.prepareRecovery();

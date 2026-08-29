@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
@@ -27,6 +27,7 @@ export function startHealthServer(options: {
   lifecycleEvents?: LifecycleEventDiagnostics;
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
+  instanceWorker?: { snapshot(): InstanceWorkerDiagnostics };
   instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } };
   herdrSocket?: { status(): HerdrSocketStatus };
   buildIdentity: BuildIdentity;
@@ -56,6 +57,9 @@ export function startHealthServer(options: {
       let promptWorker: PromptWorkerDiagnostics | { error: string } | undefined;
       try { promptWorker = options.promptWorker?.snapshot(); }
       catch (error) { promptWorker = { error: boundedError(error) }; }
+      let instanceWorker: InstanceWorkerDiagnostics | { error: string } | undefined;
+      try { instanceWorker = options.instanceWorker?.snapshot(); }
+      catch (error) { instanceWorker = { error: boundedError(error) }; }
       let herdrCircuitBreaker: HerdrCircuitBreakerStatus | { error: string } | undefined;
       try { herdrCircuitBreaker = options.herdrCircuitBreaker?.status(); }
       catch (error) { herdrCircuitBreaker = { error: boundedError(error) }; }
@@ -74,12 +78,14 @@ export function startHealthServer(options: {
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !operationalDegraded
           && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
+          && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
           && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
           && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))
           && !(sqliteIntegrity && (!("quickCheck" in sqliteIntegrity) || sqliteIntegrity.state === "idle" || sqliteIntegrity.state === "degraded" || sqliteIntegrity.state === "running" && (sqliteIntegrity.quickCheck !== "ok" || sqliteIntegrity.issues.length > 0 || sqliteIntegrity.error !== null))) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: options.lease.snapshot(),
         ...(outboxDispatcher ? { outboxDispatcher } : {}),
         ...(promptWorker ? { promptWorker } : {}),
+        ...(instanceWorker ? { instanceWorker } : {}),
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
         ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}),
         ...(startupRecovery ? { startupRecovery } : {}),

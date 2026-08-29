@@ -48,6 +48,18 @@ describe("health server", () => {
     expect(JSON.stringify(body)).not.toContain("payload");
   });
 
+  it("reports and degrades active or uncertain instance work", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      instanceWorker: { snapshot: () => ({ state: "running", activeDispatchWorkers: 1, activeObservers: 1, queuedTurns: 2, activeTurns: 1, uncertainTurns: 1, lastScanAt: "2026-08-29T00:00:00.000Z", lastFailureAt: null, lastFailure: null }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const body = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json();
+    expect(body).toMatchObject({ status: "degraded", instanceWorker: { activeDispatchWorkers: 1, activeObservers: 1, activeTurns: 1, uncertainTurns: 1 } });
+  });
+
   it("shares one short-lived readiness probe across concurrent ready and status requests", async () => {
     store = new SqliteBindingStore(":memory:");
     const assertWorkspace = vi.fn(async () => undefined);

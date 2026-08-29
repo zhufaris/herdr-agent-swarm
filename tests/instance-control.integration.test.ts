@@ -95,6 +95,24 @@ describe("InstanceControlWorkflow", () => {
     expect(worktrees.release).not.toHaveBeenCalled();
   });
 
+  it("refuses to stop an instance with current-generation active work", async () => {
+    const { workflow, paneHost } = setup();
+    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    store!.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+    store!.claimNextInstanceTurn(instance.id, instance.generation);
+    await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id })).rejects.toThrow(/active or uncertain turn/i);
+    expect(paneHost.releasePane).not.toHaveBeenCalled();
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", runtimeRef: { paneId: "herdr-a:p1" } });
+  });
+
+  it("restores running intent when pane release fails", async () => {
+    const { workflow, paneHost } = setup();
+    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    vi.mocked(paneHost.releasePane).mockRejectedValueOnce(new Error("close failed"));
+    await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id })).rejects.toThrow("close failed");
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", runtimeRef: { paneId: "herdr-a:p1" }, lastError: "close failed" });
+  });
+
   it("starts a stopped instance in a fresh pane generation while retaining its workspace", async () => {
     const { workflow, paneHost, worktrees } = setup();
     const created = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });

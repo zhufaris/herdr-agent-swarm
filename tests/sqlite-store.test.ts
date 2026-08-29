@@ -117,6 +117,7 @@ describe("SQLite store", () => {
 
     expect(store.claimNextInstanceTurn("i1", current.generation)).toMatchObject({ id: "new", state: "claimed" });
     expect(store.getInstanceTurn("old")).toMatchObject({ state: "dispatch-uncertain", instanceGeneration: first.generation });
+    expect(store.getInstanceTurnDiagnostics()).toEqual({ queuedTurns: 0, activeTurns: 1, uncertainTurns: 0 });
   });
 
   it("reserves stop only when the current generation has no active or uncertain turn", () => {
@@ -129,6 +130,7 @@ describe("SQLite store", () => {
     expect(store.reserveAgentInstanceStop("i1", instance.generation)).toEqual({ outcome: "busy" });
     store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state: "completed", eventKind: "turn.completed" });
     expect(store.reserveAgentInstanceStop("i1", instance.generation)).toMatchObject({ outcome: "reserved", instance: { desiredState: "stopped", runtimeRef: { paneId: "w1:p1" } } });
+    expect(store.updateAgentInstanceObservation({ instanceId: "i1", expectedGeneration: instance.generation, observedState: "idle" })).toMatchObject({ desiredState: "stopped", observedState: "idle" });
     expect(store.claimNextInstanceTurn("i1", instance.generation)).toBeNull();
     expect(store.finishAgentInstanceStop("i1", instance.generation)).toMatchObject({ desiredState: "stopped", observedState: "stopped", runtimeRef: null });
   });

@@ -53,7 +53,7 @@ export class InstanceRuntimeReconciler {
       return;
     }
     const observedState = normalizeState(pane);
-    const updated = this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: instance.desiredState, observedState, lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });
+    const updated = this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState, lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });
     if (updated && observedState === "idle" && this.options.store.countPendingInstanceTurns(instance.id) > 0) this.options.wake(instance.id);
   }
 }
