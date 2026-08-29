@@ -291,7 +291,7 @@ export interface BindingStorePort {
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
   getOperationalSummary(): OperationalSummary;
-  inspectIntegrity(limit: number): SqliteIntegrityInspection;
+  inspectIntegrity(limit: number, signal?: AbortSignal): SqliteIntegrityInspection;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   saveTopicView(view: TopicViewState): void;
   loadTopicView(bindingId: string): TopicViewState | null;
@@ -312,7 +312,7 @@ export type LeaseStore = Pick<BindingStorePort,
 >;
 
 export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "listBindings">;
-export interface DatabaseIntegrityStore { inspectIntegrity(limit: number): SqliteIntegrityInspection | Promise<SqliteIntegrityInspection> }
+export interface DatabaseIntegrityStore { inspectIntegrity(limit: number, signal?: AbortSignal): SqliteIntegrityInspection | Promise<SqliteIntegrityInspection> }
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
   | "acceptPrompt" | "acceptClassifiedPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"

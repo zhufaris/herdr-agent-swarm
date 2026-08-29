@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { SqliteIntegrityAuditor } from "../src/runtime/sqlite-integrity-auditor.js";
 import { WorkerDatabaseIntegrityStore } from "../src/runtime/sqlite-integrity-worker.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { createShutdownContext } from "../src/runtime/shutdown-context.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -106,5 +107,43 @@ describe("SQLite integrity auditor", () => {
     release();
     await stopping;
     expect(stopped).toBe(true);
+  });
+
+  it("forwards the shared shutdown abort signal to the active inspection", async () => {
+    let inspectionSignal: AbortSignal | undefined;
+    const auditor = new SqliteIntegrityAuditor(
+      { inspectIntegrity(_limit, signal) {
+        inspectionSignal = signal;
+        return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      } },
+      { intervalMs: 60_000, issueLimit: 20 },
+      { info() {}, error() {} }
+    );
+    const { context, abort } = createShutdownContext(1_000);
+
+    const running = auditor.run();
+    await Promise.resolve();
+    const stopping = auditor.stop(context);
+    expect(inspectionSignal?.aborted).toBe(false);
+    abort(new Error("shutdown deadline"));
+    await expect(stopping).resolves.toBeUndefined();
+    await expect(running).resolves.toBeUndefined();
+    expect(inspectionSignal?.aborted).toBe(true);
+  });
+
+  it("terminates an in-flight integrity worker when aborted", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bridge-integrity-abort-"));
+    const databasePath = join(directory, "bridge.db");
+    const store = new SqliteBindingStore(databasePath);
+    store.close();
+    const controller = new AbortController();
+    const inspection = new WorkerDatabaseIntegrityStore(databasePath).inspectIntegrity(20, controller.signal);
+    controller.abort(new Error("stop integrity worker"));
+
+    try {
+      await expect(inspection).rejects.toThrow("stop integrity worker");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

@@ -9,17 +9,36 @@ export class WorkerDatabaseIntegrityStore {
 
   constructor(databasePath: string) { this.databasePath = databasePath; }
 
-  inspectIntegrity(limit: number): Promise<SqliteIntegrityInspection> {
+  inspectIntegrity(limit: number, signal?: AbortSignal): Promise<SqliteIntegrityInspection> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(abortError(signal)); return; }
       const worker = new Worker(new URL(import.meta.url), { workerData: { databasePath: this.databasePath, limit } satisfies WorkerInput });
+      let settled = false;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        action();
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        void worker.terminate().then(() => reject(abortError(signal!)), reject);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       worker.once("message", (message: { ok: true; inspection: SqliteIntegrityInspection } | { ok: false; error: string }) => {
-        if (message.ok) resolve(message.inspection);
-        else reject(new Error(message.error));
+        if (message.ok) finish(() => resolve(message.inspection));
+        else finish(() => reject(new Error(message.error)));
       });
-      worker.once("error", reject);
-      worker.once("exit", (code) => { if (code !== 0) reject(new Error(`SQLite integrity worker exited with code ${code}`)); });
+      worker.once("error", (error) => finish(() => reject(error)));
+      worker.once("exit", (code) => { if (code !== 0) finish(() => reject(new Error(`SQLite integrity worker exited with code ${code}`))); });
     });
   }
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("SQLite integrity inspection aborted");
 }
 
 if (!isMainThread) {

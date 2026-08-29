@@ -1,9 +1,49 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
-import { BridgeRuntimeShutdown } from "../src/runtime/shutdown.js";
+import { BridgeRuntimeShutdown, cleanupStartupFailure } from "../src/runtime/shutdown.js";
 import type { ShutdownContext } from "../src/runtime/shutdown-context.js";
 
+afterEach(() => vi.useRealTimers());
+
 describe("bridge runtime shutdown", () => {
+  it("bounds a hung startup integrity stop before releasing SQLite ownership", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let integrityAborted = false;
+    const cleanup = cleanupStartupFailure({
+      integrityAuditor: { async stop(context) {
+        context?.signal.addEventListener("abort", () => { integrityAborted = true; }, { once: true });
+        await new Promise(() => {});
+      } },
+      traexSessionReporter: { async stop() { calls.push("reporter"); } },
+      primaryToolGateway: { async stop() { calls.push("gateway"); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
+    });
+
+    await vi.advanceTimersByTimeAsync(70);
+    await expect(cleanup).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    expect(integrityAborted).toBe(true);
+    expect(calls).toEqual(["reporter", "gateway", "fence", "lease", "store"]);
+  });
+
+  it("retains startup SQLite ownership when a write-capable stop remains hung", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const cleanup = cleanupStartupFailure({
+      traexSessionReporter: { async stop() { await new Promise(() => {}); } },
+      primaryToolGateway: { async stop() { calls.push("gateway"); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
+    });
+
+    await vi.advanceTimersByTimeAsync(70);
+    await expect(cleanup).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["traexSessionReporter"] });
+    expect(calls).toEqual(["gateway"]);
+  });
+
   it("waits for async components and closes the store last", async () => {
     const calls: string[] = [];
     let releaseProjector!: () => void;
@@ -89,6 +129,22 @@ describe("bridge runtime shutdown", () => {
     expect(contexts[0]!.remainingMs()).toBeLessThanOrEqual(1_000);
   });
 
+  it("stops the integrity auditor within the shared shutdown context", async () => {
+    const contexts: ShutdownContext[] = [];
+    const runtime = new BridgeRuntimeShutdown({
+      integrityAuditor: { async stop(context) { contexts.push(context!); } },
+      coordinator: { async stop(context) { contexts.push(context!); } },
+      projector: { async stop() {} }, publisher: { async stop() {} },
+      healthServer: { close(callback) { callback(); } },
+      lease: { release() {} }, store: { deactivateWriteFence() {}, close() {} },
+      logger: { info() {}, error() {} }
+    });
+
+    await runtime.shutdown("SIGTERM");
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]).toBe(contexts[1]);
+  });
+
   it("stops instance reconciliation within the shared shutdown deadline before releasing SQLite", async () => {
     const calls: string[] = [];
     const runtime = new BridgeRuntimeShutdown({
@@ -113,7 +169,7 @@ describe("bridge runtime shutdown", () => {
     expect(calls).toEqual(["primary-tools", "fence", "lease", "store"]);
   });
 
-  it("aborts the shared context once at the global deadline and retains SQLite until a writer settles", async () => {
+  it("returns after the final settlement allowance and retains SQLite ownership when a writer is stuck", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
     let settleWriter!: () => void;
@@ -130,19 +186,20 @@ describe("bridge runtime shutdown", () => {
     });
 
     const shutdown = runtime.shutdown("SIGTERM");
-    await vi.advanceTimersByTimeAsync(60);
+    await vi.advanceTimersByTimeAsync(70);
     expect(context?.signal.aborted).toBe(true);
     expect(calls).not.toContain("fence");
     expect(calls).not.toContain("lease");
     expect(calls).not.toContain("store");
 
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["coordinator"] });
+    expect(calls).toEqual(["projector", "publisher", "health"]);
     settleWriter();
-    await shutdown;
-    expect(calls).toEqual(["projector", "publisher", "health", "coordinator:settled", "fence", "lease", "store"]);
+    await Promise.resolve();
     vi.useRealTimers();
   });
 
-  it("retains SQLite ownership until the session reporter settles", async () => {
+  it("returns ownership retained when the session reporter does not settle", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
     let settleReporter!: () => void;
@@ -164,9 +221,9 @@ describe("bridge runtime shutdown", () => {
     expect(calls).not.toContain("lease");
     expect(calls).not.toContain("store");
 
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["traexSessionReporter"] });
     settleReporter();
-    await shutdown;
-    expect(calls.slice(-4)).toEqual(["reporter:end", "fence", "lease", "store"]);
+    await Promise.resolve();
     vi.useRealTimers();
   });
 });

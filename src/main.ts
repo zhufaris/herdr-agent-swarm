@@ -27,7 +27,7 @@ import { OutboundIntentWriter } from "./events/outbound-intent-writer.js";
 import { InProcessOutboundWorkNotifier } from "./events/outbound-work-notifier.js";
 import { startHealthServer } from "./health/server.js";
 import { ExecFileCommandRunner } from "./infra/command-runner.js";
-import { BridgeRuntimeShutdown } from "./runtime/shutdown.js";
+import { BridgeRuntimeShutdown, cleanupStartupFailure } from "./runtime/shutdown.js";
 import { InstanceLeaseController } from "./runtime/instance-lease.js";
 import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
 import { HerdrCircuitBreaker } from "./runtime/herdr-circuit-breaker.js";
@@ -181,9 +181,14 @@ try {
     return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure };
   } };
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
-  const stopRuntime = async (signal: string) => { outboxRetention.stop(); await sqliteIntegrity.stop(); return shutdown.shutdown(signal); };
+  const stopRuntime = async (signal: string) => {
+    outboxRetention.stop();
+    const result = await shutdown.shutdown(signal);
+    if (result.outcome === "ownership_retained") process.exitCode = 1;
+    return result;
+  };
   channelPublisher.start();
   outboxRetention.start();
   projector.start();
@@ -201,8 +206,9 @@ try {
 } catch (error) {
   logger.fatal({ event: "bridge-startup-failed", err: safeLogError(error), durationMs: Date.now() - startupStartedAt, outcome: "failed" }, "bridge failed to start");
   outboxRetention.stop();
-  await sqliteIntegrity.stop();
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
-  else { await Promise.all([herdrEventInbox?.stop(), herdrSocketSubscriber?.stop(), traexSessionReporter.stop(), primaryToolGateway.stop()]); lease.release(); store.close(); }
+  else {
+    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, lease, store, logger });
+  }
   process.exitCode = 1;
 }

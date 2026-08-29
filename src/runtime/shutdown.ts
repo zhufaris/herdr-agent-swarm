@@ -14,6 +14,7 @@ interface ShutdownDependencies {
   herdrSocketSubscriber?: { stop(): Promise<void> };
   instanceRuntime?: { stop(): Promise<void> };
   instanceWorker?: { stop(context?: ShutdownContext): Promise<void> };
+  integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
   coordinator: { stop(context?: ShutdownContext): Promise<void> };
   queueFeedbackProjector?: { stop(context?: ShutdownContext): Promise<void> };
   projector: { stop(context?: ShutdownContext): Promise<void> };
@@ -26,27 +27,50 @@ interface ShutdownDependencies {
   abortSettlementMs?: number;
 }
 
+interface StartupCleanupDependencies {
+  integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
+  herdrEventInbox?: { stop(): Promise<void> };
+  herdrSocketSubscriber?: { stop(): Promise<void> };
+  traexSessionReporter?: { stop(): Promise<void> };
+  primaryToolGateway?: { stop(): Promise<void> };
+  lease: { release(): void };
+  store: { deactivateWriteFence(): void; close(): void };
+  logger: ShutdownLogger;
+  shutdownGraceMs?: number;
+  abortSettlementMs?: number;
+}
+
+export type BridgeRuntimeShutdownOutcome =
+  | { outcome: "completed"; unsettledWriters: [] }
+  | { outcome: "ownership_retained"; unsettledWriters: string[] };
+
+interface TrackedWriter {
+  component: string;
+  settled: Promise<void>;
+  isSettled(): boolean;
+}
+
 export class BridgeRuntimeShutdown {
-  private shutdownPromise: Promise<void> | null = null;
+  private shutdownPromise: Promise<BridgeRuntimeShutdownOutcome> | null = null;
   private deadlineAbortTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly dependencies: ShutdownDependencies) {}
 
-  shutdown(signal: string): Promise<void> {
+  shutdown(signal: string): Promise<BridgeRuntimeShutdownOutcome> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.shutdownPromise = this.performShutdown(signal);
     return this.shutdownPromise;
   }
 
-  private async performShutdown(signal: string): Promise<void> {
-    const { herdrEventInbox, herdrSocketSubscriber, traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker, coordinator, queueFeedbackProjector, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+  private async performShutdown(signal: string): Promise<BridgeRuntimeShutdownOutcome> {
+    const { herdrEventInbox, herdrSocketSubscriber, traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker, integrityAuditor, coordinator, queueFeedbackProjector, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     const startedAt = Date.now();
     const budgetMs = this.dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     const { context, abort } = createShutdownContext(budgetMs);
     const failures: string[] = [];
     const timeouts: string[] = [];
     let expired = false;
-    const writers: Array<{ component: string; settled: Promise<void> }> = [];
+    const writers: TrackedWriter[] = [];
     this.deadlineAbortTimer = setTimeout(() => {
       if (context.signal.aborted) return;
       expired = true;
@@ -61,6 +85,7 @@ export class BridgeRuntimeShutdown {
     if (herdrSocketSubscriber) await this.stopComponent("herdrSocketSubscriber", () => herdrSocketSubscriber.stop(), context, logger, failures, timeouts);
     if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
     if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(context), context, logger, failures, timeouts)) });
+    if (integrityAuditor) await this.stopComponent("integrityAuditor", () => integrityAuditor.stop(context), context, logger, failures, timeouts);
     writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
     if (queueFeedbackProjector) writers.push({ component: "queueFeedbackProjector", ...(await this.stopComponent("queueFeedbackProjector", () => queueFeedbackProjector.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
@@ -70,24 +95,67 @@ export class BridgeRuntimeShutdown {
     const writersSettled = Promise.all(writers.map(({ settled }) => settled));
     if (!await settlesWithin(writersSettled, this.dependencies.abortSettlementMs ?? 1_000)) {
       if (!context.signal.aborted) { expired = true; abort(new Error("bridge shutdown deadline exceeded")); }
-      const writerNames = writers.map(({ component }) => component);
+      const writerNames = writers.filter((writer) => !writer.isSettled()).map(({ component }) => component);
       logger.error({ event: "bridge-shutdown-writers-unsettled", components: writerNames, outcome: "ownership_retained" }, "write-capable shutdown components did not settle; retaining SQLite ownership");
-      await writersSettled;
+      if (this.deadlineAbortTimer) clearTimeout(this.deadlineAbortTimer);
+      return { outcome: "ownership_retained", unsettledWriters: writerNames };
     }
     if (this.deadlineAbortTimer) clearTimeout(this.deadlineAbortTimer);
     await stopSafely("writeFence", async () => { store.deactivateWriteFence(); }, logger);
     await stopSafely("lease", async () => { lease.release(); }, logger);
     await stopSafely("store", async () => { store.close(); }, logger);
     logger.info({ event: "bridge-shutdown-completed", signal, durationMs: Date.now() - startedAt, expired, failures, timeouts, outcome: "completed" }, "bridge shutdown completed");
+    return { outcome: "completed", unsettledWriters: [] };
   }
 
-  private async stopComponent(component: string, stop: () => Promise<void>, context: ShutdownContext, logger: ShutdownLogger, failures: string[], timeouts: string[]): Promise<{ settled: Promise<void> }> {
+  private async stopComponent(component: string, stop: () => Promise<void>, context: ShutdownContext, logger: ShutdownLogger, failures: string[], timeouts: string[]): Promise<{ settled: Promise<void>; isSettled(): boolean }> {
+    let hasSettled = false;
     const settled = stopSafely(component, stop, logger, failures);
-    if (await settlesWithin(settled, context.remainingMs())) return { settled };
+    void settled.finally(() => { hasSettled = true; });
+    if (await settlesWithin(settled, context.remainingMs())) return { settled, isSettled: () => hasSettled };
     timeouts.push(component);
     logger.error({ event: "bridge-shutdown-component-timed-out", component, remainingMs: context.remainingMs(), outcome: "timed_out" }, "shutdown component exceeded the shared deadline");
-    return { settled };
+    return { settled, isSettled: () => hasSettled };
   }
+}
+
+export async function cleanupStartupFailure(dependencies: StartupCleanupDependencies): Promise<BridgeRuntimeShutdownOutcome> {
+  const { context, abort } = createShutdownContext(dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS);
+  const deadlineTimer = setTimeout(() => abort(new Error("startup cleanup deadline exceeded")), context.remainingMs());
+  deadlineTimer.unref?.();
+  const failures: string[] = [];
+  const launch = (component: string, stop: () => Promise<void>) => trackWriter(component, stopSafely(component, stop, dependencies.logger, failures));
+  const writers: TrackedWriter[] = [];
+  const cleanup: Promise<void>[] = [];
+  if (dependencies.integrityAuditor) cleanup.push(stopSafely("integrityAuditor", () => dependencies.integrityAuditor!.stop(context), dependencies.logger, failures));
+  if (dependencies.herdrEventInbox) cleanup.push(stopSafely("herdrEventInbox", () => dependencies.herdrEventInbox!.stop(), dependencies.logger, failures));
+  if (dependencies.herdrSocketSubscriber) cleanup.push(stopSafely("herdrSocketSubscriber", () => dependencies.herdrSocketSubscriber!.stop(), dependencies.logger, failures));
+  if (dependencies.traexSessionReporter) {
+    const writer = launch("traexSessionReporter", () => dependencies.traexSessionReporter!.stop());
+    writers.push(writer); cleanup.push(writer.settled);
+  }
+  if (dependencies.primaryToolGateway) {
+    const writer = launch("primaryToolGateway", () => dependencies.primaryToolGateway!.stop());
+    writers.push(writer); cleanup.push(writer.settled);
+  }
+  await settlesWithin(Promise.all(cleanup), context.remainingMs());
+  if (!await settlesWithin(Promise.all(writers.map(({ settled }) => settled)), dependencies.abortSettlementMs ?? 1_000)) {
+    const writerNames = writers.filter((writer) => !writer.isSettled()).map(({ component }) => component);
+    dependencies.logger.error({ event: "bridge-startup-cleanup-writers-unsettled", components: writerNames, outcome: "ownership_retained" }, "write-capable startup cleanup did not settle; retaining SQLite ownership");
+    clearTimeout(deadlineTimer);
+    return { outcome: "ownership_retained", unsettledWriters: writerNames };
+  }
+  clearTimeout(deadlineTimer);
+  await stopSafely("writeFence", async () => { dependencies.store.deactivateWriteFence(); }, dependencies.logger);
+  await stopSafely("lease", async () => { dependencies.lease.release(); }, dependencies.logger);
+  await stopSafely("store", async () => { dependencies.store.close(); }, dependencies.logger);
+  return { outcome: "completed", unsettledWriters: [] };
+}
+
+function trackWriter(component: string, settled: Promise<void>): TrackedWriter {
+  let hasSettled = false;
+  void settled.finally(() => { hasSettled = true; });
+  return { component, settled, isSettled: () => hasSettled };
 }
 
 async function stopSafely(component: string, stop: () => Promise<void>, logger: ShutdownLogger, failures: string[] = []): Promise<void> {

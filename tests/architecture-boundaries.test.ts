@@ -61,4 +61,10 @@ describe("application composition boundaries", () => {
     expect(main.indexOf("lease.start(")).toBeGreaterThan(main.indexOf("lease.acquire()"));
     expect(main.indexOf("lease.start(")).toBeLessThan(main.indexOf("await sqliteIntegrity.run()"));
   });
+
+  it("puts the integrity auditor inside the shared runtime shutdown boundary", () => {
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    expect(main).toContain("integrityAuditor: sqliteIntegrity");
+    expect(main).not.toContain("await sqliteIntegrity.stop(); return shutdown.shutdown(signal)");
+  });
 });
