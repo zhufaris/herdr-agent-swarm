@@ -11,7 +11,7 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 
-const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
+const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
 async function createAutomaticSteeringHarness(maxQueueDepth = 20, steeringResult: "injected" | "not_working" | "throw" = "injected") {
   let release!: () => void;
@@ -146,7 +146,7 @@ describe("active-turn steering", () => {
     expect(store.listQueuedTurnPromptIds(bindingId)).toEqual(["queued-turn"]);
     expect(steering).toEqual(["steer one", "steer two"]);
     release();
-    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\n◆ parent answer` }));
+    await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
     await vi.waitFor(() => expect(turns).toEqual(["parent", "queued turn"]));
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();

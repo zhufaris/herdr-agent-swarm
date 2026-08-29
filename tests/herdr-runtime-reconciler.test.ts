@@ -270,7 +270,7 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
-  it("projects changed terminal output even when the Herdr Pane metadata revision is unchanged", async () => {
+  it("checkpoints changed terminal output without projecting Answer text when Pane metadata is unchanged", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
@@ -282,14 +282,17 @@ describe("HerdrRuntimeReconciler", () => {
     const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
 
     await reconciler.reconcile();
+    const firstFingerprint = store.getBinding("b1")!.lastOutputFingerprint;
     await reconciler.reconcile();
 
     expect(readOutput).toHaveBeenCalledTimes(2);
-    expect(answers).toEqual(["first local answer", "second local answer"]);
+    expect(firstFingerprint).toEqual(expect.any(String));
+    expect(store.getBinding("b1")!.lastOutputFingerprint).not.toBe(firstFingerprint);
+    expect(answers).toEqual([]);
     store.close();
   });
 
-  it("persists changed terminal output without requiring a process-local view projector", async () => {
+  it("persists a terminal fingerprint without adding terminal text to the Main Card intent", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
@@ -300,8 +303,10 @@ describe("HerdrRuntimeReconciler", () => {
     await reconciler.reconcile();
 
     expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: expect.any(String) });
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "durable local answer" });
-    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]));
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "ready", answer: null });
+    const outbound = store.listPendingOutboundReplies();
+    expect(outbound).toEqual(expect.arrayContaining([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]));
+    expect(outbound.map((reply) => reply.payload).join("\n")).not.toContain("durable local answer");
     expect(wakeOutbound).toHaveBeenCalledOnce();
     store.close();
   });

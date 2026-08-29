@@ -10,6 +10,8 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { SessionAdministrationWorkflow } from "../src/coordinator/session-administration-workflow.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
+const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
+
 describe("pane/thread lifecycle integration", () => {
   it("commits queued cancellation before FIFO events and wakes outbound work once", async () => {
     const store = new SqliteBindingStore(":memory:");
@@ -297,7 +299,7 @@ describe("pane/thread lifecycle integration", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("resumes the FIFO when a detached turn is already idle at the TraeX composer after restart", async () => {
+  it("completes a detached turn without terminal Answer content and resumes the FIFO", async () => {
     const submitted: string[] = [];
     let firstController: AbortSignal | undefined;
     let firstDispatched = false;
@@ -321,7 +323,7 @@ describe("pane/thread lifecycle integration", () => {
         }
         return "done";
       },
-      async readOutput() { return restarted ? "❯ Use /skills to list available skills" : "◆ Working…"; }, async renamePane() {}
+      async readOutput() { return restarted ? "❯ SECRET_DETACHED_TERMINAL_SENTINEL" : "◆ Working…"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
@@ -336,7 +338,7 @@ describe("pane/thread lifecycle integration", () => {
     await firstRuntime.projector.stop(); await firstRuntime.publisher.stop();
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1 });
     const firstPrompt = store.database.prepare("SELECT id FROM prompt_jobs WHERE lark_message_id = 'm30'").get() as { id: string };
-    store.saveRunCard({ ...store.loadRunCard(firstPrompt.id)!, answer: "durable streamed answer", answerSegments: ["durable streamed answer"], answerDraft: "", answerDraftTransient: false });
+    store.saveRunCard({ ...store.loadRunCard(firstPrompt.id)!, answer: "LEGACY_UNPROVEN_ANSWER_SENTINEL", answerSegments: ["LEGACY_UNPROVEN_ANSWER_SENTINEL"], answerDraft: "", answerDraftTransient: false });
 
     restarted = true;
     store.updateBinding("b1", { lastAgentState: "idle" });
@@ -344,7 +346,8 @@ describe("pane/thread lifecycle integration", () => {
     await secondRuntime.coordinator.start();
     await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
-    expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: "durable streamed answer" });
+    expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE });
+    expect(store.loadRunCard(firstPrompt.id)!.answer).not.toMatch(/SECRET_DETACHED_TERMINAL_SENTINEL|LEGACY_UNPROVEN_ANSWER_SENTINEL/);
 
     await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();
   });

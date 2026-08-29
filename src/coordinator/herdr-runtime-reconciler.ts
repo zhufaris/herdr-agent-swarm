@@ -7,9 +7,9 @@ import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } fro
 import type { HerdrPort, RuntimeReconciliationStore } from "../domain/ports.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import { cleanTerminalOutput, extractNewOutput, outputFingerprint } from "../runtime/output.js";
+import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { parseTerminalStreamDelta } from "../runtime/traex-output-parser.js";
+import { extractTraexTelemetry } from "../runtime/traex-output-parser.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 
@@ -423,7 +423,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
   private async persistBaselineOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {
     const fingerprint = outputFingerprint(output);
-    const telemetry = parseTerminalStreamDelta("", output, "");
+    const telemetry = extractTraexTelemetry(output);
     const observation = terminalObservation("", telemetry.model, telemetry.context);
     const payload = { observation };
     if (!observation.main.model && !observation.main.context) {
@@ -447,10 +447,12 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const fingerprint = outputFingerprint(output);
     if (fingerprint === binding.lastOutputFingerprint) return;
     if (this.options.isBindingBusy(binding.id)) return;
-    const previous = this.observedTerminalOutputs.get(paneId) ?? "";
-    const answer = extractTraexAnswer(extractNewOutput(previous, output));
-    const telemetry = parseTerminalStreamDelta("", output, "");
-    const payload = { observation: terminalObservation(answer ?? "", telemetry.model, telemetry.context) };
+    const telemetry = extractTraexTelemetry(output);
+    const payload = { observation: terminalObservation("", telemetry.model, telemetry.context) };
+    if (!telemetry.model && !telemetry.context) {
+      if (this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) this.observedTerminalOutputs.set(paneId, output);
+      return;
+    }
     const event = createBridgeEvent(binding.id, "PaneOutputObserved", "herdr", payload);
     const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
     const view = reduceTopicView(current, event);
@@ -465,7 +467,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private async publishTerminalTelemetry(binding: Binding, output: string): Promise<void> {
-    const telemetry = parseTerminalStreamDelta("", output, "");
+    const telemetry = extractTraexTelemetry(output);
     if (!telemetry.model && !telemetry.context) return;
     await this.publish(binding.id, "PaneOutputObserved", { observation: terminalObservation("", telemetry.model, telemetry.context) });
   }
@@ -503,9 +505,3 @@ async function forEachConcurrent<T>(items: readonly T[], limit: number, operatio
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }
-function extractTraexAnswer(output: string): string | null {
-  const marker = /^\s*◆\s+/m.exec(output);
-  if (!marker || marker.index === undefined) return null;
-  const answer = output.slice(marker.index + marker[0].length).split(/\n\s*─{3,}/)[0]?.trim() ?? "";
-  return answer || null;
-}

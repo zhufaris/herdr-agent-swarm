@@ -8,7 +8,7 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
-const TERMINAL_FALLBACK_WARNING = "> ⚠️ 未能读取 TraeX JSONL，以下内容来自 Herdr pane fallback，可能缺少工具调用结构或完整上下文。";
+const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
 describe("coordinator concurrency controls", () => {
   it("continues startup after a recoverable view convergence stage fails", async () => {
@@ -195,7 +195,7 @@ describe("coordinator concurrency controls", () => {
     }
   });
 
-  it("keeps a committed terminal result completed when a lifecycle subscriber fails", async () => {
+  it("keeps a committed unavailable-output result completed when a lifecycle subscriber fails", async () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", title: "Task", foregroundExecutables: ["traex"], agentState: "idle" }]; },
@@ -217,7 +217,7 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nfinal answer` }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
 
     const promptId = store.listRunCards("b1")[0]!.promptId;
     expect(store.getPrompt(promptId)).toMatchObject({ state: "delivered", observationState: "completed", error: null });
@@ -273,8 +273,7 @@ describe("coordinator concurrency controls", () => {
     expect(answer).toContain("```bash\nnpm test\n```");
     expect(answer).toContain("```diff");
     expect(answer).not.toMatch(/fake terminal|misleading terminal/);
-    expect(answer).not.toContain(TERMINAL_FALLBACK_WARNING);
-    expect(terminalReads - terminalReadsBeforePrompt).toBe(1);
+    expect(terminalReads - terminalReadsBeforePrompt).toBe(0);
     expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
@@ -322,18 +321,18 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("logs terminal mode and its bounded fallback reason when no session identity exists", async () => {
+  it("keeps terminal text out of the Answer when no session identity exists", async () => {
     const transcriptReader: TraexTranscriptReaderPort = {
       async open(session) {
         expect(session).toBeNull();
-        return { mode: "terminal", reason: "missing_session_identity" };
+        return { mode: "unavailable", reason: "missing_session_identity" };
       }
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, _text, _timeoutMs, _onObservation, _signal, onDispatched) { await onDispatched?.(); return "done"; },
-      async readOutput() { return "◆ terminal answer\n────────"; }, async renamePane() {}
+      async readOutput() { return "◆ SECRET_TERMINAL_SENTINEL\n────────"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -346,13 +345,14 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "terminal-e1", messageId: "terminal-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "terminal work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nterminal answer` }), { timeout: 4_000 });
-    expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "terminal", fallbackReason: "missing_session_identity" }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }), { timeout: 4_000 });
+    expect(store.listRunCards("b1")[0]!.answer).not.toContain("SECRET_TERMINAL_SENTINEL");
+    expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "unavailable", unavailableReason: "missing_session_identity" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("waits for a first-turn session report before locking output to terminal fallback", async () => {
+  it("waits for a first-turn session report before marking structured output unavailable", async () => {
     const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
     let store!: SqliteBindingStore;
     const opens: Array<string | null> = [];
@@ -361,7 +361,7 @@ describe("coordinator concurrency controls", () => {
         opens.push(session?.value ?? null);
         if (!session) {
           store.recordReportedTraexSession({ bindingId: "b1", paneId: "w1:p1", generation: 1, sessionId, reportedAt: "2026-08-27T17:24:41.778Z" });
-          return { mode: "terminal", reason: "missing_session_identity" };
+          return { mode: "unavailable", reason: "missing_session_identity" };
         }
         expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
         let read = false;
@@ -373,10 +373,10 @@ describe("coordinator concurrency controls", () => {
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
         await onDispatched?.();
-        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ terminal fallback text" });
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ ignored terminal text" });
         return "done";
       },
-      async readOutput() { return "◆ terminal fallback text\n────────"; }, async renamePane() {}
+      async readOutput() { return "◆ ignored terminal text\n────────"; }, async renamePane() {}
     };
     store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -393,7 +393,6 @@ describe("coordinator concurrency controls", () => {
 
     expect(opens).toEqual([null, sessionId]);
     expect(store.listRunCards("b1")[0]!.answer).toBe("authoritative JSONL answer");
-    expect(store.listRunCards("b1")[0]!.answer).not.toContain(TERMINAL_FALLBACK_WARNING);
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
@@ -406,7 +405,7 @@ describe("coordinator concurrency controls", () => {
       async open(session) {
         opens += 1;
         expect(session).toEqual({ source: "bridge", agent: "traex", kind: "id", value: sessionId });
-        if (opens === 1) return { mode: "terminal", reason: "transcript_not_found" };
+        if (opens === 1) return { mode: "unavailable", reason: "transcript_not_found" };
         let read = false;
         return { mode: "typed", cursor: { async readDelta() { if (read) return ""; read = true; return "JSONL created after session report"; } } };
       }
@@ -416,10 +415,10 @@ describe("coordinator concurrency controls", () => {
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
         await onDispatched?.();
-        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ terminal fallback text" });
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ ignored terminal text" });
         return "done";
       },
-      async readOutput() { return "◆ terminal fallback text\n────────"; }, async renamePane() {}
+      async readOutput() { return "◆ ignored terminal text\n────────"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -436,13 +435,12 @@ describe("coordinator concurrency controls", () => {
 
     expect(opens).toBe(2);
     expect(store.listRunCards("b1")[0]!.answer).toBe("JSONL created after session report");
-    expect(store.listRunCards("b1")[0]!.answer).not.toContain(TERMINAL_FALLBACK_WARNING);
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("falls back to terminal output when typed transcript reading fails", async () => {
+  it("keeps terminal output out of the Answer when typed transcript reading fails", async () => {
     const transcriptReader: TraexTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { throw new Error("transcript unavailable"); } } }; }
     };
@@ -451,10 +449,10 @@ describe("coordinator concurrency controls", () => {
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
         await onDispatched?.();
-        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ safe terminal fallback" });
+        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ SECRET_TRANSCRIPT_FAILURE_TERMINAL" });
         return "done";
       },
-      async readOutput() { return "◆ safe terminal fallback\n────────"; }, async renamePane() {}
+      async readOutput() { return "◆ SECRET_TRANSCRIPT_FAILURE_TERMINAL\n────────"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -467,15 +465,16 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "fallback-e1", messageId: "fallback-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "fallback work", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: `${TERMINAL_FALLBACK_WARNING}\n\nsafe terminal fallback` }));
-    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", fallbackReason: "transcript_read_failed", outcome: "terminal_fallback" }));
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
+    expect(store.listRunCards("b1")[0]!.answer).not.toContain("SECRET_TRANSCRIPT_FAILURE_TERMINAL");
+    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", unavailableReason: "transcript_read_failed", outcome: "structured_output_unavailable" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("keeps one fallback warning when a terminal redraw replaces the active answer", async () => {
+  it("ignores terminal redraws when structured output is unavailable", async () => {
     const transcriptReader: TraexTranscriptReaderPort = {
-      async open() { return { mode: "terminal", reason: "transcript_not_found" }; }
+      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; }
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
@@ -500,8 +499,8 @@ describe("coordinator concurrency controls", () => {
     await coordinator.handleMessage({ eventId: "redraw-e1", messageId: "redraw-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "redraw work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
     const answer = store.listRunCards("b1")[0]!.answer;
-    expect(answer).toBe(`${TERMINAL_FALLBACK_WARNING}\n\nreplacement terminal answer`);
-    expect(answer.split(TERMINAL_FALLBACK_WARNING)).toHaveLength(2);
+    expect(answer).toBe(STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE);
+    expect(answer).not.toContain("replacement terminal answer");
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
@@ -535,7 +534,7 @@ describe("coordinator concurrency controls", () => {
     await coordinator.handleMessage({ eventId: "mixed-e1", messageId: "mixed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "typed then fail", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "authoritative typed answer" }));
     expect(store.listRunCards("b1")[0]!.answer).not.toContain("terminal");
-    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", fallbackReason: "transcript_read_failed", outcome: "terminal_fallback_suppressed" }));
+    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", unavailableReason: "transcript_read_failed", outcome: "typed_output_preserved" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });

@@ -81,9 +81,9 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   }
 
   async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
-    if (!session) return { mode: "terminal", reason: "missing_session_identity" };
+    if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
     if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) {
-      return { mode: "terminal", reason: "unsupported_session_identity" };
+      return { mode: "unavailable", reason: "unsupported_session_identity" };
     }
     try {
       const cachedPath = this.pathsBySessionId.get(session.value);
@@ -97,19 +97,19 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
         this.pathsBySessionId.delete(session.value);
       }
       const discovery = await findExactTranscriptPaths(this.sessionsRoot, session.value, this.maxDiscoveryEntries);
-      if (discovery.exhausted) return { mode: "terminal", reason: "transcript_validation_failed" };
+      if (discovery.exhausted) return { mode: "unavailable", reason: "transcript_validation_failed" };
       const paths = discovery.paths;
-      if (paths.length === 0) return { mode: "terminal", reason: "transcript_not_found" };
-      if (paths.length > 1) return { mode: "terminal", reason: "ambiguous_transcript" };
+      if (paths.length === 0) return { mode: "unavailable", reason: "transcript_not_found" };
+      if (paths.length > 1) return { mode: "unavailable", reason: "ambiguous_transcript" };
       const path = paths[0]!;
       if (!await containsMatchingSessionMeta(path, session.value)) {
-        return { mode: "terminal", reason: "transcript_validation_failed" };
+        return { mode: "unavailable", reason: "transcript_validation_failed" };
       }
       this.rememberPath(session.value, path);
       const file = await stat(path);
       return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(path, file.size, this.maxReadBytes)) };
     } catch {
-      return { mode: "terminal", reason: "transcript_validation_failed" };
+      return { mode: "unavailable", reason: "transcript_validation_failed" };
     }
   }
 

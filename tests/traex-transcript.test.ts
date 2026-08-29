@@ -337,8 +337,8 @@ describe("TraexTranscriptReader", () => {
     const root = await createRoot();
     const reader = new TraexTranscriptReader({ sessionsRoot: root });
 
-    await expect(reader.open(null)).resolves.toEqual({ mode: "terminal", reason: "missing_session_identity" });
-    await expect(reader.open(undefined)).resolves.toEqual({ mode: "terminal", reason: "missing_session_identity" });
+    await expect(reader.open(null)).resolves.toEqual({ mode: "unavailable", reason: "missing_session_identity" });
+    await expect(reader.open(undefined)).resolves.toEqual({ mode: "unavailable", reason: "missing_session_identity" });
   });
 
   it.each([
@@ -349,7 +349,7 @@ describe("TraexTranscriptReader", () => {
     const root = await createRoot();
 
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session(overrides))).resolves.toEqual({
-      mode: "terminal",
+      mode: "unavailable",
       reason: "unsupported_session_identity"
     });
   });
@@ -358,7 +358,7 @@ describe("TraexTranscriptReader", () => {
     const root = await createRoot();
 
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
-      mode: "terminal",
+      mode: "unavailable",
       reason: "transcript_not_found"
     });
   });
@@ -370,7 +370,7 @@ describe("TraexTranscriptReader", () => {
     await cp(path, duplicate);
 
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
-      mode: "terminal",
+      mode: "unavailable",
       reason: "ambiguous_transcript"
     });
   });
@@ -408,16 +408,16 @@ describe("TraexTranscriptReader", () => {
     await writeFile(join(root, "unvisited", "extra-entry"), "ignored");
 
     await expect(new TraexTranscriptReader({ sessionsRoot: root, maxDiscoveryEntries: 2 }).open(session())).resolves.toEqual({
-      mode: "terminal", reason: "ambiguous_transcript"
+      mode: "unavailable", reason: "ambiguous_transcript"
     });
   });
 
-  it("falls back safely when transcript discovery exhausts its entry budget", async () => {
+  it("reports unavailable when transcript discovery exhausts its entry budget", async () => {
     const { root } = await createTranscript();
     await writeFile(join(root, "unrelated"), "ignored");
 
     await expect(new TraexTranscriptReader({ sessionsRoot: root, maxDiscoveryEntries: 1 }).open(session())).resolves.toEqual({
-      mode: "terminal", reason: "transcript_validation_failed"
+      mode: "unavailable", reason: "transcript_validation_failed"
     });
   });
 
@@ -428,7 +428,7 @@ describe("TraexTranscriptReader", () => {
     const { root } = await createTranscript({ metadata });
 
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toEqual({
-      mode: "terminal",
+      mode: "unavailable",
       reason: "transcript_validation_failed"
     });
   });

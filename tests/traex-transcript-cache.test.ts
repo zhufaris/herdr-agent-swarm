@@ -31,7 +31,7 @@ describe("Traex transcript path cache", () => {
     await writeTranscript(root, "duplicate", sessionIds[1]!);
 
     await expect(reader.open(session(sessionIds[0]!))).resolves.toMatchObject({ mode: "typed" });
-    await expect(reader.open(session(sessionIds[1]!))).resolves.toEqual({ mode: "terminal", reason: "ambiguous_transcript" });
+    await expect(reader.open(session(sessionIds[1]!))).resolves.toEqual({ mode: "unavailable", reason: "ambiguous_transcript" });
   });
 });
 

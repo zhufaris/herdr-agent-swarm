@@ -272,8 +272,9 @@ change during the target decomposition without changing these steps.
 ### Turn output projection
 
 `PromptRunWorkflow` and passive `HerdrRuntimeReconciler` observations normalize
-their source into `TurnOutputObservation`. The active-turn JSONL path is
-authoritative; terminal parsing remains a bounded fallback. One observation has
+their source into `TurnOutputObservation`. The validated active-turn JSONL path
+is the only Answer source; when it is unavailable, the Answer uses a fixed safe
+notice and never terminal text. One observation has
 two explicit consumer payloads: `answer` supplies answer text and tool activity
 to `RunCardView`, while `main` supplies the status heading, plan snapshot, model,
 context, elapsed time, and reliable token usage to `TopicViewState`. The two
@@ -404,28 +405,27 @@ malformed results; metadata; and unknown items are ignored. Top-level
 `~/.trae/cli/sessions`.
 
 Each turn selects one Answer source mode before dispatch. An exact, validated
-transcript selects typed mode; otherwise the turn selects terminal mode and logs
-one bounded reason: `missing_session_identity`,
+transcript selects typed mode; otherwise structured output is unavailable and the
+turn logs one bounded reason: `missing_session_identity`,
 `unsupported_session_identity`, `transcript_not_found`,
 `ambiguous_transcript`, or `transcript_validation_failed`. These diagnostics do
 not include prompt text, transcript content, paths, or secrets. If a transcript
-read fails before any typed content is published, the turn may switch once to
-terminal mode with `transcript_read_failed`. After any typed content has been
-published, terminal content is never mixed into that Answer; the turn remains
-typed and finalizes from its accumulated typed chunks. A transcript failure does
-not fail or replay the prompt.
+read fails before any typed content is published, the turn changes to unavailable
+with `transcript_read_failed`. After any typed content has been published, the
+turn remains typed and finalizes from its accumulated typed chunks. When no typed
+content exists, completion uses the fixed safe notice
+`⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
+A transcript failure does not fail or replay the prompt.
 
-Terminal observations are normalized before persistence or delivery. ANSI and
-terminal chrome, prompt echo, reasoning blocks, internal protocol markup, and
-secret values are removed or redacted. Overlapping terminal windows append only
-new visible material. When a terminal redraw has no reliable overlap, the active
-transient terminal view is replaced with the new safe screen (`replace-all`),
-which prevents an entire redrawn terminal from being appended twice. Terminal
-turns use this accumulated view and final terminal extraction; typed turns may
-still observe the terminal for Herdr state but never use it as Answer content.
+Terminal observations remain a control-plane source for prompt submission,
+composer readiness, agent-state inference, completion detection, and bounded
+model/context telemetry. Terminal text never becomes Answer content, either live
+or during detached restart recovery. Because persisted RunCard text does not carry
+durable source provenance, detached recovery replaces it with the fixed safe
+notice instead of trusting content from a previous process.
 
 Rollout does not infer or migrate session identity. Existing panes without a
-native TraeX session identity remain in terminal mode for their lifetime. A
+native TraeX session identity complete with the fixed safe notice. A
 fresh bridge-created pane, or a pane explicitly reset through the bridge,
 becomes eligible for typed mode only after its managed `SessionStart` hook has
 registered the exact TraeX UUID in SQLite. The bridge never matches a transcript

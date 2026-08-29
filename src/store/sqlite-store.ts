@@ -1591,14 +1591,14 @@ export class SqliteBindingStore implements BindingStorePort {
       .run(state, observationState, error, now(), id);
   }
 
-  completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding {
+  completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', error = NULL, updated_at = ? WHERE id = ? AND binding_id = ?")
         .run(input.occurredAt, input.promptId, input.bindingId);
       this.updateBinding(input.bindingId, { lastOutputFingerprint: input.outputFingerprint });
       const binding = this.transitionBinding(input.bindingId, { type: "turn_completed" });
-      this.persistTerminalRunCard(input.promptId, { type: "completed", occurredAt: input.occurredAt, answer: input.answer });
+      this.persistTerminalRunCard(input.promptId, { type: "completed", occurredAt: input.occurredAt, answer: input.answer, ...(input.replaceAnswer === undefined ? {} : { replaceAnswer: input.replaceAnswer }) });
       this.database.exec("COMMIT");
       return binding;
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }

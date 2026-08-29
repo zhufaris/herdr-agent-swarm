@@ -68,7 +68,7 @@ export type RunCardChange =
   | { type: "steering-failed"; occurredAt: string; notice: string; failureKind: SteeringFailureKind }
   | { type: "blocked"; occurredAt: string; notice: string }
   | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
-  | { type: "completed"; occurredAt: string; answer: string }
+  | { type: "completed"; occurredAt: string; answer: string; replaceAnswer?: boolean }
   | { type: "failed"; occurredAt: string; notice: string };
 
 export function createQueuedRunCard(input: {
@@ -138,7 +138,7 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
     }
     case "completed":
       if (state.phase === "completed" && state.answer.trim() === change.answer.trim()) return state;
-      patch = { phase: "completed", ...completeAnswer(state, change.answer), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
+      patch = { phase: "completed", ...completeAnswer(state, change.answer, change.replaceAnswer === true), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
       break;
     case "failed":
       if (state.phase === "failed" && state.notice === change.notice) return state;
@@ -179,11 +179,12 @@ function reduceAnswerSnapshot(state: RunCardView, snapshot: string, update: "app
   return { answerSegments, answerDraft: next, answerDraftTransient: false };
 }
 
-function completeAnswer(state: RunCardView, finalAnswer: string): Pick<RunCardView, "answer" | "answerSegments" | "answerDraft" | "answerDraftTransient"> {
+function completeAnswer(state: RunCardView, finalAnswer: string, replace: boolean): Pick<RunCardView, "answer" | "answerSegments" | "answerDraft" | "answerDraftTransient"> {
   const current = answerParts(state);
-  const draft = current.answerDraft.trim();
   const finalValue = finalAnswer.trim();
   if (finalValue === state.answer.trim()) return { answer: state.answer, ...current };
+  if (replace) return { answerSegments: finalValue ? [finalValue] : [], answerDraft: "", answerDraftTransient: false, answer: finalValue };
+  const draft = current.answerDraft.trim();
   let answerSegments = current.answerSegments;
   if (!current.answerDraftTransient && draft && !finalValue.startsWith(draft)) answerSegments = commitSegment(answerSegments, draft);
   answerSegments = commitSegment(answerSegments, finalValue || draft);

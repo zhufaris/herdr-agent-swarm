@@ -149,7 +149,7 @@ export interface TraexTranscriptObservation {
   mainStatus?: TraexTranscriptMainStatus;
 }
 
-export type TraexTranscriptFallbackReason =
+export type TraexTranscriptUnavailableReason =
   | "missing_session_identity"
   | "unsupported_session_identity"
   | "transcript_not_found"
@@ -158,7 +158,7 @@ export type TraexTranscriptFallbackReason =
 
 export type TraexTranscriptOpenResult =
   | { mode: "typed"; cursor: TraexTranscriptCursorPort }
-  | { mode: "terminal"; reason: TraexTranscriptFallbackReason };
+  | { mode: "unavailable"; reason: TraexTranscriptUnavailableReason };
 
 export interface TraexTranscriptReaderPort {
   open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
@@ -287,7 +287,7 @@ export interface BindingStorePort {
     renderRunCard(view: RunCardView): object;
   }): { cancelledPromptIds: string[]; outboxReserved: boolean };
   updatePrompt(id: string, state: PromptJob["state"], error?: string | null): void;
-  completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string }): Binding;
+  completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding;
   failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void;
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
   enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
