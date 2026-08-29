@@ -9,7 +9,7 @@ TUI and this repository's Herdr plugin are optional operator interfaces.
 The original one-topic/one-TraeX bridge remains available during migration.
 
 Each ordinary Lark message gets an Answer CardKit entity. The bridge streams safe
-terminal output into its fixed Markdown element as the request moves from queued
+structured TraeX transcript output into its fixed Markdown element as the request moves from queued
 to running, blocked, completed, or failed. Large answers continue in a new
 continuation card without rewriting the frozen earlier card. It does not post
 separate acknowledgement or final-answer text messages.
@@ -208,7 +208,9 @@ TraeX binary reported by status. The shim does not modify the official Herdr
 binary, native Codex behavior, session database, or detection manifests. Internally
 it uses Herdr's Codex-compatible reservation and prompt protocol while executing
 the real TraeX binary; only shim-marked JSON results are projected as
-`agent: "traex"`. Forms
+`agent: "traex"`. A process-fenced reporter establishes the initial idle
+authority, then TraeX `UserPromptSubmit` and `Stop` hooks report working/idle
+transitions without reading terminal content. Forms
 with leading global routing options such as `herdr --session ...` are delegated
 unchanged; select a session through inherited `HERDR_SESSION` and
 `HERDR_SOCKET_PATH` when the exact TraeX start form must be intercepted.
@@ -370,11 +372,12 @@ Supported native Herdr Pane and Agent events wake the bridge through the Unix
 Socket API. The managed unit receives the invocation-time `HERDR_SOCKET_PATH`;
 if it is absent or disconnected, periodic snapshot reconciliation continues.
 Herdr 0.7.5 does not permit `pane.output_changed` as a Socket subscription, so
-that plugin hook continues through the bounded loopback UDP path. Both event
+that plugin hook can continue through the bounded loopback UDP path as a wake-up hint. Both event
 paths only request reconciliation. One fresh `herdr api snapshot` is
 authoritative for Pane identity, terminal identity, optional native Agent
-session reference, and Agent state. Terminal parsing still supplies answer
-content, Model/Mode selectors, and the bounded `unknown` fallback.
+session reference, and Agent state. Answer content comes only from an exactly
+identified structured TraeX transcript; `unknown` remains fail-closed and runtime
+Model/Mode selection is unsupported.
 `RECONCILE_INTERVAL_MS` is the full-scan recovery fallback and defaults to five
 minutes in the plugin template.
 `HERDR_SNAPSHOT_CACHE_TTL_MS`, `OUTBOX_SAFETY_SCAN_INTERVAL_MS`,
@@ -459,7 +462,7 @@ Available commands:
 /swarm projects
 /swarm spaces
 /swarm attach <space> <pane>
-/swarm model [name]
+/swarm model [name]  # reports runtime switching as unsupported
 /swarm status
 /swarm rename <title>
 /swarm close
@@ -509,9 +512,9 @@ button when the binding has a Feishu root message. Clicking it makes the bridge
 send Feishu's native forwarded-topic card into the current group; open that card
 to enter the project thread. This avoids unsupported `openMessageId` chat links.
 Bindings owned by another group remain rejected without exposing their topic.
-In an idle bound topic, `/swarm model` lists the current and available TraeX models;
-`/swarm model <name>` switches to a uniquely matching model. Model commands do not create an agent turn or enter the
-prompt queue, and are rejected while work is running or queued.
+`/swarm model` and `/swarm model <name>` do not interact with a running Agent.
+Herdr has no structured runtime model-selection operation, so the bridge returns
+an unsupported result; choose the model when creating or explicitly replacing an Agent.
 Only `/swarm …` is reserved for the bridge. Other slash commands, including
 `/herdr` and TraeX skill commands, are passed to the bound pane as ordinary prompts.
 An `@Bot` root message creates a topic in the default project and uses the
@@ -580,7 +583,7 @@ Then perform a Lark smoke test:
 1. Send two prompts in one bound topic.
 2. Confirm that two distinct Answer cards appear and no acknowledgement text is
    posted.
-3. Confirm that the first Answer card streams safe terminal output while TraeX
+3. Confirm that the first Answer card streams safe structured transcript output while TraeX
    works.
 4. Confirm that an approval request remains actionable only in Herdr.
 5. Confirm that completion flushes the Answer card and does not post another

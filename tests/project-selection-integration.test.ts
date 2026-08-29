@@ -21,7 +21,7 @@ describe("project selection flow", () => {
         async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
         async replyText() { return { messageId: "text" }; }, replyCard, async updateCard() {}
       };
-      const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} } as HerdrPort;
+      const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} } as HerdrPort;
       const store = new SqliteBindingStore(":memory:");
       const bus = new BridgeEventBus();
       const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
@@ -48,7 +48,7 @@ describe("project selection flow", () => {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
       async replyText() { return { messageId: "text" }; }, async replyCard() { throw new Error("temporary Lark failure"); }, async updateCard() {}
     };
-    const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} } as HerdrPort;
+    const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} } as HerdrPort;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
@@ -79,7 +79,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(_workspaceId, cwd, options) { await paneReady; return { paneId: "w1:p1", workspaceId: "w1", cwd, label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/work/alpha", label: "task-abcd", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -113,7 +113,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(_workspaceId, _cwd, options) { created.push(options?.title ?? ""); return { paneId: "w1:p1", workspaceId: "w1", cwd: "/work/alpha", label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/work/alpha", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-      async startTraex() {}, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async startTraex() {}, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -151,8 +151,7 @@ describe("project selection flow", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
-      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; },
-      async readOutput() { return ""; }, async renamePane() {}
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "archived-binding", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", title: "alpha / old task" });
@@ -195,8 +194,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd, options) { created.push([workspaceId, cwd, options]); return { paneId: "wD:p9", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "wD:p9", terminalId: "term-9", workspaceId: "wD", cwd: "/work/datasage", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-      async startTraex(paneId) { started.push(paneId); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; },
-      async readOutput() { return ""; }, async renamePane() {}
+      async startTraex(paneId) { started.push(paneId); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -288,7 +286,7 @@ describe("project selection flow", () => {
         return { paneId: "w1:p7", workspaceId: "w1", cwd: "/work/alpha", label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] };
       },
       async observeRuntime() { return { pane: { paneId: "w1:p7", terminalId: "term-7", workspaceId: "w1", cwd: "/work/alpha", label: created[0]?.title ?? null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -325,7 +323,7 @@ describe("project selection flow", () => {
         return [{ paneId: "w2:p1", workspaceId: "w2", cwd: "/work/beta", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }];
       },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const multiProjectConfig = {
       ...configForTests(),
@@ -363,7 +361,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd) { return { paneId: "w1:p7", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "w1:p7", terminalId: "term-7", workspaceId: "w1", cwd: "/work/alpha", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -399,7 +397,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd) { return { paneId: "w1:p7", workspaceId, cwd, label: null, agentState: "unknown", foregroundExecutables: [] }; },
       async startTraex() { throw new Error("TraeX composer did not become ready in pane w1:p7"); },
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();

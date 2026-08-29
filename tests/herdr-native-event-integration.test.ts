@@ -22,7 +22,7 @@ describe("Herdr native and plugin event convergence", () => {
     const published: BridgeEvent[] = [];
     const reconciler = new HerdrRuntimeReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
-      store, herdr: { async listAllPanes() { return [pane]; }, async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort,
+      store, herdr: { async listAllPanes() { return [pane]; }, async listPanes() { return [pane]; } } as unknown as HerdrPort,
       lifecycleEvents: { async publish(event) { published.push(event); } },
       channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false

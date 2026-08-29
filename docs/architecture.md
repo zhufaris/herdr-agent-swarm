@@ -12,11 +12,11 @@ and back to a durable Lark delivery.
 Herdr Agent Swarm manages human-controlled Primary and Worker instances across
 multiple projects on the Herdr headless runtime. Its compatibility bridge also
 connects a Lark topic to one TraeX process in a real Herdr pane, letting a person
-start work, queue later requests, and see a safe terminal stream in Lark while
+start work, queue later requests, and see safe structured TraeX output in Lark while
 preserving Herdr as the place for local observation and high-risk approval.
 
 The bridge is a durable workflow coordinator, not a message relay. It does not
-assume that a Lark API call, a terminal read, or a plugin event is a complete
+assume that a Lark API call, a Herdr snapshot, or a plugin event is a complete
 transaction by itself.
 
 ## Ownership and authority
@@ -83,7 +83,7 @@ The production implementation uses the following modules and seams.
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
 | `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
-| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Model state machine and the stop/model control queue; explicit steering is rejected | One queue owner with a narrow model executor seam |
+| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Stop control plus deterministic rejection of unsupported runtime model/steering operations | One queue owner with no raw terminal-input seam |
 | `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
@@ -250,12 +250,12 @@ change during the target decomposition without changing these steps.
    `agent_not_ready`, and `agent_blocked` errors are confirmed non-delivery. A
    successful command, `agent_prompt_stalled`, or an unclassified failure after
    the command process starts is potentially delivered and is never replayed.
-5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
-   process evidence provide bounded fallbacks where Herdr reports `unknown`.
+5. Herdr runs or observes TraeX. Structured Agent state is authoritative; process
+   evidence can confirm that TraeX exists but cannot turn `unknown` into ready or done.
 6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
-   process-local lifecycle events. For reconciler-observed terminal output, the
-   fingerprint, sanitized desired TopicView, and Main Card delivery intent are
-   one transaction. For a confirmed missing pane, the binding, affected prompt
+   process-local lifecycle events. For structured tab/worktree changes, the
+   sanitized desired TopicView and Main Card delivery intent are one transaction.
+   For a confirmed missing pane, the binding, affected prompt
    jobs and run cards, desired TopicView, and applicable delivery intents are one
    transaction. Queued work is cancelled and running work is failed rather than
    replayed. `BridgeEventBus` and the post-commit outbox wake-up are best-effort
@@ -289,14 +289,14 @@ explicitly uncertain. Jobs that never started remain queued.
 The process uses one Herdr Unix Socket client with a persistent event-stream
 connection and one short-lived connection per RPC because Herdr 0.7.5 dedicates
 an event connection after `events.subscribe` and closes an RPC connection after
-one response. Read-only snapshot, Agent
-read, process-info, and bounded output-wait operations prefer Socket RPC and
-fall back to the CLI when the connection or method is unavailable. TraeX startup
-uses the configured executable through `pane run`; the bridge then requires Herdr
-to detect that process as a ready Codex-compatible Agent. The bridge never
-substitutes the separate Codex executable. Ordinary prompt submission uses the
-Agent CLI surface exclusively so its uncertain-dispatch/no-replay boundary is
-explicit.
+one response. Read-only snapshots, structured Agent lookups, and process-info
+prefer Socket RPC and fall back to the matching CLI operation when unavailable.
+The bridge starts TraeX through the formal `agent start --kind traex` surface.
+On Herdr 0.7.5, the reversible command shim implements that one start operation
+with a fixed launcher plus opaque request ID; no prompt or TraeX argument appears
+in the Pane command. The bridge never substitutes the separate Codex executable.
+Ordinary prompt submission uses the Agent CLI surface exclusively so its
+uncertain-dispatch/no-replay boundary is explicit.
 Active Herdr calls pass through a global transport circuit breaker inside the
 snapshot cache. Three consecutive transport failures open it for 15 seconds;
 after the cooldown one read-only call is admitted as a half-open probe. Commands,
@@ -337,11 +337,11 @@ view and runtime batches, one binding or pane failure does not stop later items.
    references, unknown agent states, and eligible unbound TraeX panes. A new
    terminal identity is accepted only when the persisted native session reference
    exactly matches; a conflicting persisted reference is never overwritten.
-4. Use native Agent identity and structured state first. Read bounded terminal
-   output for changed revisions, final answers, interactive TraeX selectors, or
-   the `unknown` fallback.
-5. Startup terminal reads establish a baseline and do not replace an already
-   durable answer with historical scrollback. Commit reconciler-owned visible transitions before publishing lifecycle events
+4. Use native Agent identity and structured state exclusively for lifecycle
+   convergence. An `unknown` state remains unknown; process identity cannot make
+   it ready or complete.
+5. Startup baselines record only structured Agent sequence, tab, and worktree
+   metadata. Commit reconciler-owned visible transitions before publishing lifecycle events
    or waking eligible queues. A stale pane/generation or stale desired view
    rejects the observation without advancing its fingerprint or lifecycle state,
    so a later reconciliation can recompute from current SQLite state.
@@ -371,12 +371,15 @@ accepted; a new bridge-owned session uses `/swarm reset` rather than local
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
 bridge still invokes the formal `agent start --kind traex` surface and appends
-its SessionStart hook after `--`; the shim preserves those arguments, creates a
-native Codex-compatible managed reservation, launches the configured real TraeX
-executable through a private request file, and owns a separate fenced reporter.
-The reporter keeps Herdr's internal known-agent protocol as Codex, publishes
-`display_agent=traex`, maps Codex-compatible screen explanations into state, and
-releases only its own source and metadata when the exact TraeX process exits.
+its SessionStart hook after `--`; the shim preserves those arguments, launches
+the configured real TraeX executable through a private request file and fixed
+opaque launcher, and owns a separate fenced reporter.
+The reporter keeps Herdr's internal known-agent protocol as Codex, establishes
+the initial process-fenced `idle` authority, and publishes
+`display_agent=traex`. TraeX `UserPromptSubmit` and `Stop` hooks advance that
+authority through `working` and back to `idle` without reading terminal content.
+The reporter releases only its own source and metadata when the exact TraeX
+process exits.
 The shim projects only those marked JSON entries to `agent=traex`; native Codex
 entries and legacy Codex-observed panes remain unchanged.
 The shim does not replace the bridge's capability-authenticated session report:
@@ -430,10 +433,11 @@ content exists, completion uses the fixed safe notice
 `⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
 A transcript failure does not fail or replay the prompt.
 
-Terminal observations remain a bounded control-plane source for agent-state
-inference, completion detection, and explicit model-command interaction. They are
-not used to submit ordinary prompts or steering. Terminal text never becomes Answer content, either live
-or during detached restart recovery. Because persisted RunCard text does not carry
+Terminal content is not a control-plane source. Lifecycle and completion use
+Herdr's structured Agent state, ordinary prompts use `agent prompt --wait`, and
+interrupts use `agent send-keys`. Runtime model switching and steering are
+rejected because Herdr exposes no equivalent structured operation. Terminal text
+never becomes Answer content, either live or during detached restart recovery. Because persisted RunCard text does not carry
 durable source provenance, detached recovery replaces it with the fixed safe
 notice instead of trusting content from a previous process.
 
@@ -625,13 +629,8 @@ These are concrete correctness or robustness gaps in the current implementation,
 distinct from the architectural evolution priorities above. They do not require a
 boundary change to fix.
 
-- **Terminal heuristics**: agent state detection relies on regex matching against
-  terminal output patterns and poll-interval magic numbers. Reconciliation
-  self-heals within one cycle, but TraeX UI changes can cause transient false
-  idle/working detections. Prefer structured runtime evidence from Herdr where
-  available.
 - **Polling intervals and size limits**: several timeouts, poll intervals, and
-  payload size limits (25 ms, 50 ms, 250 ms terminal polls, 2 s cache TTL, 500 ms
+  payload size limits (25 ms, 50 ms, 250 ms runtime polls, 2 s cache TTL, 500 ms
   card debounce, 100 ms UDP debounce, 12000/28000 character CardKit limits,
   60 s close-code TTL) are hardcoded in their respective modules. These should
   move to the validated configuration surface.

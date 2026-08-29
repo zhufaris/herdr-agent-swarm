@@ -41,7 +41,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
       await onObservation?.({ state: "done", stateSource: "structured", output: "◆ done\n────────" });
       return "done";
     },
-    async sendEscape() {}, async readOutput() { return "working"; }, async renamePane() {}
+    async sendEscape() {}, async renamePane() {}
   };
   const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
   const store = new SqliteBindingStore(":memory:");
@@ -94,8 +94,7 @@ describe("active-turn steering", () => {
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
-      async sendEscape(paneId) { escapes.push(paneId); },
-      async readOutput() { return output; }, async renamePane() {}
+      async sendEscape(paneId) { escapes.push(paneId); }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -168,8 +167,7 @@ describe("active-turn steering", () => {
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
-      async sendEscape() {},
-      async readOutput() { return output; }, async renamePane() {}
+      async sendEscape() {}, async renamePane() {}
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
@@ -208,8 +206,7 @@ describe("active-turn steering", () => {
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, _text, _timeoutMs, onObservation) { await onObservation?.({ state: "blocked", stateSource: "structured", output: "❯ needs approval" }); await hold; return "done"; },
-      async sendEscape() {},
-      async readOutput() { return "❯ Approval required: allow this action?"; }, async renamePane() {}
+      async sendEscape() {}, async renamePane() {}
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
@@ -251,8 +248,7 @@ describe("active-turn steering", () => {
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
-      async sendEscape(paneId) { escapes.push(paneId); },
-      async readOutput() { return output; }, async renamePane() {}
+      async sendEscape(paneId) { escapes.push(paneId); }, async renamePane() {}
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();

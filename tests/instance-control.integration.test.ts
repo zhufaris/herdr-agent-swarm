@@ -21,7 +21,7 @@ function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManag
     inspectPane: vi.fn(async () => allocatedPane), releasePane: vi.fn(async () => undefined)
   } as unknown as PaneHost;
   const driver: AgentRuntimeDriver = {
-    kind: overrides.agentKind ?? "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "runtime", usageReporting: true }),
+    kind: overrides.agentKind ?? "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }),
     start: vi.fn(overrides.start ?? (async () => undefined)), submit: vi.fn(async () => ({ status: "confirmed-delivered" }))
   };
   const worktrees = {

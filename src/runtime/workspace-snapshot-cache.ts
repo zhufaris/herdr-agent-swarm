@@ -141,24 +141,11 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: Parameters<HerdrPort["runPrompt"]>[3], signal?: AbortSignal, onDispatched?: Parameters<HerdrPort["runPrompt"]>[5]): Promise<import("../domain/types.js").AgentState> {
     return this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched);
   }
-  async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
-    if (!this.delegate.runPaneCommand) throw new Error("Herdr adapter does not support Pane commands");
-    return this.delegate.runPaneCommand(paneId, command, timeoutMs);
-  }
-  async beginPaneModelSelection(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }> {
-    if (!this.delegate.beginPaneModelSelection) throw new Error("Herdr adapter does not support model selection");
-    return this.delegate.beginPaneModelSelection(paneId, model, timeoutMs);
-  }
-  async completePaneModelMode(paneId: string, mode: string, timeoutMs: number): Promise<void> {
-    if (!this.delegate.completePaneModelMode) throw new Error("Herdr adapter does not support model mode selection");
-    await this.delegate.completePaneModelMode(paneId, mode, timeoutMs);
-  }
   async sendEscape(paneId: string): Promise<void> {
     if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");
     await this.delegate.sendEscape(paneId);
   }
 
-  async readOutput(paneId: string, lines: number): Promise<string> { return this.delegate.readOutput(paneId, lines); }
   async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {
     const workspaceId = this.paneWorkspaceIds.get(paneId);
     await this.delegate.renamePane(paneId, title, options);

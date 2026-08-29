@@ -22,7 +22,7 @@ describe("agent driver contract", () => {
   it("launches TraeX and declares its verified capabilities", async () => {
     const startAgent = vi.fn(async () => undefined);
     const driver = new TraexDriver({ startAgent } as unknown as HerdrPort, "/bin/traex", 1_000);
-    expect(driver.describe()).toMatchObject({ available: true, primaryTools: true, steering: "unsupported", approvals: "terminal" });
+    expect(driver.describe()).toMatchObject({ available: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only" });
     await driver.start(runtime, { projectId: "demo", name: "primary", model: null });
     expect(startAgent).toHaveBeenCalledWith("w1:p1", { name: "demo-primary", kind: "traex", executable: "/bin/traex", args: [] });
   });

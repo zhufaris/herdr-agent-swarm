@@ -3,8 +3,6 @@ import { fileURLToPath } from "node:url";
 import type { HerdrPort } from "../domain/ports.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
-import { stripTerminalControl } from "../runtime/output.js";
-import { inferTraexAgentState, isTraexComposerReady } from "../runtime/traex-output-parser.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -28,32 +26,22 @@ const snapshotPaneSchema = paneSchema.extend({
 const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
-const nativeReadSchema = z.object({ read: z.object({ text: z.string() }).passthrough() }).passthrough();
 const PROCESS_INFO_CONCURRENCY = 4;
 const SESSION_REPORTER_PATH = fileURLToPath(new URL("../cli/report-traex-session.js", import.meta.url));
+const LIFECYCLE_REPORTER_PATH = fileURLToPath(new URL("../cli/report-traex-lifecycle.js", import.meta.url));
 
 interface HerdrNativeRequestClient {
   request(method: string, params: object, timeoutMs: number): Promise<unknown>;
   waitForPaneEvent?(paneId: string, timeoutMs: number): Promise<boolean>;
 }
 
-interface NativeReadNegativeCacheOptions {
-  ttlMs?: number;
-  maxEntries?: number;
-  clock?: () => number;
-}
-
 export class HerdrCliAdapter implements HerdrPort {
-  private readonly nativeReadUnsupportedPanes = new Map<string, number>();
-  private readonly outputReads = new Map<string, Promise<string>>();
-
   constructor(
     private readonly runner: CommandRunner,
     private readonly executable: string,
     private readonly commandTimeoutMs: number,
     private readonly traexPermissionMode = "auto",
-    private readonly native?: HerdrNativeRequestClient,
-    private readonly nativeReadNegativeCache: NativeReadNegativeCacheOptions = {}
+    private readonly native?: HerdrNativeRequestClient
   ) {}
 
   async assertWorkspace(workspaceId: string): Promise<void> {
@@ -103,15 +91,11 @@ export class HerdrCliAdapter implements HerdrPort {
     const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
     if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
-    if (pane.agentState !== "unknown") return { pane: observed, traexProcess, composerReady: pane.agentState === "idle" || pane.agentState === "done", evidenceSource: "structured" };
-    try {
-      const recentState = inferTraexAgentState(await this.readOutput(paneId, 80));
-      if (recentState !== "unknown") return this.runtimeObservation(observed, recentState, "recent");
-      const visibleState = inferTraexAgentState(await this.coalesceOutputRead(paneId, 80, "visible"));
-      return this.runtimeObservation(observed, visibleState, visibleState === "unknown" ? "process" : "visible");
-    } catch {
-      return { pane: observed, traexProcess, composerReady: false, evidenceSource: "process" };
-    }
+    return {
+      pane: observed, traexProcess,
+      composerReady: pane.agentState === "idle" || pane.agentState === "done",
+      evidenceSource: pane.agentState === "unknown" ? "process" : "structured"
+    };
   }
 
   async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
@@ -154,33 +138,30 @@ export class HerdrCliAdapter implements HerdrPort {
       ? initial.foregroundExecutables
       : await this.foregroundExecutables(paneId);
     if (!foregroundExecutables.includes("traex")) {
-      await this.runner.run(this.executable, [
-        "pane", "run", paneId, executable, "--permission-mode", this.traexPermissionMode,
-        "--dangerously-bypass-hook-trust",
-        "-c", sessionHookOverride(SESSION_REPORTER_PATH), ...args
-      ], this.commandTimeoutMs);
+      await this.startAgent(paneId, { name: managedTraexName(paneId), kind: "traex", executable, args });
+      return;
     }
     await this.waitUntilTraexAgentReady(paneId);
   }
 
   async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void> {
-    const canonical = input.kind === "claude" ? "claude" : input.kind;
     if (input.kind === "traex") {
       const args = [
         "agent", "start", input.name, "--kind", "traex", "--pane", paneId, "--timeout", String(this.commandTimeoutMs), "--",
-        "--permission-mode", this.traexPermissionMode, "--dangerously-bypass-hook-trust", "-c", sessionHookArgument(SESSION_REPORTER_PATH), ...(input.args ?? [])
+        "--permission-mode", this.traexPermissionMode, "--dangerously-bypass-hook-trust",
+        "-c", sessionHookArgument(SESSION_REPORTER_PATH),
+        "-c", lifecycleHookArgument("UserPromptSubmit", ".*", LIFECYCLE_REPORTER_PATH, this.executable),
+        "-c", lifecycleHookArgument("Stop", null, LIFECYCLE_REPORTER_PATH, this.executable),
+        ...(input.args ?? [])
       ];
       await this.startWhenShellReady(args);
-    } else if (input.executable === canonical) {
+    } else {
       const args = ["agent", "start", input.name, "--kind", input.kind, "--pane", paneId, "--timeout", String(this.commandTimeoutMs)];
       if (input.args?.length) args.push("--", ...input.args);
       await this.startWhenShellReady(args);
-    } else {
-      await this.runner.run(this.executable, ["pane", "run", paneId, input.executable, ...(input.args ?? [])], this.commandTimeoutMs);
     }
     const pane = await this.getPane(paneId);
     if (!pane || pane.agentKind !== input.kind || pane.agentState === "unknown") throw new Error(`Herdr did not verify ${input.kind} in pane ${paneId}`);
-    if (input.executable !== canonical) await this.runner.run(this.executable, ["agent", "rename", paneId, input.name], this.commandTimeoutMs);
   }
 
   private async startWhenShellReady(args: string[]): Promise<void> {
@@ -205,7 +186,6 @@ export class HerdrCliAdapter implements HerdrPort {
     onDispatched?: () => void | Promise<void>
   ): Promise<AgentState> {
     throwIfAborted(signal);
-    const before = await this.readOutput(paneId, 240);
     let commandStarted = false;
     let dispatchReported = false;
     const reportDispatched = async (): Promise<void> => {
@@ -214,171 +194,27 @@ export class HerdrCliAdapter implements HerdrPort {
       await onDispatched?.();
     };
     try {
-      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs, () => { commandStarted = true; });
+      const { stdout } = await this.runner.run(
+        this.executable,
+        ["agent", "prompt", paneId, text, "--wait", "--timeout", String(timeoutMs)],
+        timeoutMs + this.commandTimeoutMs,
+        () => { commandStarted = true; }
+      );
       await reportDispatched();
+      const state = promptResultState(stdout) ?? (await this.getPane(paneId))?.agentState ?? "unknown";
+      const settled = state === "idle" ? "done" : state;
+      await onObservation?.({ state: settled, stateSource: settled === "unknown" ? "unknown" : "structured" });
+      return settled;
     } catch (error) {
       if (!isExplicitPreDispatchAgentPromptError(error) && (commandStarted || isPossiblyDispatchedAgentPromptError(error))) {
         await reportDispatched();
       }
       throw error;
     }
-    return this.waitForTraexTurn(paneId, text, before, timeoutMs, onObservation, signal, false);
   }
 
   async sendEscape(paneId: string): Promise<void> {
-    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Esc"], this.commandTimeoutMs);
-  }
-
-  async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
-    const before = await this.readOutput(paneId, 240);
-    if (normalizePromptEcho(command) === normalizePromptEcho("/model")) await this.clearComposerInput(paneId);
-    await this.submitPromptText(paneId, command, before);
-    const deadline = Date.now() + timeoutMs;
-    let previous = "";
-    let stablePolls = 0;
-    while (Date.now() < deadline) {
-      const after = await this.readOutput(paneId, 240);
-      const selector = interactiveModelSelectorOutput(command, after);
-      if (selector) {
-        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Esc"], this.commandTimeoutMs);
-        return selector;
-      }
-      const output = paneCommandOutput(before, after, command);
-      if (output && output === previous) {
-        stablePolls += 1;
-        if (stablePolls >= 1) {
-          return output;
-        }
-      } else {
-        previous = output;
-        stablePolls = 0;
-      }
-      await abortableDelay(50);
-    }
-    throw new Error(`Timed out waiting for Pane command output in ${paneId}`);
-  }
-
-  async beginPaneModelSelection(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }> {
-    const before = await this.readOutput(paneId, 240);
-    await this.clearComposerInput(paneId);
-    await this.submitPromptText(paneId, "/model", before);
-    const deadline = Date.now() + timeoutMs;
-    await this.waitForOutputMarker(paneId, "Select Model and Effort", deadline);
-    while (Date.now() < deadline) {
-      const output = await this.readOutput(paneId, 240);
-      if (/Select Model and Effort/i.test(output) && /esc to go back/i.test(output)) {
-        await this.clearComposerInput(paneId);
-        await this.runner.run(this.executable, ["pane", "send-text", paneId, model], this.commandTimeoutMs);
-        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
-        await this.waitForOutputMarker(paneId, "Select Model and Mode", deadline);
-        while (Date.now() < deadline) {
-          const selected = await this.readOutput(paneId, 240);
-          const modes = interactiveModelModes(selected);
-          if (modes) return { kind: "mode_required", modes };
-          if (isTraexComposerReady(selected)) return { kind: "composer_ready" };
-          await abortableDelay(50);
-        }
-        throw new Error(`Timed out waiting for TraeX model selection in pane ${paneId}`);
-      }
-      await abortableDelay(50);
-    }
-    throw new Error(`Timed out waiting for TraeX model selector in pane ${paneId}`);
-  }
-
-  async completePaneModelMode(paneId: string, mode: string, timeoutMs: number): Promise<void> {
-    const before = await this.readOutput(paneId, 240);
-    if (!interactiveModelModes(before)?.includes(mode)) throw new Error(`TraeX mode selector is no longer active in pane ${paneId}`);
-    await this.clearComposerInput(paneId);
-    await this.runner.run(this.executable, ["pane", "send-text", paneId, mode], this.commandTimeoutMs);
-    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs);
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (isTraexComposerReady(await this.readOutput(paneId, 240))) return;
-      await abortableDelay(50);
-    }
-    throw new Error(`Timed out waiting for TraeX mode selection in pane ${paneId}`);
-  }
-
-  async readOutput(paneId: string, lines: number): Promise<string> {
-    return this.coalesceOutputRead(paneId, lines, "recent-unwrapped");
-  }
-
-  private async readOutputSource(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
-    // Some snapshots report an unknown status for a registered native agent,
-    // so retain the native fast path until Herdr explicitly rejects this Pane
-    // as an agent target. Cache that negative capability: agent.read targets
-    // agents rather than arbitrary Panes, and retrying agent_not_found on every
-    // observer pass creates an avoidable RPC storm.
-    if (this.native && !this.isNativeReadUnsupported(paneId)) {
-      try {
-        const result = nativeReadSchema.parse(await this.native.request("agent.read", {
-          target: paneId, source: source === "recent-unwrapped" ? "recent_unwrapped" : source, lines, format: "text", strip_ansi: true
-        }, this.commandTimeoutMs));
-        return result.read.text;
-      } catch (error) {
-        if (isUnknownNativeAgent(error)) this.rememberNativeReadUnsupported(paneId);
-        // Read-only native failures fall back to the Pane CLI.
-      }
-    }
-    return this.readPaneOutput(paneId, lines, source);
-  }
-
-  private async readPaneOutput(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
-    const { stdout } = await this.runner.run(this.executable, [
-      "pane", "read", paneId, "--source", source, "--lines", String(lines), "--format", "text"
-    ], this.commandTimeoutMs);
-    return unwrapText(stdout);
-  }
-
-  private isNativeReadUnsupported(paneId: string): boolean {
-    const expiresAt = this.nativeReadUnsupportedPanes.get(paneId);
-    if (expiresAt === undefined) return false;
-    if (expiresAt <= (this.nativeReadNegativeCache.clock ?? Date.now)()) {
-      this.nativeReadUnsupportedPanes.delete(paneId);
-      return false;
-    }
-    this.nativeReadUnsupportedPanes.delete(paneId);
-    this.nativeReadUnsupportedPanes.set(paneId, expiresAt);
-    return true;
-  }
-
-  private rememberNativeReadUnsupported(paneId: string): void {
-    const now = (this.nativeReadNegativeCache.clock ?? Date.now)();
-    for (const [key, expiresAt] of this.nativeReadUnsupportedPanes) {
-      if (expiresAt <= now) this.nativeReadUnsupportedPanes.delete(key);
-    }
-    this.nativeReadUnsupportedPanes.delete(paneId);
-    this.nativeReadUnsupportedPanes.set(paneId, now + Math.max(0, this.nativeReadNegativeCache.ttlMs ?? 30_000));
-    const maxEntries = Math.max(1, Math.floor(this.nativeReadNegativeCache.maxEntries ?? 256));
-    while (this.nativeReadUnsupportedPanes.size > maxEntries) {
-      const oldest = this.nativeReadUnsupportedPanes.keys().next().value;
-      if (oldest === undefined) break;
-      this.nativeReadUnsupportedPanes.delete(oldest);
-    }
-  }
-
-  private coalesceOutputRead(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
-    const key = `${paneId}\0${source}\0${lines}`;
-    const active = this.outputReads.get(key);
-    if (active) return active;
-    const read = this.readOutputSource(paneId, lines, source);
-    this.outputReads.set(key, read);
-    void read.then(
-      () => { if (this.outputReads.get(key) === read) this.outputReads.delete(key); },
-      () => { if (this.outputReads.get(key) === read) this.outputReads.delete(key); }
-    );
-    return read;
-  }
-
-  private async waitForOutputMarker(paneId: string, marker: string, deadline: number): Promise<void> {
-    if (!this.native) return;
-    const timeoutMs = Math.max(1, Math.min(500, deadline - Date.now()));
-    try {
-      await this.native.request("pane.wait_for_output", {
-        pane_id: paneId, source: "recent_unwrapped", lines: 240, strip_ansi: true,
-        match: { type: "substring", value: marker }, timeout_ms: timeoutMs
-      }, timeoutMs);
-    } catch { /* The bounded polling loop remains the compatibility fallback. */ }
+    await this.runner.run(this.executable, ["agent", "send-keys", paneId, "esc"], this.commandTimeoutMs);
   }
 
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> {
@@ -457,137 +293,6 @@ export class HerdrCliAdapter implements HerdrPort {
     throw new Error(`Herdr did not detect a ready TraeX-compatible agent in pane ${paneId}`);
   }
 
-  private runtimeObservation(pane: HerdrPane, state: AgentState, evidenceSource: RuntimeObservation["evidenceSource"]): RuntimeObservation {
-    return { pane: { ...pane, agentState: state }, traexProcess: true, composerReady: state === "idle" || state === "done", evidenceSource };
-  }
-
-  private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {
-    const comparableText = normalizePromptEcho(text);
-    const existingComposer = activeTraexComposer(before, true);
-    if (existingComposer !== null && normalizePromptEcho(existingComposer)) {
-      if (normalizePromptEcho(existingComposer) !== comparableText) {
-        throw new Error(`composer_not_empty in pane ${paneId}`);
-      }
-      await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs, onDispatched);
-      return;
-    }
-    await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
-    const deadline = Date.now() + this.commandTimeoutMs;
-    await this.waitForOutputMarker(paneId, text, Math.min(deadline, Date.now() + 250));
-    while (Date.now() < deadline) {
-      throwIfAborted(signal);
-      const output = await this.readOutput(paneId, 240);
-      let confirmed = normalizePromptEcho(activeTraexComposer(output) ?? "") === comparableText;
-      // agent.read can briefly return a valid but stale Agent snapshot while the
-      // Pane TUI already contains the pasted composer text. Confirm against the
-      // Pane surface before withholding Enter until timeout.
-      if (!confirmed && this.native) {
-        const paneOutput = await this.readPaneOutput(paneId, 240, "recent-unwrapped");
-        confirmed = normalizePromptEcho(activeTraexComposer(paneOutput) ?? "") === comparableText;
-      }
-      if (confirmed) {
-        await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs, onDispatched);
-        return;
-      }
-      await abortableDelay(25, signal);
-    }
-    throw new Error(`Timed out waiting for prompt text in pane ${paneId}`);
-  }
-
-  private async clearComposerInput(paneId: string): Promise<void> {
-    await this.runner.run(this.executable, ["pane", "send-keys", paneId, "ctrl+u"], this.commandTimeoutMs);
-  }
-
-  private async waitForTraexTurn(
-    paneId: string,
-    submittedText: string,
-    before: string,
-    timeoutMs: number,
-    onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
-    signal?: AbortSignal,
-    promptConfirmedInComposer = false,
-    baselineStateChangeSeq?: number | null
-  ): Promise<AgentState> {
-    const deadline = Date.now() + timeoutMs;
-    let observedWorking = false;
-    let lastAgentState: AgentState = "unknown";
-    let lastOutput = before;
-    let lastOutputRevision: number | null | undefined;
-    let stableIdlePolls = 0;
-    let outputChangedAfterSubmission = false;
-    const comparableText = normalizePromptEcho(submittedText);
-    const previousPromptOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
-    let promptObservedAfterSubmission = promptConfirmedInComposer;
-    let outputStable = false;
-
-    while (Date.now() < deadline) {
-      throwIfAborted(signal);
-      let agentState: AgentState = "unknown";
-      let stateChangeSeq: number | null | undefined;
-      let foregroundExecutables: string[] = [];
-      let outputRead = false;
-      try {
-        const pane = await this.getPane(paneId);
-        if (!pane) throw new Error(`Herdr pane not found: ${paneId}`);
-        agentState = pane.agentState;
-        stateChangeSeq = pane.stateChangeSeq;
-        foregroundExecutables = pane.foregroundExecutables;
-        const revisionChanged = pane.outputRevision === null || pane.outputRevision === undefined || pane.outputRevision !== lastOutputRevision;
-        if (agentState === "unknown" || revisionChanged) {
-          const output = await this.readOutput(paneId, 240);
-          outputRead = true;
-          outputStable = output === lastOutput;
-          if (output !== before) outputChangedAfterSubmission = true;
-          if (countOccurrences(normalizePromptEcho(output), comparableText) > previousPromptOccurrences) promptObservedAfterSubmission = true;
-          if ((agentState !== "unknown" && agentState !== lastAgentState) || output !== lastOutput) {
-            if (agentState !== "unknown") lastAgentState = agentState;
-            await onObservation?.({ state: agentState, stateSource: agentState === "unknown" ? "unknown" : "structured", output });
-          }
-          lastOutput = output;
-        } else if (agentState !== lastAgentState) {
-          lastAgentState = agentState;
-          await onObservation?.({ state: agentState, stateSource: "structured", output: lastOutput });
-        }
-        lastOutputRevision = pane.outputRevision;
-      } catch (error) {
-        if (String(error).includes("pane not found")) throw error;
-      }
-      if (!outputRead && agentState === "unknown") {
-        const output = await this.readOutput(paneId, 240);
-        outputStable = output === lastOutput;
-        if (output !== before) outputChangedAfterSubmission = true;
-        if (countOccurrences(normalizePromptEcho(output), comparableText) > previousPromptOccurrences) promptObservedAfterSubmission = true;
-        if (output !== lastOutput) await onObservation?.({ state: "unknown", stateSource: "unknown", output });
-        lastOutput = output;
-      }
-      if (agentState === "working" || agentState === "blocked") observedWorking = true;
-      if (observedWorking && promptObservedAfterSubmission && (agentState === "done" || agentState === "idle")) return "done";
-      const lifecycleAdvanced = baselineStateChangeSeq !== null && baselineStateChangeSeq !== undefined
-        && stateChangeSeq !== null && stateChangeSeq !== undefined && stateChangeSeq > baselineStateChangeSeq;
-      if (promptConfirmedInComposer && lifecycleAdvanced && (agentState === "done" || agentState === "idle")) return "done";
-      const safelyIdle = agentState === "unknown" && outputChangedAfterSubmission && isTraexIdle(lastOutput) && !hasActiveTurnHelper(foregroundExecutables);
-      if (safelyIdle) {
-        stableIdlePolls = outputStable ? stableIdlePolls + 1 : 0;
-        if (stableIdlePolls >= 2) return "done";
-      } else if (agentState === "unknown" && isTraexWorking(lastOutput)) {
-        observedWorking = true;
-        if (lastAgentState !== "working") {
-          lastAgentState = "working";
-          await onObservation?.({ state: "working", stateSource: "terminal", output: lastOutput });
-        }
-        stableIdlePolls = 0;
-      } else if (agentState === "unknown" && observedWorking) {
-        stableIdlePolls = outputStable ? stableIdlePolls + 1 : 0;
-        if (stableIdlePolls >= 1) return "done";
-      } else {
-        stableIdlePolls = 0;
-      }
-      await this.waitForPaneChange(paneId, 250, signal);
-    }
-
-    throw new Error(`Timed out waiting for TraeX turn in pane ${paneId}`);
-  }
-
   private async waitForPaneChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     if (!this.native?.waitForPaneEvent) { await abortableDelay(timeoutMs, signal); return; }
     throwIfAborted(signal);
@@ -616,16 +321,19 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 }
 
-function sessionHookOverride(reporterPath: string): string {
-  const override = sessionHookArgument(reporterPath);
-  // `herdr pane run` passes its command through the pane shell, so quote the
-  // complete TOML override as one shell argument rather than only its command.
-  return shellQuote(override);
-}
-
 function sessionHookArgument(reporterPath: string): string {
   const command = `node ${shellQuote(reporterPath)}`;
   return `hooks.SessionStart=[{matcher="startup|resume",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+}
+
+function lifecycleHookArgument(event: "UserPromptSubmit" | "Stop", matcher: string | null, reporterPath: string, herdrExecutable: string): string {
+  const command = `HERDR_TRAEX_REAL_HERDR=${shellQuote(herdrExecutable)} node ${shellQuote(reporterPath)}`;
+  const match = matcher === null ? "" : `matcher=${JSON.stringify(matcher)},`;
+  return `hooks.${event}=[{${match}hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+}
+
+function managedTraexName(paneId: string): string {
+  return `traex-${paneId.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`.slice(0, 32);
 }
 
 function shellQuote(value: string): string {
@@ -677,6 +385,29 @@ function structuredHerdrErrorCode(error: unknown): string | null {
   }
 }
 
+function promptResultState(stdout: string): AgentState | null {
+  try {
+    const value = JSON.parse(stdout) as Record<string, unknown>;
+    return findAgentState(value.result ?? value);
+  } catch {
+    return null;
+  }
+}
+
+function findAgentState(value: unknown): AgentState | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ["agent_status", "state", "status"] as const) {
+    const state = record[key];
+    if (state === "idle" || state === "working" || state === "blocked" || state === "done" || state === "unknown") return state;
+  }
+  for (const key of ["agent", "wait", "prompt", "observation", "result"] as const) {
+    const state = findAgentState(record[key]);
+    if (state) return state;
+  }
+  return null;
+}
+
 function larkTabTitle(title: string | undefined): string {
   return `lark_${normalizePaneTitle(title)}`;
 }
@@ -685,126 +416,10 @@ function normalizePaneTitle(title: string | undefined): string {
   return (title ?? "TraeX pane").replace(/\s+/g, " " ).trim() || "TraeX pane";
 }
 
-function unwrapText(stdout: string): string {
-  const trimmed = stdout.trim();
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (parsed && typeof parsed === "object") {
-      const record = parsed as Record<string, unknown>;
-      const result = record.result as Record<string, unknown> | undefined;
-      for (const candidate of [result?.text, result?.output, result?.content, record.text]) {
-        if (typeof candidate === "string") return candidate;
-      }
-    }
-  } catch { /* text output is expected on some Herdr versions */ }
-  return trimmed;
-}
-
-function isTraexWorking(output: string): boolean {
-  return /[✧◆]\s*Work(?:ing|i…)/u.test(output);
-}
-
 function isReadyTraexAgent(pane: HerdrPane | null): boolean {
   return Boolean(pane
     && (pane.agentKind === "codex" || pane.agentKind === "traex")
     && (pane.agentState === "idle" || pane.agentState === "done"));
-}
-
-function isUnknownNativeAgent(error: unknown): boolean {
-  return /(?:^|[\s:_-])agent_not_found(?:$|[\s:_-])|agent target .+ not found/i.test(error instanceof Error ? error.message : String(error));
-}
-
-function isTraexIdle(output: string): boolean {
-  const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
-  const composerIndex = lines.findLastIndex((line) => /^\s*[❯›>]\s*(?:[^<].*)?$/u.test(line));
-  if (composerIndex < 0) return false;
-  const tail = lines.slice(composerIndex + 1);
-  if (/approve|approval|required|allow this|waiting for user|等待.*(?:批准|确认|用户)/iu.test(tail.join("\n"))) return false;
-  return tail.every((line) => {
-    const value = line.trim();
-    return !value || /^[─━-]{3,}$/u.test(value) || /(?:Context|Mode|left|ctrl\+|shift\+tab|to cycle|Auto Mode)/iu.test(value);
-  });
-}
-
-function hasActiveTurnHelper(executables: string[]): boolean {
-  return executables.some((name) => !["traex", "bash", "sh", "zsh", "fish"].includes(name));
-}
-
-function normalizePromptEcho(value: string): string {
-  return value.replace(/[▍\s]+/gu, "");
-}
-
-function activeTraexComposer(output: string, requireFrame = false): string | null {
-  const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
-  let end = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (/^\s*[❯›>▍](?:\s|$)/u.test(lines[index]!)) { end = index; break; }
-  }
-  if (end < 0) return null;
-  if (requireFrame && !lines.slice(end + 1).some((line) => /^\s*[─━-]{3,}\s*$/u.test(line))) return null;
-  let start = end;
-  while (start > 0 && /^\s*[❯›>▍](?:\s|$)/u.test(lines[start - 1]!)) start -= 1;
-  return lines.slice(start, end + 1).map((line) => line.replace(/^\s*[❯›>▍]\s*/u, "")).join("");
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  let offset = 0;
-  while ((offset = haystack.indexOf(needle, offset)) !== -1) {
-    count += 1;
-    offset += needle.length;
-  }
-  return count;
-}
-
-function paneCommandOutput(before: string, after: string, command: string): string {
-  const cleanBefore = stripTerminalControl(before).replace(/\r/g, "").trimEnd();
-  const cleanAfter = stripTerminalControl(after).replace(/\r/g, "").trimEnd();
-  const lines = cleanAfter.split("\n");
-  const commandKey = normalizePromptEcho(command);
-  let commandLine = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (normalizePromptEcho(lines[index]!.replace(/^\s*[❯›>]\s*/, "")) === commandKey) { commandLine = index; break; }
-  }
-  const suffix = commandLine >= 0
-    ? lines.slice(commandLine + 1).join("\n")
-    : cleanAfter.startsWith(cleanBefore) ? cleanAfter.slice(cleanBefore.length) : "";
-  return redactTerminalSecrets(suffix.split("\n")
-    .map((line) => line.replace(/^\s*[❯›>]\s*/, ""))
-    .filter((line) => normalizePromptEcho(line) !== normalizePromptEcho(command))
-    .join("\n").trim());
-}
-
-function isInteractiveModelModeSelector(output: string): boolean {
-  return /Select Model and Mode/i.test(output) && /esc to go back/i.test(output);
-}
-
-function interactiveModelModes(output: string): string[] | null {
-  if (!isInteractiveModelModeSelector(output)) return null;
-  const modes = output.split("\n")
-    .map((line) => /^\s*(?:❯\s*)?\d+\.\s+.+?\/\s+(.+?)\s*$/u.exec(line)?.[1]?.trim() ?? null)
-    .filter((mode): mode is string => mode !== null && mode.length > 0 && mode.length <= 128);
-  const uniqueModes = [...new Set(modes)].slice(0, 100);
-  return uniqueModes.length ? uniqueModes : null;
-}
-
-function interactiveModelSelectorOutput(command: string, output: string): string | null {
-  if (normalizePromptEcho(command) !== normalizePromptEcho("/model")) return null;
-  const clean = stripTerminalControl(output).replace(/\r/g, "");
-  const start = clean.search(/Select Model and Effort/i);
-  if (start < 0) return null;
-  const selector = clean.slice(start).trim();
-  return /esc to go back/i.test(selector) ? redactTerminalSecrets(selector) : null;
-}
-
-function redactTerminalSecrets(value: string): string {
-  return value
-    .replace(/((?:proxy-)?authorization\s*[:=]\s*(?:bearer\s+)?)([^\s'";,}]+)/gi, "$1[REDACTED]")
-    .replace(/(bearer\s+)([a-z0-9._~+\/-]+)/gi, "$1[REDACTED]")
-    .replace(/((?:access[_-]?token|api[_-]?key|token|secret|password)\s*[=:]\s*["']?)([^\s"'&,;}]+)/gi, "$1[REDACTED]")
-    .replace(/([?&](?:access_token|api_key|token|secret|password)=)[^&#\s]+/gi, "$1[REDACTED]")
-    .replace(/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/gi, "[REDACTED PRIVATE KEY]");
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

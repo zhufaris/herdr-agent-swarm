@@ -26,7 +26,7 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd, label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -78,8 +78,7 @@ describe("Herdr discovery", () => {
         output += "\n◆ done\n────────";
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
-      },
-      async readOutput() { return output; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -140,8 +139,7 @@ describe("Herdr discovery", () => {
         output += "\n◆ final answer\n────────";
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
-      },
-      async readOutput() { return output; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -186,7 +184,7 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/work/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -225,7 +223,7 @@ describe("Herdr discovery", () => {
       async getPane() { return { paneId: "w1:p2", tabId: "w1:t2", terminalId: "term-2", workspaceId: "w1", cwd: "/work/my-project", label: "Initial pane", agentState: "idle", foregroundExecutables: ["traex"] }; },
       async observeRuntime() { const pane = await this.getPane("w1:p2"); return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async createPane(workspaceId, cwd, options) { created.push(options); return { paneId: "w1:p2", tabId: "w1:t2", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
-      async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; },
+      async startTraex() {}, async runPrompt() { return "done"; },
       async renamePane(paneId, title, options) { renamed.push([paneId, title, options]); }
     };
     const config = {
@@ -275,7 +273,7 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return output; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -318,7 +316,7 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return output; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -356,7 +354,7 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { output = `${output}\n◆ thread reply\n────────`; return "done"; }, async readOutput() { return output; }, async renamePane() {}
+      async runPrompt() { output = `${output}\n◆ thread reply\n────────`; return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -418,8 +416,7 @@ describe("Herdr discovery", () => {
         output = `${output}\n◆ answer ${prompts.length}\n────────`;
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
-      },
-      async readOutput() { return output; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -478,8 +475,7 @@ describe("Herdr discovery", () => {
           await blockedTurn;
         }
         return "done";
-      },
-      async readOutput() { return "terminal"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -525,7 +521,7 @@ describe("Herdr discovery", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },

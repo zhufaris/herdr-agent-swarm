@@ -111,7 +111,6 @@ function adapter(overrides: Partial<HerdrPort>): HerdrPort {
   return {
     async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
     async observeRuntime() { return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" }; },
-    async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; },
-    async readOutput() { return ""; }, async renamePane() {}, async closePane() {}, ...overrides
+    async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, async closePane() {}, ...overrides
   };
 }

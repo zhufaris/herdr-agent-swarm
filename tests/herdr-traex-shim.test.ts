@@ -85,10 +85,10 @@ describe("Herdr TraeX managed start", () => {
             processReads += 1;
             return { stdout: envelope(processReads === 1 ? processInfo(10, "bash", ["bash"]) : processInfo(44, "traex", ["/opt/traex"])), stderr: "" };
           }
-          if (args[0] === "agent" && args[1] === "start") return { stdout: envelope({ agent: { pane_id: "w1:p1", agent: "codex", agent_status: "idle" }, argv: ["codex"], type: "agent_started" }), stderr: "" };
           if (args[0] === "agent" && args[1] === "get") {
             agentReads += 1;
             expect(args[2]).toBe("reviewer");
+            if (agentReads === 1) throw new Error("agent_not_found");
             return { stdout: envelope({ agent: { pane_id: "w1:p1", agent: "codex", display_agent: "traex", agent_status: agentReads > 1 ? "idle" : "unknown" } }), stderr: "" };
           }
           return { stdout: envelope({}), stderr: "" };
@@ -104,9 +104,10 @@ describe("Herdr TraeX managed start", () => {
     );
 
     expect(result).toMatchObject({ agent: { pane_id: "w1:p1", agent: "traex", agent_status: "idle" } });
-    expect(calls.filter((args) => args[0] === "pane" && args[1] === "run")).toEqual([["pane", "run", "w1:p1", "codex() { /opt/shim/pane-launcher abc-123; }"]]);
-    expect(calls.filter((args) => args[0] === "agent" && args[1] === "start")).toEqual([["agent", "start", "reviewer", "--kind", "codex", "--pane", "w1:p1", "--timeout", "1000", "--", "--model", "private model"]]);
-    expect(calls.findIndex((args) => args[0] === "pane" && args[1] === "run")).toBeLessThan(calls.findIndex((args) => args[0] === "agent" && args[1] === "start"));
+    const launch = calls.filter((args) => args[0] === "pane" && args[1] === "run");
+    expect(launch).toEqual([["pane", "run", "w1:p1", "/opt/shim/pane-launcher abc-123"]]);
+    expect(launch[0]![3]).not.toContain("codex");
+    expect(calls.filter((args) => args[0] === "agent" && args[1] === "start")).toEqual([]);
     expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987" });
   });
 

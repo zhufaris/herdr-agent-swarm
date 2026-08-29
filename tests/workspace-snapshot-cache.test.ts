@@ -187,7 +187,7 @@ describe("workspace snapshot cache", () => {
     const unknown = { ...pane("w1", 1), agentState: "unknown" as const, foregroundExecutables: [] };
     const observed = { ...unknown, agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const listPanes = vi.fn(async () => [unknown]);
-    const observation = { pane: observed, traexProcess: true, composerReady: true, evidenceSource: "visible" as const };
+    const observation = { pane: observed, traexProcess: true, composerReady: false, evidenceSource: "process" as const };
     const observeRuntime = vi.fn(async () => observation);
     const cache = new WorkspaceSnapshotCache(adapter({ listPanes, observeRuntime }));
 
@@ -231,7 +231,6 @@ function adapter(overrides: Partial<HerdrPort>): HerdrPort {
   return {
     async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
     async observeRuntime() { return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" }; },
-    async createPane(workspaceId) { return pane(workspaceId, 99); }, async startTraex() {}, async runPrompt() { return "done"; },
-    async readOutput() { return ""; }, async renamePane() {}, ...overrides
+    async createPane(workspaceId) { return pane(workspaceId, 99); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, ...overrides
   };
 }

@@ -40,7 +40,7 @@ describe("Primary to Worker product flow", () => {
     let callPrimaryTool!: (name: string, args: Record<string, unknown>) => Promise<unknown>;
     const driver: AgentRuntimeDriver = {
       kind: "traex",
-      describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "runtime", usageReporting: true }),
+      describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }),
       start: async () => undefined,
       submit: vi.fn(async (runtime, _text, onDispatched) => {
         onDispatched?.();

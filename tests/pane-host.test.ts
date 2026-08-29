@@ -7,7 +7,7 @@ describe("Herdr pane host", () => {
     const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: [] };
     const port = {
       assertWorkspace: vi.fn(async () => undefined), createPane: vi.fn(async () => pane), getPane: vi.fn(async () => pane),
-      listPanes: vi.fn(async () => [pane]), readOutput: vi.fn(async () => "output"), sendEscape: vi.fn(async () => undefined),
+      listPanes: vi.fn(async () => [pane]), sendEscape: vi.fn(async () => undefined),
       closePane: vi.fn(async () => undefined)
     } as unknown as HerdrPort;
     const host = new HerdrPaneHost(port);
@@ -15,7 +15,6 @@ describe("Herdr pane host", () => {
     await expect(host.ensureWorkspace("w1")).resolves.toBeUndefined();
     await expect(host.allocatePane("w1", "/repo", { bindingId: "i1", generation: 1, projectId: "p1" })).resolves.toEqual(pane);
     await expect(host.inspectPane("w1:p1")).resolves.toEqual(pane);
-    await expect(host.readPane("w1:p1", 80)).resolves.toBe("output");
     await host.interruptPane("w1:p1");
     await host.releasePane("w1:p1");
 

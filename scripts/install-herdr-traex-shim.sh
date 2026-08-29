@@ -60,9 +60,8 @@ validate_contract() {
   local real_herdr=$1 schema
   "$real_herdr" pane report-agent --help >/dev/null
   "$real_herdr" pane release-agent --help >/dev/null
-  "$real_herdr" agent explain --help >/dev/null
   schema=$("$real_herdr" api schema --json)
-  [[ $schema == *pane.report_agent* && $schema == *pane.release_agent* ]] || fail "Herdr socket schema lacks reporter authority methods"
+  [[ $schema == *pane.report_agent* && $schema == *pane.report_metadata* && $schema == *pane.release_agent* ]] || fail "Herdr socket schema lacks reporter lifecycle methods"
 }
 
 case $action in
@@ -83,19 +82,19 @@ case $action in
       (( owned )) || fail "refusing to replace unrelated $target"
     fi
     [[ ${HERDR_TRAEX_SKIP_BUILD:-0} == 1 ]] || (cd "$source_root" && npm run build)
-    for file in dist/cli/herdr-traex-shim.js dist/cli/herdr-traex-reporter.js dist/runtime/herdr-traex-shim.js dist/runtime/herdr-traex-reporter.js scripts/herdr-traex-command-shim.sh scripts/herdr-traex-pane-launcher.sh; do
+    for file in dist/cli/herdr-traex-shim.js dist/cli/herdr-traex-reporter.js dist/cli/report-traex-lifecycle.js dist/runtime/herdr-traex-shim.js dist/runtime/herdr-traex-reporter.js dist/runtime/report-traex-lifecycle.js scripts/herdr-traex-command-shim.sh scripts/herdr-traex-pane-launcher.sh; do
       [[ -f $source_root/$file ]] || fail "missing built shim asset: $file"
     done
     herdr_version=$($real_herdr --version | sed -E 's/^[^0-9]*//')
     traex_version=$($traex --version | sed -E 's/^[^0-9]*//')
     [[ -n $herdr_version && -n $traex_version ]] || fail "could not determine Herdr or TraeX version"
     validate_contract "$real_herdr"
-    build_id=$(sha256sum "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/scripts/herdr-traex-command-shim.sh" "$source_root/scripts/herdr-traex-pane-launcher.sh" | sha256sum | cut -c1-16)
+    build_id=$(sha256sum "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/cli/report-traex-lifecycle.js" "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/report-traex-lifecycle.js" "$source_root/scripts/herdr-traex-command-shim.sh" "$source_root/scripts/herdr-traex-pane-launcher.sh" | sha256sum | cut -c1-16)
     release=$data_root/releases/$build_id
     mkdir -p "$release/cli" "$release/runtime" "$config_root" "$request_dir" "$bin_dir"
     chmod 700 "$config_root" "$request_dir"
-    cp "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$release/cli/"
-    cp "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$release/runtime/"
+    cp "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/cli/report-traex-lifecycle.js" "$release/cli/"
+    cp "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/report-traex-lifecycle.js" "$release/runtime/"
     cp "$source_root/scripts/herdr-traex-command-shim.sh" "$release/herdr"
     cp "$source_root/scripts/herdr-traex-pane-launcher.sh" "$release/pane-launcher"
     printf '{"type":"module"}\n' > "$release/package.json"

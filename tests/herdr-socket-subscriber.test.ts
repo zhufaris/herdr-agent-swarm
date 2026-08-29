@@ -109,7 +109,7 @@ describe("Herdr socket subscriber", () => {
       socket.on("data", (chunk: string) => {
         for (const line of chunk.trim().split("\n")) {
           const request = JSON.parse(line) as { id: string; method: string };
-          if (request.method === "agent.read") requestId = request.id;
+          if (request.method === "agent.get") requestId = request.id;
         }
       });
     });
@@ -117,7 +117,7 @@ describe("Herdr socket subscriber", () => {
     const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], () => {}, pino({ enabled: false }), 5, 20);
     subscriber.start();
     await vi.waitFor(() => expect(client).toBeDefined());
-    const request = subscriber.request("agent.read", { target: "missing" }, 1_000);
+    const request = subscriber.request("agent.get", { target: "missing" }, 1_000);
     const waiter = subscriber.waitForPaneEvent("w1:p1", 1_000);
     await vi.waitFor(() => expect(requestId).not.toBe(""));
     client.write(`${JSON.stringify({ id: requestId, error: { code: "agent_not_found", message: "missing" } })}\n`);

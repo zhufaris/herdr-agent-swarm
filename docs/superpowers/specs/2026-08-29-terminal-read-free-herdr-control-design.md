@@ -22,9 +22,10 @@ The change is complete only when all of the following are true:
    process identity, `agent_status`, `state_change_seq`, and transcript state. It
    does not derive lifecycle, model, context, answer, or readiness from terminal
    text.
-4. The TraeX shim reporter never captures a terminal snapshot and never runs
-   `agent explain --file`. It fences the real process, maintains only TraeX
-   display metadata, and defers lifecycle classification to Herdr.
+4. The TraeX shim never captures a terminal snapshot and never runs `agent
+   explain --file`. Its fenced reporter establishes the initial idle Agent
+   authority, and TraeX lifecycle hooks report working/idle transitions to
+   Herdr from structured hook events.
 5. Runtime model-menu automation is removed. A model may be selected through
    startup arguments; changing it on a running Agent requires explicit
    replacement/restart. No hidden terminal-control fallback remains.
@@ -122,20 +123,26 @@ public `traex` kind onto Herdr's internally reserved Codex-compatible lifecycle
 while executing the configured real TraeX binary. This compatibility identity is
 not a license for bridge-side terminal parsing.
 
-The reporter is reduced to process fencing and display metadata lifecycle:
+The reporter and lifecycle hook form a small structured compatibility layer:
 
 1. verify `/proc/<pid>/exe` and process start ticks through structured process
    metadata;
-2. publish and retain `display_agent=traex`;
-3. allow Herdr's native Agent integration to own `agent_status`;
-4. release metadata when the fenced process disappears.
+2. claim the internal Codex-compatible Agent authority as `idle` and publish
+   `display_agent=traex` only after that process fence succeeds;
+3. report `working` from TraeX `UserPromptSubmit` and `idle` from TraeX `Stop`;
+4. release the owned Agent authority and display metadata when the fenced
+   process disappears.
 
-It removes `readPane`, temporary snapshot files, `agent explain --file`, and
-terminal-derived `report-agent` state updates. The prompt shim may retain the
-minimal pre-dispatch `working` compatibility report required by Herdr 0.7.5 to
-avoid `agent_prompt_stalled` for sub-five-second TraeX turns; this report is not
-derived from terminal content and is reconciled by Herdr's native state. The
-isolated E2E gate determines whether that compatibility hint can be deleted.
+It removes `readPane`, temporary snapshot files, `agent explain --file`, and all
+terminal-derived `report-agent` state updates. The lifecycle hook accepts only
+the exact supported TraeX hook event names, derives no state from prompt or
+answer content, emits no hook output, and uses a monotonic sequence. It never
+reports `working` before `agent prompt` submits input: `UserPromptSubmit` is the
+post-acceptance transition that satisfies Herdr's native prompt guard. A missing
+hook therefore stalls explicitly instead of fabricating completion. Production
+evidence from panes `wH:p64` and `wH:p65` showed that Herdr 0.7.5 does not create
+Agent lifecycle authority from `display_agent` metadata or from a real TraeX
+process alone.
 
 ## Model and control behavior
 
@@ -153,7 +160,8 @@ of inspecting and answering terminal prompts.
 ## Failure and recovery semantics
 
 - Never replay after the Herdr prompt process may have started.
-- Never repair an `unknown` state using terminal content.
+- Never repair an `unknown` state using terminal content; only process-fenced
+  bootstrap or validated TraeX lifecycle hook events may advance it.
 - Never infer successful model selection, readiness, or completion from output
   stability.
 - Preserve SQLite dispatch, detached-observer, fencing, and outbox transaction
@@ -183,7 +191,8 @@ git diff --check
 The first search must return no maintained runtime hits. The second must return
 no control fallback; documented installer text is acceptable only if it is not an
 executed command. The isolated real check must use a disposable Herdr server and
-Pane, verify `/proc/<pid>/exe` is TraeX, submit a short and a normal turn with
-`agent prompt --wait`, observe structured state advancement, and exit/clean up
-without touching the production workspace. Production restart follows the
+Pane, verify `/proc/<pid>/exe` is TraeX, observe the initial `idle` authority,
+submit a short and a normal turn with `agent prompt --wait`, observe hook-driven
+`idle -> working -> idle` advancement, and exit/clean up without touching the
+production workspace. Production restart follows the
 existing drain gate and must not be forced while turns are active.

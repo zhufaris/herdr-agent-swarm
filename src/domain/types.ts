@@ -465,23 +465,7 @@ export interface RuntimeObservation {
   pane: HerdrPane | null;
   traexProcess: boolean;
   composerReady: boolean;
-  evidenceSource: "structured" | "recent" | "visible" | "process" | "none";
-}
-
-export interface RuntimeOutputProjectionInput {
-  bindingId: string;
-  expectedPaneId: string;
-  expectedGeneration: number;
-  fingerprint: string;
-  view: import("./topic-view.js").TopicViewState;
-  rootMessageId: string | null;
-  card: object;
-}
-
-export interface RuntimeOutputProjectionResult {
-  outcome: "projected" | "unchanged" | "stale";
-  view: import("./topic-view.js").TopicViewState | null;
-  outboxReserved: boolean;
+  evidenceSource: "structured" | "process" | "none";
 }
 
 export interface BindingTitleProjectionInput {
@@ -543,8 +527,7 @@ export type RuntimeObservationApplication =
 
 export interface RuntimeTurnObservation {
   state: AgentState;
-  stateSource: "structured" | "terminal" | "unknown";
-  output: string;
+  stateSource: "structured" | "unknown";
 }
 
 export interface HerdrPaneCreationOptions {

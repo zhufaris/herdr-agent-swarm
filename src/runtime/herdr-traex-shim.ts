@@ -136,18 +136,13 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     // Once pane.run is invoked, its command may have reached the terminal even
     // if the CLI later returns an error. Fence all later failures as uncertain.
     launched = true;
-    await dependencies.runHerdr(["pane", "run", input.paneId, `${shellFunction(config.launcher, requestId)}`], input.timeoutMs);
-    launched = true;
-    const started = parseEnvelope((await dependencies.runHerdr([
-      "agent", "start", input.name, "--kind", "codex", "--pane", input.paneId, "--timeout", String(input.timeoutMs), "--", ...input.traexArgs
-    ], input.timeoutMs + 1_000)).stdout) as Record<string, unknown>;
+    await dependencies.runHerdr(["pane", "run", input.paneId, launchCommand(config.launcher, requestId)], input.timeoutMs);
     const process = await waitForTraexProcess(input.paneId, config.traex, deadline, dependencies);
     const processStartTicks = await dependencies.processStartTicks(process.pid);
     if (!processStartTicks) throw new Error("TraeX process identity disappeared before reporter startup");
     await dependencies.startReporter({ paneId: input.paneId, name: input.name, executable: config.traex, pid: process.pid, processStartTicks, reporter: config.reporter });
     const managed = await waitForManagedAgent(input, deadline, dependencies);
-    started.agent = managed.agent;
-    return projectTraexAgentJson(started) as Record<string, unknown>;
+    return { type: "agent_started", agent: projectTraexAgentJson(managed.agent), argv: ["traex"] };
   } catch (cause) {
     if (!launched) {
       if (requestId) await dependencies.removeRequest(requestId).catch(() => undefined);
@@ -158,9 +153,11 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
   }
 }
 
-function shellFunction(launcher: string, requestId: string): string {
-  if (!/^\/[A-Za-z0-9_./-]+$/.test(launcher) || !/^[a-f0-9-]+$/.test(requestId)) throw new Error("Unsafe TraeX launcher path or request ID");
-  return `codex() { ${launcher} ${requestId}; }`;
+function launchCommand(launcher: string, requestId: string): string {
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(launcher) || !/^[a-f0-9-]+$/.test(requestId)) {
+    throw new Error("Unsafe TraeX launcher path or request ID");
+  }
+  return `${launcher} ${requestId}`;
 }
 
 interface ProcessRecord { pid: number; name?: string; argv: string[] }
@@ -202,9 +199,14 @@ async function waitForManagedAgent(input: TraexStartInput, deadline: number, dep
   let first = true;
   while (first || dependencies.now() <= deadline) {
     first = false;
-    const result = parseEnvelope((await dependencies.runHerdr(["agent", "get", input.name])).stdout) as { agent?: Record<string, unknown> };
-    const agent = result.agent;
-    if (agent?.pane_id === input.paneId && agent.agent === "codex" && agent.display_agent === "traex" && agent.agent_status !== "unknown") return result;
+    try {
+      const result = parseEnvelope((await dependencies.runHerdr(["agent", "get", input.name])).stdout) as { agent?: Record<string, unknown> };
+      const agent = result.agent;
+      if (agent?.pane_id === input.paneId && agent.agent === "codex" && agent.display_agent === "traex" && agent.agent_status !== "unknown") return result;
+    } catch {
+      // The detached reporter names the already-running agent asynchronously.
+      // A transient agent_not_found is expected until that structured update lands.
+    }
     await dependencies.sleep(50);
   }
   throw new Error("Timed out waiting for managed TraeX identity");

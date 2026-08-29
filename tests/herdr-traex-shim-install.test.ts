@@ -31,6 +31,8 @@ describe("Herdr TraeX shim installer", () => {
       reporter: expect.stringMatching(/releases\/[^/]+\/cli\/herdr-traex-reporter\.js$/),
       requestDir: join(fixture.runtime, "herdr-traex-shim/run")
     });
+    expect(await readFile(join(config.releaseDir, "cli/report-traex-lifecycle.js"), "utf8")).toContain("export");
+    expect(await readFile(join(config.releaseDir, "runtime/report-traex-lifecycle.js"), "utf8")).toContain("export");
 
     const status = await install(fixture, ["status"]);
     expect(status).toMatchObject({ code: 0 });
@@ -95,12 +97,12 @@ async function createFixture(options: { shimAfterReal?: boolean } = {}): Promise
   const traex = join(realBin, "traex");
   await executable(realHerdr, [
     "#!/usr/bin/env bash",
-    "if [[ $1 == --version ]]; then echo 'herdr 0.7.5'; else echo '{\"methods\":[\"pane.report_agent\",\"pane.release_agent\"]}'; fi",
+    "if [[ $1 == --version ]]; then echo 'herdr 0.7.5'; else echo '{\"methods\":[\"pane.report_agent\",\"pane.report_metadata\",\"pane.release_agent\"]}'; fi",
     ""
   ].join("\n"));
   await executable(traex, '#!/usr/bin/env bash\necho "traex 0.201.6"\n');
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
   const repo = process.cwd();
   await writeFile(join(source, "scripts/herdr-traex-command-shim.sh"), await readFile(join(repo, "scripts/herdr-traex-command-shim.sh")));
   await writeFile(join(source, "scripts/herdr-traex-pane-launcher.sh"), await readFile(join(repo, "scripts/herdr-traex-pane-launcher.sh")));

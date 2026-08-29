@@ -10,9 +10,6 @@ export interface ReporterInput {
 
 export interface ReporterOperations {
   processIdentity(paneId: string, pid: number): Promise<{ executable: string; pid: number; startTicks: string } | null>;
-  readPane(paneId: string): Promise<string>;
-  explainCodexSnapshot(snapshot: string): Promise<unknown>;
-  currentAgentState(paneId: string): Promise<ReportableAgentState | null>;
   reportAgent(paneId: string, state: ReportableAgentState, sequence: string): Promise<void>;
   renameAgent(paneId: string, name: string): Promise<void>;
   reportMetadata(paneId: string, sequence: string): Promise<void>;
@@ -40,27 +37,19 @@ export class TraexAgentReporter {
 
   async run(input: ReporterInput, signal?: AbortSignal): Promise<"released" | "lost-pane"> {
     let outcome: "released" | "lost-pane" = "released";
-    let previous: ReportableAgentState | null = null;
-    let renamed = false;
     try {
+      const initialIdentity = await this.operations.processIdentity(input.paneId, input.pid);
+      if (!initialIdentity || initialIdentity.pid !== input.pid || initialIdentity.executable !== input.executable || initialIdentity.startTicks !== input.processStartTicks) {
+        return "lost-pane";
+      }
+      await this.operations.reportAgent(input.paneId, "idle", this.nextSequence());
       await this.operations.reportMetadata(input.paneId, this.nextSequence());
-      await this.operations.reportAgent(input.paneId, "unknown", this.nextSequence());
-      previous = "unknown";
+      await this.operations.renameAgent(input.paneId, input.name);
       for (let cycle = 0; cycle < this.maxCycles && !signal?.aborted; cycle += 1) {
         const identity = await this.operations.processIdentity(input.paneId, input.pid);
         if (!identity || identity.pid !== input.pid || identity.executable !== input.executable || identity.startTicks !== input.processStartTicks) {
           outcome = "lost-pane";
           break;
-        }
-        const state = normalizeState(await this.operations.explainCodexSnapshot(await this.operations.readPane(input.paneId)));
-        const current = await this.operations.currentAgentState(input.paneId);
-        if (state !== previous || (current !== null && current !== state)) {
-          await this.operations.reportAgent(input.paneId, state, this.nextSequence());
-          previous = state;
-        }
-        if (!renamed && state !== "unknown") {
-          await this.operations.renameAgent(input.paneId, input.name);
-          renamed = true;
         }
         await this.operations.sleep(this.pollIntervalMs);
       }

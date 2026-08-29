@@ -29,15 +29,6 @@ describe("command error redaction", () => {
     await expect(new ExecFileCommandRunner(1000).run("/definitely/missing/herdr", [], undefined, () => { started = true; })).rejects.toThrow();
     expect(started).toBe(false);
   });
-  it("never exposes pane send-text content through error fields", () => {
-    const secret = "private user prompt";
-    const error = new CommandError("herdr", ["pane", "send-text", "w1:p1", secret], `failed to send ${secret}`, false);
-
-    expect(error.args).toEqual(["pane", "send-text", "w1:p1", "[REDACTED]"]);
-    expect(error.message).not.toContain(secret);
-    expect(JSON.stringify(error)).not.toContain(secret);
-  });
-
   it("never exposes agent prompt content through error fields", () => {
     const secret = "private Lark prompt";
     const error = new CommandError("herdr", ["agent", "prompt", "w1:p1", secret], `failed to submit ${secret}`, false);

@@ -22,7 +22,7 @@ describe("attach existing pane command", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return null; },
       async createPane() { throw new Error("unexpected createPane"); }, async startTraex() { throw new Error("unexpected startTraex"); },
-      async runPrompt() { throw new Error("unexpected runPrompt"); }, async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+      async runPrompt() { throw new Error("unexpected runPrompt"); }, async renamePane() { throw new Error("unexpected renamePane"); }
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -63,7 +63,7 @@ describe("attach existing pane command", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {},
       async listPanes(workspaceId) { return exposePane && workspaceId === "w5" ? [pane] : []; },
-      async getPane() { return null; }, createPane, startTraex, runPrompt, async readOutput() { return ""; }, renamePane
+      async getPane() { return null; }, createPane, startTraex, runPrompt, renamePane
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -115,7 +115,7 @@ describe("attach existing pane command", () => {
       async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return pane; },
       async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
       async createPane() { throw new Error("unexpected createPane"); }, async startTraex() { throw new Error("unexpected startTraex"); },
-      runPrompt, async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+      runPrompt, async renamePane() { throw new Error("unexpected renamePane"); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "orphaned", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "old-topic", rootMessageId: "old-root", title: "datasage_semantic_knowledge / main" });
@@ -155,8 +155,7 @@ describe("attach existing pane command", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes(workspaceId) { return workspaceId === "w5" ? [pane] : []; },
       async getPane() { return null; }, async createPane() { throw new Error("unexpected createPane"); },
-      async startTraex() { throw new Error("unexpected startTraex"); }, async runPrompt() { throw new Error("unexpected runPrompt"); },
-      async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+      async startTraex() { throw new Error("unexpected startTraex"); }, async runPrompt() { throw new Error("unexpected runPrompt"); }, async renamePane() { throw new Error("unexpected renamePane"); }
     };
     const missingExplicitSpace = config();
     missingExplicitSpace.projects[0]!.spaceName = undefined;
@@ -181,7 +180,7 @@ describe("attach existing pane command", () => {
     let exposePanes = false; const cards: object[] = [];
     const panes = ["w5:p1", "w5:p2"].map((paneId) => ({ paneId, workspaceId: "w5", cwd: "/repo", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] }));
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
-    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
@@ -201,7 +200,7 @@ describe("attach existing pane command", () => {
       { paneId: "w5:p4H", workspaceId: "w5", cwd: "/different/label", label: "w5:p3G", agentState: "idle" as const, foregroundExecutables: ["traex"] }
     ];
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
-    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
@@ -219,7 +218,7 @@ describe("attach existing pane command", () => {
     const cards: object[] = [];
     const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/different/cwd", label: "tidy", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
-    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "other-binding", projectId: "analytics", workspaceId: "w5", chatId: "other-chat", topicId: "secret-topic", rootMessageId: "secret-root", title: "secret" });
     store.updateBinding("other-binding", { paneId: "w5:p3G", state: "active" });
@@ -248,7 +247,7 @@ describe("attach existing pane command", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [wrongWorkspacePane]; }, async getPane() { return null; },
       async createPane() { throw new Error("unexpected createPane"); }, async startTraex() { throw new Error("unexpected startTraex"); },
-      async runPrompt() { throw new Error("unexpected runPrompt"); }, async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+      async runPrompt() { throw new Error("unexpected runPrompt"); }, async renamePane() { throw new Error("unexpected renamePane"); }
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -281,7 +280,7 @@ describe("attach existing pane command", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; },
       async createPane() { throw new Error("unexpected createPane"); }, async startTraex() { throw new Error("unexpected startTraex"); },
-      async runPrompt() { throw new Error("unexpected runPrompt"); }, async readOutput() { return ""; }, async renamePane() { throw new Error("unexpected renamePane"); }
+      async runPrompt() { throw new Error("unexpected runPrompt"); }, async renamePane() { throw new Error("unexpected renamePane"); }
     };
     const testConfig = config();
     testConfig.projects = projects;

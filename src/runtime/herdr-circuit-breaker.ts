@@ -55,8 +55,6 @@ export class HerdrCircuitBreaker implements HerdrPort {
     if (!this.delegate.waitForRuntimeChange) return;
     await this.delegate.waitForRuntimeChange(paneId, timeoutMs, signal);
   }
-  async readOutput(paneId: string, lines: number): Promise<string> { return this.call("probe", () => this.delegate.readOutput(paneId, lines)); }
-
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> { return this.call("command", () => this.delegate.createPane(workspaceId, cwd, options)); }
   async startTraex(paneId: string, executable: string, args?: string[]): Promise<void> { await this.call("command", () => this.delegate.startTraex(paneId, executable, args)); }
   async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void> {
@@ -65,18 +63,6 @@ export class HerdrCircuitBreaker implements HerdrPort {
   }
   async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<AgentState> {
     return this.call("command", () => this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched));
-  }
-  async runPaneCommand(paneId: string, command: string, timeoutMs: number): Promise<string> {
-    if (!this.delegate.runPaneCommand) throw new Error("Herdr adapter does not support Pane commands");
-    return this.call("command", () => this.delegate.runPaneCommand!(paneId, command, timeoutMs));
-  }
-  async beginPaneModelSelection(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }> {
-    if (!this.delegate.beginPaneModelSelection) throw new Error("Herdr adapter does not support model selection");
-    return this.call("command", () => this.delegate.beginPaneModelSelection!(paneId, model, timeoutMs));
-  }
-  async completePaneModelMode(paneId: string, mode: string, timeoutMs: number): Promise<void> {
-    if (!this.delegate.completePaneModelMode) throw new Error("Herdr adapter does not support model mode selection");
-    await this.call("command", () => this.delegate.completePaneModelMode!(paneId, mode, timeoutMs));
   }
   async sendEscape(paneId: string): Promise<void> {
     if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");

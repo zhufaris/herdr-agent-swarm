@@ -55,7 +55,6 @@ export class CommandError extends Error {
 
 function redactCommandArgs(args: string[]): string[] {
   const safe = [...args];
-  if (safe[0] === "pane" && safe[1] === "send-text" && safe.length > 3) safe[3] = "[REDACTED]";
   if (safe[0] === "agent" && safe[1] === "prompt" && safe.length > 3) safe[3] = "[REDACTED]";
   for (let index = 0; index < safe.length - 1; index += 1) {
     if (safe[index] !== "--env") continue;
@@ -67,7 +66,6 @@ function redactCommandArgs(args: string[]): string[] {
 
 function sensitiveCommandArgValues(args: string[]): string[] {
   const values: string[] = [];
-  if (args[0] === "pane" && args[1] === "send-text" && args.length > 3) values.push(args[3]!);
   if (args[0] === "agent" && args[1] === "prompt" && args.length > 3) values.push(args[3]!);
   for (let index = 0; index < args.length - 1; index += 1) {
     if (args[index] !== "--env") continue;

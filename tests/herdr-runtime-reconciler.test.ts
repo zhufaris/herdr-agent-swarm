@@ -9,37 +9,18 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("HerdrRuntimeReconciler", () => {
-  it("captures startup baselines with bounded parallel terminal reads", async () => {
+  it("captures structured Agent sequence baselines without terminal access", async () => {
     const store = new SqliteBindingStore(":memory:");
-    for (let index = 1; index <= 5; index += 1) {
-      store.createPendingBinding({ id: `b${index}`, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: `topic-${index}`, rootMessageId: `root-${index}`, title: `task-${index}` });
-      store.updateBinding(`b${index}`, { paneId: `w1:p${index}`, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    }
-    const release = new Map<string, () => void>();
-    const readOutput = vi.fn((paneId: string) => new Promise<string>((resolve) => { release.set(paneId, () => resolve("")); }));
-    const reconciler = fixture(store, { readOutput } as unknown as HerdrPort);
-
-    const capture = reconciler.captureBaselines();
-    await vi.waitFor(() => expect(readOutput).toHaveBeenCalledTimes(4));
-    expect(readOutput.mock.calls.map(([paneId]) => paneId).sort()).toEqual(["w1:p1", "w1:p2", "w1:p3", "w1:p4"]);
-    for (const releaseRead of release.values()) releaseRead();
-    await vi.waitFor(() => expect(readOutput).toHaveBeenCalledTimes(5));
-    release.get("w1:p5")!();
-    await capture;
-    store.close();
-  });
-
-  it("captures non-empty startup scrollback without replacing the durable topic answer", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    store.saveTopicView({ ...initialTopicView("b1"), phase: "done", answer: "durable answer", viewVersion: 4 });
-    const reconciler = fixture(store, { async readOutput() { return "◆ historical scrollback\n────────\nGPT-5.6-Sol · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort);
+    const listPanes = vi.fn(async () => [{
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task",
+      agentState: "working" as const, agentKind: "traex", stateChangeSeq: 7, foregroundExecutables: ["traex"]
+    }]);
+    const reconciler = fixture(store, { listPanes } as unknown as HerdrPort);
 
     await reconciler.captureBaselines();
+    await reconciler.reconcile();
 
-    expect(store.loadTopicView("b1")).toMatchObject({ answer: "durable answer", model: "GPT-5.6-Sol", context: "31.1K tokens", viewVersion: 5 });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]);
+    expect(listPanes).toHaveBeenCalledTimes(2);
     store.close();
   });
 
@@ -75,7 +56,7 @@ describe("HerdrRuntimeReconciler", () => {
 
   it("converges an existing binding title from its matching Herdr pane once", async () => {
     const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task-esk0", agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const herdr = { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort;
+    const herdr = { async listPanes() { return [pane]; } } as unknown as HerdrPort;
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "legacy prompt title" });
     store.updateBinding("b1", { paneId: pane.paneId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
@@ -102,7 +83,7 @@ describe("HerdrRuntimeReconciler", () => {
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / retained" });
     store.updateBinding("b1", { paneId: pane.paneId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
 
-    await fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort).reconcile();
+    await fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort).reconcile();
 
     expect(store.getBinding("b1")?.title).toBe("repo / retained");
     expect(store.listPendingOutboundReplies()).toEqual([]);
@@ -137,7 +118,7 @@ describe("HerdrRuntimeReconciler", () => {
 
   it("adds a discovered Pane to the pass-local map immediately", async () => {
     const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const herdr = { async listPanes() { return [pane, pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort;
+    const herdr = { async listPanes() { return [pane, pane]; } } as unknown as HerdrPort;
     const store = new SqliteBindingStore(":memory:");
     const discoverPane = vi.fn(async () => {
       let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "task" });
@@ -270,155 +251,6 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
-  it("checkpoints changed terminal output without projecting Answer text when Pane metadata is unchanged", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const readOutput = vi.fn().mockResolvedValueOnce("◆ first local answer\n────────").mockResolvedValueOnce("◆ second local answer\n────────");
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const bus = new BridgeEventBus();
-    const answers: string[] = [];
-    bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved" && event.payload.observation?.answer.snapshot) answers.push(event.payload.observation.answer.snapshot); });
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
-
-    await reconciler.reconcile();
-    const firstFingerprint = store.getBinding("b1")!.lastOutputFingerprint;
-    await reconciler.reconcile();
-
-    expect(readOutput).toHaveBeenCalledTimes(2);
-    expect(firstFingerprint).toEqual(expect.any(String));
-    expect(store.getBinding("b1")!.lastOutputFingerprint).not.toBe(firstFingerprint);
-    expect(answers).toEqual([]);
-    store.close();
-  });
-
-  it("persists a terminal fingerprint without adding terminal text to the Main Card intent", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const wakeOutbound = vi.fn();
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return "◆ durable local answer\n────────"; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), new BridgeEventBus(), wakeOutbound);
-
-    await reconciler.reconcile();
-
-    expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: expect.any(String) });
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "ready", answer: null });
-    const outbound = store.listPendingOutboundReplies();
-    expect(outbound).toEqual(expect.arrayContaining([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]));
-    expect(outbound.map((reply) => reply.payload).join("\n")).not.toContain("durable local answer");
-    expect(wakeOutbound).toHaveBeenCalledOnce();
-    store.close();
-  });
-
-  it("keeps reading unknown panes when their snapshot revision is unchanged", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const readOutput = vi.fn().mockResolvedValueOnce("◆ first answer\n────────").mockResolvedValueOnce("◆ second answer\n────────");
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
-
-    await reconciler.reconcile();
-    await reconciler.reconcile();
-
-    expect(readOutput).toHaveBeenCalledTimes(2);
-    store.close();
-  });
-
-  it("keeps reading terminal output when pane metadata revision changes", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    let outputRevision = 7;
-    const readOutput = vi.fn(async () => "◆ local answer\n────────");
-    const pane = () => ({
-      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
-      agentKind: "traex", outputRevision, stateChangeSeq: 1, foregroundExecutables: ["traex"]
-    });
-    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, readOutput } as unknown as HerdrPort);
-
-    await reconciler.reconcile();
-    await reconciler.reconcile();
-    outputRevision = 8;
-    await reconciler.reconcile();
-
-    expect(readOutput).toHaveBeenCalledTimes(3);
-    store.close();
-  });
-
-  it("discards terminal output when the binding generation changes during the read", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    let release!: (output: string) => void;
-    const readOutput = vi.fn(() => new Promise<string>((resolve) => { release = resolve; }));
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const events: string[] = [];
-    const bus = new BridgeEventBus();
-    bus.onBridgeEvent("test", (event) => { events.push(event.type); });
-    const reconciler = new HerdrRuntimeReconciler({
-      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
-      herdr: { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort, lifecycleEvents: bus,
-      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
-    });
-
-    const reconciliation = reconciler.reconcile();
-    await vi.waitFor(() => expect(readOutput).toHaveBeenCalledOnce());
-    store.updateBinding("b1", { generation: 2 });
-    release("◆ stale answer\n────────");
-    await reconciliation;
-
-    expect(store.getBinding("b1")).toMatchObject({ generation: 2, lastOutputFingerprint: null });
-    expect(events).not.toContain("TurnCompleted");
-    store.close();
-  });
-
-  it("does not publish duplicate telemetry for an unchanged terminal snapshot", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const events: string[] = [];
-    const bus = new BridgeEventBus();
-    const stop = bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved") events.push(event.type); });
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const reconciler = new HerdrRuntimeReconciler({
-      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
-      herdr: { async listPanes() { return [pane]; }, async readOutput() { return "GPT-5.6-Sol · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort,
-      lifecycleEvents: bus, channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
-    });
-
-    await reconciler.reconcile();
-    await reconciler.reconcile();
-
-    expect(events).toEqual(["PaneOutputObserved"]);
-    stop();
-    store.close();
-  });
-
-  it("projects passively observed model and context telemetry for an idle binding", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
-    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    const bus = new BridgeEventBus();
-    const observed: Array<{ type: string; payload: unknown }> = [];
-    bus.onBridgeEvent("telemetry-test", (event) => { observed.push(event); });
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
-    const reconciler = new HerdrRuntimeReconciler({
-      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
-      store, herdr: { async listPanes() { return [pane]; }, async readOutput() { return "GPT-5.6-Terra · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort,
-      lifecycleEvents: bus, channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
-    });
-
-    await reconciler.reconcile();
-
-    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ observation: { main: { model: "GPT-5.6-Terra", context: "31.1K tokens" } } });
-    store.close();
-  });
-
   it("projects a changed authoritative Herdr tab ID for the main card", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
@@ -427,7 +259,7 @@ describe("HerdrRuntimeReconciler", () => {
     const observed: Array<{ type: string; payload: unknown }> = [];
     bus.onBridgeEvent("tab-test", (event) => { observed.push(event); });
     const pane = { paneId: "w1:p1", tabId: "w1:t1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
 
     await reconciler.reconcile();
 
@@ -445,7 +277,7 @@ describe("HerdrRuntimeReconciler", () => {
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo/.worktree/feat-main-card/src", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const reconciler = new HerdrRuntimeReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
-      herdr: { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort, lifecycleEvents: bus,
+      herdr: { async listPanes() { return [pane]; } } as unknown as HerdrPort, lifecycleEvents: bus,
       channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }), discoverPane: async () => { throw new Error("not used"); },
       scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, worktreeNameFor: async (cwd) => cwd ? "feat-main-card" : null
     });
@@ -464,7 +296,7 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const,
       agentKind: "codex", outputRevision: 7, stateChangeSeq: 10, foregroundExecutables: ["traex"]
     };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return "working"; } } as unknown as HerdrPort);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
     pane = { ...pane, agentState: "idle" as const, outputRevision: 8, stateChangeSeq: 9 };
@@ -482,7 +314,7 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "old task", agentState: "idle" as const,
       agentKind: "codex", outputRevision: 10, stateChangeSeq: 10, foregroundExecutables: ["traex"]
     }];
-    const reconciler = fixture(store, { async listPanes() { return panes; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+    const reconciler = fixture(store, { async listPanes() { return panes; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
     panes = [];
@@ -512,32 +344,13 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const,
       agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 10, foregroundExecutables: ["traex"]
     };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
     pane = { ...pane, terminalId: "new-terminal", agentState: "idle" as const, stateChangeSeq: 1, outputRevision: 1 };
     await reconciler.reconcile();
 
     expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "new-terminal", lastAgentState: "idle", attachment: "attached" });
-    store.close();
-  });
-
-  it("isolates a transient terminal read failure and continues with the next pane", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    for (const index of [1, 2]) {
-      store.createPendingBinding({ id: `b${index}`, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: `topic-${index}`, rootMessageId: `root-${index}`, title: `task-${index}` });
-      store.updateBinding(`b${index}`, { paneId: `w1:p${index}`, traexSessionId: `term-${index}`, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
-    }
-    const panes = [1, 2].map((index) => ({ paneId: `w1:p${index}`, terminalId: `term-${index}`, workspaceId: "w1", cwd: "/repo", label: `task-${index}`, agentState: "idle" as const, agentKind: "traex", outputRevision: 8, stateChangeSeq: 1, foregroundExecutables: ["traex"] }));
-    let failFirst = true;
-    const readOutput = vi.fn(async (paneId: string) => { if (paneId === "w1:p1" && failFirst) { failFirst = false; throw new Error("temporary read failure"); } return `◆ recovered ${paneId}\n────────`; });
-    const reconciler = fixture(store, { async listPanes() { return panes; }, readOutput } as unknown as HerdrPort);
-
-    await expect(reconciler.reconcile()).resolves.toBeUndefined();
-    expect(store.getBinding("b2")?.lastOutputFingerprint).not.toBeNull();
-    await expect(reconciler.reconcile()).resolves.toBeUndefined();
-
-    expect(readOutput.mock.calls.filter(([paneId]) => paneId === "w1:p1")).toHaveLength(2);
     store.close();
   });
 
@@ -552,7 +365,7 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
       agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
 
@@ -570,7 +383,7 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
       agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
 
@@ -594,7 +407,7 @@ describe("HerdrRuntimeReconciler", () => {
     };
     const logger = pino({ enabled: false });
     const warning = vi.spyOn(logger, "warn");
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, logger);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, undefined, logger);
 
     await reconciler.reconcile();
 
@@ -614,7 +427,7 @@ describe("HerdrRuntimeReconciler", () => {
       paneId: "w1:p1", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
       agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "another-conversation" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
-    const reconciler = fixture(store, { async listPanes() { return [pane]; }, async readOutput() { return ""; } } as unknown as HerdrPort);
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
 
@@ -647,7 +460,7 @@ describe("HerdrRuntimeReconciler", () => {
     });
     const observedPane = () => registered ? pane() : { ...pane(), agentState: "idle" as const };
     const wakeOutbound = vi.fn();
-    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, async observeRuntime() { return { pane: observedPane(), traexProcess: true, composerReady: true, evidenceSource: registered ? "structured" : "visible" }; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, undefined, undefined, wakeOutbound);
+    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, async observeRuntime() { return { pane: observedPane(), traexProcess: true, composerReady: registered, evidenceSource: registered ? "structured" : "process" }; } } as unknown as HerdrPort, undefined, undefined, undefined, wakeOutbound);
 
     await reconciler.reconcile();
     await reconciler.reconcile();
@@ -694,7 +507,7 @@ describe("HerdrRuntimeReconciler", () => {
     store.saveRunCard({ ...runningView, phase: "running", answerMessageId: "answer-running", viewVersion: 2 });
     store.saveRunCard({ ...queuedView, phase: "queued", viewVersion: 1 });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'running'").run();
-    const reconciler = fixture(store, { async listAllPanes() { return []; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), new BridgeEventBus());
+    const reconciler = fixture(store, { async listAllPanes() { return []; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), new BridgeEventBus());
 
     await reconciler.reconcile();
 
@@ -721,7 +534,7 @@ describe("HerdrRuntimeReconciler", () => {
     const convergeAnswer = vi.fn(async () => {});
     const reconciler = fixture(
       store,
-      { async listAllPanes() { return []; }, async readOutput() { return ""; } } as unknown as HerdrPort,
+      { async listAllPanes() { return []; } } as unknown as HerdrPort,
       undefined,
       pino({ enabled: false }),
       new BridgeEventBus(),
@@ -750,7 +563,7 @@ describe("HerdrRuntimeReconciler", () => {
     const convergeAnswer = vi.fn(async (promptId: string) => { if (promptId === "first") throw new Error("temporary convergence failure"); });
     const reconciler = fixture(
       store,
-      { async listAllPanes() { return []; }, async readOutput() { return ""; } } as unknown as HerdrPort,
+      { async listAllPanes() { return []; } } as unknown as HerdrPort,
       undefined,
       pino({ enabled: false }),
       new BridgeEventBus(),
@@ -772,7 +585,7 @@ describe("HerdrRuntimeReconciler", () => {
     binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", stateChangeSeq: 1, foregroundExecutables: ["traex"] };
     const listPanes = vi.fn(async () => [pane]);
-    const herdr = { async listAllPanes() { throw new Error("snapshot schema unsupported"); }, listPanes, async readOutput() { return ""; } } as unknown as HerdrPort;
+    const herdr = { async listAllPanes() { throw new Error("snapshot schema unsupported"); }, listPanes } as unknown as HerdrPort;
     const reconciler = fixture(store, herdr);
 
     await reconciler.reconcile();
@@ -816,13 +629,13 @@ describe("HerdrRuntimeReconciler", () => {
     const countPendingPrompts = vi.spyOn(store, "countPendingPrompts");
     const unknownPane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, stateChangeSeq: 9, foregroundExecutables: [] };
     const observedPane = { ...unknownPane, agentState: "idle" as const, foregroundExecutables: ["traex"] };
-    const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: true, evidenceSource: "visible" as const }));
+    const observeRuntime = vi.fn(async () => ({ pane: observedPane, traexProcess: true, composerReady: false, evidenceSource: "process" as const }));
     const wake = vi.fn();
     const scheduler = new InProcessPromptWorkScheduler();
     scheduler.subscribe(wake);
     const reconciler = new HerdrRuntimeReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
-      store, herdr: { async listAllPanes() { return [unknownPane]; }, observeRuntime, async readOutput() { return "❯ Use /skills to list available skills"; } } as unknown as HerdrPort,
+      store, herdr: { async listAllPanes() { return [unknownPane]; }, observeRuntime } as unknown as HerdrPort,
       lifecycleEvents: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false
     });

@@ -79,7 +79,7 @@ describe("pane/thread lifecycle integration", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async observeRuntime(id) { return { pane: id === startedPane.paneId && started ? startedPane : null, traexProcess: started, composerReady: started, evidenceSource: started ? "structured" : "none" }; },
       async createPane() { return createdPane; }, async startTraex() { started = true; },
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "orphaned", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -109,7 +109,7 @@ describe("pane/thread lifecycle integration", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return replacementCreated ? [oldPane, newPane] : [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; },
       async observeRuntime(id) { const pane = id === oldPane.paneId && !oldClosed ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentState === "idle", evidenceSource: pane ? "structured" : "none" }; },
-      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}, closePane
+      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, closePane
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -136,7 +136,7 @@ describe("pane/thread lifecycle integration", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : null; },
-      async createPane() { throw new Error("new pane creation failed"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}, closePane
+      async createPane() { throw new Error("new pane creation failed"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, closePane
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -168,7 +168,7 @@ describe("pane/thread lifecycle integration", () => {
         const pane = id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null;
         return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentKind === "codex" && pane.agentState === "idle", evidenceSource: pane ? "structured" : "none" };
       },
-      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, runPrompt, async readOutput() { return ""; }, async renamePane() {}, closePane
+      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, runPrompt, async renamePane() {}, closePane
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -205,8 +205,7 @@ describe("pane/thread lifecycle integration", () => {
         submitted.push(text); await onDispatched?.();
         await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { oldObserverAborted = true; reject(new Error("observer detached")); }, { once: true }));
         return "done";
-      },
-      async readOutput() { return "◆ old output that must not reach the topic"; }, async renamePane() {}, async closePane() { throw new Error("must not close a pane with an active prompt"); }
+      }, async renamePane() {}, async closePane() { throw new Error("must not close a pane with an active prompt"); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -239,7 +238,7 @@ describe("pane/thread lifecycle integration", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane(id) { return id === pane.paneId ? pane : null; },
-      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "failed-reset", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / fresh" });
@@ -265,7 +264,7 @@ describe("pane/thread lifecycle integration", () => {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt(_paneId, text) { submitted.push(text); await activeTurn; return "done"; }, async readOutput() { return "◆ done\n────────"; }, async renamePane() {}
+      async runPrompt(_paneId, text) { submitted.push(text); await activeTurn; return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
@@ -306,8 +305,7 @@ describe("pane/thread lifecycle integration", () => {
         await onDispatched?.();
         await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("Bridge shutdown interrupted prompt wait; resend the Lark message to retry")), { once: true }));
         return "done";
-      },
-      async readOutput() { return ""; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
@@ -356,8 +354,7 @@ describe("pane/thread lifecycle integration", () => {
           await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("observer detached")), { once: true }));
         }
         return "done";
-      },
-      async readOutput() { return restarted ? "❯ SECRET_DETACHED_TERMINAL_SENTINEL" : "◆ Working…"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
@@ -391,8 +388,7 @@ describe("pane/thread lifecycle integration", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
       async observeRuntime() { return { pane, traexProcess: true, composerReady: false, evidenceSource: "process" }; },
-      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { throw new Error("must not replay"); },
-      async readOutput() { return "ambiguous output"; }, async renamePane() {}
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { throw new Error("must not replay"); }, async renamePane() {}
     };
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; },
@@ -424,8 +420,7 @@ describe("pane/thread lifecycle integration", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane(id) { return id === pane.paneId ? pane : null; },
       async observeRuntime(id) { return { pane: id === pane.paneId ? pane : null, traexProcess: id === pane.paneId, composerReady: id === pane.paneId, evidenceSource: id === pane.paneId ? "structured" : "none" }; },
-      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt(_paneId, text) { submitted.push(text); return "done"; },
-      async readOutput() { return "◆ done\n────────"; }, async renamePane() {}
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt(_paneId, text) { submitted.push(text); return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
@@ -453,7 +448,7 @@ describe("pane/thread lifecycle integration", () => {
     let failWorkspace = false;
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
-    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { if (failWorkspace) throw new Error("timeout"); return [pane]; }, async getPane() { return pane; }, async createPane() { return pane; }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { if (failWorkspace) throw new Error("timeout"); return [pane]; }, async getPane() { return pane; }, async createPane() { return pane; }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active" });

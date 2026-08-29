@@ -7,9 +7,7 @@ import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } fro
 import type { HerdrPort, RuntimeReconciliationStore } from "../domain/ports.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import { cleanTerminalOutput, outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { extractTraexTelemetry } from "../runtime/traex-output-parser.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 
@@ -30,7 +28,6 @@ interface HerdrRuntimeReconcilerOptions {
   worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>;
 }
 
-const BASELINE_READ_CONCURRENCY = 4;
 const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
 
 export interface HerdrRuntimeReconcilerPort {
@@ -48,7 +45,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private activeReconciliation: Set<string> | null | undefined;
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
-  private readonly observedTerminalOutputs = new Map<string, string>();
   private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
   private readonly observedTabIds = new Map<string, string | null>();
   private readonly observedWorktreeNames = new Map<string, string | null>();
@@ -81,19 +77,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   async captureBaselines(): Promise<void> {
-    const bindings = this.options.store.listBindingsByState("active").filter((item) => item.paneId);
-    await forEachConcurrent(bindings, BASELINE_READ_CONCURRENCY, async (binding) => {
-      try {
-        const output = cleanTerminalOutput(await this.options.herdr.readOutput(binding.paneId!, 240));
-        if (output) await this.persistBaselineOutput(binding, binding.paneId!, binding.generation, output);
-      } catch (error) {
-        const reason = `Unable to read Herdr pane ${binding.paneId}: ${errorMessage(error)}`;
-        const next = isPaneMissing(error)
-          ? await this.orphanMissingPane(binding, reason)
-          : this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
-        this.options.logger.warn({ event: "binding-pane-probe-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment }, "failed to observe Herdr pane during startup");
+    const panes = this.options.herdr.listAllPanes
+      ? await this.options.herdr.listAllPanes()
+      : (await Promise.all([...this.configuredWorkspaceIds].map((workspaceId) => this.options.herdr.listPanes(workspaceId)))).flat();
+    for (const pane of panes) {
+      if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) {
+        this.observedAgentStates.set(pane.paneId, { terminalId: pane.terminalId ?? null, sequence: pane.stateChangeSeq, state: pane.agentState });
       }
-    });
+      this.observedTabIds.set(pane.paneId, pane.tabId ?? null);
+    }
   }
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
@@ -290,8 +282,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         if (this.skippedPaneReasons.has(pane.paneId)) this.options.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: projects[0]!.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
         existing = await this.options.discoverPane(pane, projects[0]!);
         bindingByPaneId.set(pane.paneId, existing);
-        const output = cleanTerminalOutput(await this.options.herdr.readOutput(pane.paneId, 240));
-        this.observedTerminalOutputs.set(pane.paneId, output);
         continue;
       }
       if (!existing.projectId) {
@@ -336,18 +326,12 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
         if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
       }
-      // Pane snapshot revisions are metadata revisions, not a trustworthy
-      // terminal-content cursor. A direct Herdr operation can change screen
-      // output without changing this value, so content fingerprinting is the
-      // authoritative deduplication boundary for bound TraeX panes.
-      await this.publishChangedLocalOutput(existing, pane.paneId, existing.generation);
       } catch (error) {
         this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
       }
     }
     if (requestedWorkspaceIds === undefined && panesByWorkspace.size === this.configuredWorkspaceIds.size) {
       const livePaneIds = new Set([...panesByWorkspace.values()].flatMap((panes) => panes.map((pane) => pane.paneId)));
-      pruneMissingPaneObservations(this.observedTerminalOutputs, livePaneIds);
       pruneMissingPaneObservations(this.observedAgentStates, livePaneIds);
       pruneMissingPaneObservations(this.observedTabIds, livePaneIds);
       pruneMissingPaneObservations(this.observedWorktreeNames, livePaneIds);
@@ -418,12 +402,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     return result.binding ?? binding;
   }
 
-  private async publishChangedLocalOutput(binding: Binding, paneId: string, generation: number): Promise<void> {
-    const output = cleanTerminalOutput(await this.options.herdr.readOutput(paneId, 240));
-    if (!output) return;
-    await this.persistChangedLocalOutput(binding, paneId, generation, output);
-  }
-
   private async convergeBindingTitle(binding: Binding, pane: HerdrPane): Promise<Binding> {
     const paneLabel = pane.label?.trim();
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
@@ -445,67 +423,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     return result.binding;
   }
 
-  private async persistBaselineOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {
-    const fingerprint = outputFingerprint(output);
-    const telemetry = extractTraexTelemetry(output);
-    const observation = terminalObservation("", telemetry.model, telemetry.context);
-    const payload = { observation };
-    if (!observation.main.model && !observation.main.context) {
-      if (this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) this.observedTerminalOutputs.set(paneId, output);
-      return;
-    }
-    const event = createBridgeEvent(binding.id, "PaneOutputObserved", "herdr", payload);
-    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
-    const view = reduceTopicView(current, event);
-    const result = this.options.store.checkpointRuntimeOutputWithProjection({
-      bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint, view,
-      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view)
-    });
-    if (result.outcome !== "projected") return;
-    this.observedTerminalOutputs.set(paneId, output);
-    if (result.outboxReserved) this.options.wakeOutbound?.();
-    await this.publish(binding.id, "PaneOutputObserved", payload);
-  }
-
-  private async persistChangedLocalOutput(binding: Binding, paneId: string, generation: number, output: string): Promise<void> {
-    const fingerprint = outputFingerprint(output);
-    if (fingerprint === binding.lastOutputFingerprint) return;
-    if (this.options.isBindingBusy(binding.id)) return;
-    const telemetry = extractTraexTelemetry(output);
-    const payload = { observation: terminalObservation("", telemetry.model, telemetry.context) };
-    if (!telemetry.model && !telemetry.context) {
-      if (this.options.store.checkpointRuntimeOutput({ bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint })) this.observedTerminalOutputs.set(paneId, output);
-      return;
-    }
-    const event = createBridgeEvent(binding.id, "PaneOutputObserved", "herdr", payload);
-    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
-    const view = reduceTopicView(current, event);
-    const result = this.options.store.checkpointRuntimeOutputWithProjection({
-      bindingId: binding.id, expectedPaneId: paneId, expectedGeneration: generation, fingerprint, view,
-      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view)
-    });
-    if (result.outcome !== "projected") return;
-    this.observedTerminalOutputs.set(paneId, output);
-    if (result.outboxReserved) this.options.wakeOutbound?.();
-    await this.publish(binding.id, "PaneOutputObserved", payload);
-  }
-
-  private async publishTerminalTelemetry(binding: Binding, output: string): Promise<void> {
-    const telemetry = extractTraexTelemetry(output);
-    if (!telemetry.model && !telemetry.context) return;
-    await this.publish(binding.id, "PaneOutputObserved", { observation: terminalObservation("", telemetry.model, telemetry.context) });
-  }
-
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload));
   }
-}
-
-function terminalObservation(answer: string, model?: string, context?: string): NonNullable<Extract<BridgeEvent, { type: "PaneOutputObserved" }>["payload"]["observation"]> {
-  return {
-    answer: { snapshot: answer, toolActivities: [] },
-    main: { ...(model ? { model } : {}), ...(context ? { context } : {}) }
-  };
 }
 
 function workspaceCwdKey(workspaceId: string, cwd: string | null): string {
@@ -516,19 +436,6 @@ function pruneMissingPaneObservations<Value>(observations: Map<string, Value>, l
   for (const paneId of observations.keys()) if (!livePaneIds.has(paneId)) observations.delete(paneId);
 }
 
-async function forEachConcurrent<T>(items: readonly T[], limit: number, operation: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const item = items[next++];
-      if (item !== undefined) await operation(item);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-}
-
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }
 function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean {
   return pane.agentKind === null && pane.foregroundExecutables.includes("traex");
 }

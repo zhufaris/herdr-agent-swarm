@@ -187,16 +187,16 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 
 ### `/swarm model [name]`
 
-在已绑定且空闲的项目话题中查看或切换当前 Pane 的 TraeX 模型。
+该命令保留用于明确提示：运行中的 Agent 不支持远程切换模型。
 
 ```text
 /swarm model
 /swarm model GPT-5.5
 ```
 
-不带名称时显示当前模型和可用模型；带名称时由 TraeX 匹配并切换。名称未知或
-不唯一时，Bridge 会原样展示 TraeX 的候选或错误信息。该命令不创建 Request/Answer
-卡片、不进入任务队列；当前有任务运行或排队时会拒绝，请等待队列完成后重试。
+Bridge 不会打开 TraeX 的 `/model` 菜单、读取 terminal 或模拟键盘选择。请在创建
+Agent 时选择模型，或显式替换 Agent 后使用新模型。该命令不创建 Request/Answer
+卡片，也不进入普通任务队列。
 
 ### 命令边界
 

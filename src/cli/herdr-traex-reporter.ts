@@ -1,7 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { readFile, readlink } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { TraexAgentReporter, type ReporterInput, type ReporterOperations } from "../runtime/herdr-traex-reporter.js";
@@ -24,25 +22,6 @@ function operations(realHerdr: string, executable: string): ReporterOperations {
       const startTicks = process ? await readStartTicks(pid) : null;
       return process && actualExecutable === executable && startTicks ? { executable, pid, startTicks } : null;
     },
-    readPane: (paneId) => run(realHerdr, ["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]),
-    explainCodexSnapshot: async (snapshot) => {
-      const directory = await mkdtemp(join(tmpdir(), "herdr-traex-explain-"));
-      const path = join(directory, "snapshot.txt");
-      try {
-        await writeFile(path, snapshot, { mode: 0o600 });
-        const result = JSON.parse(await run(realHerdr, ["agent", "explain", "--file", path, "--agent", "codex", "--format", "json"]));
-        return findState(result);
-      } finally { await rm(directory, { recursive: true, force: true }); }
-    },
-    currentAgentState: async (paneId) => {
-      try {
-        const result = resultOf(await run(realHerdr, ["agent", "get", paneId])) as { agent?: { agent_status?: unknown } };
-        const state = result.agent?.agent_status;
-        if (state === "idle" || state === "done") return "idle";
-        if (state === "working" || state === "blocked" || state === "unknown") return state;
-        return null;
-      } catch { return null; }
-    },
     reportAgent: async (paneId, state, sequence) => { await run(realHerdr, ["pane", "report-agent", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--state", state, "--seq", sequence]); },
     reportMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--display-agent", "traex", "--seq", sequence]); },
     clearMetadata: async (paneId, sequence) => { await run(realHerdr, ["pane", "report-metadata", paneId, "--source", "herdr-traex-shim", "--agent", "codex", "--clear-display-agent", "--seq", sequence]); },
@@ -61,13 +40,6 @@ async function readStartTicks(pid: number): Promise<string | null> {
 }
 async function readExecutable(pid: number): Promise<string | null> {
   try { return realpathSync(await readlink(`/proc/${pid}/exe`)); } catch { return null; }
-}
-function findState(value: unknown): unknown {
-  if (!value || typeof value !== "object") return "unknown";
-  const record = value as Record<string, unknown>;
-  if (typeof record.state === "string") return record.state;
-  if (record.explanation && typeof record.explanation === "object") return (record.explanation as Record<string, unknown>).state;
-  return "unknown";
 }
 function parseInput(raw: string | undefined): ReporterInput {
   if (!raw) throw new Error("Missing reporter input");

@@ -6,7 +6,6 @@ export interface PaneHost {
   listPanes(workspaceId: string): Promise<HerdrPane[]>;
   allocatePane(workspaceId: string, cwd: string, options: HerdrPaneCreationOptions): Promise<HerdrPane>;
   inspectPane(paneId: string): Promise<HerdrPane | null>;
-  readPane(paneId: string, lines: number): Promise<string>;
   interruptPane(paneId: string): Promise<void>;
   releasePane(paneId: string): Promise<void>;
 }
@@ -20,7 +19,6 @@ export class HerdrPaneHost implements PaneHost {
     return this.herdr.createPane(workspaceId, cwd, options);
   }
   inspectPane(paneId: string): Promise<HerdrPane | null> { return this.herdr.getPane(paneId); }
-  readPane(paneId: string, lines: number): Promise<string> { return this.herdr.readOutput(paneId, lines); }
   interruptPane(paneId: string): Promise<void> {
     if (!this.herdr.sendEscape) throw new Error("Herdr pane interruption is unavailable");
     return this.herdr.sendEscape(paneId);

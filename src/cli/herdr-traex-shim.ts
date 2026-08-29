@@ -12,7 +12,6 @@ async function main(): Promise<void> {
   const config = parseConfig(JSON.parse(await readFile(configPath, "utf8")));
   const invocation = parseHerdrShimInvocation(process.argv.slice(2));
   if (invocation.kind === "project") {
-    await markManagedPromptWorking(config.realHerdr, invocation.argv);
     const delegated = await runProjected(config.realHerdr, invocation.argv);
     let stdout = delegated.stdout;
     try { stdout = `${JSON.stringify(projectTraexAgentJson(JSON.parse(stdout)))}\n`; } catch { /* Preserve non-JSON native output. */ }
@@ -24,18 +23,6 @@ async function main(): Promise<void> {
   if (invocation.kind !== "start-traex") throw new Error("Shim entrypoint accepts only managed TraeX commands");
   const result = await runHerdrTraexStart(invocation, config, dependencies(config));
   process.stdout.write(`${JSON.stringify({ id: "cli:agent:start", result })}\n`);
-}
-
-async function markManagedPromptWorking(realHerdr: string, argv: string[]): Promise<void> {
-  if (argv[0] !== "agent" || argv[1] !== "prompt" || !argv[2]) return;
-  const target = argv[2];
-  const inspected = await runProjected(realHerdr, ["agent", "get", target]);
-  if (inspected.exitCode !== 0) return;
-  try {
-    const result = (JSON.parse(inspected.stdout) as { result?: { agent?: Record<string, unknown> } }).result?.agent;
-    if (result?.display_agent !== "traex" || typeof result.pane_id !== "string") return;
-    await run(realHerdr, ["pane", "report-agent", result.pane_id, "--source", "herdr-traex-shim", "--agent", "codex", "--state", "working", "--seq", process.hrtime.bigint().toString(10)]);
-  } catch { /* Native prompt remains authoritative if the pre-report cannot be prepared. */ }
 }
 
 function dependencies(config: TraexLaunchConfig): TraexStartDependencies {

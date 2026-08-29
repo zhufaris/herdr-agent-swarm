@@ -114,8 +114,7 @@ function createHarness(options: { terminalId?: string; paneMissing?: boolean } =
   const herdr: HerdrPort = {
     async assertWorkspace() {}, async listPanes() { return options.paneMissing ? [] : [pane]; }, async getPane() { return options.paneMissing ? null : pane; },
     async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-    async createPane() { created += 1; return pane; }, async startTraex() { started += 1; }, async runPrompt() { return "done"; },
-    async readOutput() { return ""; }, async renamePane() {}
+    async createPane() { created += 1; return pane; }, async startTraex() { started += 1; }, async runPrompt() { return "done"; }, async renamePane() {}
   };
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,

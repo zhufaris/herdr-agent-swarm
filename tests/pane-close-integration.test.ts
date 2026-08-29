@@ -156,8 +156,7 @@ async function setup(initialAgentState: AgentState, failClose = false) {
   };
   const herdr: HerdrPort = {
     async assertWorkspace() {}, async listPanes() { return panePresent ? [pane()] : []; }, async getPane() { return panePresent ? pane() : null; },
-    async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; },
-    async readOutput() { return ""; }, async renamePane() {}, closePane
+    async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, closePane
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();

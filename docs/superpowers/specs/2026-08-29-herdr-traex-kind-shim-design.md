@@ -90,15 +90,17 @@ does not start a second process automatically.
 
 ### State reporter
 
-TraeX currently renders Codex-compatible terminal states. A small reporter maps
-the existing Codex manifest outcome onto TraeX without duplicating the detection
-rules. Its authority is scoped by a unique source name and increasing sequence.
+Herdr 0.7.5 does not detect the real TraeX executable as a native Agent. A small
+compatibility layer establishes an initial process-fenced idle authority and
+maps TraeX `UserPromptSubmit` and `Stop` hook events onto working/idle lifecycle
+updates. It never reads terminal content. Its authority is scoped by a unique
+source name and increasing sequence.
 
-The reporter runs only while the TraeX process exists. It reports transitions,
-not every poll, and releases its scoped Codex authority plus TraeX display
-metadata when the process exits. Herdr can then return the pane to ordinary shell detection. A
-bounded heartbeat may repeat the current state only if the server requires it to
-retain authority.
+The reporter runs only while the TraeX process exists. It fences the process,
+claims the initial idle state, and releases its scoped Codex authority plus TraeX
+display metadata when the process exits. The process-local lifecycle hook reports
+subsequent transitions. Herdr can then return the pane to ordinary shell
+detection after cleanup.
 
 The reporter must preserve these meanings:
 

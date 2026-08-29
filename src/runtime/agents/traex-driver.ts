@@ -15,15 +15,18 @@ export class TraexDriver implements AgentRuntimeDriver {
   describe(): AgentCapabilities {
     return {
       available: true, structuredEvents: true, nativeResume: true, primaryTools: true,
-      steering: "unsupported", interrupt: "terminal-signal", approvals: "terminal",
-      modelSelection: "runtime", usageReporting: true
+      steering: "unsupported", interrupt: "native", approvals: "terminal",
+      modelSelection: "startup-only", usageReporting: true
     };
   }
 
   async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
-    const args = options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...mcpArguments(options.primaryTools)] : undefined;
+    const args = [
+      ...(options?.model ? ["--model", options.model] : []),
+      ...(options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...mcpArguments(options.primaryTools)] : [])
+    ];
     if (!this.herdr.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
-    await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: "traex", executable: this.executable, args: args ?? [] });
+    await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
   }
 
   async submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt> {

@@ -34,7 +34,7 @@ describe("space directory command", () => {
       async assertWorkspace() {},
       listPanes,
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -84,7 +84,7 @@ describe("space directory command", () => {
     const listPanes = vi.fn((workspaceId: string) => blockDirectoryReads
       ? new Promise<HerdrPane[]>((resolve) => { release.set(workspaceId, () => resolve([])); })
       : Promise.resolve([]));
-    const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/one", executable: "herdr" },
       projects: [{ id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" }, { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }],
@@ -156,7 +156,7 @@ describe("space directory command", () => {
     const shareThread = vi.fn(async () => ({ messageId: "shared" }));
     const listPanes = vi.fn(async (_workspaceId: string, options?: { forceRefresh?: boolean }) => expose || options?.forceRefresh ? [{ paneId: "w1:p2", workspaceId: "w1", cwd: "/work/alpha", label: "Free", agentState: "idle" as const, foregroundExecutables: ["traex"] }] : []);
     const lark: LarkPort = { async start(_message, action) { onAction = action; }, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "omt-new", rootMessageId: "root-new" }; }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: `card-${cards.length}` }; }, shareThread, async updateCard() {} };
-    const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
@@ -189,7 +189,7 @@ describe("space directory command", () => {
       async replyCard() { return { messageId: "card" }; }, async updateCard() {},
       async shareThread() { throw new Error("invalid request parameter"); }
     };
-    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "omt-target", rootMessageId: "om-target", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });

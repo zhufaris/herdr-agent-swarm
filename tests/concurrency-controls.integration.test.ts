@@ -67,7 +67,7 @@ describe("coordinator concurrency controls", () => {
       async assertWorkspace() {},
       async listPanes() { scans += 1; if (block) await blocked; return []; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {}
+      async runPrompt() { return "done"; }, async renamePane() {}
     };
     const { coordinator, publisher, store } = fixture(herdr);
     await coordinator.start();
@@ -161,7 +161,6 @@ describe("coordinator concurrency controls", () => {
       async createPane() { throw new Error("not used"); },
       async startTraex() {},
       async runPrompt() { runCount += 1; return "done"; },
-      async readOutput() { return ""; },
       async renamePane() {}
     };
     const lark: LarkPort = {
@@ -203,7 +202,6 @@ describe("coordinator concurrency controls", () => {
       async createPane() { throw new Error("not used"); },
       async startTraex() {},
       async runPrompt(_paneId, _text, _timeoutMs, _onObservation, _signal, onDispatched) { await onDispatched?.(); return "done"; },
-      async readOutput() { return "◆ final answer\n────────"; },
       async renamePane() {}
     };
     const { coordinator, publisher, store, bus } = fixture(herdr);
@@ -251,8 +249,7 @@ describe("coordinator concurrency controls", () => {
         await onObservation?.({ state: "working", stateSource: "herdr", output: "• Bash fake terminal command\nnot typed" });
         await onObservation?.({ state: "working", stateSource: "herdr", output: "+ fake terminal diff" });
         return "done";
-      },
-      async readOutput() { terminalReads += 1; return "◆ misleading terminal final\n────────"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -298,8 +295,7 @@ describe("coordinator concurrency controls", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) { await onDispatched?.(); await onObservation?.({ state: "working", stateSource: "herdr", output: "ignored terminal" }); return "done"; },
-      async readOutput() { return "ignored terminal"; }, async renamePane() {}
+      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) { await onDispatched?.(); await onObservation?.({ state: "working", stateSource: "herdr", output: "ignored terminal" }); return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -331,8 +327,7 @@ describe("coordinator concurrency controls", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt(_paneId, _text, _timeoutMs, _onObservation, _signal, onDispatched) { await onDispatched?.(); return "done"; },
-      async readOutput() { return "◆ SECRET_TERMINAL_SENTINEL\n────────"; }, async renamePane() {}
+      async runPrompt(_paneId, _text, _timeoutMs, _onObservation, _signal, onDispatched) { await onDispatched?.(); return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -375,8 +370,7 @@ describe("coordinator concurrency controls", () => {
         await onDispatched?.();
         await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ ignored terminal text" });
         return "done";
-      },
-      async readOutput() { return "◆ ignored terminal text\n────────"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -417,8 +411,7 @@ describe("coordinator concurrency controls", () => {
         await onDispatched?.();
         await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ ignored terminal text" });
         return "done";
-      },
-      async readOutput() { return "◆ ignored terminal text\n────────"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -451,8 +444,7 @@ describe("coordinator concurrency controls", () => {
         await onDispatched?.();
         await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ SECRET_TRANSCRIPT_FAILURE_TERMINAL" });
         return "done";
-      },
-      async readOutput() { return "◆ SECRET_TRANSCRIPT_FAILURE_TERMINAL\n────────"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -484,8 +476,7 @@ describe("coordinator concurrency controls", () => {
         await onObservation?.({ state: "working", stateSource: "herdr", output: `◆ ${"old terminal line\n".repeat(2500)}` });
         await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ replacement terminal answer" });
         return "done";
-      },
-      async readOutput() { return "◆ replacement terminal answer\n────────"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -518,8 +509,7 @@ describe("coordinator concurrency controls", () => {
         await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ first terminal screen" });
         await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ terminal after typed failure" });
         return "done";
-      },
-      async readOutput() { return "◆ terminal final\n────────"; }, async renamePane() {}
+      }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -549,7 +539,7 @@ function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
 }
 
 function emptyHerdr(): HerdrPort {
-  return { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async readOutput() { return ""; }, async renamePane() {} };
+  return { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
 }
 
 function quietLark(): LarkPort {

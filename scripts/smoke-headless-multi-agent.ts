@@ -66,10 +66,10 @@ try {
   control = new InstanceControlWorkflow({ projects: [project], store, paneHost, drivers, worktrees: new WorktreeManager(runner, { timeoutMs: 180_000 }), idFactory: randomUUID, primaryTools: gateway });
   const primary = await control.create({ actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, name: "primary", role: "primary", agentKind: "traex", model: null, start: true });
   ownedPanes.add(primary.pendingRuntimeRef?.paneId ?? primary.runtimeRef!.paneId);
-  await prepareTemporaryRepositoryTrust(primary.runtimeRef!.paneId, "traex");
+  await requireAgentReady(primary.runtimeRef!.paneId, "traex");
   const worker = await control.create({ actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, name: "worker", role: "worker", agentKind: "traex", model: null, start: true });
   ownedPanes.add(worker.pendingRuntimeRef?.paneId ?? worker.runtimeRef!.paneId);
-  await prepareTemporaryRepositoryTrust(worker.runtimeRef!.paneId, "traex");
+  await requireAgentReady(worker.runtimeRef!.paneId, "traex");
   await messaging.submit({ idempotencyKey: "primary-smoke-turn", actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, targetInstanceId: primary.id, content: { kind: "turn", text: `Use the herdr_agent_swarm MCP tools. First list instances. Then call prompt_instance for Worker ${worker.id} with task "Reply with exactly WORKER_OK. Do not modify files." and idempotencyKey "primary-to-worker-smoke". Do not create, remove, or retarget instances. After the tool accepts the task, reply with exactly PRIMARY_DISPATCHED.` } });
   await scheduler.drain(primary.id);
   await scheduler.drain(worker.id);
@@ -105,7 +105,7 @@ try {
 } catch (error) {
   const diagnostics: Record<string, unknown> = { error: error instanceof Error ? error.message : String(error) };
   if (store) diagnostics.turns = [...store.listAgentInstances(smokeProjectId).flatMap((instance) => store!.listInstanceTurns(instance.id).map((turn) => ({ instance: instance.name, idempotencyKey: turn.idempotencyKey, state: turn.state, error: turn.error })))];
-  diagnostics.panes = await Promise.all([...ownedPanes].map(async (paneId) => ({ paneId, output: await command(herdrBin, ["pane", "read", paneId, "--source", "visible", "--format", "text"]).catch((readError) => String(readError)) })));
+  diagnostics.agents = await Promise.all([...ownedPanes].map(async (paneId) => ({ paneId, state: await command(herdrBin, ["agent", "get", paneId]).then(parseJson).catch((readError) => String(readError)) })));
   process.stderr.write(`${JSON.stringify(diagnostics, null, 2)}\n`);
   throw error;
 } finally {
@@ -120,21 +120,14 @@ async function runnerCommand(executable: string, args: string[]) { return new Pr
 async function executableExists(executable: string): Promise<boolean> { const candidates = executable.includes("/") ? [executable] : (process.env.PATH || "").split(delimiter).filter(Boolean).map((directory) => join(directory, executable)); for (const candidate of candidates) try { await access(candidate, constants.X_OK); return true; } catch {} return false; }
 async function version(executable: string): Promise<string> { const output = await runnerCommand(executable, ["--version"]); return output.stdout.trim().split(/\r?\n/).find(Boolean) ?? output.stderr.trim().split(/\r?\n/).find((line) => !line.startsWith("WARNING:")) ?? "unknown"; }
 async function optionalVersion(executable: string): Promise<string | null> { return await executableExists(executable) ? version(executable) : null; }
-async function prepareTemporaryRepositoryTrust(paneId: string, kind: "codex" | "claude-code" | "traex"): Promise<void> {
+async function requireAgentReady(paneId: string, kind: "codex" | "claude-code" | "traex"): Promise<void> {
   for (let attempt = 0; attempt < 80; attempt += 1) {
-    const output = await command(herdrBin, ["pane", "read", paneId, "--source", "visible", "--format", "text"]);
-    if (output.includes("Do you trust the contents of this directory?") && output.includes("Yes, continue")) await command(herdrBin, ["pane", "send-keys", paneId, "enter"]);
-    else if (output.includes("Press t to trust")) await command(herdrBin, ["pane", "send-text", paneId, "t"]);
-    else if (kind === "codex" && output.includes("Hooks need review")) await command(herdrBin, ["pane", "send-keys", paneId, "down", "down", "enter"]);
-    else if (kind === "codex" && output.includes("hook needs review")) await command(herdrBin, ["pane", "send-keys", paneId, "esc"]);
-    else if (kind === "claude-code" && output.includes("Yes, I trust this folder")) await command(herdrBin, ["pane", "send-keys", paneId, "down", "enter"]);
-    else {
-      const status = findAgentStatus(parseJson(await command(herdrBin, ["agent", "get", paneId])));
-      if (status === "idle" || status === "done") return;
-    }
+    const status = findAgentStatus(parseJson(await command(herdrBin, ["agent", "get", paneId])));
+    if (status === "idle" || status === "done") return;
+    if (status === "blocked") throw new Error(`${kind} requires local input in ${paneId}; resolve it in Herdr and rerun the smoke`);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`Timed out preparing ${kind} in temporary trusted repository`);
+  throw new Error(`Timed out waiting for structured ${kind} readiness`);
 }
 function parseJson(output: string): unknown { const line = output.trim().split(/\r?\n/).findLast((candidate) => candidate.trim().startsWith("{")); return line ? JSON.parse(line) : null; }
 function findAgentStatus(value: unknown): string | undefined {

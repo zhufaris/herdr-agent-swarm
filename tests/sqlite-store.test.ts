@@ -177,25 +177,6 @@ describe("SQLite store", () => {
     expect(store.getPrompt("queued")).toMatchObject({ dispatchKind: "steering", parentPromptId: "parent", state: "queued", body: "queued" });
     expect(store.convertQueuedPromptToSteering({ interactionId: "convert", actorOpenId: "u1", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued", now: "2026-08-27T00:00:03.000Z" }).outcome).toBe("duplicate");
   });
-  it("atomically projects changed runtime output with its fingerprint and main-card intent", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", generation: 1, state: "active", lifecycle: "active", attachment: "attached" });
-    const view = { ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "done" as const, agentState: "done" as const, answer: "safe final answer", model: "GPT-5.6", context: "12K tokens", viewVersion: 1 };
-
-    const projected = store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, fingerprint: "fp-1", view, rootMessageId: "root", card: {} });
-
-    expect(projected).toMatchObject({ outcome: "projected" });
-    expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: "fp-1" });
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "safe final answer", model: "GPT-5.6", context: "12K tokens" });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status" })]);
-
-    expect(store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, fingerprint: "fp-1", view, rootMessageId: "root", card: {} })).toMatchObject({ outcome: "unchanged" });
-    expect(store.checkpointRuntimeOutputWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 2, fingerprint: "fp-2", view: { ...view, answer: "stale", viewVersion: 2 }, rootMessageId: "root", card: {} })).toMatchObject({ outcome: "stale" });
-    expect(store.getBinding("b1")).toMatchObject({ lastOutputFingerprint: "fp-1" });
-    expect(store.listPendingOutboundReplies()).toHaveLength(1);
-  });
-
   it("atomically reconciles a pane-derived binding title with its main-card intent", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "legacy title" });
