@@ -1,6 +1,6 @@
 import { matchesHerdrAgentKind, type AgentInstance, type ObservedInstanceState } from "../domain/agent-instance.js";
 import type { InstanceStore } from "../domain/ports.js";
-import type { HerdrPane, ProjectConfig } from "../domain/types.js";
+import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../domain/types.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 
 interface Options { projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void }
@@ -11,13 +11,22 @@ export class InstanceRuntimeReconciler {
   private stopping = false;
   private completed = false;
   private lastError: string | null = null;
+  private runCount = 0;
+  private successCount = 0;
+  private failureCount = 0;
+  private coalescedRequestCount = 0;
+  private lastStartedAt: string | null = null;
+  private lastCompletedAt: string | null = null;
+  private lastDurationMs: number | null = null;
+  private maxDurationMs: number | null = null;
+  private lastOutcome: ReconciliationDiagnostics["lastOutcome"] = null;
 
   constructor(private readonly options: Options) {}
 
   reconcile(): Promise<void> {
     if (this.stopping) return Promise.resolve();
-    if (this.running) return this.running;
-    const run = this.reconcileOnce();
+    if (this.running) { this.coalescedRequestCount += 1; return this.running; }
+    const run = this.runMeasured();
     this.running = run;
     return run.finally(() => { if (this.running === run) this.running = null; });
   }
@@ -29,7 +38,34 @@ export class InstanceRuntimeReconciler {
     this.timer.unref();
   }
   async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
-  snapshot(): { ready: boolean; lastError: string | null } { return { ready: this.completed && !this.lastError, lastError: this.lastError }; }
+  snapshot(): ReconciliationDiagnostics & { ready: boolean; lastError: string | null } {
+    return {
+      state: this.stopping ? "stopping" : this.running ? "running" : "idle",
+      runCount: this.runCount, successCount: this.successCount, failureCount: this.failureCount, coalescedRequestCount: this.coalescedRequestCount,
+      lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastDurationMs: this.lastDurationMs, maxDurationMs: this.maxDurationMs, lastOutcome: this.lastOutcome,
+      ready: this.completed && !this.lastError, lastError: this.lastError
+    };
+  }
+
+  private async runMeasured(): Promise<void> {
+    const started = performance.now();
+    this.runCount += 1;
+    this.lastStartedAt = new Date().toISOString();
+    try {
+      await this.reconcileOnce();
+      this.successCount += 1;
+      this.lastOutcome = "succeeded";
+    } catch (error) {
+      this.failureCount += 1;
+      this.lastOutcome = "failed";
+      throw error;
+    } finally {
+      const duration = Math.max(0, Math.round(performance.now() - started));
+      this.lastDurationMs = duration;
+      this.maxDurationMs = Math.max(this.maxDurationMs ?? 0, duration);
+      this.lastCompletedAt = new Date().toISOString();
+    }
+  }
 
   private async reconcileOnce(): Promise<void> {
     try {

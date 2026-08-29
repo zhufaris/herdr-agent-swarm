@@ -314,6 +314,19 @@ export interface PromptLatencySummary {
   delivery: PromptLatencyPhaseSummary;
 }
 
+export interface ReconciliationDiagnostics {
+  state: "idle" | "running" | "stopping";
+  runCount: number;
+  successCount: number;
+  failureCount: number;
+  coalescedRequestCount: number;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  maxDurationMs: number | null;
+  lastOutcome: "succeeded" | "failed" | null;
+}
+
 export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;

@@ -16,10 +16,43 @@ function setup(snapshot: HerdrPane[]) {
   const paneHost = { listPanes: vi.fn(async () => snapshot) } as unknown as PaneHost;
   const wake = vi.fn();
   const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake });
-  return { instance, reconciler, wake };
+  return { instance, reconciler, wake, paneHost };
 }
 
 describe("instance runtime reconciliation", () => {
+  it("reports bounded lifecycle and timing diagnostics for successful and coalesced scans", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const { reconciler, paneHost } = setup([]);
+    const listPanes = vi.spyOn(paneHost, "listPanes").mockImplementation(async () => { await blocked; return []; });
+
+    expect(reconciler.snapshot()).toMatchObject({ state: "idle", runCount: 0, successCount: 0, failureCount: 0, coalescedRequestCount: 0, lastOutcome: null });
+    const first = reconciler.reconcile();
+    const second = reconciler.reconcile();
+    await vi.waitFor(() => expect(listPanes).toHaveBeenCalledOnce());
+    expect(reconciler.snapshot()).toMatchObject({ state: "running", runCount: 1, coalescedRequestCount: 1, lastStartedAt: expect.any(String), lastCompletedAt: null });
+    release();
+    await Promise.all([first, second]);
+
+    expect(reconciler.snapshot()).toMatchObject({ state: "idle", runCount: 1, successCount: 1, failureCount: 0, coalescedRequestCount: 1, lastCompletedAt: expect.any(String), lastDurationMs: expect.any(Number), maxDurationMs: expect.any(Number), lastOutcome: "succeeded", ready: true, lastError: null });
+  });
+
+  it("records failed scans and reports stopping while waiting for an active scan", async () => {
+    let reject!: (error: Error) => void;
+    const blocked = new Promise<never>((_resolve, rejectPromise) => { reject = rejectPromise; });
+    const { reconciler, paneHost } = setup([]);
+    vi.spyOn(paneHost, "listPanes").mockImplementation(() => blocked);
+
+    const running = reconciler.reconcile();
+    await vi.waitFor(() => expect(reconciler.snapshot().state).toBe("running"));
+    const stopping = reconciler.stop();
+    expect(reconciler.snapshot().state).toBe("stopping");
+    reject(new Error("runtime scan failed"));
+    await expect(running).rejects.toThrow("runtime scan failed");
+    await expect(stopping).rejects.toThrow("runtime scan failed");
+    expect(reconciler.snapshot()).toMatchObject({ state: "stopping", runCount: 1, successCount: 0, failureCount: 1, lastOutcome: "failed", lastDurationMs: expect.any(Number) });
+  });
+
   it("converges a matching runtime and wakes queued work only after an idle observation", async () => {
     const { instance, reconciler, wake } = setup([pane({ agentState: "idle" })]);
     store!.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
