@@ -10,6 +10,7 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
 const DEFAULT_MAX_DISCOVERY_ENTRIES = 100_000;
+const DEFAULT_MAX_CACHED_PATHS = 256;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 
@@ -60,6 +61,7 @@ export interface TraexTranscriptReaderOptions {
   maxReadBytes?: number;
   maxRenderedDeltaChars?: number;
   maxDiscoveryEntries?: number;
+  maxCachedPaths?: number;
 }
 
 export class TraexTranscriptReader implements TraexTranscriptReaderPort {
@@ -67,6 +69,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   private readonly maxReadBytes: number;
   private readonly maxRenderedDeltaChars: number;
   private readonly maxDiscoveryEntries: number;
+  private readonly maxCachedPaths: number;
   private readonly pathsBySessionId = new Map<string, string>();
 
   constructor(options: TraexTranscriptReaderOptions = {}) {
@@ -74,6 +77,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     this.maxReadBytes = options.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
     this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? DEFAULT_MAX_RENDERED_DELTA_CHARS;
     this.maxDiscoveryEntries = options.maxDiscoveryEntries ?? DEFAULT_MAX_DISCOVERY_ENTRIES;
+    this.maxCachedPaths = Math.max(1, Math.floor(options.maxCachedPaths ?? DEFAULT_MAX_CACHED_PATHS));
   }
 
   async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
@@ -85,6 +89,8 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       const cachedPath = this.pathsBySessionId.get(session.value);
       if (cachedPath) {
         if (await isValidTranscriptPath(this.sessionsRoot, cachedPath, session.value)) {
+          this.pathsBySessionId.delete(session.value);
+          this.pathsBySessionId.set(session.value, cachedPath);
           const file = await stat(cachedPath);
           return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(cachedPath, file.size, this.maxReadBytes)) };
         }
@@ -99,11 +105,21 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       if (!await containsMatchingSessionMeta(path, session.value)) {
         return { mode: "terminal", reason: "transcript_validation_failed" };
       }
-      this.pathsBySessionId.set(session.value, path);
+      this.rememberPath(session.value, path);
       const file = await stat(path);
       return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(path, file.size, this.maxReadBytes)) };
     } catch {
       return { mode: "terminal", reason: "transcript_validation_failed" };
+    }
+  }
+
+  private rememberPath(sessionId: string, path: string): void {
+    this.pathsBySessionId.delete(sessionId);
+    this.pathsBySessionId.set(sessionId, path);
+    while (this.pathsBySessionId.size > this.maxCachedPaths) {
+      const oldest = this.pathsBySessionId.keys().next().value;
+      if (oldest === undefined) break;
+      this.pathsBySessionId.delete(oldest);
     }
   }
 }
