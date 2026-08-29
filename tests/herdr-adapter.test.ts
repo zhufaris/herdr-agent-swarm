@@ -1179,6 +1179,61 @@ describe("Herdr adapter", () => {
     expect(readsBeforeEnter).toHaveLength(3);
   });
 
+  it("does not confirm a short prompt from unrelated terminal UI text", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "❯\nAuto Mode (shift+tab to cycle)",
+      "❯\nAuto Mode (shift+tab to cycle)",
+      "❯ hi\nAuto Mode (shift+tab to cycle)"
+    ];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1)!, stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).resolves.toBe("injected");
+    const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
+    expect(calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read")).toHaveLength(3);
+  });
+
+  it("submits an exact prompt already present in the composer without appending it", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "◆ previous answer\n❯ hi\n────────\nGPT-5 · Context 90% left", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).resolves.toBe("injected");
+    expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "hi"]);
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+  });
+
+  it("preserves and rejects a different non-empty composer draft", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_executable, args) {
+        calls.push(args);
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "❯ keep my draft\n────────\nGPT-5 · Context 90% left", stderr: "" };
+        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
+        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).rejects.toThrow("composer_not_empty");
+    expect(calls.some((args) => args[0] === "pane" && (args[1] === "send-text" || args[1] === "send-keys"))).toBe(false);
+  });
+
   it("uses a native output wait only as a prompt echo wake-up hint", async () => {
     const nativeCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const reads = ["◆ hi\n❯", "◆ hi\n❯", "◆ hi\n❯ hi"];

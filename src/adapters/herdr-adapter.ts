@@ -463,20 +463,27 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private async submitPromptText(paneId: string, text: string, before: string, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<void> {
     const comparableText = normalizePromptEcho(text);
-    const previousOccurrences = countOccurrences(normalizePromptEcho(before), comparableText);
+    const existingComposer = activeTraexComposer(before, true);
+    if (existingComposer !== null && normalizePromptEcho(existingComposer)) {
+      if (normalizePromptEcho(existingComposer) !== comparableText) {
+        throw new Error(`composer_not_empty in pane ${paneId}`);
+      }
+      await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs, onDispatched);
+      return;
+    }
     await this.runner.run(this.executable, ["pane", "send-text", paneId, text], this.commandTimeoutMs);
     const deadline = Date.now() + this.commandTimeoutMs;
     await this.waitForOutputMarker(paneId, text, Math.min(deadline, Date.now() + 250));
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       const output = await this.readOutput(paneId, 240);
-      let confirmed = countOccurrences(normalizePromptEcho(output), comparableText) > previousOccurrences;
+      let confirmed = normalizePromptEcho(activeTraexComposer(output) ?? "") === comparableText;
       // agent.read can briefly return a valid but stale Agent snapshot while the
       // Pane TUI already contains the pasted composer text. Confirm against the
       // Pane surface before withholding Enter until timeout.
       if (!confirmed && this.native) {
         const paneOutput = await this.readPaneOutput(paneId, 240, "recent-unwrapped");
-        confirmed = countOccurrences(normalizePromptEcho(paneOutput), comparableText) > previousOccurrences;
+        confirmed = normalizePromptEcho(activeTraexComposer(paneOutput) ?? "") === comparableText;
       }
       if (confirmed) {
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs, onDispatched);
@@ -700,6 +707,23 @@ function hasActiveTurnHelper(executables: string[]): boolean {
   return executables.some((name) => !["traex", "bash", "sh", "zsh", "fish"].includes(name));
 }
 
+function normalizePromptEcho(value: string): string {
+  return value.replace(/[▍\s]+/gu, "");
+}
+
+function activeTraexComposer(output: string, requireFrame = false): string | null {
+  const lines = stripTerminalControl(output).replace(/\r/g, "").split("\n");
+  let end = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^\s*[❯›>▍](?:\s|$)/u.test(lines[index]!)) { end = index; break; }
+  }
+  if (end < 0) return null;
+  if (requireFrame && !lines.slice(end + 1).some((line) => /^\s*[─━-]{3,}\s*$/u.test(line))) return null;
+  let start = end;
+  while (start > 0 && /^\s*[❯›>▍](?:\s|$)/u.test(lines[start - 1]!)) start -= 1;
+  return lines.slice(start, end + 1).map((line) => line.replace(/^\s*[❯›>▍]\s*/u, "")).join("");
+}
+
 function countOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
   let count = 0;
@@ -709,10 +733,6 @@ function countOccurrences(haystack: string, needle: string): number {
     offset += needle.length;
   }
   return count;
-}
-
-function normalizePromptEcho(value: string): string {
-  return value.replace(/[▍\s]+/gu, "");
 }
 
 function paneCommandOutput(before: string, after: string, command: string): string {
