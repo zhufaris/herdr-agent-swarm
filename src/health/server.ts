@@ -86,6 +86,7 @@ export function startHealthServer(options: {
       response.end(JSON.stringify({
         status: readiness.status === "ready" && !operationalDegraded
           && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
+          && !(outboxDispatcher && "lastScanOutcome" in outboxDispatcher && outboxDispatcher.lastScanOutcome === "failed")
           && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
           && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
           && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))

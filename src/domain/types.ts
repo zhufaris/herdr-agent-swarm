@@ -391,6 +391,9 @@ export interface OutboxDispatcherDiagnostics {
   scanPending: boolean;
   lastScanAt: string | null;
   lastScanOutcome: "idle" | "delivered" | "failed" | null;
+  lastSuccessfulScanAt: string | null;
+  lastScanFailureAt: string | null;
+  consecutiveScanFailures: number;
   lastDeliveryAt: string | null;
   lastDeliveryFailureAt: string | null;
 }

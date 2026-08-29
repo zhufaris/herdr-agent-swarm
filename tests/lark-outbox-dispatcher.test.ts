@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Logger } from "pino";
 import type { LarkPort, OutboundIntentPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
@@ -14,6 +14,8 @@ import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-vie
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
+
+afterEach(() => vi.useRealTimers());
 
 describe("Lark channel publisher", () => {
   it("checkpoints a delivered Main Card version and emits a convergence hint", async () => {
@@ -551,7 +553,8 @@ describe("Lark channel publisher", () => {
 
     expect(publisher.snapshot()).toEqual({
       state: "idle", activeDeliveries: 0, scanPending: false, lastScanAt: null,
-      lastScanOutcome: null, lastDeliveryAt: null, lastDeliveryFailureAt: null
+      lastScanOutcome: null, lastSuccessfulScanAt: null, lastScanFailureAt: null, consecutiveScanFailures: 0,
+      lastDeliveryAt: null, lastDeliveryFailureAt: null
     });
     store.enqueueOutboundReply({ id: "private-reply-id", idempotencyKey: "private-key", rootMessageId: "private-root", kind: "card_reply", payload: "private payload" });
     await publisher.requestScan();
@@ -559,6 +562,7 @@ describe("Lark channel publisher", () => {
     expect(publisher.snapshot()).toEqual({
       state: "idle", activeDeliveries: 0, scanPending: false,
       lastScanAt: "2026-08-24T00:00:00.000Z", lastScanOutcome: "failed",
+      lastSuccessfulScanAt: "2026-08-24T00:00:00.000Z", lastScanFailureAt: null, consecutiveScanFailures: 0,
       lastDeliveryAt: null, lastDeliveryFailureAt: "2026-08-24T00:00:00.000Z"
     });
     expect(JSON.stringify(publisher.snapshot())).not.toMatch(/private|secret/);
@@ -778,6 +782,36 @@ describe("Lark channel publisher", () => {
 
     publisher.start();
     await vi.waitFor(() => expect(delivered).toHaveBeenCalledTimes(1));
+
+    await publisher.stop();
+    store.close();
+  });
+
+  it("contains a rejected startup scan, retries it, and resets failure diagnostics after recovery", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
+    const store = new SqliteBindingStore(":memory:");
+    const recover = vi.spyOn(store, "recoverEligibleDeadLetters")
+      .mockImplementationOnce(() => { throw new Error("database busy"); });
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn() } as unknown as Logger;
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({}), logger);
+
+    publisher.start();
+    await vi.waitFor(() => expect(publisher.snapshot().consecutiveScanFailures).toBe(1));
+    expect(publisher.snapshot()).toMatchObject({
+      lastScanOutcome: "failed",
+      lastScanFailureAt: "2026-08-29T00:00:00.000Z",
+      lastSuccessfulScanAt: null
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(publisher.snapshot().consecutiveScanFailures).toBe(0));
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(publisher.snapshot()).toMatchObject({
+      lastScanOutcome: "idle",
+      lastScanFailureAt: "2026-08-29T00:00:00.000Z"
+    });
+    expect(Date.parse(publisher.snapshot().lastSuccessfulScanAt ?? "")).toBeGreaterThan(Date.parse("2026-08-29T00:00:00.000Z"));
 
     await publisher.stop();
     store.close();

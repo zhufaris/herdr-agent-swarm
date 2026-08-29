@@ -10,6 +10,8 @@ import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessa
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
   private static readonly MAX_CONCURRENT_DELIVERIES = 4;
+  private static readonly SCAN_RETRY_BASE_MS = 250;
+  private static readonly SCAN_RETRY_MAX_MS = 30_000;
   private draining: Promise<void> | null = null;
   private readonly activeHandlers = new Set<Promise<unknown>>();
   private unsubscribe: (() => void) | null = null;
@@ -24,6 +26,9 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private scheduler: PromptWorkScheduler | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
+  private lastSuccessfulScanAt: string | null = null;
+  private lastScanFailureAt: string | null = null;
+  private consecutiveScanFailures = 0;
   private lastDeliveryAt: string | null = null;
   private lastDeliveryFailureAt: string | null = null;
 
@@ -38,11 +43,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   start(): () => void {
     if (this.unsubscribe) return this.unsubscribe;
     this.stopping = false;
-    const unsubscribeWork = this.work.subscribe(() => this.requestScan());
+    const unsubscribeWork = this.work.subscribe(() => this.launchScan());
     this.unsubscribe = () => { unsubscribeWork(); this.unsubscribe = null; };
-    this.safetyTimer = setInterval(() => void this.requestScan(), this.safetyScanIntervalMs);
+    this.safetyTimer = setInterval(() => this.launchScan(), this.safetyScanIntervalMs);
     this.safetyTimer.unref?.();
-    void this.requestScan();
+    this.launchScan();
     return this.unsubscribe;
   }
 
@@ -63,6 +68,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       state: this.stopping ? "stopping" : this.draining ? "running" : "idle",
       activeDeliveries: this.activeHandlers.size, scanPending: this.scanRequested,
       lastScanAt: this.lastScanAt, lastScanOutcome: this.lastScanOutcome,
+      lastSuccessfulScanAt: this.lastSuccessfulScanAt, lastScanFailureAt: this.lastScanFailureAt,
+      consecutiveScanFailures: this.consecutiveScanFailures,
       lastDeliveryAt: this.lastDeliveryAt, lastDeliveryFailureAt: this.lastDeliveryFailureAt
     };
   }
@@ -89,7 +96,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     this.draining = this.runRequestedScans().finally(() => {
       this.draining = null;
       this.scheduleRetry();
-      if (this.scanRequested && !this.stopping) void this.requestScan();
+      if (this.scanRequested && !this.stopping) this.launchScan();
     });
     return this.draining;
   }
@@ -102,13 +109,23 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       try {
         this.recoverTransientDeadLetters();
         this.lastScanOutcome = await this.drainPending(force);
+        this.consecutiveScanFailures = 0;
+        this.lastSuccessfulScanAt = new Date().toISOString();
       } catch (error) {
         this.lastScanOutcome = "failed";
+        this.consecutiveScanFailures += 1;
+        this.lastScanFailureAt = new Date().toISOString();
         throw error;
       } finally {
         this.lastScanAt = new Date().toISOString();
       }
     }
+  }
+
+  private launchScan(force = false): void {
+    void this.requestScan(force).catch((error) => {
+      this.logger.warn({ event: "lark-outbox-scan-failed", err: safeLogError(error), consecutiveFailures: this.consecutiveScanFailures, outcome: "retry" }, "Lark outbox scan failed; retry scheduled");
+    });
   }
 
   private recoverTransientDeadLetters(): void {
@@ -153,12 +170,24 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     if (this.stopping) return;
+    if (this.consecutiveScanFailures > 0) {
+      const delayMs = Math.min(
+        LarkOutboxDispatcher.SCAN_RETRY_BASE_MS * (2 ** (this.consecutiveScanFailures - 1)),
+        LarkOutboxDispatcher.SCAN_RETRY_MAX_MS
+      );
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
+        this.launchScan();
+      }, delayMs);
+      this.retryTimer.unref?.();
+      return;
+    }
     const nextAttemptAt = this.store.getNextOutboundLaneHeadAttemptAt();
     if (!nextAttemptAt) return;
     const dueAt = Date.parse(nextAttemptAt);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.requestScan();
+      this.launchScan();
     }, Math.max(0, dueAt - Date.now()));
     this.retryTimer.unref?.();
   }

@@ -284,6 +284,23 @@ describe("health server", () => {
     });
   });
 
+  it("degrades status while the latest outbox scan is failed without failing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      outboxDispatcher: { snapshot: () => ({ state: "idle" as const, activeDeliveries: 0, scanPending: false, lastScanAt: "2026-08-29T00:00:00.000Z", lastScanOutcome: "failed" as const, lastDeliveryAt: null, lastDeliveryFailureAt: null, lastSuccessfulScanAt: null, lastScanFailureAt: "2026-08-29T00:00:00.000Z", consecutiveScanFailures: 1 }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" }, outboxDispatcher: { lastScanOutcome: "failed", consecutiveScanFailures: 1 }
+    });
+  });
+
   it("isolates prompt worker diagnostic failure from readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({

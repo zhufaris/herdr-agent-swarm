@@ -49,7 +49,9 @@ export class ConversationViewProjector {
       }
       await this.answerPages.converge(promptId);
       if (view) this.answerContentLengths.set(promptId, answerStreamContent(view).length);
-    }, options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS);
+    }, options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, (error, promptId, version) => {
+      this.logger.error({ event: "answer-card-update-failed", err: safeLogError(error), promptId, viewVersion: version, outcome: "retry" }, "failed to update Answer card; retry scheduled");
+    });
   }
 
   start(): () => void {
