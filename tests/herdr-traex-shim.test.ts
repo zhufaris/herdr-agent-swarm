@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeLaunchRequest, parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexStart, shimLifecycleArguments, TraexStartError, validateShimPaths } from "../src/runtime/herdr-traex-shim.js";
+import { encodeLaunchRequest, parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexStart, TraexStartError, validateShimPaths } from "../src/runtime/herdr-traex-shim.js";
 
 describe("Herdr TraeX shim invocation", () => {
   it.each([
@@ -79,16 +79,6 @@ describe("Herdr TraeX managed start", () => {
     )).toBe(true);
   });
 
-  it("owns all TraeX lifecycle hooks and preserves caller arguments after them", () => {
-    const args = shimLifecycleArguments("/opt/herdr", "/opt/shim/report-traex-lifecycle.js");
-    expect(args).toHaveLength(5);
-    expect(args[0]).toBe("--dangerously-bypass-hook-trust");
-    expect(args).not.toContainEqual(expect.stringContaining("hooks.SessionStart"));
-    expect(args).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
-    expect(args).toContainEqual(expect.stringContaining("hooks.Stop"));
-    expect(args.slice(1).every((value, index) => index % 2 === 0 ? value === "-c" : value.includes("HERDR_TRAEX_REAL_HERDR"))).toBe(true);
-  });
-
   it.each([
     ["--session-id", "01a03eb1-c193-7531-83c0-e6c6f70143d4"],
     ["--session-id=01a03eb1-c193-7531-83c0-e6c6f70143d4"],
@@ -109,7 +99,7 @@ describe("Herdr TraeX managed start", () => {
     const reports: unknown[] = [];
     const result = await runHerdrTraexStart(
       { name: "reviewer", paneId: "w1:p1", timeoutMs: 1000, traexArgs: ["--model", "private model"] },
-      { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", lifecycleReporter: "/opt/shim/report-traex-lifecycle.js", requestDir: "/run/user/1/shim", validatedHerdrVersion: "0.7.5" },
+      { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", validatedHerdrVersion: "0.7.5" },
       {
         runHerdr: async (args) => {
           calls.push(args);
@@ -143,10 +133,9 @@ describe("Herdr TraeX managed start", () => {
     expect(launch[0]![3]).not.toContain("codex");
     expect(calls.filter((args) => args[0] === "agent" && args[1] === "start")).toEqual([]);
     const request = (reports[0] as Buffer).toString("utf8").split("\0");
-    expect(request.slice(0, 3)).toEqual(["/opt/traex", "--dangerously-bypass-hook-trust", "-c"]);
-    expect(request).not.toContainEqual(expect.stringContaining("hooks.SessionStart"));
-    expect(request).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
-    expect(request).toContainEqual(expect.stringContaining("hooks.Stop"));
+    expect(request.slice(0, 3)).toEqual(["/opt/traex", "--session-id", "01a03eb1-c193-7531-83c0-e6c6f70143d4"]);
+    expect(request).not.toContainEqual(expect.stringContaining("hooks."));
+    expect(request).not.toContain("--dangerously-bypass-hook-trust");
     expect(request.slice(-5)).toEqual(["--session-id", "01a03eb1-c193-7531-83c0-e6c6f70143d4", "--model", "private model", ""]);
     expect(reports[1]).toMatchObject({ paneId: "w1:p1", pid: 44, processStartTicks: "987", launchCorrelationId: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
   });
@@ -198,7 +187,7 @@ function processInfo(pid: number, name: string, argv: string[]): object {
   return { process_info: { shell_pid: 10, foreground_processes: [{ pid, name, argv }] } };
 }
 function startInput() { return { name: "reviewer", paneId: "w1:p1", timeoutMs: 5, traexArgs: [] }; }
-function startConfig() { return { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", lifecycleReporter: "/opt/shim/report-traex-lifecycle.js", requestDir: "/run/user/1/shim", validatedHerdrVersion: "0.7.5" }; }
+function startConfig() { return { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", validatedHerdrVersion: "0.7.5" }; }
 function fakeStartDependencies(runHerdr: (args: string[]) => Promise<{ stdout: string; stderr: string }>, onWrite = () => undefined) {
   return { runHerdr, writeRequest: async () => { onWrite(); return "abc"; }, removeRequest: async () => undefined, processExecutable: async () => null, processStartTicks: async () => null, startReporter: () => undefined, sleep: async () => undefined, now: (() => { let now = 0; return () => ++now; })(), generateSessionId: () => "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
 }

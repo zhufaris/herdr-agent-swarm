@@ -29,12 +29,9 @@ describe("Herdr TraeX shim installer", () => {
       realHerdr: fixture.realHerdr, traex: fixture.traex, validatedHerdrVersion: "0.7.5", binDir: fixture.shimBin,
       launcher: expect.stringMatching(/releases\/[^/]+\/pane-launcher$/),
       reporter: expect.stringMatching(/releases\/[^/]+\/cli\/herdr-traex-reporter\.js$/),
-      lifecycleReporter: expect.stringMatching(/releases\/[^/]+\/cli\/report-traex-lifecycle\.js$/),
       requestDir: join(fixture.runtime, "herdr-traex-shim/run"),
       sessionPeersDir: join(fixture.home, ".trae/cli/session-peers")
     });
-    expect(await readFile(join(config.releaseDir, "cli/report-traex-lifecycle.js"), "utf8")).toContain("export");
-    expect(await readFile(join(config.releaseDir, "runtime/report-traex-lifecycle.js"), "utf8")).toContain("export");
     const peerResolver = await readFile(join(config.releaseDir, "runtime/traex-session-peer.js"), "utf8");
     expect(peerResolver).toContain("export");
     expect(peerResolver).not.toMatch(/from ["'](?!node:|\.)/);
@@ -135,8 +132,8 @@ async function createFixture(options: { shimAfterReal?: boolean; missingAgentSes
     ""
   ].join("\n"));
   await executable(traex, '#!/usr/bin/env bash\necho "traex 0.201.6"\n');
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js", "report-traex-lifecycle.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
   const repo = process.cwd();
   await writeFile(join(source, "scripts/herdr-traex-command-shim.sh"), await readFile(join(repo, "scripts/herdr-traex-command-shim.sh")));
   await writeFile(join(source, "scripts/herdr-traex-pane-launcher.sh"), await readFile(join(repo, "scripts/herdr-traex-pane-launcher.sh")));

@@ -294,8 +294,11 @@ projected. A finished Answer page receives one final non-streaming green card
 update and is not subsequently patched.
 
 Interrupted running prompts are detached instead of replayed. On restart the
-bridge observes the surviving pane and resumes delivery or marks the situation
-explicitly uncertain. Jobs that never started remain queued.
+bridge observes the surviving pane and canonical transcript, then resumes
+delivery only after a matching typed `task_complete` record proves that the
+detached turn finished. Herdr `idle` or composer readiness alone cannot settle a
+detached turn. If completion cannot be proven, the prompt remains explicitly
+uncertain and is never replayed. Jobs that never started remain queued.
 
 ## Reconciliation and events
 
@@ -387,16 +390,14 @@ source. A new managed session uses
 `/swarm reset` rather than local `/clear`.
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
-bridge invokes the formal `agent start --kind traex` surface without lifecycle
-hooks or hook-trust overrides; the shim injects the required trust flag plus
-UserPromptSubmit and Stop ahead of caller
-arguments, launches
+bridge invokes the formal `agent start --kind traex` surface without hooks or
+hook-trust overrides. The shim launches
 the configured real TraeX executable through a private request file and fixed
 opaque launcher, and owns a separate fenced reporter.
 The reporter keeps Herdr's internal known-agent protocol as Codex, establishes
 the initial process-fenced `idle` authority, and publishes
-`display_agent=traex`. TraeX `UserPromptSubmit` and `Stop` hooks advance that
-authority through `working` and back to `idle` without reading terminal content.
+`display_agent=traex`. It does not attempt to override Herdr's detected
+working/idle lifecycle; detached settlement comes from the canonical transcript.
 The reporter releases only its own source and metadata when the exact TraeX
 process exits.
 The shim projects only those marked JSON entries to `agent=traex`; native Codex
@@ -438,7 +439,13 @@ mentions `SKILL.md` are not reclassified. Item IDs are deduplicated, and the
 compact call descriptor is retained across reads so later results can pair by
 exact `call_id`. Reasoning, developer, system, and user messages; unmatched or
 malformed results; metadata; and unknown items are ignored. Top-level
-`event_msg` records are not Answer-content authority.
+`event_msg` records are not streamed Answer-content authority. The bounded
+`task_started` / matching `task_complete` pair is lifecycle authority for
+detached recovery; `last_agent_message` is redacted and bounded before it may
+replace the recovered final Answer. A reopened cursor reconstructs only the
+latest lifecycle pair from its bounded tail scan. Completion must also fall in
+the detached prompt's Run Card start window, so an older completed turn cannot
+advance the FIFO.
 `TRAEX_SESSIONS_ROOT` selects the transcript root and defaults to
 `~/.trae/cli/sessions`.
 
@@ -455,13 +462,15 @@ content exists, completion uses the fixed safe notice
 `⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
 A transcript failure does not fail or replay the prompt.
 
-Terminal content is not a control-plane source. Lifecycle and completion use
-Herdr's structured Agent state, ordinary prompts use `agent prompt --wait`, and
+Terminal content is not a control-plane source. Live pane/process/session
+identity uses Herdr; detached completion uses the canonical typed transcript;
+ordinary prompts use `agent prompt --wait`, and
 interrupts use `agent send-keys`. Runtime model switching and steering are
 rejected because Herdr exposes no equivalent structured operation. Terminal text
-never becomes Answer content, either live or during detached restart recovery. Because persisted RunCard text does not carry
-durable source provenance, detached recovery replaces it with the fixed safe
-notice instead of trusting content from a previous process.
+never becomes Answer content, either live or during detached restart recovery.
+Because persisted RunCard text does not carry durable source provenance,
+detached recovery replaces it with the bounded, redacted transcript completion
+answer, or the fixed safe notice when that completion carries no answer.
 
 Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A

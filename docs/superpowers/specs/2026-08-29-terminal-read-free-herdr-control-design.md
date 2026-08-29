@@ -24,8 +24,8 @@ The change is complete only when all of the following are true:
    text.
 4. The TraeX shim never captures a terminal snapshot and never runs `agent
    explain --file`. Its fenced reporter establishes the initial idle Agent
-   authority, and TraeX lifecycle hooks report working/idle transitions to
-   Herdr from structured hook events.
+   authority and canonical session identity. Detached completion comes from the
+   typed transcript rather than hook-driven working/idle overrides.
 5. Runtime model-menu automation is removed. A model may be selected through
    startup arguments; changing it on a running Agent requires explicit
    replacement/restart. No hidden terminal-control fallback remains.
@@ -69,7 +69,7 @@ mechanically auditable.
 | Intent | Command or source | Notes |
 | --- | --- | --- |
 | Start | `herdr agent start <name> --kind <kind> --pane <id>` | TraeX remains projected by the installed compatibility shim and executes the real TraeX binary. |
-| Submit and settle | `herdr agent prompt <target> <text> --wait --timeout <ms>` | No second bridge-owned polling loop and no prompt echo confirmation. |
+| Submit and settle | `herdr agent prompt <target> <text> --wait --timeout <ms>` plus canonical transcript lifecycle | Prompt dispatch remains on Herdr; a possibly dispatched/stalled waiter detaches, and only a matching typed `task_complete` settles recovery. |
 | Current state | `session.snapshot` / `herdr agent get` | Use Agent identity, status, revision, and state sequence only. |
 | Wait for change | Herdr pane events plus fresh structured snapshot | Events are hints; snapshot is authoritative. |
 | Interrupt | `herdr agent send-keys <target> esc` | This is intentional Agent UI control, not raw Pane input. |
@@ -107,7 +107,8 @@ It continues to reconcile:
 
 - workspace, pane, cwd, terminal identity, and native Agent session identity;
 - binding lifecycle and queue wakeups from structured Agent state transitions;
-- detached turn completion from structured settled state without replay;
+- detached turn completion from canonical typed `task_started` /
+  `task_complete` evidence without replay;
 - visible answer and tool activity from the typed transcript and durable SQLite
   projections.
 
@@ -123,26 +124,23 @@ public `traex` kind onto Herdr's internally reserved Codex-compatible lifecycle
 while executing the configured real TraeX binary. This compatibility identity is
 not a license for bridge-side terminal parsing.
 
-The reporter and lifecycle hook form a small structured compatibility layer:
+The reporter forms a small structured compatibility layer:
 
 1. verify `/proc/<pid>/exe` and process start ticks through structured process
    metadata;
 2. claim the internal Codex-compatible Agent authority as `idle` and publish
    `display_agent=traex` only after that process fence succeeds;
-3. report `working` from TraeX `UserPromptSubmit` and `idle` from TraeX `Stop`;
+3. publish the canonical thread ID through Herdr's trusted session authority;
 4. release the owned Agent authority and display metadata when the fenced
    process disappears.
 
 It removes `readPane`, temporary snapshot files, `agent explain --file`, and all
-terminal-derived `report-agent` state updates. The lifecycle hook accepts only
-the exact supported TraeX hook event names, derives no state from prompt or
-answer content, emits no hook output, and uses a monotonic sequence. It never
-reports `working` before `agent prompt` submits input: `UserPromptSubmit` is the
-post-acceptance transition that satisfies Herdr's native prompt guard. A missing
-hook therefore stalls explicitly instead of fabricating completion. Production
-evidence from panes `wH:p64` and `wH:p65` showed that Herdr 0.7.5 does not create
-Agent lifecycle authority from `display_agent` metadata or from a real TraeX
-process alone.
+terminal-derived `report-agent` state updates. No TraeX lifecycle hook is
+installed. Live evidence showed that Herdr 0.7.5's Codex detector can remain
+`idle` throughout a TraeX turn and ignores competing reporter state, while a
+real TraeX argv0 fails the native prompt foreground guard. Therefore Herdr idle
+is not detached-completion evidence; the exact canonical JSONL must contain a
+matching, time-fenced `task_started` / `task_complete` pair.
 
 ## Model and control behavior
 
@@ -160,8 +158,9 @@ of inspecting and answering terminal prompts.
 ## Failure and recovery semantics
 
 - Never replay after the Herdr prompt process may have started.
-- Never repair an `unknown` state using terminal content; only process-fenced
-  bootstrap or validated TraeX lifecycle hook events may advance it.
+- Never repair an `unknown` state using terminal content. Process-fenced
+  bootstrap may establish identity, and only canonical transcript lifecycle
+  evidence may settle a detached turn.
 - Never infer successful model selection, readiness, or completion from output
   stability.
 - Preserve SQLite dispatch, detached-observer, fencing, and outbox transaction
@@ -192,7 +191,8 @@ The first search must return no maintained runtime hits. The second must return
 no control fallback; documented installer text is acceptable only if it is not an
 executed command. The isolated real check must use a disposable Herdr server and
 Pane, verify `/proc/<pid>/exe` is TraeX, observe the initial `idle` authority,
-submit a short and a normal turn with `agent prompt --wait`, observe hook-driven
-`idle -> working -> idle` advancement, and exit/clean up without touching the
+submit a short and a normal turn with `agent prompt --wait`, verify exact
+canonical JSONL lifecycle and no replay after a stalled waiter, and exit/clean
+up without touching the
 production workspace. Production restart follows the
 existing drain gate and must not be forced while turns are active.

@@ -93,6 +93,53 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("reports a turn as active until the matching task_complete arrives", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      answerDelta: "",
+      turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
+    });
+
+    await appendFile(path, eventMessage({ type: "task_complete", turn_id: "01a04f35-ffff-7913-8ac7-9642e7c6a614", started_at: 1_788_035_304, completed_at: 1_788_035_318 }));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnLifecycle: { turnId, state: "active" } });
+
+    await appendFile(path, eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_318 }));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      answerDelta: "",
+      turnLifecycle: { turnId, state: "completed", startedAt: "2026-08-29T20:28:24.000Z" }
+    });
+  });
+
+  it("exposes the latest bounded lifecycle snapshot when reopened after completion", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_318, last_agent_message: "Authorization: Bearer secret\nRecovered" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      answerDelta: "",
+      turnLifecycle: { turnId, state: "completed", startedAt: "2026-08-29T20:28:24.000Z", finalAnswer: "Authorization: Bearer [REDACTED]\nRecovered" }
+    });
+  });
+
+  it("ignores an unpaired task_complete record", async () => {
+    const { root, path } = await createTranscript();
+    await appendFile(path, eventMessage({
+      type: "task_complete", turn_id: "01a04f35-8c1f-7913-8ac7-9642e7c6a614",
+      started_at: 1_788_035_304, completed_at: 1_788_035_318, last_agent_message: "must not settle"
+    }));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await expect(cursor.readObservation?.()).resolves.toEqual({ answerDelta: "" });
+  });
+
   it("captures each generic reasoning heading while rejecting prose and embedded messages", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

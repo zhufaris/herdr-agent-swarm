@@ -73,7 +73,7 @@ async function processStartTicks(pid: number): Promise<string | null> {
 function parseConfig(value: unknown): TraexLaunchConfig {
   if (!value || typeof value !== "object") throw new Error("Invalid TraeX shim config");
   const record = value as Record<string, unknown>;
-  const keys = ["realHerdr", "traex", "launcher", "reporter", "lifecycleReporter", "requestDir", "sessionPeersDir", "validatedHerdrVersion"] as const;
+  const keys = ["realHerdr", "traex", "launcher", "reporter", "requestDir", "sessionPeersDir", "validatedHerdrVersion"] as const;
   for (const key of keys) if (typeof record[key] !== "string" || !record[key]) throw new Error(`Invalid TraeX shim config field: ${key}`);
   return Object.fromEntries(keys.map((key) => [key, record[key]])) as unknown as TraexLaunchConfig;
 }

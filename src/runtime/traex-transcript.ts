@@ -13,6 +13,7 @@ const DEFAULT_MAX_DISCOVERY_ENTRIES = 100_000;
 const DEFAULT_MAX_CACHED_PATHS = 256;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
+const MAX_EPOCH_SECONDS = 10_000_000_000;
 
 const envelopeSchema = z.object({
   type: z.string(),
@@ -49,6 +50,17 @@ const reasoningEventSchema = z.object({
 const tokenCountEventSchema = z.object({
   type: z.literal("token_count"),
   info: z.object({ total_token_usage: z.object({ total_tokens: z.number().int().nonnegative() }).passthrough() }).passthrough()
+}).passthrough();
+const taskStartedEventSchema = z.object({
+  type: z.literal("task_started"),
+  turn_id: z.string().regex(SESSION_ID),
+  started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS)
+}).passthrough();
+const taskCompleteEventSchema = z.object({
+  type: z.literal("task_complete"),
+  turn_id: z.string().regex(SESSION_ID),
+  started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS),
+  last_agent_message: z.string().optional()
 }).passthrough();
 const planArgumentsSchema = z.object({
   plan: z.array(z.object({
@@ -92,7 +104,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
           this.pathsBySessionId.delete(session.value);
           this.pathsBySessionId.set(session.value, cachedPath);
           const file = await stat(cachedPath);
-          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(cachedPath, file.size, this.maxReadBytes)) };
+          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(cachedPath, file.size, this.maxReadBytes), await latestTurnLifecycle(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars)) };
         }
         this.pathsBySessionId.delete(session.value);
       }
@@ -107,7 +119,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       }
       this.rememberPath(session.value, path);
       const file = await stat(path);
-      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(path, file.size, this.maxReadBytes)) };
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(path, file.size, this.maxReadBytes), await latestTurnLifecycle(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars)) };
     } catch {
       return { mode: "unavailable", reason: "transcript_validation_failed" };
     }
@@ -133,7 +145,8 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     private offset: number,
     private readonly maxReadBytes: number,
     private readonly maxRenderedDeltaChars: number,
-    private readonly tokenBaseline: number | null
+    private readonly tokenBaseline: number | null,
+    private turnLifecycle: TraexTranscriptObservation["turnLifecycle"]
   ) {}
 
   async readDelta(): Promise<string> {
@@ -144,7 +157,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const file = await stat(this.path);
     if (file.size < this.offset) throw new Error("TraeX transcript was truncated");
     const available = file.size - this.offset;
-    if (available === 0) return { answerDelta: "" };
+    if (available === 0) return { answerDelta: "", ...(this.turnLifecycle ? { turnLifecycle: this.turnLifecycle } : {}) };
     const length = Math.min(available, this.maxReadBytes);
     const handle = await open(this.path, "r");
     let bytesRead = 0;
@@ -170,6 +183,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       if (!line.trim()) continue;
       const envelope = envelopeSchema.parse(JSON.parse(line));
       if (envelope.type === "event_msg") {
+        this.turnLifecycle = reduceTurnLifecycle(this.turnLifecycle, envelope, this.maxRenderedDeltaChars);
         const reasoning = reasoningEventSchema.safeParse(envelope.payload);
         if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
         const tokens = tokenCountEventSchema.safeParse(envelope.payload);
@@ -200,7 +214,8 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     };
     return {
       answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars),
-      ...(Object.keys(mainStatus).length ? { mainStatus } : {})
+      ...(Object.keys(mainStatus).length ? { mainStatus } : {}),
+      ...(this.turnLifecycle ? { turnLifecycle: this.turnLifecycle } : {})
     };
   }
 
@@ -231,6 +246,36 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     this.emittedItemIds.add(result.data.id);
     return projectToolResult(this.callsById.get(result.data.call_id)!, result.data.output);
   }
+}
+
+function reduceTurnLifecycle(
+  current: TraexTranscriptObservation["turnLifecycle"],
+  envelope: z.infer<typeof envelopeSchema>,
+  maxRenderedDeltaChars: number
+): TraexTranscriptObservation["turnLifecycle"] {
+  if (envelope.type !== "event_msg") return current;
+  const started = taskStartedEventSchema.safeParse(envelope.payload);
+  if (started.success) return {
+    turnId: started.data.turn_id,
+    state: "active",
+    startedAt: eventTime(started.data.started_at)
+  };
+  const completed = taskCompleteEventSchema.safeParse(envelope.payload);
+  if (!completed.success) return current;
+  if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current;
+  const finalAnswer = completed.data.last_agent_message
+    ? boundMarkdown(redactSecrets(completed.data.last_agent_message.trim()), maxRenderedDeltaChars)
+    : "";
+  return {
+    turnId: completed.data.turn_id,
+    state: "completed",
+    startedAt: current.startedAt,
+    ...(finalAnswer ? { finalAnswer } : {})
+  };
+}
+
+function eventTime(epochSeconds: number): string {
+  return new Date(epochSeconds * 1_000).toISOString();
 }
 
 function extractStatusTitle(text: string): string | null {
@@ -294,6 +339,29 @@ async function latestTokenCount(path: string, end: number, maxBytes: number): Pr
       } catch {}
     }
     return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function latestTurnLifecycle(path: string, end: number, maxBytes: number, maxRenderedDeltaChars: number): Promise<TraexTranscriptObservation["turnLifecycle"]> {
+  if (end <= 0) return undefined;
+  const start = Math.max(0, end - maxBytes);
+  const handle = await open(path, "r");
+  const buffer = Buffer.alloc(end - start);
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
+    if (start > 0) lines.shift();
+    let lifecycle: TraexTranscriptObservation["turnLifecycle"];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const envelope = envelopeSchema.safeParse(JSON.parse(line));
+        if (envelope.success) lifecycle = reduceTurnLifecycle(lifecycle, envelope.data, maxRenderedDeltaChars);
+      } catch {}
+    }
+    return lifecycle;
   } finally {
     await handle.close();
   }

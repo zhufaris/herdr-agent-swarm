@@ -338,7 +338,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
     const abortController = this.turns.attach(binding.id, prompt.id, paneId, binding.lastAgentState);
-    let observedActive = binding.lastAgentState === "working" || binding.lastAgentState === "blocked";
+    let outputSource = await this.openTranscript(binding);
+    const runCardStartedAt = this.options.store.loadRunCard(prompt.id)?.startedAt;
+    const promptStartedAt = runCardStartedAt ? Date.parse(runCardStartedAt) : Number.NaN;
     try {
       while (!this.stopping) {
         if (!this.isBindingActive(binding.id)) return;
@@ -347,11 +349,17 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (!pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
         const state = pane.agentState;
         this.turns.updateState(binding.id, prompt.id, state);
-        if (state === "working" || state === "blocked") observedActive = true;
-        if (observation.traexProcess && (state === "done" || state === "idle" && (observedActive || observation.composerReady))) {
+        const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
+        outputSource = typed.source;
+        const lifecycle = typed.observation.turnLifecycle;
+        const lifecycleBelongsToPrompt = lifecycle && Number.isFinite(promptStartedAt)
+          ? Date.parse(lifecycle.startedAt) >= promptStartedAt - 1_000
+          : false;
+        if (observation.traexProcess && lifecycle?.state === "completed" && lifecycleBelongsToPrompt) {
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
-          const finalAnswer = STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
-          this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(""), occurredAt: new Date().toISOString(), replaceAnswer: true });
+          const sourceAnswer = lifecycle.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
+          const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
+          this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: true });
           await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;

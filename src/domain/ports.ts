@@ -141,6 +141,12 @@ export interface TraexTranscriptMainStatus {
 export interface TraexTranscriptObservation {
   answerDelta: string;
   mainStatus?: TraexTranscriptMainStatus;
+  turnLifecycle?: {
+    turnId: string;
+    state: "active" | "completed";
+    startedAt: string;
+    finalAnswer?: string;
+  };
 }
 
 export type TraexTranscriptUnavailableReason =

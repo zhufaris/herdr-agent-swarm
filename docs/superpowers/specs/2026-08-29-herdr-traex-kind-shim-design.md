@@ -76,9 +76,8 @@ The launcher performs this ordered startup protocol:
 4. Start one reporter sidecar keyed by the target pane and TraeX process identity.
    It keeps the internal authority as `codex`, reports `display_agent=traex`,
    `state=unknown`, a monotonic sequence, and a dedicated source.
-5. Poll the pane from the sidecar until TraeX is present and its Codex-compatible
-   screen evidence resolves to a stable state, then report that state as
-   `codex` internally.
+5. Resolve the exact canonical TraeX thread ID from the PID/name-matched
+   `session-peers` record and report it through Herdr's trusted session source.
 6. Keep the name created by native `agent start`.
 7. Return success only when `herdr agent get <name>` reports the requested pane,
    `display_agent=traex`, and a non-unknown state; the shim projects that marked
@@ -91,21 +90,21 @@ does not start a second process automatically.
 ### State reporter
 
 Herdr 0.7.5 does not detect the real TraeX executable as a native Agent. A small
-compatibility layer establishes an initial process-fenced idle authority and
-maps TraeX `UserPromptSubmit` and `Stop` hook events onto working/idle lifecycle
-updates. It never reads terminal content. Its authority is scoped by a unique
-source name and increasing sequence.
+compatibility layer establishes initial process-fenced identity without reading
+terminal content. Its authority is scoped by a unique source name and increasing
+sequence.
 
 The reporter runs only while the TraeX process exists. It fences the process,
-claims the initial idle state, and releases its scoped Codex authority plus TraeX
-display metadata when the process exits. The process-local lifecycle hook reports
-subsequent transitions. Herdr can then return the pane to ordinary shell
-detection after cleanup.
+claims the initial idle state, publishes the canonical session identity, and
+releases its scoped Codex authority plus TraeX display metadata when the process
+exits. No process-local lifecycle hook is installed. Herdr can then return the
+pane to ordinary shell detection after cleanup.
 
 The reporter must preserve these meanings:
 
-- `idle`: composer is ready;
-- `working`: TraeX is processing a turn;
+- `idle`: Herdr accepts Agent prompt submission, but it does not prove a
+  detached turn completed;
+- `working`: used only when Herdr itself can prove the transition;
 - `blocked`: visible approval or question requires local interaction;
 - `done`: Herdr derives unseen completion from the settled idle transition;
 - `unknown`: evidence is insufficient and must never be treated as completion.

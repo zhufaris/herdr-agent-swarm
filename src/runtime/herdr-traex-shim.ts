@@ -25,7 +25,6 @@ export interface TraexLaunchConfig {
   traex: string;
   launcher: string;
   reporter: string;
-  lifecycleReporter: string;
   requestDir: string;
   sessionPeersDir: string;
   validatedHerdrVersion: string;
@@ -144,7 +143,6 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     const before = parseProcessInfo((await dependencies.runHerdr(["pane", "process-info", "--pane", input.paneId], input.timeoutMs)).stdout);
     if (!isAvailableShell(before)) throw new TraexStartError("agent_start_failed", `Pane ${input.paneId} is not an available shell`);
     requestId = await dependencies.writeRequest(encodeLaunchRequest(config.traex, [
-      ...shimLifecycleArguments(config.realHerdr, config.lifecycleReporter),
       "--session-id", launchCorrelationId,
       ...input.traexArgs
     ]));
@@ -168,28 +166,10 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
   }
 }
 
-export function shimLifecycleArguments(realHerdr: string, lifecycleReporter: string): string[] {
-  const command = `HERDR_TRAEX_REAL_HERDR=${shellQuote(realHerdr)} node ${shellQuote(lifecycleReporter)}`;
-  return [
-    "--dangerously-bypass-hook-trust",
-    "-c", lifecycleHookArgument("UserPromptSubmit", ".*", command),
-    "-c", lifecycleHookArgument("Stop", null, command)
-  ];
-}
-
-function lifecycleHookArgument(event: "UserPromptSubmit" | "Stop", matcher: string | null, command: string): string {
-  const match = matcher === null ? "" : `matcher=${JSON.stringify(matcher)},`;
-  return `hooks.${event}=[{${match}hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
-}
-
 function rejectCallerSessionIdentity(args: readonly string[]): void {
   if (args.some((arg) => arg === "--session-id" || arg.startsWith("--session-id=") || arg === "--resume" || arg.startsWith("--resume="))) {
     throw new Error("TraeX session identity is owned by the Herdr shim");
   }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 function boundedCause(cause: unknown): string {

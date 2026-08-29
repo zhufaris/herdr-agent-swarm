@@ -36,16 +36,13 @@ while retaining its own source for process state and display metadata.
 
 ## Chosen architecture
 
-The shim generates one correlation UUID per managed start and injects two
-lifecycle hooks:
+The shim generates one correlation UUID per managed start:
 
 - `--session-id <uuid>` gives the TraeX process a unique thread name that can
   be correlated with its canonical thread ID.
 - The process-fenced reporter reports initial `idle` under its own state
   authority and reports the UUID separately through Herdr's trusted Codex
   session authority.
-- `UserPromptSubmit` reports `working`.
-- `Stop` reports `idle`.
 
 All reports use the existing process-scoped authority:
 
@@ -91,9 +88,6 @@ correlation sources. It writes the launch request with:
 
 ```text
 traex
-  --dangerously-bypass-hook-trust
-  -c hooks.UserPromptSubmit=...
-  -c hooks.Stop=...
   --session-id <uuid>
   <caller arguments>
 ```
@@ -133,13 +127,11 @@ The reporter receives the launch correlation UUID through its private argv input
 It never discovers identity from process environment, terminal output, or
 newest-file ordering. The configured session-peer directory is resolved at
 installation from `HERDR_TRAEX_HOME`, then `TRAECLI_HOME`, then
-`$HOME/.trae/cli`, and stored as an absolute private config path. The
-lifecycle hook parser remains bounded to 64 KiB and accepts only
-`UserPromptSubmit` and `Stop`; it never logs hook input, prompt content, session
-identity, or transcript data.
+`$HOME/.trae/cli`, and stored as an absolute private config path. No TraeX hook
+is installed for identity or lifecycle reporting.
 
-The installed shim release must contain the hook CLI and its complete local
-JavaScript import closure. Installation validation checks that the installed
+The installed shim release contains the start shim, process-fenced reporter, and
+peer resolver as a complete local JavaScript import closure. Installation validation checks that the installed
 official Herdr provides `pane report-agent-session` with
 `--agent-session-id` and `--session-start-source`. The release remains
 independent of repository `node_modules`.

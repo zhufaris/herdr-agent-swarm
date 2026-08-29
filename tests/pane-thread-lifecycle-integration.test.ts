@@ -331,7 +331,7 @@ describe("pane/thread lifecycle integration", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("completes a detached turn without terminal Answer content and resumes the FIFO", async () => {
+  it("does not complete a detached turn from false Herdr idle before canonical transcript completion", async () => {
     const submitted: string[] = [];
     let firstController: AbortSignal | undefined;
     let firstDispatched = false;
@@ -373,11 +373,36 @@ describe("pane/thread lifecycle integration", () => {
 
     restarted = true;
     store.updateBinding("b1", { lastAgentState: "idle" });
-    const secondRuntime = runtime(store, herdr, lark);
+    let lifecycleState: "active" | "completed" = "completed";
+    let lifecycleStartedAt = new Date(Date.now() - 60_000).toISOString();
+    const transcriptReader = {
+      async open() {
+        return { mode: "typed" as const, cursor: {
+          async readDelta() { return ""; },
+          async readObservation() {
+            return { answerDelta: "", turnLifecycle: {
+              turnId: "turn-1", state: lifecycleState, startedAt: lifecycleStartedAt,
+              ...(lifecycleState === "completed" ? { finalAnswer: "Recovered answer" } : {})
+            } };
+          }
+        } };
+      }
+    };
+    const secondRuntime = runtime(store, herdr, lark, 30_000, transcriptReader);
     await secondRuntime.coordinator.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(submitted).toEqual(["first"]);
+    expect(store.listDetachedPrompts()).toMatchObject([{ id: firstPrompt.id, state: "running", observationState: "detached" }]);
+
+    lifecycleState = "active";
+    lifecycleStartedAt = new Date(Date.now() + 1_000).toISOString();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(submitted).toEqual(["first"]);
+
+    lifecycleState = "completed";
     await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
-    expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE });
+    expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: "Recovered answer" });
     expect(store.loadRunCard(firstPrompt.id)!.answer).not.toMatch(/SECRET_DETACHED_TERMINAL_SENTINEL|LEGACY_UNPROVEN_ANSWER_SENTINEL/);
 
     await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();
@@ -468,11 +493,11 @@ function message(index: number, text: string) {
   return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
 }
 
-function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000) {
+function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort) {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), shutdownGraceMs);
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), shutdownGraceMs, undefined, undefined, transcriptReader);
   return { coordinator, projector, publisher };
 }
 
