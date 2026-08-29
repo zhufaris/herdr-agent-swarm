@@ -17,15 +17,23 @@ export class InstanceInteractionWorkflow {
   async handleCommand(message: IncomingLarkMessage, command: InstanceCommand): Promise<void> {
     if (!this.isOperator(message.actorOpenId)) return this.reject(message, "你没有 Agent 管理权限。");
     const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
-    const current = this.options.store.getConversationTarget(message.chatId);
+    const context = this.resolveConversationContext(message);
+    const current = this.getSelectedTarget(context, message.chatId);
     if (command.kind === "projects") return this.reply(message, projectCard(this.options.projects, current?.projectId));
-    if (command.kind === "project") { const project = this.projects.get(command.projectId); if (!project) return this.reject(message, "项目不存在。"); this.options.store.setConversationTarget({ chatId: message.chatId, projectId: project.id, target: { kind: "primary" } }); return this.showDirectory(message, project.id); }
-    const projectId = current?.projectId;
+    if (command.kind === "project") {
+      const project = this.projects.get(command.projectId);
+      if (!project) return this.reject(message, "项目不存在。");
+      if (context.boundProjectId && context.boundProjectId !== project.id) return this.reject(message, `当前话题已固定到项目 ${context.boundProjectId}，不能切换到 ${project.id}。`);
+      this.options.store.setConversationTarget({ chatId: context.conversationKey, projectId: project.id, target: { kind: "primary" } });
+      return this.showDirectory(message, project.id, context.conversationKey);
+    }
+    if (context.bindingPresent && !context.boundProjectId) return this.reject(message, "当前话题绑定缺少有效项目，请联系管理员修复绑定。");
+    const projectId = context.boundProjectId ?? current?.projectId;
     if (!projectId || !this.projects.has(projectId)) return this.reject(message, "请先使用 `/project <id>` 选择项目。");
-    if (command.kind === "instances") return this.showDirectory(message, projectId);
+    if (command.kind === "instances") return this.showDirectory(message, projectId, context.conversationKey);
     const instance = this.findByName(projectId, command.name);
     if (!instance) return this.reject(message, `实例不存在：${command.name}`);
-    if (command.kind === "instance") return this.showDetail(message, instance);
+    if (command.kind === "instance") return this.showDetail(message, instance, context.conversationKey);
     if (command.kind === "to") { await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor, projectId, targetInstanceId: instance.id, content: { kind: "turn", text: command.text } }); return this.reply(message, statusCard(`已提交给 ${instance.name}`)); }
     if (command.kind === "steer_instance") { const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: instance.id, text: command.text }); return this.reply(message, statusCard(`Steer: ${result.status}`)); }
     const result = await this.options.messaging.interrupt({ idempotencyKey: `lark:${message.messageId}:interrupt`, actor, targetInstanceId: instance.id });
@@ -33,15 +41,18 @@ export class InstanceInteractionWorkflow {
   }
 
   async handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean> {
-    const current = this.options.store.getConversationTarget(message.chatId);
-    if (!current) return false;
+    const context = this.resolveConversationContext(message);
+    const selected = this.getSelectedTarget(context, message.chatId);
+    const projectId = context.boundProjectId ?? selected?.projectId;
+    if (!projectId) return false;
+    const current = selected?.projectId === projectId ? selected : { projectId, target: { kind: "primary" as const } };
     if (!this.isOperator(message.actorOpenId)) { await this.reject(message, "你没有 Agent 管理权限。"); return true; }
     const instances = this.options.control.list(current.projectId);
     const fixedTargetId = current.target.kind === "instance" ? current.target.instanceId : null;
     const target = fixedTargetId === null
       ? instances.find(({ role }) => role === "primary") ?? null
       : instances.find(({ id }) => id === fixedTargetId) ?? null;
-    if (!target) { await this.showDirectory(message, current.projectId); return true; }
+    if (!target) { await this.showDirectory(message, current.projectId, context.conversationKey); return true; }
     if (current.target.kind === "instance" && current.target.expectedGeneration !== undefined && current.target.expectedGeneration !== target.generation) {
       await this.reject(message, "当前目标实例已重新启动，请从实例目录重新选择。"); return true;
     }
@@ -55,15 +66,20 @@ export class InstanceInteractionWorkflow {
     if (typeof value.action !== "string" || !value.action.startsWith("instance_")) return;
     if (!this.isOperator(action.operatorOpenId)) return { toast: { type: "error", content: "你没有 Agent 管理权限。" } };
     const actor = { kind: "human" as const, userId: action.operatorOpenId, channel: "feishu" as const };
+    const conversationKey = typeof value.conversationKey === "string" && value.conversationKey.length <= 200 ? value.conversationKey : action.chatId;
+    const bindingContext = this.boundProjectForConversationKey(conversationKey, action.chatId);
+    if (bindingContext === "invalid") return warning("话题上下文已失效，请重新打开实例目录。");
     if (value.action === "instance_create_form") {
       const projectId = typeof value.projectId === "string" ? value.projectId : "";
       if (!this.projects.has(projectId)) return warning("项目不存在或已移除。");
-      return { card: renderInstanceCreateCard({ projectId, requestedBy: action.operatorOpenId }) };
+      if (bindingContext && bindingContext !== projectId) return warning("当前话题已固定到其他项目。");
+      return { card: renderInstanceCreateCard({ projectId, requestedBy: action.operatorOpenId, conversationKey }) };
     }
     if (value.action === "instance_create_submit") {
       if (!sameOperator(value, action)) return forbidden();
       const projectId = typeof value.projectId === "string" ? value.projectId : "";
       if (!this.projects.has(projectId)) return warning("项目不存在或已移除。");
+      if (bindingContext && bindingContext !== projectId) return warning("当前话题已固定到其他项目。");
       const form = action.formValues ?? {};
       const role = form.role === "primary" || form.role === "worker" ? form.role : null;
       const agentKind = form.agent_kind === "pi" || form.agent_kind === "claude-code" || form.agent_kind === "codex" || form.agent_kind === "traex" ? form.agent_kind : null;
@@ -71,14 +87,15 @@ export class InstanceInteractionWorkflow {
       if (!name || !role || !agentKind) return { toast: { type: "error", content: "请填写有效的实例名、角色和 Agent。" } };
       try {
         const created = await this.options.control.create({ actor, projectId, name, role, agentKind, model: form.model?.trim() || null, start: form.start === "true" });
-        return { toast: { type: "success", content: `实例 ${created.name} 已创建。` }, card: this.detailCard(created) };
+        return { toast: { type: "success", content: `实例 ${created.name} 已创建。` }, card: this.detailCard(created, conversationKey) };
       } catch (error) { return failed(error); }
     }
     const instance = typeof value.instanceId === "string" ? this.options.store.getAgentInstance(value.instanceId) : null;
     if (!instance || instance.generation !== Number(value.generation)) return { toast: { type: "warning", content: "实例状态已变化，请刷新后重试。" } };
-    if (value.action === "instance_open") return { card: this.detailCard(instance) };
+    if (bindingContext && bindingContext !== instance.projectId) return warning("实例不属于当前话题项目。");
+    if (value.action === "instance_open") return { card: this.detailCard(instance, conversationKey) };
     if (value.action === "instance_set_target") {
-      this.options.store.setConversationTarget({ chatId: action.chatId, projectId: instance.projectId, target: { kind: "instance", instanceId: instance.id, expectedGeneration: instance.generation } });
+      this.options.store.setConversationTarget({ chatId: conversationKey, projectId: instance.projectId, target: { kind: "instance", instanceId: instance.id, expectedGeneration: instance.generation } });
       return { toast: { type: "success", content: `当前目标已设为 ${instance.name}` } };
     }
     if (value.action === "instance_start") {
@@ -97,7 +114,7 @@ export class InstanceInteractionWorkflow {
       const result = await this.options.messaging.interrupt({ idempotencyKey: `card:${action.messageId}:interrupt:${instance.generation}`, actor, targetInstanceId: instance.id });
       return { toast: { type: result.status === "interrupted" ? "success" : "warning", content: `Interrupt: ${result.status}` } };
     }
-    if (value.action === "instance_steer_form") return { card: renderInstanceSteerCard({ instance, requestedBy: action.operatorOpenId }) };
+    if (value.action === "instance_steer_form") return { card: renderInstanceSteerCard({ instance, requestedBy: action.operatorOpenId, conversationKey }) };
     if (value.action === "instance_steer_submit") {
       if (!sameOperator(value, action)) return forbidden();
       const text = action.formValues?.steer_text?.trim() ?? "";
@@ -114,7 +131,7 @@ export class InstanceInteractionWorkflow {
         if (!current || current.generation !== plan.instanceGeneration) return warning("实例状态已变化，请重新生成删除计划。");
         const workspace = this.options.store.getWorkspaceLease(current.workspaceLeaseId);
         if (!workspace || workspace.generation !== plan.workspaceGeneration) return warning("Worktree 状态已变化，请重新生成删除计划。");
-        return { card: renderInstanceRemovalPlanCard({ instance: current, workspace, plan, requestedBy: action.operatorOpenId }) };
+        return { card: renderInstanceRemovalPlanCard({ instance: current, workspace, plan, requestedBy: action.operatorOpenId, conversationKey }) };
       } catch (error) { return failed(error); }
     }
     if (value.action === "instance_confirm_removal") {
@@ -129,13 +146,29 @@ export class InstanceInteractionWorkflow {
     }
   }
 
-  private async showDirectory(message: IncomingLarkMessage, projectId: string): Promise<void> {
-    const project = this.projects.get(projectId)!; const target = this.options.store.getConversationTarget(message.chatId)?.target ?? { kind: "primary" as const };
+  private async showDirectory(message: IncomingLarkMessage, projectId: string, conversationKey: string): Promise<void> {
+    const project = this.projects.get(projectId)!; const selected = this.options.store.getConversationTarget(conversationKey); const target = selected?.projectId === projectId ? selected.target : { kind: "primary" as const };
     const entries = this.options.control.list(projectId).map((instance) => ({ instance, workspace: this.options.control.inspect(instance.id).workspace, capabilities: this.options.drivers.describe(instance.agentKind), queueDepth: this.options.store.countPendingInstanceTurns(instance.id) }));
-    await this.reply(message, renderInstanceDirectoryCard({ project, entries, target }));
+    await this.reply(message, renderInstanceDirectoryCard({ project, entries, target, conversationKey }));
   }
-  private async showDetail(message: IncomingLarkMessage, instance: AgentInstance): Promise<void> { await this.reply(message, this.detailCard(instance)); }
-  private detailCard(instance: AgentInstance): object { const view = this.options.control.inspect(instance.id); return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listInstanceTurns(instance.id), queueDepth: this.options.store.countPendingInstanceTurns(instance.id) }); }
+  private async showDetail(message: IncomingLarkMessage, instance: AgentInstance, conversationKey: string): Promise<void> { await this.reply(message, this.detailCard(instance, conversationKey)); }
+  private detailCard(instance: AgentInstance, conversationKey: string): object { const view = this.options.control.inspect(instance.id); return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listInstanceTurns(instance.id), queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey }); }
+  private resolveConversationContext(message: IncomingLarkMessage): { bindingPresent: boolean; boundProjectId: string | null; conversationKey: string } {
+    const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
+    if (binding) return { bindingPresent: true, boundProjectId: binding.projectId, conversationKey: `binding:${binding.id}` };
+    if (message.topicId) return { bindingPresent: false, boundProjectId: null, conversationKey: `topic:${message.topicId}` };
+    if (message.rootMessageId) return { bindingPresent: false, boundProjectId: null, conversationKey: `root:${message.rootMessageId}` };
+    return { bindingPresent: false, boundProjectId: null, conversationKey: message.chatId };
+  }
+  private getSelectedTarget(context: { bindingPresent: boolean; conversationKey: string }, chatId: string): ReturnType<InstanceStore["getConversationTarget"]> {
+    return this.options.store.getConversationTarget(context.conversationKey) ?? (!context.bindingPresent && context.conversationKey !== chatId ? this.options.store.getConversationTarget(chatId) : null);
+  }
+  private boundProjectForConversationKey(conversationKey: string, chatId: string): string | "invalid" | null {
+    if (!conversationKey.startsWith("binding:")) return null;
+    const binding = this.options.store.getBinding(conversationKey.slice("binding:".length));
+    if (!binding || binding.chatId !== chatId || !binding.projectId) return "invalid";
+    return binding.projectId;
+  }
   private findByName(projectId: string, name: string): AgentInstance | null { return this.options.control.list(projectId).find((item) => item.name === name) ?? null; }
   private isOperator(openId: string): boolean { const allowed = this.options.operatorOpenIds ?? []; return allowed.length === 0 || allowed.includes(openId); }
   private reply(message: IncomingLarkMessage, card: object): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `instance:${message.messageId}:${JSON.stringify(card)}`, card); }
