@@ -460,10 +460,14 @@ prompt queue, and are rejected while work is running or queued.
 Only `/swarm …` is reserved for the bridge. Other slash commands, including
 `/herdr` and TraeX skill commands, are passed to the bound pane as ordinary prompts.
 An `@Bot` root message creates a topic in the default project and uses the
-message body as its first prompt. A reply received while a bridge-owned turn is actively `working`
-steers that turn; replies received while idle, blocked, or in an unknown state
-enter the binding's FIFO queue. Every message has an independent live card, so queued requests and earlier
-results remain visible.
+message body as its first prompt. Replies normally enter the binding's FIFO
+queue. A small allowlist of short, plain-text continuations may automatically
+steer a recently active supervised turn in `working` or `blocked` state; the
+Answer card reports when this happens. Commands, code blocks, rich content,
+long messages, and ambiguous requests remain FIFO. Queued cards show the exact
+number of waiting turns ahead and, after three valid historical samples, a
+coarse wait range rather than a deadline. Every message has an independent live
+card, so queued requests and earlier results remain visible.
 
 When TraeX needs high-risk approval, the card changes to orange and directs the
 operator to the associated Herdr pane. Approve or reject the operation in Herdr;

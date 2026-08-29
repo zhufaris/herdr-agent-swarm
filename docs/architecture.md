@@ -224,8 +224,14 @@ change during the target decomposition without changing these steps.
 2. The coordinator rejects messages outside the configured chat and bridge-owned
    messages, then durably records the rest before attempting business handling.
 3. A command is handled as a binding or operational workflow. Ordinary text in
-   an active bound topic always becomes a FIFO prompt job; it is never
-   auto-promoted to steering. Exact, case-insensitive `/swarm stop` is a local Herdr
+   an active bound topic normally becomes a FIFO prompt job. A conservative
+   classifier marks only allowlisted continuations of at most 100 normalized
+   characters, excluding slash commands, code fences, and messages containing
+   unsupported rich content. One SQLite acceptance transaction rechecks the
+   binding generation and selects automatic steering only when there is one
+   attached ordinary parent that is still `working` or `blocked` and has durable
+   activity in the preceding five minutes. Every other message remains FIFO.
+   Exact, case-insensitive `/swarm stop` is a local Herdr
    `Esc` control while the bridge has a supervised active turn (`working` or
    `blocked`): it bypasses queued ordinary prompts and creates no prompt job.
    Explicit `/swarm steer <text>` is the separate priority steering command; it injects
@@ -241,6 +247,9 @@ change during the target decomposition without changing these steps.
    delegating to existing workflows. Supplement input is operator-scoped and
    single-use. Queued-to-steering conversion is one SQLite transaction; if the
    captured parent is no longer running, the queued prompt is unchanged.
+   Rejected automatic steering may expose an actor-scoped, idempotent
+   `作为新任务排队` action. Uncertain steering never exposes that action and is
+   never replayed automatically.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
    Herdr unchanged through the native Agent prompt command when available; the
    bridge adds no hidden prompt suffix. If Herdr reports `agent_prompt_stalled`,
@@ -544,6 +553,19 @@ The same endpoint reports the Herdr circuit state, bounded last failure, recover
 time, and rejection/failure counters. Open and half-open states degrade status.
 It also reports each startup recovery stage with its bounded duration and error;
 an isolated failed stage degrades status without making the process unavailable.
+The operational summary includes aggregate automatic-steering outcomes and
+queued-card counts with or without wait estimates. It does not expose prompt
+text or actor identity.
+
+Queued ordinary turns carry durable presentation feedback. The exact queue
+position counts only earlier waiting FIFO turns; the active turn is not counted
+as a queued item. After at least three eligible completed ordinary turns, the
+bridge estimates a coarse range from the median of the most recent ten durations,
+subtracts elapsed time from the active turn, and rounds the range outward to
+30-second boundaries. A separate stoppable projector refreshes changed buckets
+on lifecycle events and while queued work exists. Each Run Card update and its
+replaceable outbox intent are committed atomically, so restart convergence cannot
+persist a newer view without retaining its delivery intent.
 
 Shutdown uses one shared deadline, stops ingress and both runtime reconcilers,
 waits for known write-capable work, and detaches observers if the
