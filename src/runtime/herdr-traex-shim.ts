@@ -25,6 +25,7 @@ export interface TraexLaunchConfig {
   traex: string;
   launcher: string;
   reporter: string;
+  lifecycleReporter: string;
   requestDir: string;
   validatedHerdrVersion: string;
 }
@@ -138,7 +139,10 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     }
     const before = parseProcessInfo((await dependencies.runHerdr(["pane", "process-info", "--pane", input.paneId], input.timeoutMs)).stdout);
     if (!isAvailableShell(before)) throw new TraexStartError("agent_start_failed", `Pane ${input.paneId} is not an available shell`);
-    requestId = await dependencies.writeRequest(encodeLaunchRequest(config.traex, input.traexArgs));
+    requestId = await dependencies.writeRequest(encodeLaunchRequest(config.traex, [
+      ...shimLifecycleArguments(config.realHerdr, config.lifecycleReporter),
+      ...input.traexArgs
+    ]));
     // Once pane.run is invoked, its command may have reached the terminal even
     // if the CLI later returns an error. Fence all later failures as uncertain.
     launched = true;
@@ -157,6 +161,24 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     }
     throw new TraexStartError("agent_start_uncertain", `TraeX may have started in pane ${input.paneId}; inspect it before retrying`, { cause });
   }
+}
+
+export function shimLifecycleArguments(realHerdr: string, lifecycleReporter: string): string[] {
+  const command = `HERDR_TRAEX_REAL_HERDR=${shellQuote(realHerdr)} node ${shellQuote(lifecycleReporter)}`;
+  return [
+    "-c", lifecycleHookArgument("SessionStart", "startup|resume", command),
+    "-c", lifecycleHookArgument("UserPromptSubmit", ".*", command),
+    "-c", lifecycleHookArgument("Stop", null, command)
+  ];
+}
+
+function lifecycleHookArgument(event: "SessionStart" | "UserPromptSubmit" | "Stop", matcher: string | null, command: string): string {
+  const match = matcher === null ? "" : `matcher=${JSON.stringify(matcher)},`;
+  return `hooks.${event}=[{${match}hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 function boundedCause(cause: unknown): string {

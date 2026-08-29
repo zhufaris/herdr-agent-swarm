@@ -52,7 +52,7 @@ path_index() {
 
 write_config() {
   local output=$1 real_herdr=$2 traex=$3 version=$4 release=$5
-  node -e 'const fs=require("fs"); const [p,r,t,v,b,d,q]=process.argv.slice(1); fs.writeFileSync(p, JSON.stringify({realHerdr:r,traex:t,validatedHerdrVersion:v,releaseDir:b,binDir:d,launcher:b+"/pane-launcher",reporter:b+"/cli/herdr-traex-reporter.js",requestDir:q},null,2)+"\n",{mode:0o600})' "$output" "$real_herdr" "$traex" "$version" "$release" "$bin_dir" "$request_dir"
+  node -e 'const fs=require("fs"); const [p,r,t,v,b,d,q]=process.argv.slice(1); fs.writeFileSync(p, JSON.stringify({realHerdr:r,traex:t,validatedHerdrVersion:v,releaseDir:b,binDir:d,launcher:b+"/pane-launcher",reporter:b+"/cli/herdr-traex-reporter.js",lifecycleReporter:b+"/cli/report-traex-lifecycle.js",requestDir:q},null,2)+"\n",{mode:0o600})' "$output" "$real_herdr" "$traex" "$version" "$release" "$bin_dir" "$request_dir"
 }
 
 read_config() { node -e 'const c=require(process.argv[1]); console.log(c[process.argv[2]] ?? "")' "$config_path" "$1"; }

@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { fileURLToPath } from "node:url";
 import type { HerdrPort } from "../domain/ports.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
@@ -28,7 +27,6 @@ const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
 const PROCESS_INFO_CONCURRENCY = 4;
-const LIFECYCLE_REPORTER_PATH = fileURLToPath(new URL("../cli/report-traex-lifecycle.js", import.meta.url));
 
 interface HerdrNativeRequestClient {
   request(method: string, params: object, timeoutMs: number): Promise<unknown>;
@@ -152,9 +150,6 @@ export class HerdrCliAdapter implements HerdrPort {
       const args = [
         "agent", "start", input.name, "--kind", "traex", "--pane", paneId, "--timeout", String(this.commandTimeoutMs), "--",
         "--permission-mode", this.traexPermissionMode, "--dangerously-bypass-hook-trust",
-        "-c", lifecycleHookArgument("SessionStart", "startup|resume", LIFECYCLE_REPORTER_PATH, this.executable),
-        "-c", lifecycleHookArgument("UserPromptSubmit", ".*", LIFECYCLE_REPORTER_PATH, this.executable),
-        "-c", lifecycleHookArgument("Stop", null, LIFECYCLE_REPORTER_PATH, this.executable),
         ...(input.args ?? [])
       ];
       await this.startWhenShellReady(args);
@@ -337,18 +332,8 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 }
 
-function lifecycleHookArgument(event: "SessionStart" | "UserPromptSubmit" | "Stop", matcher: string | null, reporterPath: string, herdrExecutable: string): string {
-  const command = `HERDR_TRAEX_REAL_HERDR=${shellQuote(herdrExecutable)} node ${shellQuote(reporterPath)}`;
-  const match = matcher === null ? "" : `matcher=${JSON.stringify(matcher)},`;
-  return `hooks.${event}=[{${match}hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
-}
-
 function managedTraexName(paneId: string): string {
   return `traex-${paneId.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`.slice(0, 32);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, operation: (item: T) => Promise<R>): Promise<R[]> {

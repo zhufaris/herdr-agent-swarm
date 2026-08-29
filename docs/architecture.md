@@ -376,14 +376,15 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-For bridge-started TraeX processes, a process-local `SessionStart` hook validates
+For shim-started TraeX processes, a shim-owned `SessionStart` hook validates
 `startup` or `resume` and reports the exact native session UUID through Herdr's
 official `pane report-agent --agent-session-id` surface. A new managed session
 uses `/swarm reset` rather than local `/clear`.
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
-bridge still invokes the formal `agent start --kind traex` surface and appends
-its SessionStart hook after `--`; the shim preserves those arguments, launches
+bridge invokes the formal `agent start --kind traex` surface without lifecycle
+hooks; the shim injects SessionStart, UserPromptSubmit, and Stop ahead of caller
+arguments, launches
 the configured real TraeX executable through a private request file and fixed
 opaque launcher, and owns a separate fenced reporter.
 The reporter keeps Herdr's internal known-agent protocol as Codex, establishes

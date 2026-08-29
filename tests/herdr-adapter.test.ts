@@ -27,10 +27,7 @@ describe("Herdr adapter structured control", () => {
     expect(calls[0]?.slice(0, 12)).toEqual(["agent", "start", "demo-primary", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto"]);
     expect(calls[0]?.at(-2)).toBe("--model");
     expect(calls[0]?.at(-1)).toBe("x");
-    expect(calls[0]).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
-    expect(calls[0]).toContainEqual(expect.stringContaining("hooks.Stop"));
-    expect(calls[0]).toContainEqual(expect.stringContaining("hooks.SessionStart"));
-    expect(calls[0]).not.toContainEqual(expect.stringContaining("report-traex-session"));
+    expect(calls[0]).not.toContainEqual(expect.stringContaining("hooks."));
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });
 
@@ -50,10 +47,7 @@ describe("Herdr adapter structured control", () => {
 
     const start = calls.find((args) => args[0] === "agent" && args[1] === "start");
     expect(start?.slice(0, 13)).toEqual(["agent", "start", "traex-w1-p1", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto", "--dangerously-bypass-hook-trust"]);
-    expect(start).toContainEqual(expect.stringContaining("hooks.SessionStart"));
-    expect(start).not.toContainEqual(expect.stringContaining("report-traex-session"));
-    expect(start).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
-    expect(start).toContainEqual(expect.stringContaining("hooks.Stop"));
+    expect(start).not.toContainEqual(expect.stringContaining("hooks."));
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });
 

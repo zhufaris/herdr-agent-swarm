@@ -50,7 +50,7 @@ agent_session.kind  = id
 agent_session.value = <TraeX session UUID>
 ```
 
-The bridge does not install a SessionStart hook, run a session-report socket, or
+The bridge does not install lifecycle hooks, run a session-report socket, or
 accept a session identity directly from a pane. It starts TraeX through the shim,
 observes Herdr, stores `agent_session_*` with the binding, and opens the
 transcript by that identity.

@@ -29,6 +29,7 @@ describe("Herdr TraeX shim installer", () => {
       realHerdr: fixture.realHerdr, traex: fixture.traex, validatedHerdrVersion: "0.7.5", binDir: fixture.shimBin,
       launcher: expect.stringMatching(/releases\/[^/]+\/pane-launcher$/),
       reporter: expect.stringMatching(/releases\/[^/]+\/cli\/herdr-traex-reporter\.js$/),
+      lifecycleReporter: expect.stringMatching(/releases\/[^/]+\/cli\/report-traex-lifecycle\.js$/),
       requestDir: join(fixture.runtime, "herdr-traex-shim/run")
     });
     expect(await readFile(join(config.releaseDir, "cli/report-traex-lifecycle.js"), "utf8")).toContain("export");
