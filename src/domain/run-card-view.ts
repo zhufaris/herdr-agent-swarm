@@ -46,6 +46,7 @@ export interface RunCardView {
   startedAt: string | null;
   finishedAt: string | null;
   notice: string | null;
+  activityAt: string;
   viewVersion: number;
   deliveredVersion: number;
   answerDeliveredVersion: number;
@@ -69,7 +70,7 @@ export function createQueuedRunCard(input: {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
-    progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null,
+    progressEvents: [], queuePosition: input.queuePosition, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
@@ -128,7 +129,8 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }
-  return { ...state, ...patch, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
+  const activityAt = change.type === "queue-position" || change.type === "steering-delivered" ? state.activityAt : change.occurredAt;
+  return { ...state, ...patch, activityAt, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
 }
 
 type AnswerParts = Pick<RunCardView, "answerSegments" | "answerDraft" | "answerDraftTransient">;

@@ -713,6 +713,148 @@ describe("SQLite store", () => {
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
     expect(store.loadRunCard("p1")).toMatchObject({ phase: "running", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求", queuePosition: 0, viewVersion: 2 });
+    expect(store.getPrompt("p1")).toMatchObject({ steeringOrigin: null, sourcePromptId: null, wasDetached: true });
+  });
+
+  it("atomically accepts an eligible classified prompt as automatic steering", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "working" });
+    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", bindingGeneration: 3, title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("parent", "running");
+    store.markPromptDispatched("parent");
+    store.saveRunCard({ ...store.loadRunCard("parent")!, phase: "running", activityAt: "2026-08-29T10:04:00.000Z" });
+    const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", bindingGeneration: 3, title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
+    const answerCardFor = vi.fn(() => ({ card: "answer" }));
+
+    const accepted = store.acceptClassifiedPrompt({
+      prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" },
+      ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root",
+      expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor
+    });
+
+    expect(accepted).toMatchObject({ inserted: true, decision: "automatic_steering", fallbackReason: null, prompt: { dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic", sourcePromptId: null, wasDetached: false }, view: { title: "Steering", queuePosition: 0, activityAt: "2026-08-29T10:05:00.000Z", createdAt: "2026-08-29T10:05:00.000Z", updatedAt: "2026-08-29T10:05:00.000Z" } });
+    expect(answerCardFor).toHaveBeenCalledWith(expect.objectContaining({ title: "Steering", queuePosition: 0 }));
+    expect(store.listPendingOutboundReplies()).toHaveLength(2);
+    expect(store.acceptClassifiedPrompt({
+      prompt: { id: "duplicate", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" },
+      ordinaryView: { ...ordinaryView, promptId: "duplicate" }, steeringView: { ...ordinaryView, promptId: "duplicate" }, rootMessageId: "root",
+      expectedBindingGeneration: 99, candidateParentPromptId: null, activeAfter: "2099-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({})
+    })).toMatchObject({ inserted: false, decision: "automatic_steering", prompt: { id: "next" } });
+    expect(store.listPendingOutboundReplies()).toHaveLength(2);
+    expect(store.database.prepare("SELECT created_at, updated_at FROM prompt_jobs WHERE id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z" });
+    expect(store.database.prepare("SELECT created_at, updated_at FROM answer_pages WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z" });
+    expect(store.database.prepare("SELECT created_at, updated_at, next_attempt_at FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z", next_attempt_at: "2026-08-29T10:05:00.000Z" });
+  });
+
+  it.each([
+    ["no_candidate", null, 3, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
+    ["binding_changed", "parent", 2, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
+    ["parent_inactive", "parent", 3, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
+    ["parent_detached", "parent", 3, "working", "detached", true, "2026-08-29T10:04:00.000Z"],
+    ["parent_state", "parent", 3, "idle", "attached", false, "2026-08-29T10:04:00.000Z"],
+    ["parent_stale", "parent", 3, "working", "attached", false, "2026-08-29T09:59:59.000Z"]
+  ] as const)("falls back atomically for %s", (reason, candidateParentPromptId, expectedGeneration, agentState, observationState, wasDetached, activityAt) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: agentState });
+    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: activityAt });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
+    if (reason !== "parent_inactive") {
+      store.updatePrompt("parent", "running");
+      if (observationState === "attached") store.markPromptDispatched("parent");
+      else store.database.prepare("UPDATE prompt_jobs SET observation_state = 'detached', was_detached = ? WHERE id = 'parent'").run(wasDetached ? 1 : 0);
+    } else store.updatePrompt("parent", "delivered");
+    const queuedAhead = createQueuedRunCard({ promptId: "ahead", bindingId: "b1", title: "Ahead", workspaceId: "w1", paneId: "w1:p1", requestText: "ahead", queuePosition: 1, occurredAt: "2026-08-29T10:04:30.000Z" });
+    store.acceptPrompt({ prompt: { id: "ahead", bindingId: "b1", larkMessageId: "m-ahead", actorOpenId: "u1", body: "ahead" }, view: queuedAhead, rootMessageId: "root", answerCard: {} });
+    const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
+
+    const first = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root", expectedBindingGeneration: expectedGeneration, candidateParentPromptId, activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) });
+    const duplicate = store.acceptClassifiedPrompt({ prompt: { id: "other", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" }, ordinaryView: { ...ordinaryView, promptId: "other" }, steeringView: { ...ordinaryView, promptId: "other" }, rootMessageId: "root", expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "1900-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({}) });
+
+    expect(first).toMatchObject({ inserted: true, decision: "ordinary", fallbackReason: reason, prompt: { dispatchKind: "turn", parentPromptId: null, steeringOrigin: null }, view: { queuePosition: 2 } });
+    expect(duplicate).toMatchObject({ inserted: false, decision: "ordinary", prompt: { id: "next" }, view: { promptId: "next", queuePosition: 2 } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE lark_message_id = 'm-next'").get()).toEqual({ count: 1 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ count: 1 });
+  });
+
+  it.each([
+    ["archived binding", { state: "archived", lifecycle: "archived", attachment: "attached" }],
+    ["degraded attachment", { state: "active", lifecycle: "active", attachment: "degraded" }]
+  ] as const)("falls back when the %s is not dispatchable", (_label, bindingState) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", generation: 3, lastAgentState: "working", ...bindingState });
+    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-29T10:04:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("parent", "running");
+    store.markPromptDispatched("parent");
+    const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
+
+    expect(store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: ordinaryView, rootMessageId: "root", expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) })).toMatchObject({ decision: "ordinary", fallbackReason: "parent_inactive", prompt: { dispatchKind: "turn" } });
+  });
+
+  it("migrates prompt provenance and run-card activity idempotently", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-classified-prompt-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m-legacy", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.exec("DROP INDEX prompt_jobs_source_prompt_once; DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN steering_origin; ALTER TABLE prompt_jobs DROP COLUMN source_prompt_id; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at;");
+    store.close();
+    store = undefined;
+
+    store = new SqliteBindingStore(path);
+    expect(store.getPrompt("legacy")).toMatchObject({ steeringOrigin: null, sourcePromptId: null, wasDetached: false });
+    expect(store.loadRunCard("legacy")?.activityAt).toBe("2026-08-29T09:00:00.000Z");
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'prompt_jobs_source_prompt_once'").get()).toEqual({ name: "prompt_jobs_source_prompt_once" });
+  });
+
+  it("enforces one conversion source and preserves activity across presentation-only changes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const source = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Source", workspaceId: "w1", paneId: null, requestText: "source", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "m-source", actorOpenId: "u1", body: "source" }, view: source, rootMessageId: "root", answerCard: {} });
+    const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: null, requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
+    expect(store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", steeringOrigin: "converted", sourcePromptId: "source" }, view: converted, rootMessageId: "root", answerCard: {} }).prompt).toMatchObject({ steeringOrigin: "converted", sourcePromptId: "source" });
+    expect(() => store!.acceptPrompt({ prompt: { id: "duplicate-source", bindingId: "b1", larkMessageId: "m-duplicate-source", actorOpenId: "u1", body: "duplicate", steeringOrigin: "converted", sourcePromptId: "source" }, view: { ...converted, promptId: "duplicate-source" }, rootMessageId: "root", answerCard: {} })).toThrow();
+
+    const originalActivity = store.loadRunCard("converted")!.activityAt;
+    store.saveRunCard({ ...store.loadRunCard("converted")!, queuePosition: 1, updatedAt: "2026-08-29T09:02:00.000Z" });
+    expect(store.loadRunCard("converted")?.activityAt).toBe(originalActivity);
+  });
+
+  it("preserves prompt provenance while rebuilding the legacy prompt state constraint", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-prompt-state-provenance-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const source = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Source", workspaceId: "w1", paneId: null, requestText: "source", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "m-source", actorOpenId: "u1", body: "source" }, view: source, rootMessageId: "root", answerCard: {} });
+    const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: null, requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true }, view: converted, rootMessageId: "root", answerCard: {} });
+    store.database.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP INDEX prompt_jobs_source_prompt_once;
+      CREATE TABLE prompt_jobs_legacy(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs_legacy(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
+        state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO prompt_jobs_legacy SELECT * FROM prompt_jobs;
+      DROP TABLE prompt_jobs;
+      ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
+      PRAGMA foreign_keys = ON;
+    `);
+    store.close();
+    store = undefined;
+
+    store = new SqliteBindingStore(path);
+    expect(store.getPrompt("converted")).toMatchObject({ steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true });
   });
 
   it("atomically reserves Answer content, continuation, and terminal finish intents", () => {

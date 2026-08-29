@@ -9,6 +9,26 @@ import type { ControlActor } from "./commands.js";
 import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "./instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
 
+export interface ClassifiedPromptInput {
+  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">;
+  ordinaryView: RunCardView;
+  steeringView: RunCardView;
+  rootMessageId: string;
+  expectedBindingGeneration: number;
+  candidateParentPromptId: string | null;
+  activeAfter: string;
+  acceptedAt: string;
+  answerCardFor(view: RunCardView): object;
+}
+
+export type ClassifiedPromptAcceptance = {
+  prompt: PromptJob;
+  view: RunCardView;
+  inserted: boolean;
+  decision: "automatic_steering" | "ordinary";
+  fallbackReason: "no_candidate" | "binding_changed" | "parent_inactive" | "parent_detached" | "parent_state" | "parent_stale" | null;
+};
+
 export interface InstanceStore {
   createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest;
   resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
@@ -221,8 +241,9 @@ export interface BindingStorePort {
   markPromptObservationDetached(id: string, notice: string): void;
   markPromptDispatched(id: string): void;
   recoverLegacyElementIdDeadLetters(): number;
-  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>): { prompt: PromptJob; inserted: boolean };
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">>): { prompt: PromptJob; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  acceptClassifiedPrompt(input: ClassifiedPromptInput): ClassifiedPromptAcceptance;
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   getActiveAnswerPage(promptId: string): AnswerPage | null;
   listAnswerPages(promptId: string): AnswerPage[];
@@ -281,7 +302,7 @@ export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "list
 export type DatabaseIntegrityStore = Pick<BindingStorePort, "inspectIntegrity">;
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
-  | "acceptPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"
+  | "acceptPrompt" | "acceptClassifiedPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"
   | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "recoverStaleOutboxQuarantines" | "reserveMainCard" | "saveRunCard" | "saveTopicView"
 >;
 

@@ -7,6 +7,7 @@ export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
 export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
+export type SteeringOrigin = "explicit" | "automatic" | "converted";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
@@ -216,6 +217,9 @@ export interface PromptJob {
   body: string;
   dispatchKind: PromptDispatchKind;
   parentPromptId: string | null;
+  steeringOrigin: SteeringOrigin | null;
+  sourcePromptId: string | null;
+  wasDetached: boolean;
   observationState: PromptObservationState;
   state: PromptState;
   attemptCount: number;
@@ -514,6 +518,7 @@ export interface IncomingLarkMessage {
   text: string;
   mentionsBot: boolean;
   isRootMessage: boolean;
+  hasUnsupportedContent?: boolean;
 }
 
 export type BridgeCommand =
