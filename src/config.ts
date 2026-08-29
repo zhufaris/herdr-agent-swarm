@@ -78,7 +78,7 @@ const environmentSchema = z.object({
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   HERDR_SNAPSHOT_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60_000).default(2_000),
   OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
-  CARD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).max(10_000).default(750),
+  CARD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).max(10_000).default(500),
   HERDR_EVENT_DEBOUNCE_MS: z.coerce.number().int().min(0).max(5_000).default(100),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
   HERDR_CIRCUIT_OPEN_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),

@@ -11,10 +11,9 @@ import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { answerStreamContent } from "../runtime/answer-stream.js";
 
-const ANSWER_STREAM_INTERVAL_MS = 750;
-const ANSWER_STREAM_MIN_DELTA_CHARS = 400;
+const ANSWER_STREAM_INTERVAL_MS = 500;
+const ANSWER_STREAM_MIN_DELTA_CHARS = 80;
 
 export class ConversationViewProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
@@ -45,10 +44,11 @@ export class ConversationViewProjector {
       const view = this.store.loadRunCard(promptId);
       if (!view?.answerCardId && view?.answerMessageId) {
         await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
+        this.answerContentLengths.set(promptId, view.answer.length);
         return;
       }
       await this.answerPages.converge(promptId);
-      if (view) this.answerContentLengths.set(promptId, answerStreamContent(view).length);
+      if (view) this.answerContentLengths.set(promptId, view.answer.length);
     }, options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, (error, promptId, version) => {
       this.logger.error({ event: "answer-card-update-failed", err: safeLogError(error), promptId, viewVersion: version, outcome: "retry" }, "failed to update Answer card; retry scheduled");
     });
@@ -95,9 +95,11 @@ export class ConversationViewProjector {
         if (next !== runCard) {
           this.store.saveRunCard(next);
           const terminal = ["blocked", "completed", "failed"].includes(next.phase);
-          const contentLength = answerStreamContent(next).length;
+          const contentLength = next.answer.length;
           const previousLength = this.answerContentLengths.get(promptId) ?? 0;
-          this.scheduler.schedule(promptId, next.viewVersion, terminal || contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS);
+          const firstContent = previousLength === 0 && contentLength > 0;
+          const progressChanged = event.type === "TurnOutputObserved" && normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0;
+          this.scheduler.schedule(promptId, next.viewVersion, terminal || firstContent || progressChanged || contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS);
           if (terminal) this.answerContentLengths.delete(promptId);
         } else if (["blocked", "completed", "failed"].includes(runCard.phase) && runCard.viewVersion > runCard.answerDeliveredVersion) {
           // The durable workflow transition may have projected the terminal view

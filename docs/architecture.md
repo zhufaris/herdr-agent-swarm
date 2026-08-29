@@ -619,7 +619,7 @@ boundary change to fix.
   idle/working detections. Prefer structured runtime evidence from Herdr where
   available.
 - **Polling intervals and size limits**: several timeouts, poll intervals, and
-  payload size limits (25 ms, 50 ms, 250 ms terminal polls, 2 s cache TTL, 750 ms
+  payload size limits (25 ms, 50 ms, 250 ms terminal polls, 2 s cache TTL, 500 ms
   card debounce, 100 ms UDP debounce, 12000/28000 character CardKit limits,
   60 s close-code TTL) are hardcoded in their respective modules. These should
   move to the validated configuration surface.

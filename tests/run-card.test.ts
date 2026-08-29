@@ -563,15 +563,13 @@ describe("run card", () => {
     expect(JSON.stringify(card)).not.toContain("older page");
   });
 
-  it("enables CardKit native typewriter rendering for a streaming answer", () => {
+  it("enables cumulative CardKit streaming without character-by-character playback", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stream", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "start" });
 
     expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
-      config: {
-        streaming_mode: true,
-        streaming_config: { print_frequency_ms: { default: 40 }, print_step: { default: 50 }, print_strategy: "fast" }
-      }
+      config: { streaming_mode: true }
     });
+    expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "running" }))).not.toContain("streaming_config");
     expect(renderRequestAnswerCard({ ...view, phase: "completed" })).toMatchObject({ config: { streaming_mode: false } });
     expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed" }))).not.toContain("streaming_config");
   });

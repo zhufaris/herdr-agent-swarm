@@ -11,6 +11,53 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("event-driven card projection", () => {
+  it("flushes the first answer immediately and batches later small deltas", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const converge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
+    projector.start();
+
+    await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "短首段", answerUpdate: "replace", progressEvents: [] } });
+    await Promise.resolve();
+    expect(converge).toHaveBeenCalledTimes(1);
+
+    await bus.publish({ eventId: "small", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "小增量", answerUpdate: "append", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(converge).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(converge).toHaveBeenCalledTimes(2));
+
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
+  it("flushes an eighty-character answer increment before the batch timer", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const converge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
+    projector.start();
+
+    await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "a", answerUpdate: "replace", progressEvents: [] } });
+    await Promise.resolve();
+    expect(converge).toHaveBeenCalledTimes(1);
+    await bus.publish({ eventId: "large", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "b".repeat(80), answerUpdate: "append", progressEvents: [] } });
+    await Promise.resolve();
+    expect(converge).toHaveBeenCalledTimes(2);
+
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
   it("keeps an atomically terminal cancellation version and still converges delivery", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
@@ -177,11 +224,12 @@ describe("event-driven card projection", () => {
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: "第一条", answerUpdate: "replace", progressEvents: [] } });
+    await vi.waitFor(() => expect(updates.filter((update) => update.messageId === "request-answer-card")).toHaveLength(1));
     await bus.publish({ eventId: "first-grown", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", answerSnapshot: "第一条中间消息。", answerUpdate: "replace", progressEvents: [] } });
     await bus.publish({ eventId: "second", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:03Z", payload: { promptId: "p1", answerSnapshot: "第二条", answerUpdate: "append", progressEvents: [] } });
     await bus.publish({ eventId: "second-grown", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:04Z", payload: { promptId: "p1", answerSnapshot: "第二条中间消息。", answerUpdate: "replace", progressEvents: [] } });
     await vi.advanceTimersByTimeAsync(1_499);
-    expect(updates.filter((update) => update.messageId === "request-answer-card")).toHaveLength(0);
+    expect(updates.filter((update) => update.messageId === "request-answer-card")).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     await publisher.drain();
 

@@ -169,7 +169,7 @@ describe("project registry configuration", () => {
 
   it("configures bounded runtime cache, safety scan, and debounce intervals", () => {
     expect(loadConfig(requiredEnvironment).runtimeTuning).toEqual({
-      herdrSnapshotCacheTtlMs: 2_000, outboxSafetyScanIntervalMs: 30_000, cardUpdateDebounceMs: 750, herdrEventDebounceMs: 100
+      herdrSnapshotCacheTtlMs: 2_000, outboxSafetyScanIntervalMs: 30_000, cardUpdateDebounceMs: 500, herdrEventDebounceMs: 100
     });
     expect(loadConfig({
       ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "0", OUTBOX_SAFETY_SCAN_INTERVAL_MS: "1000",

@@ -6,7 +6,7 @@ export class CardUpdateScheduler {
 
   constructor(
     private readonly deliver: (promptId: string, version: number) => Promise<void>,
-    private readonly intervalMs = 750,
+    private readonly intervalMs = 500,
     private readonly onError?: (error: unknown, promptId: string, version: number) => void
   ) {}
 
