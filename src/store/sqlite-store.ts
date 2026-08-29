@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, RuntimeOutputProjectionInput, RuntimeOutputProjectionResult, SessionSummary, SqliteIntegrityInspection, SqliteIntegrityIssue } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -966,6 +966,31 @@ export class SqliteBindingStore implements BindingStorePort {
       if (this.database.isTransaction) this.database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  degradeBindingWithProjection(input: RuntimeDegradationInput): RuntimeDegradationResult {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      let binding = this.requireBinding(input.bindingId);
+      if (!this.matchesRuntimeFence(binding, input.expectedPaneId, input.expectedGeneration)) {
+        this.database.exec("COMMIT");
+        return { outcome: "stale", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
+      }
+      const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
+      if (binding.attachment === "degraded" && current.phase === input.view.phase && current.notice === input.view.notice) {
+        this.database.exec("COMMIT");
+        return { outcome: "unchanged", binding, view: current, outboxReserved: false };
+      }
+      if (current.viewVersion > input.view.viewVersion) {
+        this.database.exec("COMMIT");
+        return { outcome: "stale", binding, view: current, outboxReserved: false };
+      }
+      binding = this.transitionBinding(input.bindingId, { type: "agent_unregistered" });
+      this.saveTopicView(input.view);
+      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
+      this.database.exec("COMMIT");
+      return { outcome: "degraded", binding, view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   orphanBindingWithProjection(input: OrphanBindingProjectionInput): OrphanBindingProjectionResult {

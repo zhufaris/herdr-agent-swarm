@@ -316,7 +316,7 @@ describe("HerdrRuntimeReconciler", () => {
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
     const readOutput = vi.fn().mockResolvedValueOnce("◆ first answer\n────────").mockResolvedValueOnce("◆ second answer\n────────");
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
     const reconciler = fixture(store, { async listPanes() { return [pane]; }, readOutput } as unknown as HerdrPort);
 
     await reconciler.reconcile();
@@ -382,7 +382,7 @@ describe("HerdrRuntimeReconciler", () => {
     const events: string[] = [];
     const bus = new BridgeEventBus();
     const stop = bus.onBridgeEvent("test", (event) => { if (event.type === "PaneOutputObserved") events.push(event.type); });
-    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: null, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "unknown" as const, agentKind: "traex", outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"] };
     const reconciler = new HerdrRuntimeReconciler({
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
       herdr: { async listPanes() { return [pane]; }, async readOutput() { return "GPT-5.6-Sol · Auto Mode · 31.1K tokens"; } } as unknown as HerdrPort,
@@ -632,6 +632,34 @@ describe("HerdrRuntimeReconciler", () => {
     await reconciler.reconcile();
 
     expect(store.getBinding("b1")).toMatchObject({ attachment: "degraded", degradationCount: 1 });
+    store.close();
+  });
+
+  it("degrades a live unregistered TraeX pane and restores it after native Agent registration", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "task", workspaceId: "w1", paneId: "w1:p1", phase: "ready" });
+    let registered = false;
+    const pane = () => ({
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task",
+      agentState: registered ? "idle" as const : "unknown" as const, agentKind: registered ? "codex" : null, foregroundExecutables: ["traex"]
+    });
+    const wakeOutbound = vi.fn();
+    const reconciler = fixture(store, { async listPanes() { return [pane()]; }, async observeRuntime() { return { pane: pane(), traexProcess: true, composerReady: registered, evidenceSource: registered ? "structured" : "process" }; }, async readOutput() { return ""; } } as unknown as HerdrPort, undefined, undefined, undefined, wakeOutbound);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ state: "active", attachment: "degraded", degradationCount: 0 });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "degraded", notice: expect.stringContaining("/swarm reset") });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(wakeOutbound).toHaveBeenCalledOnce();
+
+    registered = true;
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")).toMatchObject({ attachment: "attached", lastAgentState: "idle" });
     store.close();
   });
 

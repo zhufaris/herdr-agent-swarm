@@ -23,6 +23,7 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
   blocked: { label: "等待用户处理", icon: "⚠", color: "orange" },
   done: { label: "已完成", icon: "✓", color: "green" },
   error: { label: "执行失败", icon: "×", color: "red" },
+  degraded: { label: "连接降级", icon: "!", color: "orange" },
   draining: { label: "正在归档", icon: "◌", color: "orange" },
   archived: { label: "已归档", icon: "□", color: "grey" },
   orphaned: { label: "绑定异常", icon: "!", color: "orange" }
@@ -96,8 +97,8 @@ export function renderRunCard(input: TopicViewState): object {
     elements.push({ tag: "markdown", content: `**最近输出**\n\n${truncateLarkMarkdownMiddle(input.answer.trim(), MAIN_CARD_PREVIEW_LIMIT)}` });
   } else if (input.phase === "blocked") {
     elements.push(callout("orange", safeRecoveryNotice(input.notice)));
-  } else if (input.phase === "error" || input.phase === "orphaned") {
-    elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请检查 bridge 日志与 Herdr pane。"));
+  } else if (input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned") {
+    elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请检查 bridge 日志与 Herdr pane。"));
   } else if (input.phase === "running") {
     elements.push({ tag: "markdown", content: "正在等待 TraeX 完成。本卡片会在状态变化时更新。" });
   } else if (input.phase === "queued") {
@@ -120,7 +121,7 @@ export function renderRunCard(input: TopicViewState): object {
 
 export function renderProjectEntryCard(input: TopicViewState): object {
   const view = STATE_VIEW[input.phase];
-  const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
+  const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
   const progress = input.recentProgress ?? [];
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable
@@ -132,7 +133,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   const recentActivity = progress.filter((event) => !planKeys.has(event.key));
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
-  if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
+  if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
   elements.push(...mainCardActions(input));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
@@ -153,7 +154,7 @@ function mainCardActions(input: TopicViewState): object[] {
   if (input.phase === "provisioning" || input.phase === "draining") return [];
   if (input.phase === "archived") return [button("新建任务", "create_new_task", "primary")];
   if (input.phase === "blocked") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
-  if (input.phase === "error" || input.phase === "orphaned") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
+  if (input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
   if (input.phase === "running") return [...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
   return [button("发送新任务", "create_new_task", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
 }

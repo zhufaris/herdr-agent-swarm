@@ -166,6 +166,12 @@ describe("topic view reducer", () => {
     expect(orphaned).toMatchObject({ phase: "orphaned", notice: "pane missing" });
   });
 
+  it("projects a live but unregistered Agent as degraded", () => {
+    const degraded = reduceTopicView(initialTopicView("b1"), event("BindingDegraded", { reason: "TraeX is not registered as a Herdr Agent" }));
+
+    expect(degraded).toMatchObject({ phase: "degraded", notice: "TraeX is not registered as a Herdr Agent" });
+  });
+
   it("restores the primary card state from the latest persisted request", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "do it", queuePosition: 1, occurredAt: "start" });
     const output = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "latest answer", progressEvents: [{ key: "test", kind: "test", label: "tests passed", state: "done", occurredAt: "later" }] });

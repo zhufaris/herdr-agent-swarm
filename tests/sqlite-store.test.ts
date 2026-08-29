@@ -222,6 +222,23 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
   });
 
+  it("atomically and idempotently degrades an unregistered Agent without orphaning it", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", generation: 1, state: "active", lifecycle: "active", attachment: "attached" });
+    const view = { ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "degraded" as const, notice: "TraeX is not registered as a Herdr Agent", viewVersion: 1 };
+
+    expect(store.degradeBindingWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, view, rootMessageId: "root", mainCard: {} }))
+      .toMatchObject({ outcome: "degraded", binding: { state: "active", attachment: "degraded" }, outboxReserved: true });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "degraded", notice: view.notice });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+
+    expect(store.degradeBindingWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, view, rootMessageId: "root", mainCard: {} }))
+      .toMatchObject({ outcome: "unchanged", binding: { attachment: "degraded" }, outboxReserved: false });
+    expect(store.getBinding("b1")).toMatchObject({ attachment: "degraded", degradationCount: 0 });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+  });
+
   it("atomically projects a confirmed missing pane across binding, run cards, and card intents", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

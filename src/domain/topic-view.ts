@@ -5,7 +5,7 @@ import type { MainCardLiveStatus, RunCardView, RunProgressEvent } from "./run-ca
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 
-export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "draining" | "archived" | "orphaned";
+export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "degraded" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
@@ -38,6 +38,7 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
     case "BindingRenamed": return { ...base, title: event.payload.title };
     case "BindingDraining": return { ...base, phase: "draining", notice: event.payload.reason };
     case "BindingArchived": return { ...base, phase: "archived", notice: event.payload.reason };
+    case "BindingDegraded": return { ...base, phase: "degraded", notice: event.payload.reason };
     case "BindingOrphaned": return { ...base, phase: "orphaned", notice: event.payload.reason };
     case "PromptQueued": return base.activePromptId
       ? { ...base, queueDepth: event.payload.queueDepth }

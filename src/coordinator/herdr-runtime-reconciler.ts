@@ -299,6 +299,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         if (projects.length === 1) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: projects[0]!.id });
       }
       if (existing.lifecycle === "provisioning") continue;
+      if (isConfirmedUnregisteredTraexAgent(pane)) {
+        await this.degradeUnregisteredAgent(existing, pane);
+        continue;
+      }
       pane = this.withMonotonicAgentState(pane);
       const previous = existing.lastAgentState;
       const observation = this.options.store.applyRuntimeObservation({ bindingId: existing.id, expectedPaneId: pane.paneId, expectedGeneration: existing.generation, pane });
@@ -390,6 +394,26 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
           this.options.logger.warn({ event: "orphan-answer-convergence-failed", err: safeLogError(error), bindingId: binding.id, promptId, outcome: "deferred" }, "failed to converge an orphaned prompt Answer");
         }
       }
+    }
+    return result.binding ?? binding;
+  }
+
+  private async degradeUnregisteredAgent(binding: Binding, pane: HerdrPane): Promise<Binding> {
+    const reason = `TraeX is running in Herdr pane ${pane.paneId}, but it is not registered as a Herdr Agent. 请由会话创建者发送 \`/swarm reset\` 创建可投递的新会话。`;
+    const current = this.options.store.loadTopicView(binding.id) ?? {
+      ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId,
+      spaceName: binding.projectId ? projectSpaceName(this.projectsById.get(binding.projectId)!) : binding.workspaceId, paneId: pane.paneId
+    };
+    const event = createBridgeEvent(binding.id, "BindingDegraded", "herdr", { reason });
+    const view = reduceTopicView(current, event);
+    const result = this.options.store.degradeBindingWithProjection({
+      bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, view,
+      rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view)
+    });
+    if (result.outcome === "degraded") {
+      if (result.outboxReserved) this.options.wakeOutbound?.();
+      await this.options.lifecycleEvents.publish(event);
+      this.options.logger.warn({ event: "binding-runtime-degraded", bindingId: binding.id, workspaceId: pane.workspaceId, paneId: pane.paneId, reason: "agent_unregistered", outcome: "degraded" }, "TraeX pane is not registered as a Herdr Agent");
     }
     return result.binding ?? binding;
   }
@@ -505,3 +529,4 @@ async function forEachConcurrent<T>(items: readonly T[], limit: number, operatio
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isPaneMissing(error: unknown): boolean { return /(?:pane|agent).*(?:not found|does not exist)|agent_not_found/i.test(errorMessage(error)); }
+function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean { return pane.agentKind === null && pane.agentState === "unknown"; }

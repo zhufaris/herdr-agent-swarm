@@ -25,6 +25,7 @@ export type SessionTransition =
   | { type: "drain_completed" }
   | { type: "closed" }
   | { type: "pane_probe_failed"; confirmedMissing: boolean; orphanThreshold: number }
+  | { type: "agent_unregistered" }
   | { type: "pane_observed"; runtime: AgentState }
   | { type: "pane_reattached"; replacement: boolean }
   | { type: "recover_failed"; runtime: AgentState }
@@ -63,6 +64,9 @@ export function transitionSession(state: PaneThreadSessionState, transition: Ses
       const attachment = transition.confirmedMissing || degradationCount >= transition.orphanThreshold ? "orphaned" : "degraded";
       return { ...state, attachment, degradationCount };
     }
+    case "agent_unregistered":
+      requireLifecycle(state, transition.type, "active", "draining");
+      return { ...state, attachment: "degraded", runtime: "unknown" };
     case "pane_observed":
       requireLifecycle(state, transition.type, "provisioning", "active", "draining");
       return { ...state, attachment: "attached", degradationCount: 0, runtime: transition.runtime };

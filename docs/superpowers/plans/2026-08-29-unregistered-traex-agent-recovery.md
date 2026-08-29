@@ -57,9 +57,9 @@ Extend the event union with:
 | EventBase<"BindingDegraded", { reason: string }>
 ```
 
-Extend `TopicViewPhase` with `"degraded"` and reduce that event to the supplied notice. Add a store method that, inside `BEGIN IMMEDIATE`, verifies `(bindingId, expectedPaneId, expectedGeneration)`, transitions with one non-confirmed `pane_probe_failed`, saves the supplied topic view, reserves the supplied Main Card, commits, and returns whether the outbox was reserved. If the binding is already degraded with the same projected view, return unchanged without duplicating outbox intent.
+Extend `TopicViewPhase` with `"degraded"` and reduce that event to the supplied notice. Add an idempotent `agent_unregistered` session transition which sets attachment to `degraded` without incrementing the missing-pane degradation counter. Add a store method that, inside `BEGIN IMMEDIATE`, verifies `(bindingId, expectedPaneId, expectedGeneration)`, applies that transition, saves the supplied topic view, reserves the supplied Main Card, commits, and returns whether the outbox was reserved. If the binding is already degraded with the same projected view, return unchanged without duplicating outbox intent. Repeated unregistered observations must never become `orphaned`.
 
-In reconciliation, before `applyRuntimeObservation`, classify a bound TraeX pane as unregistered when `agentKind` is neither `codex` nor `traex`. Persist `BindingDegraded` through the atomic store method, wake outbound work when reserved, log `reason: "agent_unregistered"`, and skip Agent-state/output publication for that pass. A later compatible Agent observation follows the existing `applyRuntimeObservation` path and restores attachment.
+In reconciliation, before `applyRuntimeObservation`, classify a bound TraeX pane as unregistered only when the authoritative snapshot explicitly reports `agentKind: null` with `agentState: "unknown"`. An omitted kind remains unknown evidence and must not be degraded. Persist `BindingDegraded` through the atomic store method, wake outbound work when reserved, log `reason: "agent_unregistered"`, and skip Agent-state/output publication for that pass. A later compatible Agent observation follows the existing `applyRuntimeObservation` path and restores attachment.
 
 - [ ] **Step 4: Run focused tests and confirm they pass**
 

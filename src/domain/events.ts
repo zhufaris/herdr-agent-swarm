@@ -53,6 +53,7 @@ export type BridgeEvent =
   | EventBase<"BindingRenamed", { title: string }>
   | EventBase<"BindingDraining", { reason: string }>
   | EventBase<"BindingArchived", { reason: string }>
+  | EventBase<"BindingDegraded", { reason: string }>
   | EventBase<"BindingOrphaned", { reason: string }>
   | EventBase<"PromptQueued", { promptId: string; queueDepth: number; actorOpenId: string }>
   | EventBase<"PromptCancelled", { promptId: string; reason: string }>

@@ -500,6 +500,22 @@ export interface BindingTitleProjectionResult {
   outboxReserved: boolean;
 }
 
+export interface RuntimeDegradationInput {
+  bindingId: string;
+  expectedPaneId: string;
+  expectedGeneration: number;
+  view: import("./topic-view.js").TopicViewState;
+  rootMessageId: string | null;
+  mainCard: object;
+}
+
+export interface RuntimeDegradationResult {
+  outcome: "degraded" | "unchanged" | "stale";
+  binding: Binding | null;
+  view: import("./topic-view.js").TopicViewState | null;
+  outboxReserved: boolean;
+}
+
 export interface OrphanBindingProjectionInput {
   bindingId: string;
   expectedPaneId: string;
