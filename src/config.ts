@@ -76,6 +76,10 @@ const environmentSchema = z.object({
   LARK_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  HERDR_SNAPSHOT_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60_000).default(2_000),
+  OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+  CARD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).max(10_000).default(750),
+  HERDR_EVENT_DEBOUNCE_MS: z.coerce.number().int().min(0).max(5_000).default(100),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
   HERDR_CIRCUIT_OPEN_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),
   INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
@@ -111,6 +115,12 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     commandTimeoutMs: value.COMMAND_TIMEOUT_MS,
     turnTimeoutMs: value.TURN_TIMEOUT_MS,
     reconcileIntervalMs: value.RECONCILE_INTERVAL_MS,
+    runtimeTuning: {
+      herdrSnapshotCacheTtlMs: value.HERDR_SNAPSHOT_CACHE_TTL_MS,
+      outboxSafetyScanIntervalMs: value.OUTBOX_SAFETY_SCAN_INTERVAL_MS,
+      cardUpdateDebounceMs: value.CARD_UPDATE_DEBOUNCE_MS,
+      herdrEventDebounceMs: value.HERDR_EVENT_DEBOUNCE_MS
+    },
     herdrCircuitBreaker: { failureThreshold: value.HERDR_CIRCUIT_FAILURE_THRESHOLD, openMs: value.HERDR_CIRCUIT_OPEN_MS },
     instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
     maxQueueDepth: value.MAX_QUEUE_DEPTH,

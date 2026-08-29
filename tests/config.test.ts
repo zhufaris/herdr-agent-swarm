@@ -158,6 +158,23 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, SQLITE_INTEGRITY_AUDIT_INTERVAL_MS: "59999" })).toThrow();
   });
 
+  it("configures bounded runtime cache, safety scan, and debounce intervals", () => {
+    expect(loadConfig(requiredEnvironment).runtimeTuning).toEqual({
+      herdrSnapshotCacheTtlMs: 2_000, outboxSafetyScanIntervalMs: 30_000, cardUpdateDebounceMs: 750, herdrEventDebounceMs: 100
+    });
+    expect(loadConfig({
+      ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "0", OUTBOX_SAFETY_SCAN_INTERVAL_MS: "1000",
+      CARD_UPDATE_DEBOUNCE_MS: "10000", HERDR_EVENT_DEBOUNCE_MS: "0"
+    }).runtimeTuning).toEqual({
+      herdrSnapshotCacheTtlMs: 0, outboxSafetyScanIntervalMs: 1_000, cardUpdateDebounceMs: 10_000, herdrEventDebounceMs: 0
+    });
+    expect(() => loadConfig({ ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "60001" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "999" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "300001" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, CARD_UPDATE_DEBOUNCE_MS: "10001" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, HERDR_EVENT_DEBOUNCE_MS: "5001" })).toThrow();
+  });
+
   it("uses plugin-native paths unless explicit paths override them", () => {
     expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
       PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"
