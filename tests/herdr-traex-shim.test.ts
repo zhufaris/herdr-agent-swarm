@@ -132,6 +132,15 @@ describe("Herdr TraeX managed start", () => {
     expect(launches).toBe(1);
   });
 
+  it("preserves a bounded pre-launch cause without exposing TraeX arguments", async () => {
+    const dependencies = fakeStartDependencies(async (args) => {
+      if (args[0] === "--version") throw new Error(`socket unavailable ${"x".repeat(500)}`);
+      return { stdout: "", stderr: "" };
+    });
+    await expect(runHerdrTraexStart({ ...startInput(), traexArgs: ["secret-prompt"] }, startConfig(), dependencies))
+      .rejects.toThrow(/^TraeX did not start: socket unavailable x{1,240}$/);
+  });
+
   it("treats a pane-run command error as uncertain because dispatch may have occurred", async () => {
     let launches = 0;
     const dependencies = fakeStartDependencies(async (args) => {

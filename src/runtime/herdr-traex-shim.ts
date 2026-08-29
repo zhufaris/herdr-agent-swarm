@@ -122,16 +122,15 @@ export function encodeLaunchRequest(executable: string, args: readonly string[])
 
 export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLaunchConfig, dependencies: TraexStartDependencies): Promise<Record<string, unknown>> {
   const deadline = dependencies.now() + input.timeoutMs;
-  const version = await dependencies.runHerdr(["--version"], input.timeoutMs);
-  if (!version.stdout.includes(config.validatedHerdrVersion)) {
-    throw new TraexStartError("agent_start_failed", "Herdr version is not validated for the installed TraeX shim");
-  }
-  const before = parseProcessInfo((await dependencies.runHerdr(["pane", "process-info", "--pane", input.paneId], input.timeoutMs)).stdout);
-  if (!isAvailableShell(before)) throw new TraexStartError("agent_start_failed", `Pane ${input.paneId} is not an available shell`);
-
   let requestId: string | null = null;
   let launched = false;
   try {
+    const version = await dependencies.runHerdr(["--version"], input.timeoutMs);
+    if (!version.stdout.includes(config.validatedHerdrVersion)) {
+      throw new TraexStartError("agent_start_failed", "Herdr version is not validated for the installed TraeX shim");
+    }
+    const before = parseProcessInfo((await dependencies.runHerdr(["pane", "process-info", "--pane", input.paneId], input.timeoutMs)).stdout);
+    if (!isAvailableShell(before)) throw new TraexStartError("agent_start_failed", `Pane ${input.paneId} is not an available shell`);
     requestId = await dependencies.writeRequest(encodeLaunchRequest(config.traex, input.traexArgs));
     // Once pane.run is invoked, its command may have reached the terminal even
     // if the CLI later returns an error. Fence all later failures as uncertain.
@@ -147,10 +146,15 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
     if (!launched) {
       if (requestId) await dependencies.removeRequest(requestId).catch(() => undefined);
       if (cause instanceof TraexStartError) throw cause;
-      throw new TraexStartError("agent_start_failed", "TraeX did not start", { cause });
+      throw new TraexStartError("agent_start_failed", `TraeX did not start: ${boundedCause(cause)}`, { cause });
     }
     throw new TraexStartError("agent_start_uncertain", `TraeX may have started in pane ${input.paneId}; inspect it before retrying`, { cause });
   }
+}
+
+function boundedCause(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return message.replace(/[\r\n]+/g, " " ).slice(0, 256);
 }
 
 function launchCommand(launcher: string, requestId: string): string {
