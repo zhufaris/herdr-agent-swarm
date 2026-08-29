@@ -312,7 +312,7 @@ export type LeaseStore = Pick<BindingStorePort,
 >;
 
 export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "listBindings">;
-export type DatabaseIntegrityStore = Pick<BindingStorePort, "inspectIntegrity">;
+export interface DatabaseIntegrityStore { inspectIntegrity(limit: number): SqliteIntegrityInspection | Promise<SqliteIntegrityInspection> }
 
 export type PromptAcceptanceStore = Pick<BindingStorePort,
   | "acceptPrompt" | "acceptClassifiedPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"

@@ -36,6 +36,7 @@ import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
 import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
 import { SqliteIntegrityAuditor } from "./runtime/sqlite-integrity-auditor.js";
+import { WorkerDatabaseIntegrityStore } from "./runtime/sqlite-integrity-worker.js";
 import { AnswerPageWorkflow } from "./coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "./coordinator/main-card-workflow.js";
 import { WorktreeNameResolver } from "./runtime/worktree-name-resolver.js";
@@ -124,7 +125,7 @@ const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundW
 const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
 const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
 const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
-const sqliteIntegrity = new SqliteIntegrityAuditor(store, config.sqliteIntegrityAudit, logger);
+const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
 const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot });
 const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cardUpdateDebounceMs });
 const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork, logger });
@@ -164,6 +165,10 @@ try {
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
+  lease.start(() => {
+    if (runtimeShutdown) return runtimeShutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; });
+    process.kill(process.pid, "SIGTERM");
+  });
   instanceTurns.prepareRecovery();
   await traexSessionReporter.start();
   await primaryToolGateway.start();
@@ -179,7 +184,6 @@ try {
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), traexSessionReporter, primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => { outboxRetention.stop(); await sqliteIntegrity.stop(); return shutdown.shutdown(signal); };
-  lease.start(() => stopRuntime("lease-lost").then(() => { process.exitCode = 1; }));
   channelPublisher.start();
   outboxRetention.start();
   projector.start();

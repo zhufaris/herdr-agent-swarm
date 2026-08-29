@@ -55,4 +55,10 @@ describe("application composition boundaries", () => {
     expect(dispatcher).not.toContain("implements OutboundIntentPort");
     expect(coordinators).not.toMatch(/(?:outbound|channelPublisher)\.drain\(|retryPending/);
   });
+
+  it("starts the database lease heartbeat before long startup audits", () => {
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    expect(main.indexOf("lease.start(")).toBeGreaterThan(main.indexOf("lease.acquire()"));
+    expect(main.indexOf("lease.start(")).toBeLessThan(main.indexOf("await sqliteIntegrity.run()"));
+  });
 });

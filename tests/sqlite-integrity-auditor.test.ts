@@ -1,9 +1,31 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SqliteIntegrityAuditor } from "../src/runtime/sqlite-integrity-auditor.js";
+import { WorkerDatabaseIntegrityStore } from "../src/runtime/sqlite-integrity-worker.js";
+import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("SQLite integrity auditor", () => {
+  it("runs a real database inspection without blocking the main event loop", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bridge-integrity-worker-"));
+    const databasePath = join(directory, "bridge.db");
+    const store = new SqliteBindingStore(databasePath);
+    store.close();
+    try {
+      const inspection = new WorkerDatabaseIntegrityStore(databasePath).inspectIntegrity(20);
+      let timerObserved = false;
+      await new Promise<void>((resolve) => setTimeout(() => { timerObserved = true; resolve(); }, 0));
+
+      expect(timerObserved).toBe(true);
+      await expect(inspection).resolves.toEqual({ quickCheck: "ok", issues: [], truncated: false });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("runs immediately and caches a healthy bounded snapshot", async () => {
     const auditor = new SqliteIntegrityAuditor(
       { inspectIntegrity: () => ({ quickCheck: "ok", issues: [], truncated: false }) },
