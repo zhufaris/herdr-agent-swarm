@@ -31,7 +31,7 @@ case "${1:-}" in
 esac
 if [ "$#" -gt 1 ]; then echo "Only one option is supported." >&2; usage >&2; exit 2; fi
 
-for command_name in node npm herdr; do
+for command_name in node npm; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "Missing required command: $command_name" >&2
         exit 1
@@ -44,6 +44,11 @@ if [ "$STANDALONE" -eq 1 ]; then
     bash "$ROOT/scripts/swarm-service.sh" install
     echo "Standalone service installed. Run 'npm run swarm:start' after configuration is ready."
     exit 0
+fi
+
+if ! command -v herdr >/dev/null 2>&1; then
+    echo "Missing required command: herdr" >&2
+    exit 1
 fi
 
 bash "$ROOT/plugin/build.sh"

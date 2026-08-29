@@ -52,4 +52,13 @@ describe("Herdr plugin manifest", () => {
     expect(installScript).toContain('if [ "$RUN_SETUP" -eq 1 ]');
     expect(installScript).toContain('herdr plugin action invoke setup --plugin "$PLUGIN_ID"');
   });
+
+  it("requires the Herdr CLI only for plugin installation", () => {
+    const standaloneBranch = installScript.indexOf('if [ "$STANDALONE" -eq 1 ]');
+    const herdrCheck = installScript.indexOf('command -v herdr');
+
+    expect(installScript).toContain("for command_name in node npm; do");
+    expect(standaloneBranch).toBeGreaterThan(0);
+    expect(herdrCheck).toBeGreaterThan(standaloneBranch);
+  });
 });
