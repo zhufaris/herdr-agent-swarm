@@ -76,6 +76,63 @@ describe("SQLite store", () => {
     });
   });
 
+  it("recovers only pre-dispatch instance claims back to the FIFO queue", () => {
+    store = new SqliteBindingStore(":memory:");
+    const createRunning = (id: string) => {
+      store!.createAgentInstance({
+        id, projectId: "project-a", name: id, role: "worker", agentKind: "traex", model: null, desiredState: "running",
+        workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "abc123" }
+      });
+      return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: `w1:${id}`, nativeSessionId: null })!;
+    };
+    const actor = { kind: "human" as const, userId: "u1" };
+    const claimedInstance = createRunning("claimed-worker");
+    const uncertainInstance = createRunning("uncertain-worker");
+    store.acceptInstanceTurn({ id: "claimed-turn", idempotencyKey: "claimed-turn", actor, projectId: "project-a", instanceId: claimedInstance.id, instanceGeneration: claimedInstance.generation, kind: "turn", text: "safe to retry" });
+    store.acceptInstanceTurn({ id: "uncertain-turn", idempotencyKey: "uncertain-turn", actor, projectId: "project-a", instanceId: uncertainInstance.id, instanceGeneration: uncertainInstance.generation, kind: "turn", text: "must not replay" });
+    store.claimNextInstanceTurn(claimedInstance.id, claimedInstance.generation);
+    store.claimNextInstanceTurn(uncertainInstance.id, uncertainInstance.generation);
+    store.updateInstanceTurn({ turnId: "uncertain-turn", expectedGeneration: uncertainInstance.generation, state: "dispatching", eventKind: "turn.dispatching" });
+
+    expect(store.recoverInterruptedInstanceTurns()).toEqual({
+      requeuedTurnIds: ["claimed-turn"],
+      observableTurns: [expect.objectContaining({ id: "uncertain-turn", state: "dispatching" })]
+    });
+    expect(store.getInstanceTurn("claimed-turn")).toMatchObject({ state: "queued" });
+    expect(store.getInstanceTurn("uncertain-turn")).toMatchObject({ state: "dispatching" });
+  });
+
+  it("scopes active turn fencing to the current runtime generation", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const first = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
+    const actor = { kind: "human" as const, userId: "u1" };
+    store.acceptInstanceTurn({ id: "old", idempotencyKey: "old", actor, projectId: "project-a", instanceId: "i1", instanceGeneration: first.generation, kind: "turn", text: "old" });
+    store.claimNextInstanceTurn("i1", first.generation);
+    store.updateInstanceTurn({ turnId: "old", expectedGeneration: first.generation, state: "dispatch-uncertain", eventKind: "turn.dispatch-uncertain" });
+    store.detachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: first.generation, reason: "pane replaced" });
+    const detached = store.getAgentInstance("i1")!;
+    const current = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: detached.generation, herdrWorkspaceId: "w1", paneId: "w1:p2", nativeSessionId: null })!;
+    store.acceptInstanceTurn({ id: "new", idempotencyKey: "new", actor, projectId: "project-a", instanceId: "i1", instanceGeneration: current.generation, kind: "turn", text: "new" });
+
+    expect(store.claimNextInstanceTurn("i1", current.generation)).toMatchObject({ id: "new", state: "claimed" });
+    expect(store.getInstanceTurn("old")).toMatchObject({ state: "dispatch-uncertain", instanceGeneration: first.generation });
+  });
+
+  it("reserves stop only when the current generation has no active or uncertain turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
+    store.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: "i1", instanceGeneration: instance.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn("i1", instance.generation);
+
+    expect(store.reserveAgentInstanceStop("i1", instance.generation)).toEqual({ outcome: "busy" });
+    store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state: "completed", eventKind: "turn.completed" });
+    expect(store.reserveAgentInstanceStop("i1", instance.generation)).toMatchObject({ outcome: "reserved", instance: { desiredState: "stopped", runtimeRef: { paneId: "w1:p1" } } });
+    expect(store.claimNextInstanceTurn("i1", instance.generation)).toBeNull();
+    expect(store.finishAgentInstanceStop("i1", instance.generation)).toMatchObject({ desiredState: "stopped", observedState: "stopped", runtimeRef: null });
+  });
+
   it("projects a legacy binding as a TraeX instance without creating durable work", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Legacy" });

@@ -243,6 +243,30 @@ export class SqliteBindingStore implements BindingStorePort {
     return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
   }
 
+  reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const instance = this.getAgentInstance(instanceId);
+      if (!instance || instance.generation !== expectedGeneration) { this.database.exec("COMMIT"); return { outcome: "stale" }; }
+      const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(instanceId, expectedGeneration);
+      if (active) { this.database.exec("COMMIT"); return { outcome: "busy" }; }
+      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', last_error = NULL, updated_at = ? WHERE id = ? AND generation = ?").run(now(), instanceId, expectedGeneration);
+      const reserved = changed.changes === 1 ? this.getAgentInstance(instanceId) : null;
+      this.database.exec("COMMIT");
+      return reserved ? { outcome: "reserved", instance: reserved } : { outcome: "stale" };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null {
+    const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);
+    return result.changes === 1 ? this.getAgentInstance(instanceId) : null;
+  }
+
+  rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null {
+    const result = this.database.prepare("UPDATE agent_instances SET desired_state = 'running', last_error = ?, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped' AND pane_id IS NOT NULL").run(error, now(), instanceId, expectedGeneration);
+    return result.changes === 1 ? this.getAgentInstance(instanceId) : null;
+  }
+
   detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -341,14 +365,29 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const instance = this.getAgentInstance(instanceId);
-      if (!instance || instance.generation !== expectedGeneration || !instance.runtimeRef || !["idle", "working", "blocked"].includes(instance.observedState)) { this.database.exec("COMMIT"); return null; }
-      const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId);
+      if (!instance || instance.generation !== expectedGeneration || instance.desiredState !== "running" || !instance.runtimeRef || !["idle", "working", "blocked"].includes(instance.observedState)) { this.database.exec("COMMIT"); return null; }
+      const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
       if (active) { this.database.exec("COMMIT"); return null; }
       const row = this.database.prepare("SELECT id FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state = 'queued' ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as { id: string } | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
       this.database.prepare("UPDATE instance_turns SET state = 'claimed', updated_at = ? WHERE id = ? AND state = 'queued'").run(now(), row.id);
       const turn = this.getInstanceTurn(row.id)!; this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.claimed", {});
       this.database.exec("COMMIT"); return turn;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] } {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = this.database.prepare(`SELECT t.id, t.project_id, t.instance_id FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state = 'claimed' ORDER BY t.created_at, t.rowid`).all() as Array<{ id: string; project_id: string; instance_id: string }>;
+      for (const turn of claimed) {
+        this.database.prepare("UPDATE instance_turns SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'claimed'").run(timestamp, turn.id);
+        this.insertInstanceEvent(turn.project_id, turn.instance_id, turn.id, "turn.requeued-after-restart", {});
+      }
+      const rows = this.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>;
+      this.database.exec("COMMIT");
+      return { requeuedTurnIds: claimed.map(({ id }) => id), observableTurns: rows.map((row) => this.mapInstanceTurn(row)!) };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -368,7 +407,12 @@ export class SqliteBindingStore implements BindingStorePort {
   listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] {
     return (this.database.prepare("SELECT * FROM instance_events WHERE instance_id = ? AND id > ? ORDER BY id LIMIT 100").all(instanceId, afterId) as Array<Record<string, unknown>>).map((row) => ({ id: Number(row.id), projectId: String(row.project_id), instanceId: String(row.instance_id), turnId: row.turn_id === null ? null : String(row.turn_id), kind: String(row.kind), payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>, createdAt: String(row.created_at) }));
   }
-  countPendingInstanceTurns(instanceId: string): number { return Number((this.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId) as { count: number }).count); }
+  countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number {
+    const row = expectedGeneration === undefined
+      ? this.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId)
+      : this.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
+    return Number((row as { count: number }).count);
+  }
   acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean } {
     const timestamp = now();
     const instance = this.getAgentInstance(input.instanceId);
