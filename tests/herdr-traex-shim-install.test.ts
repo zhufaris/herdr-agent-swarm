@@ -40,6 +40,13 @@ describe("Herdr TraeX shim installer", () => {
     expect(status.stdout).toContain("herdr: 0.7.5");
   });
 
+  it("rejects Herdr without native Agent session reporting", async () => {
+    const fixture = await createFixture({ missingAgentSession: true });
+    const result = await install(fixture, ["install"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/agent-session-id/);
+  });
+
   it("refuses unsafe PATH order and preserves an unrelated target", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.shimBin, "herdr"), "keep me");
@@ -81,7 +88,7 @@ describe("Herdr TraeX shim installer", () => {
 
 interface Fixture { root: string; home: string; data: string; config: string; state: string; runtime: string; shimBin: string; realBin: string; realHerdr: string; traex: string; source: string; path: string }
 
-async function createFixture(options: { shimAfterReal?: boolean } = {}): Promise<Fixture> {
+async function createFixture(options: { shimAfterReal?: boolean; missingAgentSession?: boolean } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "herdr-traex-install-"));
   roots.push(root);
   const home = join(root, "home");
@@ -97,7 +104,10 @@ async function createFixture(options: { shimAfterReal?: boolean } = {}): Promise
   const traex = join(realBin, "traex");
   await executable(realHerdr, [
     "#!/usr/bin/env bash",
-    "if [[ $1 == --version ]]; then echo 'herdr 0.7.5'; else echo '{\"methods\":[\"pane.report_agent\",\"pane.report_metadata\",\"pane.release_agent\"]}'; fi",
+    "if [[ $1 == --version ]]; then echo 'herdr 0.7.5'",
+    `elif [[ $1 == pane && $2 == report-agent && $3 == --help ]]; then echo '${options.missingAgentSession ? "Usage: report-agent" : "Usage: report-agent --agent-session-id <ID>"}'`,
+    "else echo '{\"methods\":[\"pane.report_agent\",\"pane.report_metadata\",\"pane.release_agent\"]}'",
+    "fi",
     ""
   ].join("\n"));
   await executable(traex, '#!/usr/bin/env bash\necho "traex 0.201.6"\n');

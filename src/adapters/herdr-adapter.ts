@@ -27,7 +27,6 @@ const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
 const PROCESS_INFO_CONCURRENCY = 4;
-const SESSION_REPORTER_PATH = fileURLToPath(new URL("../cli/report-traex-session.js", import.meta.url));
 const LIFECYCLE_REPORTER_PATH = fileURLToPath(new URL("../cli/report-traex-lifecycle.js", import.meta.url));
 
 interface HerdrNativeRequestClient {
@@ -152,7 +151,7 @@ export class HerdrCliAdapter implements HerdrPort {
       const args = [
         "agent", "start", input.name, "--kind", "traex", "--pane", paneId, "--timeout", String(this.commandTimeoutMs), "--",
         "--permission-mode", this.traexPermissionMode, "--dangerously-bypass-hook-trust",
-        "-c", sessionHookArgument(SESSION_REPORTER_PATH),
+        "-c", lifecycleHookArgument("SessionStart", "startup|resume", LIFECYCLE_REPORTER_PATH, this.executable),
         "-c", lifecycleHookArgument("UserPromptSubmit", ".*", LIFECYCLE_REPORTER_PATH, this.executable),
         "-c", lifecycleHookArgument("Stop", null, LIFECYCLE_REPORTER_PATH, this.executable),
         ...(input.args ?? [])
@@ -332,12 +331,7 @@ export class HerdrCliAdapter implements HerdrPort {
   }
 }
 
-function sessionHookArgument(reporterPath: string): string {
-  const command = `node ${shellQuote(reporterPath)}`;
-  return `hooks.SessionStart=[{matcher="startup|resume",hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
-}
-
-function lifecycleHookArgument(event: "UserPromptSubmit" | "Stop", matcher: string | null, reporterPath: string, herdrExecutable: string): string {
+function lifecycleHookArgument(event: "SessionStart" | "UserPromptSubmit" | "Stop", matcher: string | null, reporterPath: string, herdrExecutable: string): string {
   const command = `HERDR_TRAEX_REAL_HERDR=${shellQuote(herdrExecutable)} node ${shellQuote(reporterPath)}`;
   const match = matcher === null ? "" : `matcher=${JSON.stringify(matcher)},`;
   return `hooks.${event}=[{${match}hooks=[{type="command",command=${JSON.stringify(command)},timeout=5}]}]`;
