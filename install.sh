@@ -37,6 +37,7 @@ for command_name in node npm; do
         exit 1
     fi
 done
+node "$ROOT/scripts/check-node-version.mjs"
 
 if [ "$STANDALONE" -eq 1 ]; then
     npm ci

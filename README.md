@@ -72,7 +72,7 @@ substitute for the trust boundary above.
 
 ## Prerequisites
 
-- Linux with Node.js 22.5 or newer. Node.js 24 LTS is recommended.
+- Linux with Node.js 22.12 or newer. Node.js 24 LTS is recommended.
 - npm, supplied with Node.js.
 - A running Herdr workspace.
 - `herdr` and at least one supported agent CLI (`traex`, `codex`, `claude`, or
@@ -90,7 +90,7 @@ traex --version
 ```
 
 If Node.js is missing, install Node.js 24 using your team's package manager or
-Node.js distribution method. Avoid a system Node older than 22.5 because this
+Node.js distribution method. Avoid a system Node older than 22.12 because this
 project uses the built-in `node:sqlite` module.
 
 ## Configure the Lark app

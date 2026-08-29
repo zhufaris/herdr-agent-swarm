@@ -5,6 +5,7 @@ describe("Herdr plugin manifest", () => {
   const manifest = readFileSync("herdr-plugin.toml", "utf8");
   const setupScript = readFileSync("plugin/setup.sh", "utf8");
   const installScript = readFileSync("install.sh", "utf8");
+  const buildScript = readFileSync("plugin/build.sh", "utf8");
 
   it("declares a Linux build without using a startup hook as a service manager", () => {
     expect(manifest).toContain('id = "herdr-lark-bridge"');
@@ -60,5 +61,16 @@ describe("Herdr plugin manifest", () => {
     expect(installScript).toContain("for command_name in node npm; do");
     expect(standaloneBranch).toBeGreaterThan(0);
     expect(herdrCheck).toBeGreaterThan(standaloneBranch);
+  });
+
+  it("enforces the shared Node version contract before either installation path", () => {
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { engines: { node: string } };
+    const versionCheck = 'node "$ROOT/scripts/check-node-version.mjs"';
+
+    expect(packageJson.engines.node).toBe(">=22.12");
+    expect(installScript.indexOf(versionCheck)).toBeGreaterThan(installScript.indexOf("for command_name in node npm; do"));
+    expect(installScript.indexOf(versionCheck)).toBeLessThan(installScript.indexOf('if [ "$STANDALONE" -eq 1 ]'));
+    expect(buildScript).toContain(versionCheck);
+    expect(buildScript).not.toContain("node -e");
   });
 });

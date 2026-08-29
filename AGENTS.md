@@ -72,7 +72,7 @@ Historical designs are not the current behavioral authority.
 
 ## Build and operations
 
-Requirements: Linux, Node.js >= 22.5 (Node 24 LTS recommended), npm, a running
+Requirements: Linux, Node.js >= 22.12 (Node 24 LTS recommended), npm, a running
 Herdr workspace, `herdr`, `traex`, and a Lark bot configured for long
 connections. The Herdr plugin requires Herdr >= 0.7.5.
 
