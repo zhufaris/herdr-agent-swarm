@@ -602,8 +602,8 @@ Run:
 
 ```bash
 npm run build
-npm run solo:restart
-npm run solo:status
+npm run swarm:restart
+npm run swarm:status
 ```
 
 Expected: `herdr-agent-swarm.service` is active, `readiness.status` is `ready`, and expected/observed build IDs and Git commits match. Do not restart the compatibility `herdr-lark-bridge.service`.

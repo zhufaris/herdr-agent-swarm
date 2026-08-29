@@ -126,32 +126,32 @@ files, then install and start the user service:
 ```bash
 npm ci
 npm run build
-npm run solo:init
+npm run swarm:init
 $EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm/.env"
 $EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm/projects.json"
-npm run solo:install
-npm run solo:start
-npm run solo:status
+npm run swarm:install
+npm run swarm:start
+npm run swarm:status
 ```
 
 The defaults are `~/.config/herdr-agent-swarm` for configuration,
 `~/.local/state/herdr-agent-swarm` for SQLite state, and
 `herdr-agent-swarm.service` for the
-user systemd unit. Override them with `SOLO_AGENT_CONFIG_DIR`,
-`SOLO_AGENT_STATE_DIR`, and `BRIDGE_SYSTEMD_SERVICE_NAME`. The installer writes
+user systemd unit. Override them with `SWARM_CONFIG_DIR`,
+`SWARM_STATE_DIR`, and `BRIDGE_SYSTEMD_SERVICE_NAME`. The installer writes
 absolute paths and the expected build identity into the unit; secrets remain in
 the mode-600 environment file.
 
-Useful lifecycle commands are `npm run solo:restart`, `npm run solo:stop`, and
-`npm run solo:logs`. `./install.sh --standalone` combines dependency install,
+Useful lifecycle commands are `npm run swarm:restart`, `npm run swarm:stop`, and
+`npm run swarm:logs`. `./install.sh --standalone` combines dependency install,
 build, validation, and service installation after configuration has been
 initialized. The checked-in service file is an explanatory template; the
 installer renders the production unit.
 
-`npm run solo:restart` refuses to interrupt active TraeX turns and reports the
+`npm run swarm:restart` refuses to interrupt active TraeX turns and reports the
 running and queued prompt counts. Wait for the active work to drain whenever
 possible. For an intentional observer handoff,
-`npm run solo:restart -- --force` preserves the existing detached/no-replay
+`npm run swarm:restart -- --force` preserves the existing detached/no-replay
 recovery behavior. `/status` exposes bounded `operational.promptLatency`
 aggregates for queue, execution, and final Lark delivery time.
 
