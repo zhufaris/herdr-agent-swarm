@@ -139,10 +139,7 @@ const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outb
 const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
 const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound, outboundWork, logger });
 const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), isSteerable: async (turn) => {
-  const observation = await herdr.observeRuntime(turn.paneId);
-  return observation.pane?.agentState === "working" || observation.pane?.agentState === "blocked";
-}, wakeSteering: (bindingId, parentPromptId) => scheduler.wake({ kind: "steering-ready", bindingId, parentPromptId }), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
+const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   wakeOutbound: () => outboundWork.wake(),
@@ -152,10 +149,7 @@ const reconciler = new HerdrRuntimeReconciler({
   worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
 });
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, automaticSteeringTarget: (bindingId) => {
-  const turn = promptRun.activeTurn(bindingId);
-  return turn && (turn.state === "working" || turn.state === "blocked") ? { promptId: turn.promptId, paneId: turn.paneId, state: turn.state } : null;
-}, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
+const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
   ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), async (workspaceIds) => { await Promise.all([coordinator.reconcileHerdrWorkspaces(workspaceIds), instanceRuntime.reconcile()]); }, logger, config.runtimeTuning.herdrEventDebounceMs)

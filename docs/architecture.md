@@ -81,9 +81,9 @@ The production implementation uses the following modules and seams.
 | Module | Responsibility | Seam |
 | --- | --- | --- |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
-| `PromptRunWorkflow` | FIFO turn execution, steering observation, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
+| `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
-| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Model state machine and the single stop/steer/model control queue | One queue owner with a narrow model executor seam |
+| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Model state machine and the stop/model control queue; explicit steering is rejected | One queue owner with a narrow model executor seam |
 | `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
@@ -201,7 +201,7 @@ Lark message or card action            Herdr Socket / plugin event
                               |                    -> authoritative snapshot
                               v
                        PromptRunWorkflow
-                       FIFO turn / steering / observer
+                       FIFO turn / legacy steering rejection / observer
                               |
                               v
                      Herdr port -> TraeX
@@ -225,18 +225,14 @@ change during the target decomposition without changing these steps.
    messages, then durably records the rest before attempting business handling.
 3. A command is handled as a binding or operational workflow. Ordinary text in
    an active bound topic normally becomes a FIFO prompt job. A conservative
-   classifier marks only allowlisted continuations of at most 100 normalized
-   characters, excluding slash commands, code fences, and messages containing
-   unsupported rich content. One SQLite acceptance transaction rechecks the
-   binding generation and selects automatic steering only when there is one
-   attached ordinary parent that is still `working` or `blocked` and has durable
-   activity in the preceding five minutes. Every other message remains FIFO.
+   classifier may describe a message as a short continuation, but steering is
+   currently unsupported, so every ordinary message remains FIFO. One SQLite
+   acceptance transaction rechecks the binding generation and queue limit.
    Exact, case-insensitive `/swarm stop` is a local Herdr
    `Esc` control while the bridge has a supervised active turn (`working` or
    `blocked`): it bypasses queued ordinary prompts and creates no prompt job.
-   Explicit `/swarm steer <text>` is the separate priority steering command; it injects
-   into the same supervised active turn, bypasses queued ordinary prompts, and
-   never falls back to the ordinary FIFO.
+   Explicit `/swarm steer <text>` is rejected before durable control acceptance;
+   it never writes text to the terminal and never falls back to the ordinary FIFO.
    A natural-language root mention first persists a project selection and its
    original text. Only an explicit project callback provisions the binding; the
    original message ID is then reused as the prompt idempotency key, including
@@ -244,16 +240,16 @@ change during the target decomposition without changing these steps.
    Main/Answer Card callbacks carry only binding and prompt identity. The focused
    card-interaction workflow reloads SQLite state, checks binding generation,
    creator or operator scope, expiry, and the captured parent turn before
-   delegating to existing workflows. Supplement input is operator-scoped and
-   single-use. Queued-to-steering conversion is one SQLite transaction; if the
-   captured parent is no longer running, the queued prompt is unchanged.
-   Rejected automatic steering may expose an actor-scoped, idempotent
-   `作为新任务排队` action. Uncertain steering never exposes that action and is
-   never replayed automatically.
+   delegating to existing workflows. Current cards do not advertise supplement
+   or queued-to-steering actions. Callbacks from older cards are rejected without
+   terminal input, and queued prompts keep their FIFO position. Legacy durable
+   steering rows are marked rejected during recovery and are never replayed.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
-   Herdr unchanged through the native Agent prompt command when available; the
-   bridge adds no hidden prompt suffix. If Herdr reports `agent_prompt_stalled`,
-   dispatch is treated as uncertain and is never replayed automatically.
+   Herdr unchanged through `herdr agent prompt`; the bridge adds no hidden prompt
+   suffix and has no raw Pane-input fallback. Structured `agent_not_found`,
+   `agent_not_ready`, and `agent_blocked` errors are confirmed non-delivery. A
+   successful command, `agent_prompt_stalled`, or an unclassified failure after
+   the command process starts is potentially delivered and is never replayed.
 5. Herdr runs or observes TraeX. Structured state is preferred; terminal and
    process evidence provide bounded fallbacks where Herdr reports `unknown`.
 6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
@@ -296,9 +292,11 @@ an event connection after `events.subscribe` and closes an RPC connection after
 one response. Read-only snapshot, Agent
 read, process-info, and bounded output-wait operations prefer Socket RPC and
 fall back to the CLI when the connection or method is unavailable. TraeX startup
-continues to use the configured executable through `pane run`; the bridge never
-substitutes the separate Codex executable. Prompt submission remains on the
-existing CLI path so its uncertain-dispatch/no-replay boundary stays unchanged.
+uses the configured executable through `pane run`; the bridge then requires Herdr
+to detect that process as a ready Codex-compatible Agent. The bridge never
+substitutes the separate Codex executable. Ordinary prompt submission uses the
+Agent CLI surface exclusively so its uncertain-dispatch/no-replay boundary is
+explicit.
 Active Herdr calls pass through a global transport circuit breaker inside the
 snapshot cache. Three consecutive transport failures open it for 15 seconds;
 after the cooldown one read-only call is admitted as a half-open probe. Commands,
@@ -417,9 +415,9 @@ content exists, completion uses the fixed safe notice
 `⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
 A transcript failure does not fail or replay the prompt.
 
-Terminal observations remain a control-plane source for prompt submission,
-composer readiness, agent-state inference, completion detection, and bounded
-model/context telemetry. Terminal text never becomes Answer content, either live
+Terminal observations remain a bounded control-plane source for agent-state
+inference, completion detection, and explicit model-command interaction. They are
+not used to submit ordinary prompts or steering. Terminal text never becomes Answer content, either live
 or during detached restart recovery. Because persisted RunCard text does not carry
 durable source provenance, detached recovery replaces it with the fixed safe
 notice instead of trusting content from a previous process.
@@ -577,10 +575,9 @@ and credentials.
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
 - `/swarm stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
-  `/swarm steer <text>` is TraeX steering. Both work while the bridge has a supervised
-  active turn (`working` or `blocked`); while `blocked`, `/swarm steer` sends text to
-  TraeX steering, not to the approval interface. Neither command can approve,
-  reject, or bypass a high-risk approval.
+  `/swarm steer <text>` and card-based immediate supplements are unsupported and
+  rejected without terminal input. Neither path can approve, reject, or bypass a
+  high-risk approval.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and
   terminal identity before changing a binding.

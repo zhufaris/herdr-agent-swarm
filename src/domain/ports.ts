@@ -116,12 +116,10 @@ export interface HerdrPort {
     signal?: AbortSignal,
     onDispatched?: () => void | Promise<void>
   ): Promise<AgentState>;
-  runManagedPrompt?(paneId: string, text: string, timeoutMs: number, onDispatched?: () => void | Promise<void>): Promise<AgentState>;
   runPaneCommand?(paneId: string, command: string, timeoutMs: number): Promise<string>;
   beginPaneModelSelection?(paneId: string, model: string, timeoutMs: number): Promise<{ kind: "mode_required"; modes: string[] } | { kind: "composer_ready" }>;
   completePaneModelMode?(paneId: string, mode: string, timeoutMs: number): Promise<void>;
   sendEscape?(paneId: string): Promise<void>;
-  steerPrompt?(paneId: string, text: string): Promise<"injected" | "not_working">;
   readOutput(paneId: string, lines: number): Promise<string>;
   renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;
   closePane(paneId: string): Promise<void>;

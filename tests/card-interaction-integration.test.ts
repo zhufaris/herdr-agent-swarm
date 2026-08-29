@@ -3,7 +3,7 @@ import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-wor
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
-function harness(options: { steerable?: boolean } = {}) {
+function harness() {
   const store = new SqliteBindingStore(":memory:");
   const binding = store.createPendingBinding({ id: "b1", creatorOpenId: "creator", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
   store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
@@ -11,57 +11,41 @@ function harness(options: { steerable?: boolean } = {}) {
   store.updatePrompt("parent", "running");
   let active: { promptId: string; paneId: string } | null = { promptId: "parent", paneId: "w1:p1" };
   const steer = vi.fn(async () => true);
-  const wakeSteering = vi.fn();
   const wakePrompt = vi.fn();
   const logger = { info: vi.fn(), warn: vi.fn() };
-  const workflow = new CardInteractionWorkflow({ store, paneControl: { steer, stop: vi.fn(async () => true) }, sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) }, provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) }, activeTurn: () => active, isSteerable: vi.fn(async () => options.steerable ?? true), wakeSteering, wakePrompt, logger });
-  return { store, binding: store.getBinding("b1")!, workflow, steer, wakeSteering, wakePrompt, logger, end: () => { active = null; } };
+  const workflow = new CardInteractionWorkflow({ store, paneControl: { steer, stop: vi.fn(async () => true) }, sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) }, provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) }, activeTurn: () => active, wakePrompt, logger });
+  return { store, binding: store.getBinding("b1")!, workflow, steer, wakePrompt, logger, end: () => { active = null; } };
 }
 
 describe("card interactions", () => {
-  it("opens an operator-scoped supplement form and submits only to the captured turn", async () => {
+  it("rejects legacy supplement actions without touching the terminal", async () => {
     const h = harness();
     const opened = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "member", value: { action: "open_supplement", bindingId: "b1" } });
-    expect(JSON.stringify(opened?.card)).toContain("supplement_text");
-    const interactionId = findValue(opened!.card!, "submit_supplement").interactionId as string;
-    const wrong = await h.workflow.handle({ messageId: "form", chatId: "chat", operatorOpenId: "other", value: { action: "submit_supplement", interactionId, bindingId: "b1", bindingGeneration: 1 }, formValues: { supplement_text: "more" } });
-    expect(wrong?.toast?.type).toBe("error"); expect(h.steer).not.toHaveBeenCalled();
-    const sent = await h.workflow.handle({ messageId: "form", chatId: "chat", operatorOpenId: "member", value: { action: "submit_supplement", interactionId, bindingId: "b1", bindingGeneration: 1 }, formValues: { supplement_text: "more" } });
-    expect(sent?.toast?.type).toBe("success"); expect(h.steer).toHaveBeenCalledWith(expect.anything(), expect.anything(), "more", "parent");
-    const duplicate = await h.workflow.handle({ messageId: "form", chatId: "chat", operatorOpenId: "member", value: { action: "submit_supplement", interactionId, bindingId: "b1", bindingGeneration: 1 }, formValues: { supplement_text: "more" } });
-    expect(duplicate?.toast?.content).toContain("已处理"); expect(h.steer).toHaveBeenCalledTimes(1);
+    expect(opened?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；请将内容作为普通消息发送。" });
+    expect(h.steer).not.toHaveBeenCalled();
     h.store.close();
   });
 
-  it("does not send a supplement after the captured parent turn ends", async () => {
-    const h = harness();
-    const opened = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "member", value: { action: "open_supplement", bindingId: "b1" } });
-    const interactionId = findValue(opened!.card!, "submit_supplement").interactionId as string; h.end();
-    const result = await h.workflow.handle({ messageId: "form", chatId: "chat", operatorOpenId: "member", value: { action: "submit_supplement", interactionId, bindingId: "b1", bindingGeneration: 1 }, formValues: { supplement_text: "late" } });
-    expect(result?.toast).toEqual({ type: "warning", content: "任务刚刚结束，补充内容未发送。" });
-    expect(h.steer).not.toHaveBeenCalled(); h.store.close();
-  });
-
-  it("atomically converts a queued prompt and preserves it when the parent has ended", async () => {
+  it("keeps a queued prompt in FIFO when immediate supplement is unsupported", async () => {
     const h = harness();
     h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
     const value = { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" };
     const converted = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value });
-    expect(converted?.toast?.type).toBe("success"); expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "steering", parentPromptId: "parent" }); expect(h.wakeSteering).toHaveBeenCalledWith("b1", "parent");
+    expect(converted?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；原消息仍按原顺序排队。" });
+    expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "turn", parentPromptId: null });
     h.store.enqueuePrompt({ id: "queued-2", bindingId: "b1", larkMessageId: "queued-message-2", actorOpenId: "member", body: "later" }); h.end();
     const stale = await h.workflow.handle({ messageId: "answer-2", chatId: "chat", operatorOpenId: "member", value: { ...value, targetPromptId: "queued-2" } });
     expect(stale?.toast?.type).toBe("warning"); expect(h.store.getPrompt("queued-2")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" }); h.store.close();
   });
 
-  it("keeps a queued prompt in FIFO when live TraeX is no longer steerable", async () => {
-    const h = harness({ steerable: false });
+  it("keeps a queued prompt in FIFO without probing TraeX", async () => {
+    const h = harness();
     h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
 
     const result = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" } });
 
-    expect(result?.toast).toEqual({ type: "warning", content: "TraeX 已结束当前执行，原消息仍按原顺序排队。" });
+    expect(result?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；原消息仍按原顺序排队。" });
     expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" });
-    expect(h.wakeSteering).not.toHaveBeenCalled();
     h.store.close();
   });
 
@@ -76,12 +60,12 @@ describe("card interactions", () => {
       store: h.store, paneControl: { steer: h.steer, stop: vi.fn(async () => true) },
       sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) },
       provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) },
-      activeTurn: () => ({ promptId: "new-parent", paneId: "w1:p1" }), isSteerable: vi.fn(async () => true), wakeSteering: h.wakeSteering, wakePrompt: h.wakePrompt, logger: h.logger
+      activeTurn: () => ({ promptId: "new-parent", paneId: "w1:p1" }), wakePrompt: h.wakePrompt, logger: h.logger
     });
     const result = await workflow.handle({ messageId: "old-answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued-old" } });
     expect(result?.toast?.type).toBe("warning");
     expect(h.store.getPrompt("queued-old")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" });
-    expect(h.wakeSteering).not.toHaveBeenCalled(); h.store.close();
+    h.store.close();
   });
 
   it("shows management controls only to the creator and rejects forged callbacks", async () => {

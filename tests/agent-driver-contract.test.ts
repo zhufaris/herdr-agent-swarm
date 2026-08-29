@@ -22,7 +22,7 @@ describe("agent driver contract", () => {
   it("launches TraeX and declares its verified capabilities", async () => {
     const startTraex = vi.fn(async () => undefined);
     const driver = new TraexDriver({ startTraex } as unknown as HerdrPort, "/bin/traex", 1_000);
-    expect(driver.describe()).toMatchObject({ available: true, primaryTools: true, steering: "terminal-input", approvals: "terminal" });
+    expect(driver.describe()).toMatchObject({ available: true, primaryTools: true, steering: "unsupported", approvals: "terminal" });
     await driver.start(runtime);
     expect(startTraex).toHaveBeenCalledWith("w1:p1", "/bin/traex");
   });
@@ -50,14 +50,20 @@ describe("agent driver contract", () => {
     await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "delivery-uncertain", reason: "observer disconnected" });
   });
 
-  it("prefers Herdr's atomic managed prompt surface for instance turns", async () => {
-    const runPrompt = vi.fn();
-    const runManagedPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, onDispatched: () => void) => { onDispatched(); return "done" as const; });
-    const driver = new TraexDriver({ runPrompt, runManagedPrompt } as unknown as HerdrPort, "traex", 1_000);
+  it("submits TraeX instance turns through Herdr's Agent prompt surface", async () => {
+    const runPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, _observation: unknown, _signal: unknown, onDispatched: () => void) => { onDispatched(); return "done" as const; });
+    const driver = new TraexDriver({ runPrompt } as unknown as HerdrPort, "traex", 1_000);
 
     await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "confirmed-delivered" });
-    expect(runManagedPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, expect.any(Function));
-    expect(runPrompt).not.toHaveBeenCalled();
+    expect(runPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, undefined, undefined, expect.any(Function));
+  });
+
+  it("reports TraeX steering as unsupported without touching Herdr", async () => {
+    const steerPrompt = vi.fn();
+    const driver = new TraexDriver({ steerPrompt } as unknown as HerdrPort, "traex", 1_000);
+
+    await expect(driver.steer(runtime, "change course")).resolves.toEqual({ status: "unsupported" });
+    expect(steerPrompt).not.toHaveBeenCalled();
   });
 
   it("reports a confirmed non-delivery when submission fails before dispatch", async () => {
@@ -68,8 +74,8 @@ describe("agent driver contract", () => {
   });
 
   it.each([
-    ["codex", CodexDriver, "codex", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
-    ["claude-code", ClaudeCodeDriver, "claude", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: false, steering: "terminal-input", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
+    ["codex", CodexDriver, "codex", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
+    ["claude-code", ClaudeCodeDriver, "claude", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: false, steering: "unsupported", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
     ["pi", PiDriver, "pi", [], { structuredEvents: false, nativeResume: false, primaryTools: false, steering: "unsupported", approvals: "terminal", modelSelection: "unsupported", usageReporting: false }]
   ] as const)("starts the %s driver through Herdr with exact capabilities", async (_label, Driver, herdrKind, expectedArgs, capabilities) => {
     const startAgent = vi.fn(async () => undefined);

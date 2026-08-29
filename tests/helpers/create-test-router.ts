@@ -48,10 +48,7 @@ export function createTestRouter(
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-  const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), isSteerable: async (turn) => {
-    const observation = await herdr.observeRuntime(turn.paneId);
-    return observation.pane?.agentState === "working" || observation.pane?.agentState === "blocked";
-  }, wakeSteering: (bindingId, parentPromptId) => scheduler.wake({ kind: "steering-ready", bindingId, parentPromptId }), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
+  const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
@@ -59,9 +56,6 @@ export function createTestRouter(
   });
   return new InboundRouter({
     config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, automaticSteeringTarget: (bindingId) => {
-      const turn = promptRun.activeTurn(bindingId);
-      return turn && (turn.state === "working" || turn.state === "blocked") ? { promptId: turn.promptId, paneId: turn.paneId, state: turn.state } : null;
-    }, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
+    promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
   });
 }

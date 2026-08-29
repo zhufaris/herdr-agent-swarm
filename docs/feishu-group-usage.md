@@ -24,7 +24,7 @@ Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目和多个 Agen
 ```text
 /instance reviewer
 /to reviewer 检查当前改动并给出建议
-/steer reviewer 只关注并发安全
+/steer reviewer 只关注并发安全  # 当前返回 unsupported
 /interrupt reviewer
 ```
 
@@ -60,12 +60,9 @@ Bridge 仍会先要求你明确选择项目；选择成功后，这条原始消�
 
 ## 更自然的卡片操作
 
-项目主卡会根据当前状态显示精简操作。任务执行中，任意群成员都可点击“立即补充”，
-在仅对当前操作者有效的输入卡中补充要求。提交时 Bridge 会重新校验原 turn；如果原
-turn 已结束，内容不会发送，也不会转投新的 turn。
-
-普通话题回复始终按 FIFO 排队。执行中排队的 Answer 卡会提供“改为立即补充”；转换
-成功后只绑定当时捕获的活动 turn。若该 turn 已结束，原 prompt 保持原队列位置和内容。
+项目主卡会根据当前状态显示精简操作。当前版本不提供“立即补充”或“改为立即补充”
+入口；任务执行期间发送的普通回复仍按 FIFO 排队。旧卡片上的相关回调会被拒绝，
+不会向 terminal 写入文本，已排队的 prompt 也会保持原位置和内容。
 
 “更多操作”按实时状态生成。所有成员可刷新状态；停止、重置、重命名、归档、恢复、
 替换和 Pane 关闭等管理操作仅会话创建者可用，服务端也会再次校验身份与 generation，
@@ -111,9 +108,8 @@ prompt，也不依赖 Herdr 是否识别出 named agent。
 
 ### `/swarm steer <文本>`
 
-将文本作为当前活动 TraeX turn 的 steering 立即注入，绕过普通 FIFO。只要有受
-bridge 监督的活动 turn（`working` 或 `blocked`）即可注入；`blocked` 时文本会进入
-TraeX 的 steering 输入，而不是审批界面。没有活动 turn 时会拒绝，不会降级为普通任务。
+当前不支持。Bridge 会返回拒绝卡，不创建控制操作、不写入 terminal，也不会把文本
+自动降级为普通任务。需要继续工作时，请把内容作为普通消息发送，它会进入 FIFO。
 
 ### `/swarm new [说明]`
 
@@ -256,31 +252,22 @@ Pane。请先检查对应 Space；已有 Pane 时发送
 
 ## 在话题中发送普通消息
 
-已绑定话题中的普通回复默认进入 FIFO，按顺序作为下一个 turn 执行。只有少量明确、简短的
-延续语句可能自动加入最近五分钟内仍受 Bridge 监督的活动 turn，例如 `继续`、`继续处理`、
-`按这个做`、`可以`、`确认`，以及以 `补充：`、`另外注意：`、`再看下`、`顺便检查`
-开头且不超过 100 个字符的纯文本。成功时 Answer 卡会显示“已自动加入当前执行”。
-
-Slash 命令、代码块、图片或附件、超过 100 个字符的内容，以及不在上述白名单中的模糊消息
-仍进入 FIFO。要无歧义地插入当前 turn，请显式使用 `/swarm steer <文本>`：
+已绑定话题中的普通回复全部进入 FIFO，按顺序作为下一个 turn 执行。Bridge 不会根据
+`继续`、`可以` 等短语自动向正在运行的 turn 注入文本。
 
 | TraeX 状态 | 普通消息的 Bridge 行为 |
 | --- | --- |
-| `working` 或 `blocked` | 明确的短延续语句可能自动加入当前 turn；其他消息进入 FIFO。需要明确立即插入可点“立即补充”或用 `/swarm steer` |
+| `working` 或 `blocked` | 加入 FIFO，等待当前 turn 结束后执行 |
 | `idle` 或 `done` | 加入 FIFO，作为下一个 turn 执行 |
-| `unknown` | 保守地进入 FIFO，不尝试 steering |
+| `unknown` | 加入 FIFO，不尝试 steering |
 
-每条消息都有独立状态卡。`/swarm steer` 卡显示“已加入当前执行”，当前 turn 的最终
-回答仍只显示在主任务卡中。重复的飞书事件不会导致同一条消息重复注入。
+每条普通消息都有独立状态卡。重复的飞书事件不会导致同一条消息重复排队。
 排队卡会立即显示准确的 FIFO 前方条数；当前任务的运行时间按 30 秒档更新。有至少三个
 有效历史 turn 样本时，卡片还显示基于最近最多十个样本中位数计算的粗略等待区间。该区间
 用于解释队列进展，不是截止时间或倒计时。
 
-如果自动延续在发送到 TraeX 前被明确拒绝，卡片会提供“作为新任务排队”，由用户确认后
-幂等地转为普通 FIFO 任务。如果发送结果不确定，Bridge 不显示该按钮，也不会自动重放，
-以免同一段内容被 TraeX 执行两次。
-`/swarm stop` 与 `/swarm steer` 是显式的优先级命令：只要有受 bridge 监督的活动 turn
-（`working` 或 `blocked`）即可生效，越过普通 FIFO，但不改变已排队的普通消息。
+旧版本留下的 steering 记录在恢复时会标记为 rejected，不会自动重放。`/swarm stop`
+仍是显式优先级命令；`/swarm steer` 当前始终拒绝。
 
 ## 权限与审批
 
@@ -299,8 +286,7 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
 - 通过 `/swarm stop` 强制终止 TraeX 进程或 Herdr pane。
 
-`blocked` 时的 `/swarm steer` 会把文本作为 steering 送入 TraeX，而不是替你点击审批
-按钮；是否放行高风险操作仍由 Herdr 终端决定。
+`blocked` 时 `/swarm steer` 同样不会发送文本；是否放行高风险操作仍由 Herdr 终端决定。
 
 ## 从飞书关闭 Pane
 
@@ -321,9 +307,9 @@ Herdr 明确报告为 `idle` 或 `done` 的 Pane；`working`、`blocked` 和 `un
 
 ### 消息没有立即执行
 
-先发送 `/swarm status`。除上述白名单短延续语句外，普通消息进入 FIFO；排队卡上的
-前方条数是准确顺序，等待区间只是基于历史样本的粗略估算。要明确立即插入当前 turn，
-请用 `/swarm steer <文本>`；如果 TraeX 是 `blocked`，也可以到 Herdr 处理审批。
+先发送 `/swarm status`。普通消息进入 FIFO；排队卡上的前方条数是准确顺序，等待区间
+只是基于历史样本的粗略估算。当前不支持远程 steering；如果 TraeX 是 `blocked`，
+请到 Herdr 处理审批。
 
 ### `/swarm close` 后 pane 还在
 

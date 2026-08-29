@@ -82,10 +82,6 @@ export class HerdrCircuitBreaker implements HerdrPort {
     if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");
     await this.call("command", () => this.delegate.sendEscape!(paneId));
   }
-  async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
-    if (!this.delegate.steerPrompt) return "not_working";
-    return this.call("command", () => this.delegate.steerPrompt!(paneId, text));
-  }
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> { await this.call("command", () => this.delegate.renamePane(paneId, title, options)); }
   async closePane(paneId: string): Promise<void> { await this.call("command", () => this.delegate.closePane(paneId)); }
 

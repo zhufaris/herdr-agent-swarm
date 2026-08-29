@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
-import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard, renderSupplementInputCard } from "../cards/interaction-card.js";
+import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard } from "../cards/interaction-card.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { BindingStorePort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/types.js";
@@ -19,8 +19,6 @@ interface Options {
   paneClosure: Pick<PaneClosureWorkflowPort, "requestPaneClose">;
   modelSelection: Pick<ModelSelectionWorkflowPort, "runModel">;
   activeTurn(bindingId: string): { promptId: string; paneId: string } | null;
-  isSteerable(turn: { promptId: string; paneId: string }): Promise<boolean>;
-  wakeSteering(bindingId: string, parentPromptId: string): void;
   wakePrompt(bindingId: string): void;
   logger: Pick<Logger, "info" | "warn">;
 }
@@ -49,17 +47,8 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
   }
 
   private openSupplement(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
-    const bindingId = stringValue(value.bindingId); let generation = numberValue(value.bindingGeneration);
-    const binding = bindingId ? this.options.store.getBinding(bindingId) : null;
-    generation ??= binding?.generation ?? null;
-    const active = binding ? this.options.activeTurn(binding.id) : null;
-    if (!binding || generation === null || binding.generation !== generation || !active || binding.lifecycle !== "active") return interactionToast("warning", "当前任务已结束或状态已变化，请刷新后重试。");
-    const interaction = this.options.store.createCardInteraction({
-      id: randomUUID(), bindingId: binding.id, bindingGeneration: binding.generation, actorOpenId: action.operatorOpenId,
-      actionKind: "supplement", parentPromptId: active.promptId, targetPromptId: null,
-      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
-    });
-    return { toast: { type: "success", content: "请输入补充内容" }, card: renderSupplementInputCard({ interactionId: interaction.id, bindingId: binding.id, bindingGeneration: binding.generation }) };
+    void action; void value;
+    return interactionToast("warning", "当前 Agent 不支持立即补充；请将内容作为普通消息发送。");
   }
 
   private async submitSupplement(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
@@ -73,11 +62,8 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (interaction.actorOpenId !== action.operatorOpenId) return interactionToast("error", "这张输入卡仅限打开它的人使用。");
     if (interaction.state === "consumed") return interactionToast("success", "这条补充已处理。");
     if (interaction.expiresAt <= new Date().toISOString() || !active || active.promptId !== interaction.parentPromptId) return interactionToast("warning", "任务刚刚结束，补充内容未发送。");
-    const message: IncomingLarkMessage = { eventId: `card:${interactionId}`, messageId: `card:${interactionId}`, chatId: action.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: action.operatorOpenId, text, mentionsBot: true, isRootMessage: false };
-    const accepted = await this.options.paneControl.steer(message, binding, text, interaction.parentPromptId ?? undefined);
-    if (!accepted) return interactionToast("warning", "原任务已经结束，补充内容未发送。");
-    const consumed = this.options.store.consumeCardInteraction({ id: interactionId, actorOpenId: action.operatorOpenId, bindingId, bindingGeneration: generation, now: new Date().toISOString(), resultCode: "accepted" });
-    return consumed.outcome === "consumed" || consumed.outcome === "duplicate" ? interactionToast("success", "已补充到当前任务。") : interactionToast("warning", "补充入口已失效，请检查当前任务状态。");
+    void text;
+    return interactionToast("warning", "当前 Agent 不支持立即补充；内容未发送。请作为普通消息进入 FIFO 队列。");
   }
 
   private async convertQueuedPrompt(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
@@ -93,17 +79,8 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     }
     generation ??= interaction?.bindingGeneration ?? null;
     if (!interactionId || !bindingId || generation === null || !interaction?.parentPromptId || !interaction.targetPromptId) return interactionToast("warning", "转换入口已失效，原消息仍在队列中。");
-    const active = this.options.activeTurn(bindingId);
-    if (!active || active.promptId !== interaction.parentPromptId) return interactionToast("warning", "当前任务已结束，原消息仍按原顺序排队。");
-    try {
-      if (!await this.options.isSteerable(active)) return interactionToast("warning", "TraeX 已结束当前执行，原消息仍按原顺序排队。");
-    } catch {
-      return interactionToast("warning", "暂时无法确认 TraeX 状态，原消息仍按原顺序排队。");
-    }
-    const result = this.options.store.convertQueuedPromptToSteering({ interactionId, actorOpenId: action.operatorOpenId, bindingId, bindingGeneration: generation, parentPromptId: interaction.parentPromptId, targetPromptId: interaction.targetPromptId, now: new Date().toISOString() });
-    if (result.outcome === "converted") { this.options.wakeSteering(bindingId, interaction.parentPromptId); return interactionToast("success", "已改为立即补充。"); }
-    if (result.outcome === "duplicate") return interactionToast("success", "这条消息已转换。");
-    return interactionToast(result.outcome === "unauthorized" ? "error" : "warning", result.outcome === "unauthorized" ? "这项操作不属于当前操作者。" : "当前任务已结束，原消息仍按原顺序排队。");
+    void action;
+    return interactionToast("warning", "当前 Agent 不支持立即补充；原消息仍按原顺序排队。");
   }
 
   private enqueueFailedSteering(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {

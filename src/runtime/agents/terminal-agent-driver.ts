@@ -22,10 +22,7 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
     if (!this.available) return { status: "not-delivered", reason: `Agent adapter is unavailable: ${this.kind}` };
     let dispatched = false;
     try {
-      const run = this.herdr.runManagedPrompt
-        ? this.herdr.runManagedPrompt(runtime.paneId, text, this.turnTimeoutMs, () => { dispatched = true; onDispatched?.(); })
-        : this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; onDispatched?.(); });
-      await run;
+      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; onDispatched?.(); });
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;
@@ -33,10 +30,8 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
     }
   }
 
-  async steer(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt> {
-    if (this.describe().steering === "unsupported" || !this.herdr.steerPrompt) return { status: "unsupported" };
-    try { return await this.herdr.steerPrompt(runtime.paneId, text) === "injected" ? { status: "delivered" } : { status: "not-active" }; }
-    catch (error) { return { status: "failed", reason: safeLogError(error).message }; }
+  async steer(_runtime: AgentRuntimeRef, _text: string): Promise<SteerReceipt> {
+    return { status: "unsupported" };
   }
 
   async interrupt(runtime: AgentRuntimeRef): Promise<InterruptReceipt> {

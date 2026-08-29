@@ -15,7 +15,7 @@ export class TraexDriver implements AgentRuntimeDriver {
   describe(): AgentCapabilities {
     return {
       available: true, structuredEvents: true, nativeResume: true, primaryTools: true,
-      steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal",
+      steering: "unsupported", interrupt: "terminal-signal", approvals: "terminal",
       modelSelection: "runtime", usageReporting: true
     };
   }
@@ -29,10 +29,7 @@ export class TraexDriver implements AgentRuntimeDriver {
   async submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt> {
     let dispatched = false;
     try {
-      const run = this.herdr.runManagedPrompt
-        ? this.herdr.runManagedPrompt(runtime.paneId, text, this.turnTimeoutMs, () => { dispatched = true; onDispatched?.(); })
-        : this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; onDispatched?.(); });
-      await run;
+      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; onDispatched?.(); });
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;
@@ -40,10 +37,8 @@ export class TraexDriver implements AgentRuntimeDriver {
     }
   }
 
-  async steer(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt> {
-    if (!this.herdr.steerPrompt) return { status: "unsupported" };
-    try { return await this.herdr.steerPrompt(runtime.paneId, text) === "injected" ? { status: "delivered" } : { status: "not-active" }; }
-    catch (error) { return { status: "failed", reason: safeLogError(error).message }; }
+  async steer(_runtime: AgentRuntimeRef, _text: string): Promise<SteerReceipt> {
+    return { status: "unsupported" };
   }
 
   async interrupt(runtime: AgentRuntimeRef): Promise<InterruptReceipt> {

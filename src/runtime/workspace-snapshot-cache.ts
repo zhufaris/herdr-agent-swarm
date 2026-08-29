@@ -153,10 +153,11 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (!this.delegate.completePaneModelMode) throw new Error("Herdr adapter does not support model mode selection");
     await this.delegate.completePaneModelMode(paneId, mode, timeoutMs);
   }
-
-  async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
-    return this.delegate.steerPrompt ? this.delegate.steerPrompt(paneId, text) : "not_working";
+  async sendEscape(paneId: string): Promise<void> {
+    if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");
+    await this.delegate.sendEscape(paneId);
   }
+
   async readOutput(paneId: string, lines: number): Promise<string> { return this.delegate.readOutput(paneId, lines); }
   async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {
     const workspaceId = this.paneWorkspaceIds.get(paneId);

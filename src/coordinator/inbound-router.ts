@@ -50,7 +50,6 @@ export interface InboundRouterOptions {
   scheduler: PromptWorkScheduler;
   inboundWork: InboundWorkNotifier;
   promptRun: PromptRunWorkflowPort;
-  automaticSteeringTarget(bindingId: string): { promptId: string; paneId: string; state: "working" | "blocked" } | null;
   provisioning: BindingProvisioningWorkflowPort;
   cardInteractions: CardInteractionWorkflowPort;
   modelSelection: ModelSelectionWorkflowPort;
@@ -268,7 +267,7 @@ export class InboundRouter implements InboundRouterPort {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const classification = classifyContinuation({ text: body, hasUnsupportedContent: message.hasUnsupportedContent ?? false });
     if (!classification.eligible && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
-    const candidate = classification.eligible ? this.options.automaticSteeringTarget(binding.id) : null;
+    const candidate = null;
     const promptId = randomUUID();
     const acceptedAt = new Date().toISOString();
     const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
@@ -277,7 +276,7 @@ export class InboundRouter implements InboundRouterPort {
       prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body },
       ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }),
       steeringView: createQueuedRunCard({ ...common, conversionParentPromptId: null, queuePosition: 0 }),
-      rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: candidate?.promptId ?? null,
+      rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: null,
       activeAfter: new Date(Date.parse(acceptedAt) - 5 * 60_000).toISOString(), acceptedAt, answerCardFor: renderRequestAnswerCard
     });
     this.options.logger.info({ event: "auto-steering-classified", bindingId: binding.id, messageId: message.messageId, outcome: result.decision, reason: classification.eligible ? result.fallbackReason : classification.reason }, "classified continuation message");
@@ -287,18 +286,10 @@ export class InboundRouter implements InboundRouterPort {
     }
     if (!result.inserted) return true;
     this.options.outboundWork.wake();
-    const automatic = result.decision === "automatic_steering";
-    const parentPromptId = automatic ? result.prompt.parentPromptId! : null;
-    const depth = automatic ? 0 : this.options.store.countPendingPrompts(binding.id);
-    this.options.scheduler.wake(automatic
-      ? { kind: "steering-ready", bindingId: binding.id, parentPromptId: parentPromptId! }
-      : { kind: "prompt-ready", bindingId: binding.id });
-    if (automatic) this.options.logger.info({ event: "auto-steering-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: result.prompt.id, parentPromptId, reason: result.fallbackReason, outcome: result.decision }, "accepted automatic steering");
-    else if (candidate) this.options.logger.info({ event: "auto-steering-fell-back-before-dispatch", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: result.prompt.id, parentPromptId, reason: result.fallbackReason, outcome: result.decision }, "fell back to ordinary prompt before dispatch");
-    await this.publish(binding.id, automatic ? "SteeringQueued" : "PromptQueued", "lark", automatic
-      ? { promptId: result.prompt.id, parentPromptId: parentPromptId!, actorOpenId: message.actorOpenId }
-      : { promptId: result.prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
-    this.options.store.audit({ actorOpenId: message.actorOpenId, action: automatic ? "prompt.auto_steer" : "prompt.queue", target: binding.id, outcome: "success" });
+    const depth = this.options.store.countPendingPrompts(binding.id);
+    this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+    await this.publish(binding.id, "PromptQueued", "lark", { promptId: result.prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId });
+    this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.queue", target: binding.id, outcome: "success" });
     return true;
   }
 

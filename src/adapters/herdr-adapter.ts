@@ -200,32 +200,23 @@ export class HerdrCliAdapter implements HerdrPort {
   ): Promise<AgentState> {
     throwIfAborted(signal);
     const before = await this.readOutput(paneId, 240);
-    let promptConfirmedInComposer = false;
-    try {
-      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs);
+    let commandStarted = false;
+    let dispatchReported = false;
+    const reportDispatched = async (): Promise<void> => {
+      if (dispatchReported) return;
+      dispatchReported = true;
       await onDispatched?.();
+    };
+    try {
+      await this.runner.run(this.executable, ["agent", "prompt", paneId, text], this.commandTimeoutMs, () => { commandStarted = true; });
+      await reportDispatched();
     } catch (error) {
-      if (isPossiblyDispatchedAgentPromptError(error)) await onDispatched?.();
-      if (!isUnsupportedAgentPromptError(error)) throw error;
-      await this.submitPromptText(paneId, text, before, signal, onDispatched);
-      promptConfirmedInComposer = true;
+      if (!isExplicitPreDispatchAgentPromptError(error) && (commandStarted || isPossiblyDispatchedAgentPromptError(error))) {
+        await reportDispatched();
+      }
+      throw error;
     }
-    return this.waitForTraexTurn(paneId, text, before, timeoutMs, onObservation, signal, promptConfirmedInComposer);
-  }
-
-  async runManagedPrompt(paneId: string, text: string, timeoutMs: number, onDispatched?: () => void | Promise<void>): Promise<AgentState> {
-    const before = await this.readOutput(paneId, 240);
-    const baselineStateChangeSeq = (await this.getPane(paneId))?.stateChangeSeq;
-    await this.submitPromptText(paneId, text, before, undefined, onDispatched);
-    return this.waitForTraexTurn(paneId, text, before, timeoutMs, undefined, undefined, true, baselineStateChangeSeq);
-  }
-
-  async steerPrompt(paneId: string, text: string): Promise<"injected" | "not_working"> {
-    const runtime = await this.observeRuntime(paneId);
-    if (!runtime.pane || (runtime.pane.agentState !== "working" && runtime.pane.agentState !== "blocked")) return "not_working";
-    const before = await this.readOutput(paneId, 240);
-    await this.submitPromptText(paneId, text, before);
-    return "injected";
+    return this.waitForTraexTurn(paneId, text, before, timeoutMs, onObservation, signal, false);
   }
 
   async sendEscape(paneId: string): Promise<void> {
@@ -655,12 +646,25 @@ function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
   return null;
 }
 
-function isUnsupportedAgentPromptError(error: unknown): boolean {
-  return /"code"\s*:\s*"agent_(?:not_ready|not_found)"/.test(error instanceof Error ? error.message : String(error));
+function isExplicitPreDispatchAgentPromptError(error: unknown): boolean {
+  const code = structuredHerdrErrorCode(error);
+  return code === "agent_not_found" || code === "agent_not_ready" || code === "agent_blocked";
 }
 
 function isPossiblyDispatchedAgentPromptError(error: unknown): boolean {
-  return /"code"\s*:\s*"agent_prompt_stalled"/.test(error instanceof Error ? error.message : String(error));
+  return structuredHerdrErrorCode(error) === "agent_prompt_stalled";
+}
+
+function structuredHerdrErrorCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const start = message.indexOf("{");
+  if (start < 0) return null;
+  try {
+    const parsed = JSON.parse(message.slice(start)) as { error?: { code?: unknown } };
+    return typeof parsed.error?.code === "string" ? parsed.error.code : null;
+  } catch {
+    return null;
+  }
 }
 
 function larkTabTitle(title: string | undefined): string {

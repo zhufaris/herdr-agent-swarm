@@ -88,10 +88,10 @@ describe("run card", () => {
     const mainButtons = findTaggedNodes(main, "button");
     const moreButtons = findTaggedNodes(more, "button");
     expect(mainButtons.map(callbackValue)).toEqual(expect.arrayContaining([
-      { action: "open_supplement", bindingId: "b1" },
       { action: "view_queue", bindingId: "b1" },
       { action: "open_more_actions", bindingId: "b1" }
     ]));
+    expect(mainButtons.map(callbackValue)).not.toContainEqual({ action: "open_supplement", bindingId: "b1" });
     expect(moreButtons.map(callbackValue)).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "session_status", bindingId: "b1" }),
       expect.objectContaining({ action: "session_stop", bindingId: "b1" })
@@ -377,7 +377,7 @@ describe("run card", () => {
       expect(serialized).not.toContain("重新发送");
       expect(actions).toContain("view_recovery");
       expect(actions).toContain("open_more_actions");
-      expect(actions.includes("open_supplement")).toBe(phase === "blocked");
+      expect(actions).not.toContain("open_supplement");
     }
   });
 
@@ -388,9 +388,9 @@ describe("run card", () => {
       { phase: "ready", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
       { phase: "queued", queueDepth: 2, actions: ["create_new_task", "view_queue", "open_more_actions"] },
       { phase: "done", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
-      { phase: "running", activePromptId: "p1", queueDepth: 0, actions: ["open_supplement", "open_more_actions"] },
-      { phase: "running", activePromptId: "p1", queueDepth: 2, actions: ["open_supplement", "view_queue", "open_more_actions"] },
-      { phase: "blocked", activePromptId: "p1", queueDepth: 0, actions: ["open_supplement", "view_recovery", "open_more_actions"] },
+      { phase: "running", activePromptId: "p1", queueDepth: 0, actions: ["open_more_actions"] },
+      { phase: "running", activePromptId: "p1", queueDepth: 2, actions: ["view_queue", "open_more_actions"] },
+      { phase: "blocked", activePromptId: "p1", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
       { phase: "error", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
       { phase: "orphaned", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
       { phase: "archived", queueDepth: 0, actions: ["create_new_task"] }
@@ -707,11 +707,11 @@ describe("run card", () => {
     expect(serialized).not.toContain("执行计划");
   });
 
-  it("renders exact durable queue feedback and keeps the conversion action", () => {
+  it("renders exact durable queue feedback without a steering conversion action", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, conversionParentPromptId: "parent", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
     const card = renderRequestAnswerCard({ ...view, queueFeedback: { aheadCount: 2, activeElapsedSeconds: 48, estimateLowerSeconds: 60, estimateUpperSeconds: 180, sampleCount: 3, elapsedBucket: 1 } });
     expect(findTaggedNodes(card, "markdown").map((node) => node.content)).toContain("⏳ 已排队 · 前方 2 条\n当前任务已运行 48 秒\n预计等待约 1–3 分钟");
-    expect(JSON.stringify(card)).toContain("改为立即补充");
+    expect(JSON.stringify(card)).not.toContain("改为立即补充");
   });
 
   it("omits only unavailable queue feedback lines", () => {

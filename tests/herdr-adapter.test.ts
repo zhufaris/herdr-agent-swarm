@@ -457,25 +457,26 @@ describe("Herdr adapter", () => {
       .resolves.toBe("done");
   });
 
-  it("falls back to pane input when Herdr rejects a detected TraeX pane as an unnamed agent", async () => {
+  it.each(["agent_not_found", "agent_not_ready", "agent_blocked"])(
+    "does not use Pane input after explicit %s rejection", async (code) => {
     const calls: string[][] = [];
-    const outputs = ["before", "before", "before\n❯ continue", "✧ Working", "answer", "answer"];
+    let dispatched = 0;
     const runner: CommandRunner = {
       async run(_executable, args) {
         calls.push(args);
         if (args[0] === "agent" && args[1] === "prompt") {
-          throw new Error('{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"}}');
+          throw new Error(JSON.stringify({ error: { code } }));
         }
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "answer", stderr: "" };
-        if (args[0] === "api" && args[1] === "snapshot") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: outputs.length > 2 ? "working" : "done" }], agents: [] } });
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "before", stderr: "" };
         return { stdout: "", stderr: "" };
       }
     };
 
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 1000)).resolves.toBe("done");
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "continue", 1000, undefined, undefined, () => { dispatched += 1; }))
+      .rejects.toThrow(code);
     expect(calls).toContainEqual(["agent", "prompt", "w1:p1", "continue"]);
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "continue"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+    expect(calls.some((args) => args[0] === "pane" && ["send-text", "send-keys"].includes(args[1]!))).toBe(false);
+    expect(dispatched).toBe(0);
   });
 
   it("does not retry through pane input after an ambiguous native prompt failure", async () => {
@@ -822,84 +823,6 @@ describe("Herdr adapter", () => {
     expect(calls.some((args) => args[0] === "pane" && args[1] === "send-text")).toBe(false);
   });
 
-  it("submits a managed instance turn only after its composer echoes the prompt", async () => {
-    const calls: string[][] = [];
-    let dispatched = 0;
-    const outputs = ["ready", "ready\n❯ do work", "working", "done"];
-    const states = ["idle", "working", "done"] as const;
-    const runner: CommandRunner = { async run(_executable, args, _timeout, onStarted) {
-      calls.push(args);
-      await onStarted?.();
-      if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "done", stderr: "" };
-      if (args[0] === "api") { const agent_status = states.shift() ?? "done"; return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status }], agents: [] } }); }
-      if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "codex" }] } });
-      return { stdout: "", stderr: "" };
-    } };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runManagedPrompt("w1:p1", "do work", 60_000, () => { dispatched += 1; })).resolves.toBe("done");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "do work"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-    expect(dispatched).toBe(1);
-  });
-
-  it("confirms a managed prompt through the Pane CLI when native agent output is stale", async () => {
-    const calls: string[][] = [];
-    let dispatched = 0;
-    let paneReads = 0;
-    const native: HerdrNativeRequestClient = {
-      async request(method) {
-        if (method === "agent.read") return { read: { text: "ready" } };
-        if (method === "pane.wait_for_output") return { type: "wait_matched" };
-        if (method === "session.snapshot") return { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle", state_change_seq: 1 }], agents: [] } };
-        if (method === "pane.process_info") return { process_info: { foreground_processes: [{ name: "traex" }] } };
-        throw new Error(`unexpected native method: ${method}`);
-      }
-    };
-    const runner: CommandRunner = { async run(_executable, args, _timeout, onStarted) {
-      calls.push(args);
-      await onStarted?.();
-      if (args[0] === "pane" && args[1] === "read") {
-        paneReads += 1;
-        return { stdout: paneReads === 1 ? "ready" : "ready\n❯ do work", stderr: "" };
-      }
-      return { stdout: "", stderr: "" };
-    } };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 100, "auto", native).runManagedPrompt("w1:p1", "do work", 100, () => { dispatched += 1; }))
-      .rejects.toThrow("Timed out waiting for TraeX turn");
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-    expect(dispatched).toBe(1);
-  });
-
-  it("keeps a managed prompt replayable when its composer never echoes the text", async () => {
-    let dispatched = 0;
-    const runner: CommandRunner = { async run(_executable, args) {
-      if (args[0] === "pane" && args[1] === "read") return { stdout: "unchanged", stderr: "" };
-      if (args[0] === "api") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle", state_change_seq: 1 }], agents: [] } });
-      return { stdout: "", stderr: "" };
-    } };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 40).runManagedPrompt("w1:p1", "do work", 60_000, () => { dispatched += 1; })).rejects.toThrow("Timed out waiting for prompt text");
-    expect(dispatched).toBe(0);
-  });
-
-  it("completes a short managed turn when Herdr lifecycle advances between polls", async () => {
-    let paneReads = 0;
-    let paneGets = 0;
-    const runner: CommandRunner = { async run(_executable, args, _timeout, onStarted) {
-      await onStarted?.();
-      if (args[0] === "pane" && args[1] === "read") return { stdout: paneReads++ === 0 ? "ready" : "ready\n❯ quick task", stderr: "" };
-      if (args[0] === "api") {
-        const state_change_seq = paneGets++ === 0 ? 40 : 42;
-        return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "done", state_change_seq }], agents: [] } });
-      }
-      if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "codex" }] } });
-      return { stdout: "", stderr: "" };
-    } };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runManagedPrompt("w1:p1", "quick task", 60_000)).resolves.toBe("done");
-  });
-
   it("runs a pane slash command and returns only its stable native output", async () => {
     const calls: string[][] = [];
     const outputs = [
@@ -1075,51 +998,6 @@ describe("Herdr adapter", () => {
     await expect(turn).rejects.toThrow("Bridge shutdown detached from an in-flight TraeX turn; the request will not be replayed");
   });
 
-  it("steers while structured pane state is working or blocked", async () => {
-    const calls: string[][] = [];
-    let state: "working" | "blocked" = "working";
-    const outputs = ["before", "before\n❯ change course", "before\n❯ change course", "before\n❯ change course while blocked"];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "before\n❯ change course", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: state } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-    const adapter = new HerdrCliAdapter(runner, "herdr", 1000);
-
-    await expect(adapter.steerPrompt("w1:p1", "change course")).resolves.toBe("injected");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "change course"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-
-    state = "blocked";
-    calls.length = 0;
-    await expect(adapter.steerPrompt("w1:p1", "change course while blocked")).resolves.toBe("injected");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "change course while blocked"]);
-  });
-
-  it("steers when structured state is unknown but the live terminal shows an active turn", async () => {
-    const calls: string[][] = [];
-    const active = "◈ Organizing test procedures (1m 21s • ↑ 2.62K tokens • esc to interrupt)\nGPT-5.6-Sol · Context 78% left · Auto Mode";
-    const outputs = [active, active, `${active}\n❯ add a focused regression test`];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? `${active}\n❯ add a focused regression test`, stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "unknown" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "add a focused regression test"))
-      .resolves.toBe("injected");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "add a focused regression test"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-  });
-
   it("sends Esc directly without requiring named-agent working state", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) { calls.push(args); return { stdout: "", stderr: "" }; } };
@@ -1127,200 +1005,34 @@ describe("Herdr adapter", () => {
     expect(calls).toEqual([["pane", "send-keys", "w1:p1", "Esc"]]);
   });
 
-  it("surfaces an uncertain steering delivery when Enter fails after text was sent", async () => {
-    const calls: string[][] = [];
-    const outputs = ["before", "before\n❯ possibly typed"];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "before\n❯ possibly typed", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        if (args[0] === "pane" && args[1] === "send-keys") throw new Error("enter failed");
-        return { stdout: "", stderr: "" };
-      }
-    };
-    const adapter = new HerdrCliAdapter(runner, "herdr", 1000);
-
-    await expect(adapter.steerPrompt("w1:p1", "possibly typed")).rejects.toThrow("enter failed");
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "possibly typed"]);
-  });
-
-  it("does not treat an earlier matching prompt as confirmation of new text", async () => {
-    const calls: string[][] = [];
-    const outputs = ["◆ hi\n❯", "◆ hi\n❯", "◆ hi\n❯ hi"];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ hi\n❯ hi", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).resolves.toBe("injected");
-    const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
-    const readsBeforeEnter = calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read");
-    expect(readsBeforeEnter).toHaveLength(3);
-  });
-
-  it("does not confirm a short prompt from unrelated terminal UI text", async () => {
-    const calls: string[][] = [];
-    const outputs = [
-      "❯\nAuto Mode (shift+tab to cycle)",
-      "❯\nAuto Mode (shift+tab to cycle)",
-      "❯ hi\nAuto Mode (shift+tab to cycle)"
-    ];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? outputs.at(-1)!, stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).resolves.toBe("injected");
-    const enterIndex = calls.findIndex((args) => args[0] === "pane" && args[1] === "send-keys");
-    expect(calls.slice(0, enterIndex).filter((args) => args[0] === "pane" && args[1] === "read")).toHaveLength(3);
-  });
-
-  it("submits an exact prompt already present in the composer without appending it", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: "◆ previous answer\n❯ hi\n────────\nGPT-5 · Context 90% left", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).resolves.toBe("injected");
-    expect(calls).not.toContainEqual(["pane", "send-text", "w1:p1", "hi"]);
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-  });
-
-  it("preserves and rejects a different non-empty composer draft", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: "❯ keep my draft\n────────\nGPT-5 · Context 90% left", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "hi")).rejects.toThrow("composer_not_empty");
-    expect(calls.some((args) => args[0] === "pane" && (args[1] === "send-text" || args[1] === "send-keys"))).toBe(false);
-  });
-
-  it("uses a native output wait only as a prompt echo wake-up hint", async () => {
-    const nativeCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
-    const reads = ["◆ hi\n❯", "◆ hi\n❯", "◆ hi\n❯ hi"];
-    const native = { async request(method: string, params: Record<string, unknown>) {
-      nativeCalls.push({ method, params });
-      if (method === "session.snapshot") return { snapshot: {
-        panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "working" }], agents: []
-      } };
-      if (method === "agent.read") return { read: { text: reads.shift() ?? "◆ hi\n❯ hi" } };
-      if (method === "pane.wait_for_output") return { type: "wait_matched" };
-      throw new Error(`unexpected native method: ${method}`);
-    } };
-    const commands: string[][] = [];
-    const runner: CommandRunner = { async run(_executable, args) {
-      commands.push(args);
-      return { stdout: "", stderr: "" };
-    } };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).steerPrompt("w1:p1", "hi"))
-      .resolves.toBe("injected");
-
-    const outputWait = nativeCalls.find(({ method }) => method === "pane.wait_for_output");
-    expect(outputWait?.params).toMatchObject({
-      pane_id: "w1:p1", source: "recent_unwrapped", match: { type: "substring", value: "hi" }
-    });
-    expect(nativeCalls.filter(({ method }) => method === "agent.read")).toHaveLength(3);
-    expect(commands).toContainEqual(["pane", "send-text", "w1:p1", "hi"]);
-    expect(commands).toContainEqual(["pane", "read", "w1:p1", "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]);
-    expect(commands).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-  });
-
-  it("confirms prompt text when a narrow pane soft-wraps it", async () => {
-    const calls: string[][] = [];
-    const outputs = [
-      "❯ Explain this codebase",
-      "▍ 你好，请回复当前工作目\n▍ 录"
-    ];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: outputs.shift() ?? "◆ 当前工作目录：/repo", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerPrompt("w1:p1", "你好，请回复当前工作目录"))
-      .resolves.toBe("injected");
-    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
-  });
-
-  it("does not send Enter when the composer never confirms the prompt text", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "pane" && args[1] === "read") return { stdout: "unchanged terminal", stderr: "" };
-        if (args[0] === "pane" && args[1] === "get") return json({ pane: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } });
-        if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [{ name: "traex" }] } });
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 40).steerPrompt("w1:p1", "lost prompt"))
-      .rejects.toThrow("Timed out waiting for prompt text in pane w1:p1");
-    expect(calls.some((args) => args[0] === "pane" && args[1] === "send-keys")).toBe(false);
-  });
-
-  it("does not report a prompt as dispatched when agent prompt falls back and the composer never echoes it", async () => {
-    const calls: string[][] = [];
+  it("reports an unknown failure after the agent prompt process starts as possibly dispatched", async () => {
     let dispatched = 0;
     const runner: CommandRunner = {
-      async run(_executable, args) {
-        calls.push(args);
-        if (args[0] === "agent" && args[1] === "prompt") throw new Error('{"error":{"code":"agent_not_ready"}}');
-        if (args[0] === "pane" && args[1] === "read") return { stdout: "Select Model and Mode\nPress enter to confirm or esc to go back", stderr: "" };
-        return { stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 40).runPrompt("w1:p1", "lost prompt", 1_000, undefined, undefined, () => { dispatched += 1; }))
-      .rejects.toThrow("Timed out waiting for prompt text in pane w1:p1");
-    expect(dispatched).toBe(0);
-    expect(calls).toContainEqual(["pane", "send-text", "w1:p1", "lost prompt"]);
-    expect(calls.some((args) => args[0] === "pane" && args[1] === "send-keys")).toBe(false);
-  });
-
-  it("reports direct agent prompt dispatch only after the command succeeds", async () => {
-    let dispatched = 0;
-    const runner: CommandRunner = {
-      async run(_executable, args) {
+      async run(_executable, args, _timeout, onStarted) {
         if (args[0] === "pane" && args[1] === "read") return { stdout: "before", stderr: "" };
-        if (args[0] === "agent" && args[1] === "prompt") throw new Error("transport failed");
+        if (args[0] === "agent" && args[1] === "prompt") { await onStarted?.(); throw new Error("transport failed"); }
         return { stdout: "", stderr: "" };
       }
     };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1_000).runPrompt("w1:p1", "hello", 1_000, undefined, undefined, () => { dispatched += 1; }))
       .rejects.toThrow("transport failed");
-    expect(dispatched).toBe(0);
+    expect(dispatched).toBe(1);
+  });
+
+  it("does not trust an unstructured pre-dispatch code phrase after process start", async () => {
+    let dispatched = 0;
+    const runner: CommandRunner = {
+      async run(_executable, args, _timeout, onStarted) {
+        if (args[0] === "pane" && args[1] === "read") return { stdout: "before", stderr: "" };
+        if (args[0] === "agent" && args[1] === "prompt") { await onStarted?.(); throw new Error("transport mentioned agent_not_ready without a Herdr error envelope"); }
+        return { stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1_000).runPrompt("w1:p1", "hello", 1_000, undefined, undefined, () => { dispatched += 1; }))
+      .rejects.toThrow("agent_not_ready");
+    expect(dispatched).toBe(1);
   });
 
   it("reports a stalled native agent prompt as possibly dispatched to prevent replay", async () => {

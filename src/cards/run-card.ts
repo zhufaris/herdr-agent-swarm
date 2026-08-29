@@ -150,12 +150,11 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 
 function mainCardActions(input: TopicViewState): object[] {
   const button = (content: string, action: string, type?: "primary") => callbackButton(content, { action, bindingId: input.bindingId }, type);
-  const canSupplement = input.activePromptId !== null && (input.phase === "running" || input.phase === "blocked");
   if (input.phase === "provisioning" || input.phase === "draining") return [];
   if (input.phase === "archived") return [button("新建任务", "create_new_task", "primary")];
-  if (input.phase === "blocked") return [...(canSupplement ? [button("立即补充", "open_supplement", "primary")] : []), button("恢复指引", "view_recovery", canSupplement ? undefined : "primary"), button("更多操作", "open_more_actions")];
+  if (input.phase === "blocked") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
   if (input.phase === "error" || input.phase === "orphaned") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
-  if (input.phase === "running") return [...(canSupplement ? [button("立即补充", "open_supplement", "primary")] : []), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
+  if (input.phase === "running") return [...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
   return [button("发送新任务", "create_new_task", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
 }
 
@@ -190,7 +189,6 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   ];
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  if (input.phase === "queued" && input.conversionParentPromptId) elements.push(callbackButton("改为立即补充", { action: "convert_queued_prompt", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.conversionParentPromptId, targetPromptId: input.promptId }, "primary"));
   if (input.phase === "failed" && input.steeringOrigin === "automatic" && input.steeringFailureKind === "rejected") elements.push(callbackButton("作为新任务排队", { action: "enqueue_failed_steering", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, sourcePromptId: input.promptId }, "primary"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
@@ -349,7 +347,7 @@ export function renderHelpCard(): object {
       { tag: "markdown", content: [
         "**直接开始**",
         "@机器人 描述任务 → 选择项目 → 自动开始。",
-        "话题里的普通消息始终按 FIFO 排队；需要插入当前任务时，点“立即补充”。", "",
+        "话题里的普通消息始终按 FIFO 排队；当前版本不支持向运行中的任务注入补充。", "",
         "**紧急操作**",
         "`/swarm stop` 停止当前任务 · `/swarm status` 刷新状态"
       ].join("\n") },
@@ -358,7 +356,7 @@ export function renderHelpCard(): object {
         "`/swarm new [标题]`  选择项目并创建 TraeX pane",
         "`/swarm reset [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
         "`/swarm stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
-        "`/swarm steer <文本>`  将文本注入当前活动 turn，不降级为普通任务",
+        "`/swarm steer <文本>`  当前不支持；拒绝且不写入 terminal",
         "`/swarm projects`  打开项目选择卡片",
         "`/swarm spaces`  按 Space 查看全部 Pane",
         "`/swarm sessions`  查看当前群的会话",

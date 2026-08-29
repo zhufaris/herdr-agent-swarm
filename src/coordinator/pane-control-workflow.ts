@@ -5,7 +5,7 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 
-interface Options { store: Pick<OperationsStore, "acceptPaneControlOperation" | "audit" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getBinding" | "listBindings" | "listRecoverablePaneControlOperations">; herdr: Pick<HerdrPort, "readOutput" | "sendEscape" | "steerPrompt">; outbound: Pick<OutboundIntentPort, "enqueueCard">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
+interface Options { store: Pick<OperationsStore, "acceptPaneControlOperation" | "audit" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getBinding" | "listBindings" | "listRecoverablePaneControlOperations">; herdr: Pick<HerdrPort, "sendEscape">; outbound: Pick<OutboundIntentPort, "enqueueCard">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
 export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean>; }
 
 export class PaneControlWorkflow implements PaneControlWorkflowPort {
@@ -15,7 +15,8 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
   async recover(): Promise<void> {
     await this.options.model.recover();
     for (const operation of this.options.store.listRecoverablePaneControlOperations()) {
-      if (operation.kind !== "model") this.options.store.finishPaneControlOperation(operation.id, "uncertain", "Bridge restarted after pane input may have been sent; operation was not replayed");
+      if (operation.kind === "steer") this.options.store.finishPaneControlOperation(operation.id, "rejected", "Steering is unsupported; text was not injected");
+      else if (operation.kind !== "model") this.options.store.finishPaneControlOperation(operation.id, "uncertain", "Bridge restarted after pane input may have been sent; operation was not replayed");
     }
     for (const binding of this.options.store.listBindings()) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
   }
@@ -37,12 +38,9 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
   }
 
   async steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean> {
-    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。"); return false; }
-    const active = this.options.activeTurn(binding.id);
-    if (!active || active.paneId !== binding.paneId || (expectedParentPromptId && active.promptId !== expectedParentPromptId) || !this.options.herdr.steerPrompt) { await this.reject(message, "当前没有可 steering 的活动 TraeX 任务。`/swarm steer` 未进入任务队列。"); return false; }
-    const accepted = this.accept({ message, binding, kind: "steer", payload: text, parentPromptId: active.promptId });
-    if (accepted.inserted) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
-    return true;
+    void binding; void text; void expectedParentPromptId;
+    await this.reject(message, "当前 Agent 不支持 steering。`/swarm steer` 未进入任务队列，也不会写入 terminal。");
+    return false;
   }
 
   private async drainOnce(bindingId: string): Promise<void> {
@@ -62,15 +60,8 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
   }
 
   private async executeSteer(operation: PaneControlOperation, binding: Binding): Promise<void> {
-    const active = this.options.activeTurn(binding.id);
-    if (!active || active.promptId !== operation.parentPromptId || active.paneId !== operation.paneId || !this.options.herdr.steerPrompt || !operation.payload) { this.options.store.finishPaneControlOperation(operation.id, "rejected", "TraeX is no longer steerable; text was not injected"); return; }
-    try {
-      const tail = await this.options.herdr.readOutput(operation.paneId, 80);
-      if (isApprovalPrompt(tail)) { this.options.store.finishPaneControlOperation(operation.id, "rejected", "TraeX approval remains local to Herdr; steering text was not injected"); return; }
-      const result = await this.options.herdr.steerPrompt(operation.paneId, operation.payload);
-      this.options.store.finishPaneControlOperation(operation.id, result === "injected" ? "confirmed" : "rejected", result === "injected" ? "Steering injected into active turn" : "TraeX is no longer steerable; text was not injected");
-      this.options.store.audit({ actorOpenId: operation.actorOpenId, action: "prompt.steer", target: binding.id, outcome: result });
-    } catch (error) { this.options.store.finishPaneControlOperation(operation.id, "uncertain", "Steering result cannot be confirmed: " + errorMessage(error)); }
+    void binding;
+    this.options.store.finishPaneControlOperation(operation.id, "rejected", "Steering is unsupported; text was not injected");
   }
 
   private accept(input: { message: IncomingLarkMessage; binding: Binding; kind: PaneControlOperation["kind"]; payload?: string; parentPromptId?: string }) {
@@ -80,4 +71,3 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function isApprovalPrompt(output: string): boolean { return /\b(?:approve|approval|required|allow this|waiting for user)\b|等待.*(?:批准|确认|用户)/iu.test(output); }
