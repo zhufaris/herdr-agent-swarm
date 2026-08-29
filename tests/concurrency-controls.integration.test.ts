@@ -149,7 +149,7 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("starts a queued prompt after its initial answer card succeeds on retry", async () => {
+  it("starts a queued prompt while its initial answer card retries independently", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
     let failReply = true;
@@ -186,9 +186,10 @@ describe("coordinator concurrency controls", () => {
 
       await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
 
-      expect(runCount).toBe(0);
-      await vi.advanceTimersByTimeAsync(1_300);
       await vi.waitFor(() => expect(runCount).toBe(1));
+      await vi.advanceTimersByTimeAsync(1_300);
+      await vi.waitFor(() => expect(store.loadRunCard(store.listRunCards("b1")[0]!.promptId)?.answerMessageId).toBe("answer-1"));
+      expect(runCount).toBe(1);
     } finally {
       await coordinator.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
     }
@@ -223,7 +224,7 @@ describe("coordinator concurrency controls", () => {
     expect(lifecycleTypes).toContain("TurnStarted");
     expect(lifecycleTypes).toContain("TurnCompleted");
     expect(lifecycleTypes).not.toContain("RunQueuePositionChanged");
-    expect(bus.snapshot()).toMatchObject({ subscriberFailures: 1, lastFailedSubscriber: "failing-projector" });
+    await vi.waitFor(() => expect(bus.snapshot()).toMatchObject({ subscriberFailures: 1, lastFailedSubscriber: "failing-projector" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });

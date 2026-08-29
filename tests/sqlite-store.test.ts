@@ -790,7 +790,7 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary().outbound.dismissed).toBe(1);
   });
 
-  it("atomically accepts one streaming answer card and claims after its card identity is delivered", () => {
+  it("atomically accepts one streaming answer card and claims before its card identity is delivered", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
@@ -809,15 +809,15 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toMatchObject([
       { promptId: "p1", viewVersion: 1, kind: "stream_card_create", cardRole: "answer", payload: JSON.stringify({ card: "answer" }) }
     ]);
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
     expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1"]);
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+    expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
 
     const [answerCreate] = store.listPendingOutboundReplies();
     store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1", "cardkit-1");
     expect(store.loadRunCard("p1")).toMatchObject({
       bindingGeneration: 3, conversionParentPromptId: "parent-prompt", larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
     });
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({
       promptId: "p1", pageIndex: 0, messageId: "answer-card-m1", cardId: "cardkit-1", elementId: answerElementId("p1", 0), sourceStart: 0, sequence: 0, state: "active"
     })]);
@@ -1226,16 +1226,16 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", bindingId: "b1", rootMessageId: "m1", kind: "text", payload: "hello" });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("unrelated", "network unavailable");
 
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
     expect(store.recoverLegacyElementIdDeadLetters()).toBe(1);
     const [recovered] = store.listPendingOutboundReplies();
     expect(recovered).toMatchObject({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null });
     expect(store.loadRunCard("legacy-id")?.answerElementId).toBe(answerElementId("legacy-id", 0));
     expect(JSON.parse(recovered!.payload)).toMatchObject({ body: { elements: [{ element_id: answerElementId("legacy-id", 0) }] } });
     expect(store.getOperationalSummary().deadLetters).toBe(1);
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("legacy-id");
 
     store.markOutboundReplyDelivered(legacyReply!.id, "answer-1", "cardkit-1");
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("legacy-id");
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
   it("canonicalizes pending continuation metadata with its card payload", () => {
@@ -1638,10 +1638,10 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toMatchObject([{
       promptId: "p1", cardRole: "answer", kind: "stream_card_create", payload: JSON.stringify({})
     }]);
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     const answerCreate = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(answerCreate.id, "answer-card", "cardkit-1");
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
   it("selects bounded durable lane heads without letting later rows bypass backoff", () => {
@@ -2196,7 +2196,7 @@ describe("SQLite store", () => {
       hints: [{ kind: "prompt-ready", bindingId: "active" }]
     });
     expect(store.getOperationalSummary().prompts).toMatchObject({ queued: 2, cancelled: 2 });
-    expect(store.claimNextDispatchablePrompt("active")).toBeNull();
+    expect(store.claimNextDispatchablePrompt("active")).toMatchObject({ prompt: { id: "private-turn", state: "running" } });
     expect(store.listFailures("c1").filter((failure) => failure.kind === "prompt").map((failure) => failure.error)).toEqual([
       "Session can no longer dispatch queued work",
       "Session can no longer dispatch queued work"

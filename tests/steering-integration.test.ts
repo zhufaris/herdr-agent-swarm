@@ -293,6 +293,8 @@ describe("active-turn steering", () => {
 describe("automatic continuation steering", () => {
   it("wakes durable ordinary work before queued-card projection completes", async () => {
     const harness = await createAutomaticSteeringHarness();
+    harness.release();
+    await vi.waitFor(() => expect(harness.store.getPrompt(harness.parent.promptId)?.state).toBe("delivered"));
     await harness.publisher.stop();
     harness.schedulerWake.mockClear();
     let releaseProjection!: () => void;
@@ -309,9 +311,10 @@ describe("automatic continuation steering", () => {
     await projectionEntered;
 
     const prompt = harness.store.database.prepare("SELECT id, state FROM prompt_jobs WHERE lark_message_id = ?").get("nonblocking-dispatch") as { id: string; state: string };
-    expect(prompt.state).toBe("queued");
+    expect(["queued", "running"]).toContain(prompt.state);
     expect(harness.store.database.prepare("SELECT kind, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.id)).toEqual({ kind: "stream_card_create", state: "pending" });
     expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
+    await vi.waitFor(() => expect(harness.turns).toContain("investigate another issue"));
 
     releaseProjection();
     await handling;

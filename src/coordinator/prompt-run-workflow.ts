@@ -267,7 +267,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       let observerDetached = false;
       let dispatched = false;
       try {
-        await this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth });
+        const turnStartedPublication = this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth }).catch((error) => {
+          this.options.logger.error({ event: "turn-started-publication-failed", err: safeLogError(error), bindingId, promptId: prompt.id, outcome: "workflow_continued" }, "TurnStarted lifecycle publication failed; prompt dispatch continued");
+        });
         let outputSource = await this.acquireTranscript(binding, abortController.signal);
         this.options.logger.info({
           event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth,
@@ -303,6 +305,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
             if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: observedQueueDepth, outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
         }, abortController.signal, () => { dispatched = true; this.options.store.markPromptDispatched(prompt.id); });
+        await turnStartedPublication;
         if (!this.isBindingActive(bindingId)) return;
         const stateBeforeReturn = binding.lastAgentState;
         this.turns.updateState(bindingId, prompt.id, state);

@@ -7,6 +7,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 describe("model command", () => {
   it("runs outside the prompt queue and replies with the native TraeX result", async () => {
@@ -43,15 +44,23 @@ describe("model command", () => {
 
   it("runs before queued ordinary prompts while the pane is idle", async () => {
     const cards: object[] = [];
-    const runPaneCommand = vi.fn(async () => "Current model: GPT-5.5");
-    const fixture = await setup(cards, runPaneCommand);
+    let releaseModel!: () => void;
+    const modelHeld = new Promise<void>((resolve) => { releaseModel = resolve; });
+    const runPaneCommand = vi.fn(async () => { await modelHeld; return "Current model: GPT-5.5"; });
+    const runPrompt = vi.fn(async () => "done");
+    const fixture = await setup(cards, runPaneCommand, { runPrompt });
     const queued = { id: "queued-turn", bindingId: fixture.bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "ordinary work" };
-    fixture.store.enqueuePrompt(queued);
+    const view = createQueuedRunCard({ promptId: queued.id, bindingId: fixture.bindingId, title: "Ordinary work", workspaceId: "w1", paneId: "w1:p1", requestText: queued.body, queuePosition: 1, occurredAt: new Date().toISOString() });
+    fixture.store.acceptPrompt({ prompt: queued, view, rootMessageId: "root-1", answerCard: {} });
 
-    await fixture.coordinator.handleMessage(message("/swarm model"));
+    const handling = fixture.coordinator.handleMessage(message("/swarm model"));
 
     await vi.waitFor(() => expect(runPaneCommand).toHaveBeenCalledWith("w1:p1", "/model", 1000));
     expect(fixture.store.getPrompt(queued.id)?.state).toBe("queued");
+    expect(runPrompt).not.toHaveBeenCalled();
+    releaseModel();
+    await handling;
+    await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledTimes(1));
     expect(fixture.store.database.prepare("SELECT state FROM pane_control_operations WHERE kind = 'model'").get()).toEqual({ state: "confirmed" });
     await fixture.close();
   });

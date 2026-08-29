@@ -1538,9 +1538,8 @@ export class SqliteBindingStore implements BindingStorePort {
       `).get(bindingId) as BindingRow | undefined;
       if (!bindingRow) { this.database.exec("COMMIT"); return null; }
       const row = this.database.prepare(`
-        SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+        SELECT p.* FROM prompt_jobs p
         WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
-          AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
           AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
           AND NOT EXISTS (SELECT 1 FROM pane_control_operations control WHERE control.binding_id = p.binding_id AND control.kind = 'model' AND control.state IN ('accepted','running','applied'))
         ORDER BY p.created_at, p.rowid LIMIT 1
@@ -1559,9 +1558,8 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const row = this.database.prepare(`
-        SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+        SELECT p.* FROM prompt_jobs p
         WHERE p.binding_id = ? AND p.parent_prompt_id = ? AND p.dispatch_kind = 'steering' AND p.state = 'queued'
-          AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
         ORDER BY p.created_at, p.rowid LIMIT 1
       `).get(bindingId, parentPromptId) as PromptRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
