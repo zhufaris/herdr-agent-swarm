@@ -320,6 +320,10 @@ export class HerdrCliAdapter implements HerdrPort {
         // Read-only native failures fall back to the Pane CLI.
       }
     }
+    return this.readPaneOutput(paneId, lines, source);
+  }
+
+  private async readPaneOutput(paneId: string, lines: number, source: "visible" | "recent-unwrapped"): Promise<string> {
     const { stdout } = await this.runner.run(this.executable, [
       "pane", "read", paneId, "--source", source, "--lines", String(lines), "--format", "text"
     ], this.commandTimeoutMs);
@@ -466,7 +470,15 @@ export class HerdrCliAdapter implements HerdrPort {
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       const output = await this.readOutput(paneId, 240);
-      if (countOccurrences(normalizePromptEcho(output), comparableText) > previousOccurrences) {
+      let confirmed = countOccurrences(normalizePromptEcho(output), comparableText) > previousOccurrences;
+      // agent.read can briefly return a valid but stale Agent snapshot while the
+      // Pane TUI already contains the pasted composer text. Confirm against the
+      // Pane surface before withholding Enter until timeout.
+      if (!confirmed && this.native) {
+        const paneOutput = await this.readPaneOutput(paneId, 240, "recent-unwrapped");
+        confirmed = countOccurrences(normalizePromptEcho(paneOutput), comparableText) > previousOccurrences;
+      }
+      if (confirmed) {
         await this.runner.run(this.executable, ["pane", "send-keys", paneId, "Enter"], this.commandTimeoutMs, onDispatched);
         return;
       }

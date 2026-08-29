@@ -856,6 +856,35 @@ describe("Herdr adapter", () => {
     expect(dispatched).toBe(1);
   });
 
+  it("confirms a managed prompt through the Pane CLI when native agent output is stale", async () => {
+    const calls: string[][] = [];
+    let dispatched = 0;
+    let paneReads = 0;
+    const native: HerdrNativeRequestClient = {
+      async request(method) {
+        if (method === "agent.read") return { read: { text: "ready" } };
+        if (method === "pane.wait_for_output") return { type: "wait_matched" };
+        if (method === "session.snapshot") return { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle", state_change_seq: 1 }], agents: [] } };
+        if (method === "pane.process_info") return { process_info: { foreground_processes: [{ name: "traex" }] } };
+        throw new Error(`unexpected native method: ${method}`);
+      }
+    };
+    const runner: CommandRunner = { async run(_executable, args, _timeout, onStarted) {
+      calls.push(args);
+      await onStarted?.();
+      if (args[0] === "pane" && args[1] === "read") {
+        paneReads += 1;
+        return { stdout: paneReads === 1 ? "ready" : "ready\n❯ do work", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 100, "auto", native).runManagedPrompt("w1:p1", "do work", 100, () => { dispatched += 1; }))
+      .rejects.toThrow("Timed out waiting for TraeX turn");
+    expect(calls).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
+    expect(dispatched).toBe(1);
+  });
+
   it("keeps a managed prompt replayable when its composer never echoes the text", async () => {
     let dispatched = 0;
     const runner: CommandRunner = { async run(_executable, args) {
@@ -1176,10 +1205,9 @@ describe("Herdr adapter", () => {
       pane_id: "w1:p1", source: "recent_unwrapped", match: { type: "substring", value: "hi" }
     });
     expect(nativeCalls.filter(({ method }) => method === "agent.read")).toHaveLength(3);
-    expect(commands).toEqual([
-      ["pane", "send-text", "w1:p1", "hi"],
-      ["pane", "send-keys", "w1:p1", "Enter"]
-    ]);
+    expect(commands).toContainEqual(["pane", "send-text", "w1:p1", "hi"]);
+    expect(commands).toContainEqual(["pane", "read", "w1:p1", "--source", "recent-unwrapped", "--lines", "240", "--format", "text"]);
+    expect(commands).toContainEqual(["pane", "send-keys", "w1:p1", "Enter"]);
   });
 
   it("confirms prompt text when a narrow pane soft-wraps it", async () => {
