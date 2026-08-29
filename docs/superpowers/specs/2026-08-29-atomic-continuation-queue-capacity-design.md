@@ -44,10 +44,11 @@ Card outbox row, scheduler wake-up, lifecycle event, or success audit record.
 
 Inside one `BEGIN IMMEDIATE` transaction, the store first checks for an existing
 message to preserve idempotency, then revalidates the binding and candidate
-parent. When the final decision is ordinary, it counts queued ordinary turns.
-If that count is at least `maxQueueDepth`, it commits the read-only decision and
-returns `queue_full` before inserting any prompt, view, answer page, or outbox
-intent. Automatic steering skips the ordinary-capacity gate.
+parent. When the final decision is ordinary, it counts pending prompts using the
+existing queue-depth definition (`queued` plus `running`). If that count is at
+least `maxQueueDepth`, it commits the read-only decision and returns
+`queue_full` before inserting any prompt, view, answer page, or outbox intent.
+Automatic steering skips the ordinary-capacity gate.
 
 The router keeps its current precheck as a fast path for unambiguously ordinary
 messages. It also handles the transactional `queue_full` result by sending the

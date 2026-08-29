@@ -47,7 +47,7 @@
 
 - [ ] **Step 3: Add the classified acceptance union and transactional gate**
 
-  Add `maxQueueDepth` to the input. Preserve the duplicate lookup first. After parent revalidation, count queued ordinary turns only for an ordinary final decision. Commit and return `queue_full` before creating durable rows when the limit is reached.
+  Add `maxQueueDepth` to the input. Preserve the duplicate lookup first. After parent revalidation, count `queued` plus `running` prompts only for an ordinary final decision, matching `countPendingPrompts`. Commit and return `queue_full` before creating durable rows when the limit is reached.
 
 - [ ] **Step 4: Run the store test to verify green**
 

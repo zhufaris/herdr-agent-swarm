@@ -21,12 +21,13 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20, steeringResult
   const info = vi.fn();
   const error = vi.fn();
   const warn = vi.fn();
+  const replyCard = vi.fn(async () => ({ messageId: `card-${Math.random()}` }));
   const logger = { info, warn, error, debug: vi.fn() } as unknown as Logger;
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,
     async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
     async replyText() { return { messageId: "text-1" }; },
-    async replyCard() { return { messageId: `card-${Math.random()}` }; },
+    replyCard,
     async updateCard() {}
   };
   const herdr: HerdrPort = {
@@ -62,7 +63,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20, steeringResult
   await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "working" }));
   const parent = store.listRunCards(bindingId)[0]!;
   schedulerWake.mockClear();
-  return { bindingId, bridgeEvents, coordinator, error, info, message, parent, projector, publisher, release, schedulerWake, send, steering, store, turns, warn, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
+  return { bindingId, bridgeEvents, coordinator, error, info, message, parent, projector, publisher, release, replyCard, schedulerWake, send, steering, store, turns, warn, async close() { release(); await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }
 
 describe("active-turn steering", () => {
@@ -380,18 +381,26 @@ describe("automatic continuation steering", () => {
     await harness.close();
   });
 
-  it("durably queues an eligible continuation when its full-queue parent invalidates before acceptance", async () => {
+  it("rejects an eligible continuation when its full-queue parent invalidates before acceptance", async () => {
     const harness = await createAutomaticSteeringHarness(1);
+    const eventsBefore = harness.bridgeEvents.length;
+    const auditsBefore = Number((harness.store.database.prepare("SELECT COUNT(*) AS count FROM audit_log").get() as { count: number }).count);
+    harness.replyCard.mockClear();
     const acceptClassifiedPrompt = harness.store.acceptClassifiedPrompt.bind(harness.store);
     vi.spyOn(harness.store, "acceptClassifiedPrompt").mockImplementation((input) => {
       harness.store.markPromptObservationDetached(harness.parent.promptId, "test race");
       return acceptClassifiedPrompt(input);
     });
     await harness.send("full-fallback-message", "继续");
-    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId);
-    expect(prompt).toMatchObject({ dispatchKind: "turn", parentPromptId: null, steeringOrigin: null });
-    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(2);
-    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-fell-back-before-dispatch", reason: "parent_detached" }), "fell back to ordinary prompt before dispatch"]);
+    await vi.waitFor(() => expect(harness.replyCard).toHaveBeenCalledTimes(1));
+    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
+    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.bridgeEvents).toHaveLength(eventsBefore);
+    expect(harness.store.database.prepare("SELECT COUNT(*) AS count FROM audit_log").get()).toEqual({ count: auditsBefore });
+    expect(harness.error.mock.calls.some(([record]) => record.event === "lark-message-handling-failed")).toBe(false);
+    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-classified", outcome: "queue_full", reason: "parent_detached" }), "classified continuation message"]);
+    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "lark-message-accepted", messageId: "full-fallback-message", disposition: "rejected" }), "completed durable inbound handling"]);
     await harness.close();
   });
 

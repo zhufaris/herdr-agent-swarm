@@ -14,6 +14,7 @@ export interface ClassifiedPromptInput {
   ordinaryView: RunCardView;
   steeringView: RunCardView;
   rootMessageId: string;
+  maxQueueDepth: number;
   expectedBindingGeneration: number;
   candidateParentPromptId: string | null;
   activeAfter: string;
@@ -21,12 +22,18 @@ export interface ClassifiedPromptInput {
   answerCardFor(view: RunCardView): object;
 }
 
+type ClassifiedPromptFallbackReason = "no_candidate" | "binding_changed" | "parent_inactive" | "parent_detached" | "parent_state" | "parent_stale" | null;
+
 export type ClassifiedPromptAcceptance = {
   prompt: PromptJob;
   view: RunCardView;
   inserted: boolean;
   decision: "automatic_steering" | "ordinary";
-  fallbackReason: "no_candidate" | "binding_changed" | "parent_inactive" | "parent_detached" | "parent_state" | "parent_stale" | null;
+  fallbackReason: ClassifiedPromptFallbackReason;
+} | {
+  inserted: false;
+  decision: "queue_full";
+  fallbackReason: ClassifiedPromptFallbackReason;
 };
 
 export interface InstanceStore {

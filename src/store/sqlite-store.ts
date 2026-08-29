@@ -1481,6 +1481,11 @@ export class SqliteBindingStore implements BindingStorePort {
       else if (parent.activity_at === null || parent.activity_at < input.activeAfter) fallbackReason = "parent_stale";
 
       const automatic = fallbackReason === null;
+      const pendingDepth = automatic ? 0 : Number((this.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state IN ('queued','running')").get(input.prompt.bindingId) as { count: number }).count);
+      if (!automatic && pendingDepth >= input.maxQueueDepth) {
+        this.database.exec("COMMIT");
+        return { inserted: false, decision: "queue_full", fallbackReason };
+      }
       const queuePosition = automatic ? 0 : Number((this.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn'").get(input.prompt.bindingId) as { count: number }).count) + 1;
       const sourceView = automatic ? input.steeringView : input.ordinaryView;
       const feedbackInputs = automatic ? null : this.loadQueueFeedbackInputs(input.prompt.bindingId);

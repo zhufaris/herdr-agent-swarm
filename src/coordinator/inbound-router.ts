@@ -240,7 +240,7 @@ export class InboundRouter implements InboundRouterPort {
       else if (command?.kind === "reattach") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected"; } else await this.options.provisioning.reattach(binding, command.paneId, message.actorOpenId); }
       else if (command?.kind === "replace") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected"; } else await this.options.provisioning.replace(binding, message.actorOpenId); }
       else if (command?.kind === "resume") disposition = await this.requireCreator(message, binding) && await this.options.sessionAdministration.resume(message, binding) ? "command_completed" : "rejected";
-      else if (binding?.state === "active" && binding.lifecycle === "active") { await this.enqueue(binding, message); disposition = "prompt_queued"; }
+      else if (binding?.state === "active" && binding.lifecycle === "active") disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected";
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) disposition = "prompt_queued";
       else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
       else { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
@@ -248,22 +248,23 @@ export class InboundRouter implements InboundRouterPort {
     this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");
   }
 
-  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text, forcedParentPromptId?: string): Promise<void> {
+  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text, forcedParentPromptId?: string): Promise<boolean> {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     if (!forcedParentPromptId) return this.enqueueClassified(binding, message, body);
     const promptId = randomUUID(); const occurredAt = new Date().toISOString(); const parentPromptId = forcedParentPromptId; const dispatchKind = "steering" as const;
     const view = createQueuedRunCard({ promptId, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: null, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: 0, occurredAt });
     const { prompt, inserted } = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view) });
     this.options.outboundWork.wake();
-    if (!inserted) { if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return; }
+    if (!inserted) { if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true; }
     const depth = this.options.store.countPendingPrompts(binding.id);
     this.options.logger.info({ event: "prompt-dispatch-decided", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: prompt.id, parentPromptId, workspaceId: binding.workspaceId, paneId: binding.paneId, dispatchKind, queueDepth: depth, outcome: "accepted" }, "accepted Lark prompt dispatch decision");
     await this.publish(binding.id, "SteeringQueued", "lark", { promptId: prompt.id, parentPromptId, actorOpenId: message.actorOpenId });
     this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.steer", target: binding.id, outcome: "success" });
     if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+    return true;
   }
 
-  private async enqueueClassified(binding: Binding, message: IncomingLarkMessage, body: string): Promise<void> {
+  private async enqueueClassified(binding: Binding, message: IncomingLarkMessage, body: string): Promise<boolean> {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const classification = classifyContinuation({ text: body, hasUnsupportedContent: message.hasUnsupportedContent ?? false });
     if (!classification.eligible && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
@@ -276,11 +277,15 @@ export class InboundRouter implements InboundRouterPort {
       prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body },
       ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }),
       steeringView: createQueuedRunCard({ ...common, conversionParentPromptId: null, queuePosition: 0 }),
-      rootMessageId: binding.rootMessageId, expectedBindingGeneration: binding.generation, candidateParentPromptId: candidate?.promptId ?? null,
+      rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: candidate?.promptId ?? null,
       activeAfter: new Date(Date.parse(acceptedAt) - 5 * 60_000).toISOString(), acceptedAt, answerCardFor: renderRequestAnswerCard
     });
     this.options.logger.info({ event: "auto-steering-classified", bindingId: binding.id, messageId: message.messageId, outcome: result.decision, reason: classification.eligible ? result.fallbackReason : classification.reason }, "classified continuation message");
-    if (!result.inserted) return;
+    if (result.decision === "queue_full") {
+      await this.reject(message, "This topic's prompt queue is full");
+      return false;
+    }
+    if (!result.inserted) return true;
     this.options.outboundWork.wake();
     const automatic = result.decision === "automatic_steering";
     const parentPromptId = automatic ? result.prompt.parentPromptId! : null;
@@ -294,6 +299,7 @@ export class InboundRouter implements InboundRouterPort {
     this.options.scheduler.wake(automatic
       ? { kind: "steering-ready", bindingId: binding.id, parentPromptId: parentPromptId! }
       : { kind: "prompt-ready", bindingId: binding.id });
+    return true;
   }
 
   private async requireCreator(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {

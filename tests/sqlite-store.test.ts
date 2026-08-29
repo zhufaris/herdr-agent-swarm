@@ -790,7 +790,7 @@ describe("SQLite store", () => {
 
     const accepted = store.acceptClassifiedPrompt({
       prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" },
-      ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root",
+      ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root", maxQueueDepth: 20,
       expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor
     });
 
@@ -799,13 +799,39 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toHaveLength(2);
     expect(store.acceptClassifiedPrompt({
       prompt: { id: "duplicate", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" },
-      ordinaryView: { ...ordinaryView, promptId: "duplicate" }, steeringView: { ...ordinaryView, promptId: "duplicate" }, rootMessageId: "root",
+      ordinaryView: { ...ordinaryView, promptId: "duplicate" }, steeringView: { ...ordinaryView, promptId: "duplicate" }, rootMessageId: "root", maxQueueDepth: 20,
       expectedBindingGeneration: 99, candidateParentPromptId: null, activeAfter: "2099-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({})
     })).toMatchObject({ inserted: false, decision: "automatic_steering", prompt: { id: "next" } });
     expect(store.listPendingOutboundReplies()).toHaveLength(2);
     expect(store.database.prepare("SELECT created_at, updated_at FROM prompt_jobs WHERE id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z" });
     expect(store.database.prepare("SELECT created_at, updated_at FROM answer_pages WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z" });
     expect(store.database.prepare("SELECT created_at, updated_at, next_attempt_at FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z", next_attempt_at: "2026-08-29T10:05:00.000Z" });
+  });
+
+  it("atomically rejects an ordinary fallback when the queue is full", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "working" });
+    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("parent", "running");
+    store.markPromptDispatched("parent");
+    store.saveRunCard({ ...store.loadRunCard("parent")!, phase: "running", activityAt: "2026-08-29T10:04:00.000Z" });
+    const queuedView = createQueuedRunCard({ promptId: "queued", bindingId: "b1", title: "Queued", workspaceId: "w1", paneId: "w1:p1", requestText: "queued", queuePosition: 1, occurredAt: "2026-08-29T10:04:30.000Z" });
+    store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m-queued", actorOpenId: "u1", body: "queued" }, view: queuedView, rootMessageId: "root", answerCard: {} });
+    store.markPromptObservationDetached("parent", "test race");
+    const nextView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 2, occurredAt: "2026-08-29T10:05:00.000Z" });
+
+    const accepted = store.acceptClassifiedPrompt({
+      prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" },
+      ordinaryView: nextView, steeringView: nextView, rootMessageId: "root", maxQueueDepth: 1,
+      expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({})
+    });
+
+    expect(accepted).toEqual({ inserted: false, decision: "queue_full", fallbackReason: "parent_detached" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE lark_message_id = 'm-next'").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM run_cards WHERE prompt_id = 'next'").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ count: 0 });
   });
 
   it("projects queue feedback and its answer-card outbox intent atomically", () => {
@@ -845,8 +871,8 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "ahead", bindingId: "b1", larkMessageId: "m-ahead", actorOpenId: "u1", body: "ahead" }, view: queuedAhead, rootMessageId: "root", answerCard: {} });
     const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
 
-    const first = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root", expectedBindingGeneration: expectedGeneration, candidateParentPromptId, activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) });
-    const duplicate = store.acceptClassifiedPrompt({ prompt: { id: "other", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" }, ordinaryView: { ...ordinaryView, promptId: "other" }, steeringView: { ...ordinaryView, promptId: "other" }, rootMessageId: "root", expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "1900-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({}) });
+    const first = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: expectedGeneration, candidateParentPromptId, activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) });
+    const duplicate = store.acceptClassifiedPrompt({ prompt: { id: "other", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" }, ordinaryView: { ...ordinaryView, promptId: "other" }, steeringView: { ...ordinaryView, promptId: "other" }, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "1900-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({}) });
 
     expect(first).toMatchObject({ inserted: true, decision: "ordinary", fallbackReason: reason, prompt: { dispatchKind: "turn", parentPromptId: null, steeringOrigin: null }, view: { queuePosition: 2 } });
     expect(duplicate).toMatchObject({ inserted: false, decision: "ordinary", prompt: { id: "next" }, view: { promptId: "next", queuePosition: 2 } });
@@ -881,7 +907,7 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "ahead", bindingId: "b1", larkMessageId: "m-ahead", actorOpenId: "u1", body: "ahead" }, view: ahead, rootMessageId: "root", answerCard: {} });
     const next = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "next", workspaceId: "w1", paneId: "w1:p1", requestText: "next", queuePosition: 99, occurredAt: "old" });
     const answerCardFor = vi.fn(renderRequestAnswerCard);
-    const accepted = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "next" }, ordinaryView: next, steeringView: next, rootMessageId: "root", expectedBindingGeneration: 3, candidateParentPromptId: null, activeAfter: "2026-08-29T09:00:00.000Z", acceptedAt: "2026-08-29T10:00:20.000Z", answerCardFor });
+    const accepted = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "next" }, ordinaryView: next, steeringView: next, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: 3, candidateParentPromptId: null, activeAfter: "2026-08-29T09:00:00.000Z", acceptedAt: "2026-08-29T10:00:20.000Z", answerCardFor });
     expect(accepted.view.queueFeedback).toMatchObject({ aheadCount: 1, activeElapsedSeconds: 20, sampleCount: 3, estimateLowerSeconds: 60, estimateUpperSeconds: 240 });
     expect(answerCardFor).toHaveBeenCalledWith(expect.objectContaining({ queuePosition: 2, queueFeedback: expect.objectContaining({ aheadCount: 1, activeElapsedSeconds: 20 }) }));
     expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "next")!.payload).toContain("⏳ 已排队 · 前方 1 条\\n当前任务已运行 20 秒\\n预计等待约 1–4 分钟");
@@ -918,7 +944,7 @@ describe("SQLite store", () => {
     store.markPromptDispatched("parent");
     const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
 
-    expect(store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: ordinaryView, rootMessageId: "root", expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) })).toMatchObject({ decision: "ordinary", fallbackReason: "parent_inactive", prompt: { dispatchKind: "turn" } });
+    expect(store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: ordinaryView, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) })).toMatchObject({ decision: "ordinary", fallbackReason: "parent_inactive", prompt: { dispatchKind: "turn" } });
   });
 
   it("migrates prompt provenance and run-card activity idempotently", () => {
