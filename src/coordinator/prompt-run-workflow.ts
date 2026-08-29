@@ -58,9 +58,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly shutdownGraceMs: number;
   private readonly safetyScanIntervalMs: number;
   private unsubscribe: (() => void) | null = null;
-  private safetyTimer: ReturnType<typeof setInterval> | null = null;
+  private safetyTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private stopping = false;
+  private consecutiveIdleScans = 0;
+  private currentSafetyScanDelayMs: number | null = null;
+  private nextSafetyScanAt: string | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
   private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, cancelled: 0 };
@@ -82,12 +85,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.started = true;
     this.unsubscribe = this.options.scheduler.subscribe((event) => this.wake(event));
     this.requestSafetyScan();
-    this.safetyTimer = setInterval(() => this.requestSafetyScan(), this.safetyScanIntervalMs);
-    this.safetyTimer.unref?.();
   }
 
   requestSafetyScan(): void {
     if (this.stopping) return;
+    if (this.safetyTimer) clearTimeout(this.safetyTimer);
+    this.safetyTimer = null;
+    this.currentSafetyScanDelayMs = null;
+    this.nextSafetyScanAt = null;
     try {
       const result = this.options.store.scanDurablePromptWork();
       const discovered = { turns: 0, steering: 0, detached: 0, cancelled: result.cancelled };
@@ -99,16 +104,25 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       }
       this.lastDiscovered = discovered;
       this.lastScanOutcome = result.hints.length > 0 || result.cancelled > 0 ? "work_found" : "idle";
+      if (this.lastScanOutcome === "idle") this.consecutiveIdleScans += 1;
+      else this.consecutiveIdleScans = 0;
       if (result.cancelled > 0) this.options.logger.info({
         event: "prompt-backlog-converged", cancelled: result.cancelled, outcome: "cancelled"
       }, "cancelled queued prompts whose bindings can no longer dispatch");
     } catch (error) {
       this.lastDiscovered = { turns: 0, steering: 0, detached: 0, cancelled: 0 };
       this.lastScanOutcome = "failed";
+      this.consecutiveIdleScans = 0;
       this.lastScanFailureAt = new Date().toISOString();
       this.options.logger.error({ event: "prompt-safety-scan-failed", err: safeLogError(error), outcome: "deferred_to_next_scan" }, "durable prompt safety scan failed");
     } finally {
       this.lastScanAt = new Date().toISOString();
+      if (this.started && !this.stopping) {
+        const delay = this.lastScanOutcome === "idle"
+          ? this.safetyScanIntervalMs * Math.min(2 ** Math.max(0, this.consecutiveIdleScans - 1), 6)
+          : this.safetyScanIntervalMs;
+        this.armSafetyScan(delay);
+      }
     }
   }
 
@@ -116,6 +130,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     return {
       state: this.stopping ? "stopping" : this.started ? "running" : "idle",
       activeTurnWorkers: this.workers.size, activeSteeringWorkers: this.steeringWorkers.size,
+      currentSafetyScanDelayMs: this.currentSafetyScanDelayMs, nextSafetyScanAt: this.nextSafetyScanAt,
       lastScanAt: this.lastScanAt, lastScanOutcome: this.lastScanOutcome,
       lastDiscovered: { ...this.lastDiscovered }, lastScanFailureAt: this.lastScanFailureAt
     };
@@ -123,17 +138,22 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   wake(event: PromptWorkHint): void {
     if (this.stopping) return;
-    if (event.kind === "steering-ready") {
-      this.scheduleSteering(event.bindingId, event.parentPromptId);
-      return;
+    try {
+      if (event.kind === "steering-ready") {
+        this.scheduleSteering(event.bindingId, event.parentPromptId);
+        return;
+      }
+      if (event.kind === "detached-observer-ready") {
+        const prompt = this.options.store.getPrompt(event.promptId);
+        if (prompt?.bindingId === event.bindingId && prompt.state === "running" && prompt.observationState === "detached") this.scheduleDetachedObserver(prompt);
+        return;
+      }
+      if (event.kind === "binding-runtime-changed" && !this.isBindingActive(event.bindingId)) this.turns.abort(event.bindingId);
+      this.scheduleWorker(event.bindingId);
+    } finally {
+      this.consecutiveIdleScans = 0;
+      this.armSafetyScan(this.safetyScanIntervalMs);
     }
-    if (event.kind === "detached-observer-ready") {
-      const prompt = this.options.store.getPrompt(event.promptId);
-      if (prompt?.bindingId === event.bindingId && prompt.state === "running" && prompt.observationState === "detached") this.scheduleDetachedObserver(prompt);
-      return;
-    }
-    if (event.kind === "binding-runtime-changed" && !this.isBindingActive(event.bindingId)) this.turns.abort(event.bindingId);
-    this.scheduleWorker(event.bindingId);
   }
 
   activeTurn(bindingId: string): ActiveTurnSnapshot | null {
@@ -147,8 +167,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   async stop(context?: ShutdownContext): Promise<void> {
     this.stopping = true;
-    if (this.safetyTimer) clearInterval(this.safetyTimer);
+    if (this.safetyTimer) clearTimeout(this.safetyTimer);
     this.safetyTimer = null;
+    this.currentSafetyScanDelayMs = null;
+    this.nextSafetyScanAt = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     const pending = [...this.workers.values(), ...this.steeringWorkers.values()];
@@ -171,6 +193,20 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       abortObservers();
       await settled;
     }
+  }
+
+  private armSafetyScan(delayMs: number): void {
+    if (this.stopping || !this.started) return;
+    if (this.safetyTimer) clearTimeout(this.safetyTimer);
+    this.currentSafetyScanDelayMs = delayMs;
+    this.nextSafetyScanAt = new Date(Date.now() + delayMs).toISOString();
+    this.safetyTimer = setTimeout(() => {
+      this.safetyTimer = null;
+      this.currentSafetyScanDelayMs = null;
+      this.nextSafetyScanAt = null;
+      this.requestSafetyScan();
+    }, delayMs);
+    this.safetyTimer.unref?.();
   }
 
   private scheduleSteering(bindingId: string, parentPromptId: string): void {

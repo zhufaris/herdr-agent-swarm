@@ -1,58 +1,134 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PromptRunWorkflow } from "../src/coordinator/prompt-run-workflow.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 
 describe("PromptRunWorkflow durable safety scan", () => {
-  it("finds durable work at startup and periodically after a lost wake", async () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("scans immediately and backs idle scans off to the capped delay with one timer", async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
+    const scan = vi.fn(() => ({ cancelled: 0, hints: [] }));
+    const workflow = createWorkflow({ scanDurablePromptWork: scan }, 100);
+
+    workflow.start();
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(workflow.snapshot()).toMatchObject({
+      state: "running", lastScanOutcome: "idle", currentSafetyScanDelayMs: 100,
+      nextSafetyScanAt: "2026-08-29T00:00:00.100Z"
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(workflow.snapshot()).toMatchObject({ currentSafetyScanDelayMs: 200, nextSafetyScanAt: "2026-08-29T00:00:00.300Z" });
+    await vi.advanceTimersByTimeAsync(199);
+    expect(scan).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scan).toHaveBeenCalledTimes(3);
+    expect(workflow.snapshot()).toMatchObject({ currentSafetyScanDelayMs: 400, nextSafetyScanAt: "2026-08-29T00:00:00.700Z" });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(scan).toHaveBeenCalledTimes(4);
+    expect(workflow.snapshot()).toMatchObject({ currentSafetyScanDelayMs: 600, nextSafetyScanAt: "2026-08-29T00:00:01.300Z" });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(scan).toHaveBeenCalledTimes(5);
+    expect(workflow.snapshot()).toMatchObject({ currentSafetyScanDelayMs: 600, nextSafetyScanAt: "2026-08-29T00:00:01.900Z" });
+    expect(vi.getTimerCount()).toBe(1);
+    await workflow.stop();
+  });
+
+  it("resets to the base delay when a safety scan finds work", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
     const scan = vi.fn()
       .mockReturnValueOnce({ cancelled: 0, hints: [] })
-      .mockReturnValueOnce({ cancelled: 0, hints: [{ kind: "prompt-ready", bindingId: "b1" }] })
-      .mockReturnValue({ cancelled: 0, hints: [] });
+      .mockReturnValueOnce({ cancelled: 0, hints: [] })
+      .mockReturnValueOnce({ cancelled: 0, hints: [{ kind: "prompt-ready", bindingId: "b1" }] });
     const claim = vi.fn(() => null);
     const workflow = createWorkflow({ scanDurablePromptWork: scan, claimNextDispatchablePrompt: claim }, 100);
 
     workflow.start();
-    expect(scan).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(300);
     await Promise.resolve();
 
-    expect(scan).toHaveBeenCalledTimes(2);
+    expect(scan).toHaveBeenCalledTimes(3);
     expect(claim).toHaveBeenCalledWith("b1");
     expect(workflow.snapshot()).toMatchObject({
       state: "running", lastScanOutcome: "work_found",
-      lastDiscovered: { turns: 1, steering: 0, detached: 0, cancelled: 0 }
+      lastDiscovered: { turns: 1, steering: 0, detached: 0, cancelled: 0 },
+      currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.400Z"
     });
     await workflow.stop();
-    vi.useRealTimers();
   });
 
-  it("isolates a failed scan, retries later, and stops future timer scans", async () => {
+  it("retries a failed scan at the base delay without exposing its error", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
     const error = vi.fn();
     const scan = vi.fn()
+      .mockReturnValueOnce({ cancelled: 0, hints: [] })
+      .mockReturnValueOnce({ cancelled: 0, hints: [] })
       .mockImplementationOnce(() => { throw new Error("private database detail"); })
       .mockReturnValue({ cancelled: 0, hints: [] });
     const workflow = createWorkflow({ scanDurablePromptWork: scan }, 100, error);
 
-    expect(workflow.snapshot()).toMatchObject({ state: "idle", lastScanAt: null, lastScanFailureAt: null });
     workflow.start();
+    await vi.advanceTimersByTimeAsync(300);
     expect(workflow.snapshot()).toMatchObject({
-      state: "running", lastScanAt: "2026-08-24T00:00:00.000Z",
-      lastScanOutcome: "failed", lastScanFailureAt: "2026-08-24T00:00:00.000Z"
+      state: "running", lastScanAt: "2026-08-29T00:00:00.300Z",
+      lastScanOutcome: "failed", lastScanFailureAt: "2026-08-29T00:00:00.300Z",
+      currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.400Z"
     });
     expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "prompt-safety-scan-failed", outcome: "deferred_to_next_scan" }), expect.any(String));
-
     await vi.advanceTimersByTimeAsync(100);
-    expect(scan).toHaveBeenCalledTimes(2);
+    expect(scan).toHaveBeenCalledTimes(4);
     expect(workflow.snapshot()).toMatchObject({ state: "running", lastScanOutcome: "idle" });
-    await workflow.stop();
-    expect(workflow.snapshot().state).toBe("stopping");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(scan).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(workflow.snapshot())).not.toContain("private database detail");
-    vi.useRealTimers();
+    await workflow.stop();
+  });
+
+  it("handles a wake immediately and replaces a long idle timeout with one base-delay scan", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));
+    const scan = vi.fn(() => ({ cancelled: 0, hints: [] }));
+    const claim = vi.fn(() => null);
+    const workflow = createWorkflow({ scanDurablePromptWork: scan, claimNextDispatchablePrompt: claim }, 100);
+    workflow.start();
+    await vi.advanceTimersByTimeAsync(700);
+    expect(workflow.snapshot()).toMatchObject({ currentSafetyScanDelayMs: 600, nextSafetyScanAt: "2026-08-29T00:00:01.300Z" });
+
+    workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
+    expect(claim).toHaveBeenCalledWith("b1");
+    expect(vi.getTimerCount()).toBe(1);
+    expect(workflow.snapshot()).toMatchObject({ currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.800Z" });
+    await vi.advanceTimersByTimeAsync(99);
+    expect(scan).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scan).toHaveBeenCalledTimes(5);
+    expect(vi.getTimerCount()).toBe(1);
+    await workflow.stop();
+  });
+
+  it("keeps one timer across repeated starts and wakes and never rearms after stop", async () => {
+    vi.useFakeTimers();
+    const scan = vi.fn(() => ({ cancelled: 0, hints: [] }));
+    const workflow = createWorkflow({ scanDurablePromptWork: scan, claimNextDispatchablePrompt: () => null }, 100);
+
+    workflow.start();
+    workflow.start();
+    workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
+    workflow.wake({ kind: "control-ready", bindingId: "b1" });
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await workflow.stop();
+    expect(workflow.snapshot()).toMatchObject({ state: "stopping", currentSafetyScanDelayMs: null, nextSafetyScanAt: null });
+    expect(vi.getTimerCount()).toBe(0);
+    workflow.requestSafetyScan();
+    workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

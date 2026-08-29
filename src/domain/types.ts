@@ -402,6 +402,8 @@ export interface PromptWorkerDiagnostics {
   state: "idle" | "running" | "stopping";
   activeTurnWorkers: number;
   activeSteeringWorkers: number;
+  currentSafetyScanDelayMs: number | null;
+  nextSafetyScanAt: string | null;
   lastScanAt: string | null;
   lastScanOutcome: "idle" | "work_found" | "failed" | null;
   lastDiscovered: { turns: number; steering: number; detached: number; cancelled: number };
