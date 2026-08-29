@@ -43,7 +43,9 @@ export class HerdrCircuitBreaker implements HerdrPort {
     };
   }
 
-  async assertWorkspace(workspaceId: string): Promise<void> { await this.call("probe", () => this.delegate.assertWorkspace(workspaceId)); }
+  async assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> {
+    await this.call("probe", () => expectedSpaceName === undefined ? this.delegate.assertWorkspace(workspaceId) : this.delegate.assertWorkspace(workspaceId, expectedSpaceName));
+  }
   async listAllPanes(): Promise<HerdrPane[]> {
     if (!this.delegate.listAllPanes) throw new Error("Herdr adapter does not support an all-workspace snapshot");
     return this.call("probe", () => this.delegate.listAllPanes!());

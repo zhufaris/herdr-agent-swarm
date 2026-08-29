@@ -50,7 +50,7 @@ describe("coordinator concurrency controls", () => {
     const coordinator = createTestRouter(startupConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));
 
     const startup = coordinator.start();
-    await vi.waitFor(() => expect(assertWorkspace.mock.calls.map(([workspaceId]) => workspaceId).sort()).toEqual(["w1", "w2"]));
+    await vi.waitFor(() => expect(assertWorkspace.mock.calls.sort()).toEqual([["w1", "one"], ["w2", "two"]]));
     release.get("w1")!();
     release.get("w2")!();
     await startup;

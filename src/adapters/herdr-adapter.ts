@@ -44,10 +44,13 @@ export class HerdrCliAdapter implements HerdrPort {
     private readonly native?: HerdrNativeRequestClient
   ) {}
 
-  async assertWorkspace(workspaceId: string): Promise<void> {
+  async assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> {
     const result = await this.json(["workspace", "get", workspaceId]);
-    const workspace = z.object({ workspace: z.object({ workspace_id: z.string() }) }).parse(result);
+    const workspace = z.object({ workspace: z.object({ workspace_id: z.string(), label: z.string().nullish() }) }).parse(result);
     if (workspace.workspace.workspace_id !== workspaceId) throw new Error(`Herdr workspace mismatch: ${workspaceId}`);
+    if (expectedSpaceName && workspace.workspace.label !== expectedSpaceName) {
+      throw new Error(`Project Space mismatch: workspace ${workspaceId} is '${workspace.workspace.label ?? "unlabeled"}', expected '${expectedSpaceName}'`);
+    }
   }
 
   async listPanes(workspaceId: string): Promise<HerdrPane[]> {

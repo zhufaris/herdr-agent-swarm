@@ -99,7 +99,7 @@ export interface LarkPort {
 }
 
 export interface HerdrPort {
-  assertWorkspace(workspaceId: string): Promise<void>;
+  assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void>;
   listAllPanes?(): Promise<HerdrPane[]>;
   listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;

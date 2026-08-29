@@ -41,7 +41,7 @@ type InboundRouterStore = InboundStore & PromptAcceptanceStore & InstanceStore;
 export interface InboundRouterOptions {
   config: BridgeConfig;
   store: InboundRouterStore;
-  herdr: { assertWorkspace(workspaceId: string): Promise<void> };
+  herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> };
   lark: Pick<LarkPort, "start" | "stop">;
   lifecycleEvents: LifecycleEventPublisher;
   outbound: OutboundIntentPort;
@@ -87,7 +87,7 @@ export class InboundRouter implements InboundRouterPort {
     await this.runStartupStage("view-convergence", () => startupViews.converge());
     const recoveredInbound = store.recoverProcessingInboundMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
-    await Promise.all([...new Set(config.projects.map((project) => project.workspaceId))].map((workspaceId) => herdr.assertWorkspace(workspaceId)));
+    await Promise.all(config.projects.map((project) => herdr.assertWorkspace(project.workspaceId, projectSpaceName(project))));
     await this.runStartupStage("runtime-baselines", () => reconciler.captureBaselines());
     this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
       if (event.kind === "control-ready") void this.options.paneControl.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));

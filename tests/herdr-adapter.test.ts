@@ -5,6 +5,15 @@ import type { CommandRunner } from "../src/infra/command-runner.js";
 describe("Herdr adapter structured control", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("rejects a configured workspace whose live Space label differs", async () => {
+    const runner: CommandRunner = { async run() {
+      return json({ workspace: { workspace_id: "wH", label: "herdr-lark-bridge" } });
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).assertWorkspace("wH", "herdr-agent-swarm"))
+      .rejects.toThrow("Project Space mismatch: workspace wH is 'herdr-lark-bridge', expected 'herdr-agent-swarm'");
+  });
+
   it("starts managed TraeX through the formal agent command", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

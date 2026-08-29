@@ -106,7 +106,9 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     };
   }
 
-  async assertWorkspace(workspaceId: string): Promise<void> { await this.delegate.assertWorkspace(workspaceId); }
+  async assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> {
+    await (expectedSpaceName === undefined ? this.delegate.assertWorkspace(workspaceId) : this.delegate.assertWorkspace(workspaceId, expectedSpaceName));
+  }
   async getPane(paneId: string): Promise<HerdrPane | null> {
     const pane = await this.delegate.getPane(paneId);
     if (pane) this.rememberPane(pane);
