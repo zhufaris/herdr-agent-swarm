@@ -1316,6 +1316,16 @@ describe("SQLite store", () => {
     expect(plan.map((row) => row.detail).join(" ")).toContain("outbound_replies_binding_target_version");
   });
 
+  it("uses a prompt delivery index for operational latency summaries", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const columns = store.database.prepare("PRAGMA index_info(outbound_replies_prompt_kind_state_updated)").all() as Array<{ name: string }>;
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT MIN(updated_at) FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_finish' AND state = 'delivered' AND updated_at >= ?").all("p1", "2026-08-29T00:00:00.000Z") as Array<{ detail: string }>;
+
+    expect(columns.map((column) => column.name)).toEqual(["prompt_id", "kind", "state", "updated_at"]);
+    expect(plan.map((row) => row.detail).join(" " )).toContain("outbound_replies_prompt_kind_state_updated");
+  });
+
   it("creates the ordinary prompt queue index with the exact column order", () => {
     store = new SqliteBindingStore(":memory:");
 
