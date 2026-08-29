@@ -178,12 +178,12 @@ function explicitStatus(output: unknown, normalized: string): { kind: "success" 
 
 function renderCommandResult(descriptor: ToolActivityDescriptor, output: unknown, normalized: string, status: ReturnType<typeof explicitStatus>): string {
   const command = fence("bash", descriptor.target);
-  if (status.kind === "running") return `… Command · 运行中\n\n${command}`;
+  if (status.kind === "running") return `◆ **Ran** · 运行中\n\n${command}`;
   if (status.kind === "failed") {
-    const heading = `✗ Command · ${status.summary}`;
+    const heading = `◆ **Ran** · ✗ ${status.summary}`;
     return renderBoundedCommandBlocks([heading, command], failureTail(normalized));
   }
-  return renderBoundedCommandBlocks([command], commandOutput(output, normalized));
+  return renderBoundedCommandBlocks(["◆ **Ran**", command], commandOutput(output, normalized));
 }
 
 function commandOutput(output: unknown, normalized: string): string {

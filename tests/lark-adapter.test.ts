@@ -243,8 +243,94 @@ describe("Lark message normalization", () => {
     };
 
     expect(normalizeMessage(reply, "bot")).toMatchObject({
-      messageId: "m2", rootMessageId: "root-1", topicId: "thread-1", text: "continue", mentionsBot: false, isRootMessage: false
+      messageId: "m2", rootMessageId: "root-1", topicId: "thread-1", text: "continue", mentionsBot: false, isRootMessage: false,
+      hasUnsupportedContent: false
     });
+  });
+
+  it("marks plain continuation post content as supported", () => {
+    const post = {
+      ...base,
+      message: {
+        ...base.message,
+        message_type: "post",
+        content: JSON.stringify({ content: [[{ tag: "text", text: "继续" }]] }),
+        mentions: []
+      }
+    };
+
+    expect(normalizeMessage(post, "bot")).toMatchObject({ text: "继续", hasUnsupportedContent: false });
+  });
+
+  it("marks a continuation post with a discarded rich-content node as unsupported", () => {
+    const post = {
+      ...base,
+      message: {
+        ...base.message,
+        message_type: "post",
+        content: JSON.stringify({ content: [[
+          { tag: "text", text: "继续" },
+          { tag: "img", image_key: "img-1" }
+        ]] }),
+        mentions: []
+      }
+    };
+
+    expect(normalizeMessage(post, "bot")).toMatchObject({ text: "继续", hasUnsupportedContent: true });
+  });
+
+  it("normalizes a bare command from a topic-group post", () => {
+    const post = {
+      ...base,
+      event_id: "e-post",
+      message: {
+        ...base.message,
+        message_id: "m-post",
+        message_type: "post",
+        content: JSON.stringify({
+          title: "",
+          content: [[{ tag: "text", text: "/projects", style: [] }]],
+          content_v2: [[{ tag: "text", text: "/projects", style: [] }]]
+        }),
+        mentions: []
+      }
+    };
+
+    expect(normalizeMessage(post, "bot")).toMatchObject({
+      messageId: "m-post", text: "/projects", mentionsBot: false, isRootMessage: true
+    });
+  });
+
+  it("removes only the configured bot mention from a topic-group post", () => {
+    const post = {
+      ...base,
+      event_id: "e-post-mention",
+      message: {
+        ...base.message,
+        message_id: "m-post-mention",
+        message_type: "post",
+        content: JSON.stringify({
+          title: "",
+          content: [[
+            { tag: "at", user_id: "@_user_1", user_name: "Bridge", style: [] },
+            { tag: "text", text: " /projects", style: [] }
+          ]]
+        })
+      }
+    };
+
+    expect(normalizeMessage(post, "bot")).toMatchObject({ text: "/projects", mentionsBot: true });
+    expect(normalizeMessage(post, "someone-else")).toMatchObject({ text: "@_user_1 /projects", mentionsBot: false });
+  });
+
+  it("ignores malformed and non-text post content", () => {
+    const post = { ...base, message: { ...base.message, message_type: "post", mentions: [] } };
+
+    expect(normalizeMessage({ ...post, message: { ...post.message, content: "not-json" } }, "bot")).toBeNull();
+    expect(normalizeMessage({
+      ...post,
+      message: { ...post.message, content: JSON.stringify({ content: [[{ tag: "img", image_key: "img-1" }]] }) }
+    }, "bot")).toBeNull();
   });
 });
 

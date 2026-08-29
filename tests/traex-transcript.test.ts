@@ -282,7 +282,7 @@ describe("TraexTranscriptReader", () => {
 
     await expect(cursor.readDelta()).resolves.toBe("");
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-" + field, call_id: "call-" + field, output: "Script completed" }]));
-    await expect(cursor.readDelta()).resolves.toBe("```bash\nnpm test\n```");
+    await expect(cursor.readDelta()).resolves.toBe("◆ **Ran**\n\n```bash\nnpm test\n```");
   });
 
   it("renders a wrapped command and JSON result as fenced Answer Card Markdown", async () => {
@@ -299,7 +299,7 @@ describe("TraexTranscriptReader", () => {
       output: JSON.stringify({ exit_code: 0, output: "Test Files 1 passed\nTests 2 passed" })
     }]));
     await expect(cursor.readDelta()).resolves.toBe([
-      "```bash", "npm test", "```", "", "```text",
+      "◆ **Ran**", "", "```bash", "npm test", "```", "", "```text",
       "Test Files 1 passed", "Tests 2 passed", "```"
     ].join("\n"));
   });

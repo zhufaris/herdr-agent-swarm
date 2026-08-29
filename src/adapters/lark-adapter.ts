@@ -202,19 +202,16 @@ function isUnsupportedFenceLanguage(error: unknown): boolean {
 type MessageEvent = Parameters<NonNullable<lark.EventHandles["im.message.receive_v1"]>>[0];
 
 export function normalizeMessage(data: MessageEvent, botOpenId: string): IncomingLarkMessage | null {
-  if (data.sender.sender_type !== "user" || data.message.message_type !== "text") return null;
-  let text: string;
-  try {
-    const parsed = JSON.parse(data.message.content) as { text?: unknown };
-    if (typeof parsed.text !== "string") return null;
-    text = parsed.text;
-  } catch { return null; }
+  if (data.sender.sender_type !== "user") return null;
+  const normalized = normalizeMessageText(data.message.message_type, data.message.content);
+  if (normalized === null) return null;
+  let { text } = normalized;
 
   const botMentions = (data.message.mentions ?? []).filter((mention) => mention.id.open_id === botOpenId);
   const mentionsBot = botMentions.length > 0;
   for (const mention of botMentions) text = text.replaceAll(mention.key, "");
-  text = text.trim();
-  if (!text) return null;
+  const normalizedText = text.trim();
+  if (!normalizedText) return null;
 
   const messageId = data.message.message_id;
   const rootMessageId = data.message.root_id ?? null;
@@ -225,8 +222,44 @@ export function normalizeMessage(data: MessageEvent, botOpenId: string): Incomin
     topicId: data.message.thread_id ?? rootMessageId ?? messageId,
     rootMessageId: rootMessageId ?? messageId,
     actorOpenId: data.sender.sender_id?.open_id ?? "unknown",
-    text, mentionsBot, isRootMessage: rootMessageId === null
+    text: normalizedText, mentionsBot, isRootMessage: rootMessageId === null,
+    hasUnsupportedContent: normalized.hasUnsupportedContent
   };
+}
+
+function normalizeMessageText(messageType: string, content: string): { text: string; hasUnsupportedContent: boolean } | null {
+  try {
+    const parsed = JSON.parse(content) as { text?: unknown; content?: unknown; content_v2?: unknown };
+    if (messageType === "text") return typeof parsed.text === "string"
+      ? { text: parsed.text, hasUnsupportedContent: false }
+      : null;
+    if (messageType !== "post") return null;
+    const paragraphs = Array.isArray(parsed.content_v2) ? parsed.content_v2 : parsed.content;
+    if (!Array.isArray(paragraphs)) return null;
+    let hasUnsupportedContent = false;
+    const text = paragraphs.map((paragraph) => {
+      if (!Array.isArray(paragraph)) {
+        hasUnsupportedContent = true;
+        return "";
+      }
+      return paragraph.map((node) => {
+        const normalizedNode = normalizePostNode(node);
+        if (normalizedNode === null) {
+          hasUnsupportedContent = true;
+          return "";
+        }
+        return normalizedNode;
+      }).join("");
+    }).join("\n");
+    return { text, hasUnsupportedContent };
+  } catch { return null; }
+}
+
+function normalizePostNode(node: unknown): string | null {
+  if (!isRecord(node)) return null;
+  if (node.tag === "text" && typeof node.text === "string") return node.text;
+  if (node.tag === "at" && typeof node.user_id === "string") return node.user_id;
+  return null;
 }
 
 export function normalizeCardActionEvent(data: lark.RawCardActionEvent): IncomingLarkCardAction | null {

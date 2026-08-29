@@ -3,6 +3,9 @@ const TABLE_DELIMITER = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 const TRAEX_DIFF_ROW = /^\s*\d+\s+[+-](?:\s|$)/u;
 const TRUNCATION_MARKER = "…（内容已截断）";
 const LEADING_TRUNCATION_MARKER = "…（较早内容已省略）";
+const TOOL_RESULT_LINE_LIMIT = 20;
+const TOOL_RESULT_HEAD_LINES = 10;
+const TOOL_RESULT_TAIL_LINES = 9;
 
 export interface RenderedLarkMarkdownPage {
   page: string;
@@ -53,7 +56,7 @@ export function normalizeLarkMarkdown(source: string): string {
 export function renderLarkMarkdownPage(source: string, pageStart: number, limit: number): RenderedLarkMarkdownPage {
   const start = Math.max(0, Math.min(pageStart, source.length));
   const boundedLimit = Math.max(0, limit);
-  const complete = renderMarkdownRange(source, start, source.length);
+  const complete = renderCardMarkdownRange(source, start, source.length);
   if (complete.length <= boundedLimit) return { page: complete, nextPageStart: null };
 
   const lineEnds: number[] = [];
@@ -61,23 +64,36 @@ export function renderLarkMarkdownPage(source: string, pageStart: number, limit:
     const end = index + 1;
     if (end < source.length) lineEnds.push(end);
   }
-  const lineEnd = latestFittingEnd(source, start, boundedLimit, lineEnds);
-  if (lineEnd !== null) return { page: renderMarkdownRange(source, start, lineEnd), nextPageStart: lineEnd };
+  const protectedRanges = atomicToolActivityRanges(source, boundedLimit);
+  const candidates = lineEnds.filter((end) => !protectedRanges.some((range) => end > range.start && end < range.end));
+  const lineEnd = latestFittingEnd(source, start, boundedLimit, candidates);
+  if (lineEnd !== null) return { page: renderCardMarkdownRange(source, start, lineEnd), nextPageStart: lineEnd };
 
   let low = start + 1;
   let high = source.length - 1;
   let hardEnd: number | null = null;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    if (renderMarkdownRange(source, start, middle).length <= boundedLimit) {
+    if (renderCardMarkdownRange(source, start, middle).length <= boundedLimit) {
       hardEnd = middle;
       low = middle + 1;
     } else high = middle - 1;
   }
-  if (hardEnd !== null) return { page: renderMarkdownRange(source, start, hardEnd), nextPageStart: hardEnd };
+  if (hardEnd !== null) return { page: renderCardMarkdownRange(source, start, hardEnd), nextPageStart: hardEnd };
 
   const forcedEnd = Math.min(source.length, start + Math.max(1, boundedLimit));
   return { page: source.slice(start, forcedEnd).slice(0, boundedLimit), nextPageStart: forcedEnd < source.length ? forcedEnd : null };
+}
+
+function atomicToolActivityRanges(source: string, limit: number): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const pattern = /^◆ \*\*Ran\*\*(?: · .+)?\n\n```bash\n[\s\S]*?\n```(?:\n\n```text\n[\s\S]*?\n```)?(?=\n|$)/gmu;
+  for (const match of source.matchAll(pattern)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (renderToolActivityResults(match[0]).length <= limit) ranges.push({ start, end });
+  }
+  return ranges;
 }
 
 /** Normalizes first, then applies a bounded render-only copy. */
@@ -240,12 +256,46 @@ function latestFittingEnd(source: string, start: number, limit: number, candidat
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const end = candidates[middle]!;
-    if (renderMarkdownRange(source, start, end).length <= limit) {
+    if (renderCardMarkdownRange(source, start, end).length <= limit) {
       result = end;
       low = middle + 1;
     } else high = middle - 1;
   }
   return result;
+}
+
+function renderCardMarkdownRange(source: string, start: number, end: number): string {
+  return renderToolActivityResults(renderMarkdownRange(source, start, end));
+}
+
+/** Applies Answer Card-only tool result folding without changing source offsets. */
+function renderToolActivityResults(markdown: string): string {
+  const lines = markdown.split("\n");
+  const rendered: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    rendered.push(lines[index]!);
+    if (!/^◆ \*\*Ran\*\*(?: · .+)?$/.test(lines[index]!)) { index += 1; continue; }
+    index += 1;
+    while (index < lines.length && lines[index] === "") rendered.push(lines[index++]!);
+    if (!/^```bash\s*$/.test(lines[index] ?? "")) continue;
+    do {
+      rendered.push(lines[index]!);
+      index += 1;
+    } while (index < lines.length && lines[index - 1] !== "```");
+    while (index < lines.length && lines[index] === "") rendered.push(lines[index++]!);
+    if (!/^```text\s*$/.test(lines[index] ?? "")) continue;
+    rendered.push(lines[index++]!);
+    const detail: string[] = [];
+    while (index < lines.length && lines[index] !== "```") detail.push(lines[index++]!);
+    const bounded = detail.length <= TOOL_RESULT_LINE_LIMIT ? detail : [
+      ...detail.slice(0, TOOL_RESULT_HEAD_LINES),
+      `… 已省略中间 ${detail.length - TOOL_RESULT_HEAD_LINES - TOOL_RESULT_TAIL_LINES} 行 …`,
+      ...detail.slice(-TOOL_RESULT_TAIL_LINES)
+    ];
+    rendered.push(...bounded.map((line, lineIndex) => `${lineIndex === bounded.length - 1 ? "└" : "│"} ${line}`));
+    if (index < lines.length) rendered.push(lines[index++]!);
+  }
+  return rendered.join("\n");
 }
 
 function renderMarkdownRange(source: string, start: number, end: number): string {

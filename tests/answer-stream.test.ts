@@ -119,6 +119,40 @@ describe("Answer stream pagination", () => {
     ].join("\n"));
   });
 
+  it.each([
+    ["JSON", "jq . result.json", (index: number) => `\"key-${index}\": ${index}`],
+    ["Git diff", "git diff", (index: number) => `+changed line ${index}`],
+    ["Git status", "git status --short", (index: number) => `M  src/file-${index}.ts`],
+    ["Git log", "git log --oneline", (index: number) => `abc${index} commit ${index}`],
+    ["test output", "npm test", (index: number) => `test ${index} passed`],
+    ["plain text", "printf output", (index: number) => `plain line ${index}`]
+  ])("folds %s tool results only in the rendered page", (_kind, command, line) => {
+    const canonicalLines = Array.from({ length: 35 }, (_, index) => line(index + 1));
+    const canonical = ["◆ **Ran**", "", "```bash", command, "```", "", "```text", ...canonicalLines, "```"].join("\n");
+    const rendered = renderAnswerStreamPage(canonical, 0).page;
+    const detail = rendered.match(/```text\n([\s\S]*?)\n```$/)?.[1].split("\n") ?? [];
+
+    expect(detail).toHaveLength(20);
+    expect(detail.slice(0, 10)).toEqual(canonicalLines.slice(0, 10).map((value) => `│ ${value}`));
+    expect(detail[10]).toBe("│ … 已省略中间 16 行 …");
+    expect(detail.at(-1)).toBe(`└ ${canonicalLines.at(-1)}`);
+    expect(canonical.split("\n")).toContain(canonicalLines[20]);
+  });
+
+  it("keeps one bounded tool result together when prose nearly fills a page", () => {
+    const resultLines = Array.from({ length: 35 }, (_, index) => "result-" + (index + 1));
+    const ticks = String.fromCharCode(96).repeat(3);
+    const activity = ["◆ **Ran**", "", ticks + "bash", "git log --oneline", ticks, "", ticks + "text", ...resultLines, ticks].join("\n");
+    const content = "intro ".repeat(70) + "\n\n" + activity;
+    const first = renderAnswerStreamPage(content, 0, 600);
+    const second = renderAnswerStreamPage(content, first.nextPageStart!, 600);
+
+    expect(first.page).not.toContain("◆ **Ran**");
+    expect(second.page).toContain("◆ **Ran**");
+    expect(second.page.match(/^[│└] /gmu) ?? []).toHaveLength(20);
+    expect(second.page).toContain("已省略中间 16 行");
+  });
+
   it("sanitizes prose but leaves fenced code literals unchanged", () => {
     const content = [
       "<b>Result</b> [unsafe](data:text/plain,no)",

@@ -39,7 +39,7 @@ describe("tool activity projector", () => {
   it("preserves shell backticks inside the fenced command", () => {
     const projected = projectToolCall("exec_command", JSON.stringify({ cmd: "echo `date`" }));
 
-    expect(projectToolResult(projected.descriptor, "Script completed")).toBe("```bash\necho `date`\n```");
+    expect(projectToolResult(projected.descriptor, "Script completed")).toBe("◆ **Ran**\n\n```bash\necho `date`\n```");
   });
 
   it("suppresses an exec wrapper when its command cannot be inspected", () => {
@@ -98,15 +98,26 @@ describe("tool activity projector", () => {
     ].join("\n");
 
     expect(projectToolResult(descriptor, output)).toBe([
-      "```bash", "npm test", "```", "", "```text", "private test log",
+      "◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "private test log",
       "Test Files  69 passed (69)", "Tests  662 passed (662)", "```"
     ].join("\n"));
+  });
+
+  it("keeps successful command output canonical for display-time folding", () => {
+    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "git diff --stat" }));
+    const line = (index: number) => `file-${index} | changed`;
+    const lines = Array.from({ length: 35 }, (_, index) => line(index + 1));
+    const result = projectToolResult(descriptor, ["Script completed", "Output:", ...lines].join("\n"));
+    const detail = result.match(/```text\n([\s\S]*?)\n```$/)?.[1].split("\n") ?? [];
+
+    expect(detail).toEqual(lines);
+    expect(result.endsWith("```")).toBe(true);
   });
 
   it("renders an explicit running result without retaining payload", () => {
     const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
 
-    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 42, output: "private partial output" }))).toBe("… Command · 运行中\n\n```bash\nnpm test\n```");
+    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 42, output: "private partial output" }))).toBe("◆ **Ran** · 运行中\n\n```bash\nnpm test\n```");
   });
 
   it("retains only a bounded redacted failure tail", () => {
@@ -116,7 +127,7 @@ describe("tool activity projector", () => {
     const output = ["Script failed", "Process exited with code 2", ...lines].join("\n");
     const result = projectToolResult(descriptor, output);
 
-    expect(result).toContain("✗ Command · exit 2\n\n```bash\nnpm test\n```");
+    expect(result).toContain("◆ **Ran** · ✗ exit 2\n\n```bash\nnpm test\n```");
     expect(result).not.toContain("failure-10\n");
     expect(result).toContain("failure-11");
     expect(result).toContain("TOKEN=[REDACTED]");
