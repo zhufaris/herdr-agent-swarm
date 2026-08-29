@@ -206,6 +206,8 @@ describe("coordinator concurrency controls", () => {
       async renamePane() {}
     };
     const { coordinator, publisher, store, bus } = fixture(herdr);
+    const lifecycleTypes: string[] = [];
+    bus.onBridgeEvent("lifecycle-sequence", (event) => { lifecycleTypes.push(event.type); });
     bus.onBridgeEvent("failing-projector", (event) => {
       if (event.type === "TurnCompleted") throw new Error("projection failed");
     });
@@ -218,6 +220,9 @@ describe("coordinator concurrency controls", () => {
 
     const promptId = store.listRunCards("b1")[0]!.promptId;
     expect(store.getPrompt(promptId)).toMatchObject({ state: "delivered", observationState: "completed", error: null });
+    expect(lifecycleTypes).toContain("TurnStarted");
+    expect(lifecycleTypes).toContain("TurnCompleted");
+    expect(lifecycleTypes).not.toContain("RunQueuePositionChanged");
     expect(bus.snapshot()).toMatchObject({ subscriberFailures: 1, lastFailedSubscriber: "failing-projector" });
 
     await coordinator.stop(); await publisher.stop(); store.close();

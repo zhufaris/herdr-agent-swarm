@@ -299,6 +299,7 @@ describe("automatic continuation steering", () => {
     });
     expect(harness.schedulerWake.mock.calls.map(([hint]) => hint)).not.toContainEqual({ kind: "prompt-ready", bindingId: harness.bindingId });
     expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "steering-ready", bindingId: harness.bindingId, parentPromptId: harness.parent.promptId });
+    expect(harness.store.loadQueueFeedbackInputs(harness.bindingId).queued.every((view) => view.steeringOrigin === null)).toBe(true);
     await vi.waitFor(() => expect(harness.steering).toEqual(["继续"]));
     await harness.close();
   });
