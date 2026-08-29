@@ -30,6 +30,8 @@ export type ClassifiedPromptAcceptance = {
 };
 
 export interface InstanceStore {
+  findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
+  getBinding(id: string): Binding | null;
   createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest;
   resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
   consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch";
