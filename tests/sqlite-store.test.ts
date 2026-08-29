@@ -22,7 +22,7 @@ describe("SQLite store", () => {
   it("persists exact approval identity and consumes a matching grant once", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    const identity = { actorId: "user-1", projectId: "project-a", instanceId: "i1", instanceGeneration: 1, actionFingerprint: "sha256:action", resourceScope: "repo/acme#new", policyVersion: "solo-agent-v1" };
+    const identity = { actorId: "user-1", projectId: "project-a", instanceId: "i1", instanceGeneration: 1, actionFingerprint: "sha256:action", resourceScope: "repo/acme#new", policyVersion: "policy-v1" };
     const request = store.createApprovalRequest({ id: "request-1", ...identity, expiresAt: "2026-08-28T16:00:00.000Z" });
     expect(request).toMatchObject({ ...identity, state: "pending", tier: "remote-confirmation" });
 

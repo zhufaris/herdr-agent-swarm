@@ -15,7 +15,7 @@ const methodNames: Record<string, string> = { list_instances: "listInstances", p
 
 export async function handlePrimaryMcpRequest(request: JsonRpcRequest, invoke: (tool: string, args: Record<string, unknown>) => Promise<unknown>): Promise<object | null> {
   if (request.method === "notifications/initialized") return null;
-  if (request.method === "initialize") return result(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "solo-agent-primary-tools", version: "0.2.0" }, instructions: "Use these tools only to coordinate existing Workers in this Primary's project. Never create, remove, promote, retarget, merge, push, deploy, or delete through this server." });
+  if (request.method === "initialize") return result(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "herdr-agent-swarm-primary-tools", version: "0.2.0" }, instructions: "Use these tools only to coordinate existing Workers in this Primary's project. Never create, remove, promote, retarget, merge, push, deploy, or delete through this server." });
   if (request.method === "tools/list") return result(request.id, { tools: definitions });
   if (request.method === "tools/call") {
     const name = typeof request.params?.name === "string" ? request.params.name : "";
@@ -33,7 +33,7 @@ export async function handlePrimaryMcpRequest(request: JsonRpcRequest, invoke: (
 
 async function main(): Promise<void> {
   const socketPath = argument("--socket"); const instanceId = argument("--instance"); const generation = Number(argument("--generation"));
-  const capability = process.env.SOLO_AGENT_PRIMARY_CAPABILITY;
+  const capability = process.env.SWARM_PRIMARY_CAPABILITY;
   if (!socketPath || !instanceId || !Number.isInteger(generation) || generation <= 0 || !capability) throw new Error("Primary MCP runtime credential is incomplete");
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {

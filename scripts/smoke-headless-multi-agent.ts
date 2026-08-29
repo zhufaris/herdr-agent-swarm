@@ -37,7 +37,7 @@ if (!process.env.HERDR_PANE_ID || !process.env.HERDR_WORKSPACE_ID) throw new Err
 if (!available.codex || !available.traex) throw new Error("--execute requires Codex and TraeX");
 await access(mcpEntrypoint, constants.R_OK);
 
-const temporary = await mkdtemp(join(tmpdir(), "solo-agent-product-smoke-"));
+const temporary = await mkdtemp(join(tmpdir(), "herdr-agent-swarm-smoke-"));
 const smokeRunId = temporary.slice(-6).toLowerCase();
 const smokeProjectId = `smoke-${smokeRunId}`;
 const repository = join(temporary, "project");
@@ -63,7 +63,7 @@ try {
   const worker = await control.create({ actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, name: "worker", role: "worker", agentKind: "traex", model: null, start: true });
   ownedPanes.add(worker.pendingRuntimeRef?.paneId ?? worker.runtimeRef!.paneId);
   await prepareTemporaryRepositoryTrust(worker.runtimeRef!.paneId, "traex");
-  await messaging.submit({ idempotencyKey: "primary-smoke-turn", actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, targetInstanceId: primary.id, content: { kind: "turn", text: `Use the solo_agent MCP tools. First list instances. Then call prompt_instance for Worker ${worker.id} with task "Reply with exactly WORKER_OK. Do not modify files." and idempotencyKey "primary-to-worker-smoke". Do not create, remove, or retarget instances. After the tool accepts the task, reply with exactly PRIMARY_DISPATCHED.` } });
+  await messaging.submit({ idempotencyKey: "primary-smoke-turn", actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, targetInstanceId: primary.id, content: { kind: "turn", text: `Use the herdr_agent_swarm MCP tools. First list instances. Then call prompt_instance for Worker ${worker.id} with task "Reply with exactly WORKER_OK. Do not modify files." and idempotencyKey "primary-to-worker-smoke". Do not create, remove, or retarget instances. After the tool accepts the task, reply with exactly PRIMARY_DISPATCHED.` } });
   await scheduler.drain(primary.id);
   await scheduler.drain(worker.id);
   const dispatchedWorkerTurn = store.listInstanceTurns(worker.id).find((turn) => turn.idempotencyKey === "primary-to-worker-smoke");

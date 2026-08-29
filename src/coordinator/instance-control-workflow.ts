@@ -32,7 +32,7 @@ export class InstanceControlWorkflow {
     const workspaceId = this.options.idFactory();
     const worker = command.role === "worker";
     const workspace: CreateAgentInstanceInput["workspace"] = worker
-      ? { id: workspaceId, kind: "git-worktree", cwd: join(project.cwd, ".worktree", command.name), branch: `solo/${command.name}`, baseCommit: "HEAD" }
+      ? { id: workspaceId, kind: "git-worktree", cwd: join(project.cwd, ".worktree", command.name), branch: `swarm/${command.name}`, baseCommit: "HEAD" }
       : { id: workspaceId, kind: "main-checkout", cwd: project.cwd, branch: null, baseCommit: "HEAD" };
     const instance = this.options.store.createAgentInstance({ id, projectId: project.id, name: command.name, role: command.role, agentKind: command.agentKind, model: command.model, desiredState: command.start ? "running" : "stopped", workspace });
     return command.start ? this.start({ actor: command.actor, instanceId: instance.id }) : instance;

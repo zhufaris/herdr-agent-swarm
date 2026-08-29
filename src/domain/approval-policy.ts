@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 
-export const APPROVAL_POLICY_VERSION = "solo-agent-v1";
+export const APPROVAL_POLICY_VERSION = "herdr-agent-swarm-v1";
 
 export type ApprovalTier = "routine" | "remote-confirmation" | "local-only";
 

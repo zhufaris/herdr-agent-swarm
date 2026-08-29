@@ -55,9 +55,9 @@ export class TraexDriver implements AgentRuntimeDriver {
 
 function mcpArguments(server: { command: string; args: string[] }): string[] {
   return [
-    "-c", shellQuote(`mcp_servers.solo_agent.command=${JSON.stringify(server.command)}`),
-    "-c", shellQuote(`mcp_servers.solo_agent.args=${JSON.stringify(server.args)}`),
-    "-c", shellQuote('mcp_servers.solo_agent.env_vars=["SOLO_AGENT_PRIMARY_CAPABILITY"]')
+    "-c", shellQuote(`mcp_servers.herdr_agent_swarm.command=${JSON.stringify(server.command)}`),
+    "-c", shellQuote(`mcp_servers.herdr_agent_swarm.args=${JSON.stringify(server.args)}`),
+    "-c", shellQuote('mcp_servers.herdr_agent_swarm.env_vars=["SWARM_PRIMARY_CAPABILITY"]')
   ];
 }
 

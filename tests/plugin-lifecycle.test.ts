@@ -45,7 +45,7 @@ describe("plugin lifecycle", () => {
     const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> };
     for (const action of ["init", "install", "start", "status", "restart", "stop", "logs"]) {
       expect(packageJson.scripts[`swarm:${action}`]).toBe(`bash scripts/swarm-service.sh ${action}`);
-      expect(packageJson.scripts[`solo:${action}`]).toBeUndefined();
+      expect(Object.keys(packageJson.scripts).filter((name) => name.endsWith(`:${action}`))).toEqual([`swarm:${action}`]);
     }
   });
 

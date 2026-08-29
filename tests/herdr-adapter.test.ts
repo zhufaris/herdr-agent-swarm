@@ -33,7 +33,7 @@ describe("Herdr adapter", () => {
       if (args[0] === "api") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle" }], agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "idle" }] } });
       throw new Error(`unexpected command: ${args.join(" ")}`);
     } };
-    const mcpArgs = ["-c", 'mcp_servers.solo_agent.command="node"', "-c", 'mcp_servers.solo_agent.args=["shim.js"]'];
+    const mcpArgs = ["-c", 'mcp_servers.herdr_agent_swarm.command="node"', "-c", 'mcp_servers.herdr_agent_swarm.args=["shim.js"]'];
     await new HerdrCliAdapter(runner, "herdr", 1000).startAgent("w1:p1", { name: "primary", kind: "codex", executable: "codex", args: mcpArgs });
     expect(calls[0]).toEqual(["agent", "start", "primary", "--kind", "codex", "--pane", "w1:p1", "--timeout", "1000", "--", ...mcpArgs]);
   });

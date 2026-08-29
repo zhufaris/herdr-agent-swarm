@@ -4,7 +4,7 @@ import { renderInstanceDetailCard } from "../src/cards/instance-detail-card.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../src/cards/instance-control-card.js";
 
 const instance = { id: "i1", projectId: "p1", name: "reviewer", role: "worker" as const, agentKind: "claude-code" as const, model: "sonnet", desiredState: "running" as const, observedState: "idle" as const, workspaceLeaseId: "ws1", generation: 2, runtimeRef: { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1", generation: 2 }, pendingRuntimeRef: null, provisioningCheckpoint: "verified" as const, lastError: null };
-const workspace = { id: "ws1", projectId: "p1", instanceId: "i1", kind: "git-worktree" as const, cwd: "/repo/.worktree/reviewer", branch: "solo/reviewer", baseCommit: "abc123", state: "ready" as const, generation: 1 };
+const workspace = { id: "ws1", projectId: "p1", instanceId: "i1", kind: "git-worktree" as const, cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "abc123", state: "ready" as const, generation: 1 };
 const capabilities = { available: true, structuredEvents: true, nativeResume: true, primaryTools: false, steering: "unsupported" as const, interrupt: "terminal-signal" as const, approvals: "terminal" as const, modelSelection: "startup-only" as const, usageReporting: true };
 
 describe("instance cards", () => {
@@ -12,7 +12,7 @@ describe("instance cards", () => {
     const primary = { ...instance, id: "primary", name: "lead", role: "primary" as const };
     const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries: [{ instance: primary, workspace: { ...workspace, instanceId: "primary", kind: "main-checkout", cwd: "/repo", branch: null }, capabilities, queueDepth: 1 }, { instance, workspace, capabilities, queueDepth: 3 }], target: { kind: "instance", instanceId: "i1" } });
     const text = JSON.stringify(card);
-    expect(text).toContain("PRIMARY"); expect(text).toContain("lead"); expect(text).toContain("TARGET"); expect(text).toContain("reviewer"); expect(text).toContain("queue 3"); expect(text).toContain("solo/reviewer");
+    expect(text).toContain("PRIMARY"); expect(text).toContain("lead"); expect(text).toContain("TARGET"); expect(text).toContain("reviewer"); expect(text).toContain("queue 3"); expect(text).toContain("swarm/reviewer");
   });
   it("shows runtime and Git evidence but hides unsupported steering controls", () => {
     const text = JSON.stringify(renderInstanceDetailCard({ instance, workspace, capabilities, turns: [], queueDepth: 0 }));

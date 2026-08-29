@@ -32,12 +32,12 @@ describe("agent driver contract", () => {
     const traex = new TraexDriver({ startTraex } as unknown as HerdrPort, "traex", 1_000);
     const primaryTools = { command: process.execPath, args: ["shim.js", "--instance", "primary"] };
     await traex.start(runtime, { name: "primary", model: null, primaryTools });
-    expect(startTraex).toHaveBeenCalledWith("w1:p1", "traex", ["-c", expect.stringMatching(/^'mcp_servers\.solo_agent\.command=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.solo_agent\.args=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.solo_agent\.env_vars=.*'$/)]);
+    expect(startTraex).toHaveBeenCalledWith("w1:p1", "traex", ["-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.command=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.args=.*'$/), "-c", expect.stringMatching(/^'mcp_servers\.herdr_agent_swarm\.env_vars=.*'$/)]);
 
     const startAgent = vi.fn(async () => undefined);
     const codex = new CodexDriver({ startAgent } as unknown as HerdrPort, "codex", 1_000, true);
     await codex.start(runtime, { name: "primary", model: null, primaryTools });
-    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["-c", expect.stringContaining("mcp_servers.solo_agent.command"), "-c", expect.stringContaining("mcp_servers.solo_agent.args"), "-c", expect.stringContaining("SOLO_AGENT_PRIMARY_CAPABILITY")] }));
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["-c", expect.stringContaining("mcp_servers.herdr_agent_swarm.command"), "-c", expect.stringContaining("mcp_servers.herdr_agent_swarm.args"), "-c", expect.stringContaining("SWARM_PRIMARY_CAPABILITY")] }));
   });
 
   it("returns an uncertain receipt when a submitted prompt may have reached TraeX", async () => {

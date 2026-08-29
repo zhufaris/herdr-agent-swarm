@@ -43,12 +43,12 @@ describe("InstanceControlWorkflow", () => {
   });
 
   it("injects trusted tools only into a capable primary runtime", async () => {
-    const primaryTools = { issue: vi.fn(() => ({ environment: { SOLO_AGENT_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] })), configuration: vi.fn() };
+    const primaryTools = { issue: vi.fn(() => ({ environment: { SWARM_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] })), configuration: vi.fn() };
     const { workflow, paneHost, driver } = setup({ primaryTools });
     const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "primary", role: "primary", agentKind: "traex", model: null, start: true });
     expect(primaryTools.issue).toHaveBeenCalledWith(instance.id, 1);
-    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo", expect.objectContaining({ environment: { SOLO_AGENT_PRIMARY_CAPABILITY: "secret" } }));
-    expect(driver.start).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ primaryTools: { environment: { SOLO_AGENT_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] } }));
+    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo", expect.objectContaining({ environment: { SWARM_PRIMARY_CAPABILITY: "secret" } }));
+    expect(driver.start).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ primaryTools: { environment: { SWARM_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] } }));
   });
 
   it("accepts Herdr's canonical claude kind for a Claude Code instance", async () => {
@@ -66,8 +66,8 @@ describe("InstanceControlWorkflow", () => {
   it("allocates a named branch and isolated worktree for an explicit worker", async () => {
     const { workflow, worktrees } = setup();
     const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
-    expect(worktrees.prepare).toHaveBeenCalledWith({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/reviewer", branch: "solo/reviewer", baseRef: "HEAD" });
-    expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "solo/reviewer", baseCommit: "base-sha", state: "ready" });
+    expect(worktrees.prepare).toHaveBeenCalledWith({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseRef: "HEAD" });
+    expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base-sha", state: "ready" });
   });
 
   it("persists the workspace checkpoint when runtime launch fails", async () => {

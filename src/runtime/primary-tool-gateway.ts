@@ -27,7 +27,7 @@ export class PrimaryToolGateway {
     const runtimeGeneration = expectedGeneration + 1;
     const capability = randomBytes(32).toString("hex");
     if (!this.store.setPrimaryToolCapability({ instanceId, expectedGeneration, credentialGeneration: runtimeGeneration, capabilityHash: hash(capability) })) throw new Error("Primary instance generation changed before tool credential issue");
-    return { ...this.configuration(instanceId, runtimeGeneration), environment: { SOLO_AGENT_PRIMARY_CAPABILITY: capability } };
+    return { ...this.configuration(instanceId, runtimeGeneration), environment: { SWARM_PRIMARY_CAPABILITY: capability } };
   }
 
   configuration(instanceId: string, runtimeGeneration: number): PrimaryToolLaunch {

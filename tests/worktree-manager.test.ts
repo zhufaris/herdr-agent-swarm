@@ -21,7 +21,7 @@ const registered = [
   "",
   "worktree /repo/.worktree/worker-1",
   "HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "branch refs/heads/solo/worker-1",
+  "branch refs/heads/swarm/worker-1",
   ""
 ].join("\n");
 
@@ -34,23 +34,23 @@ describe("WorktreeManager", () => {
     ]);
     const manager = new WorktreeManager(runner, { managedRoot: "/repo/.worktree", timeoutMs: 5_000 });
 
-    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/worker-1", branch: "solo/worker-1", baseRef: "main" }))
-      .resolves.toMatchObject({ cwd: "/repo/.worktree/worker-1", branch: "solo/worker-1", baseCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
-    expect(runner.calls).toContainEqual({ executable: "git", args: ["-C", "/repo", "worktree", "add", "-b", "solo/worker-1", "/repo/.worktree/worker-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] });
+    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/worker-1", branch: "swarm/worker-1", baseRef: "main" }))
+      .resolves.toMatchObject({ cwd: "/repo/.worktree/worker-1", branch: "swarm/worker-1", baseCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+    expect(runner.calls).toContainEqual({ executable: "git", args: ["-C", "/repo", "worktree", "add", "-b", "swarm/worker-1", "/repo/.worktree/worker-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] });
   });
 
   it("adopts an already-created matching worktree after a missed durable checkpoint", async () => {
     const runner = new ScriptedRunner([{ stdout: "/repo\n" }, { stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" }, { stdout: registered }]);
     const manager = new WorktreeManager(runner, { timeoutMs: 5_000 });
-    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/worker-1", branch: "solo/worker-1", baseRef: "main" }))
-      .resolves.toMatchObject({ cwd: "/repo/.worktree/worker-1", branch: "solo/worker-1" });
+    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/worker-1", branch: "swarm/worker-1", baseRef: "main" }))
+      .resolves.toMatchObject({ cwd: "/repo/.worktree/worker-1", branch: "swarm/worker-1" });
     expect(runner.calls.some(({ args }) => args.includes("add"))).toBe(false);
   });
 
   it("rejects paths outside the managed root before invoking Git", async () => {
     const runner = new ScriptedRunner([]);
     const manager = new WorktreeManager(runner, { managedRoot: "/repo/.worktree", timeoutMs: 5_000 });
-    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/tmp/worker", branch: "solo/worker", baseRef: "main" }))
+    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/tmp/worker", branch: "swarm/worker", baseRef: "main" }))
       .rejects.toThrow(/managed worktree root/);
     expect(runner.calls).toEqual([]);
   });
@@ -58,7 +58,7 @@ describe("WorktreeManager", () => {
   it("rejects an existing branch without mutating worktrees", async () => {
     const runner = new ScriptedRunner([{ stdout: "/repo\n" }, { stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" }, { stdout: "worktree /repo\nHEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbranch refs/heads/main\n" }, { stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" }]);
     const manager = new WorktreeManager(runner, { managedRoot: "/repo/.worktree", timeoutMs: 5_000 });
-    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/worker-1", branch: "solo/worker-1", baseRef: "main" }))
+    await expect(manager.prepare({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/worker-1", branch: "swarm/worker-1", baseRef: "main" }))
       .rejects.toThrow(/branch already exists/);
     expect(runner.calls.some(({ args }) => args.includes("add"))).toBe(false);
   });

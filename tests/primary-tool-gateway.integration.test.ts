@@ -30,7 +30,7 @@ describe("Primary tool gateway", () => {
     store.acceptInstanceTurn({ id: "parent-server-owned", idempotencyKey: "parent", actor: { kind: "human", userId: "u" }, projectId: "p1", instanceId: "primary", instanceGeneration: 2, kind: "turn", text: "coordinate" });
     store.claimNextInstanceTurn("primary", 2);
     await gateway.start();
-    const capability = launch.environment.SOLO_AGENT_PRIMARY_CAPABILITY!;
+    const capability = launch.environment.SWARM_PRIMARY_CAPABILITY!;
     await expect(call(socketPath, { instanceId: "primary", generation: 2, capability, tool: "promptInstance", arguments: { instanceId: "worker", task: "review", idempotencyKey: "child", projectId: "forged", parentTurnId: "forged" } })).resolves.toMatchObject({ ok: true, result: { accepted: true, turn: { actor: { parentTurnId: "parent-server-owned" } } } });
     await expect(call(socketPath, { instanceId: "primary", generation: 2, capability: "0".repeat(64), tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
   });
