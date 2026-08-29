@@ -3,7 +3,7 @@ import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-ca
 import { projectSpaceName } from "../config.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { ProjectConfig, Binding, HerdrPane } from "../domain/types.js";
+import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } from "../domain/types.js";
 import type { HerdrPort, RuntimeReconciliationStore } from "../domain/ports.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -36,6 +36,7 @@ export interface HerdrRuntimeReconcilerPort {
   captureBaselines(): Promise<void>;
   reconcile(workspaceIds?: readonly string[]): Promise<void>;
   requestReconciliation(workspaceIds?: readonly string[]): Promise<void>;
+  snapshot(): ReconciliationDiagnostics;
   start(intervalMs: number): void;
   stop(): Promise<void>;
 }
@@ -54,6 +55,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
+  private runCount = 0;
+  private successCount = 0;
+  private failureCount = 0;
+  private coalescedRequestCount = 0;
+  private lastStartedAt: string | null = null;
+  private lastCompletedAt: string | null = null;
+  private lastDurationMs: number | null = null;
+  private maxDurationMs: number | null = null;
+  private lastOutcome: ReconciliationDiagnostics["lastOutcome"] = null;
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
@@ -86,7 +96,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
-    if (this.reconciliation) return this.reconciliation;
+    if (this.reconciliation) { this.coalescedRequestCount += 1; return this.reconciliation; }
     this.enqueueReconciliation(workspaceIds);
     const work = this.drainReconciliations();
     this.reconciliation = work;
@@ -97,7 +107,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   async requestReconciliation(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
     this.enqueueReconciliation(workspaceIds);
-    if (this.reconciliation) return this.reconciliation;
+    if (this.reconciliation) { this.coalescedRequestCount += 1; return this.reconciliation; }
     const work = this.drainReconciliations();
     this.reconciliation = work;
     try { await work; }
@@ -114,7 +124,35 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     while (this.pendingReconciliation !== undefined && !this.stopping) {
       const requested = this.pendingReconciliation;
       this.pendingReconciliation = undefined;
-      await this.reconcileOnce(requested === null ? undefined : requested);
+      await this.runMeasured(requested === null ? undefined : requested);
+    }
+  }
+
+  snapshot(): ReconciliationDiagnostics {
+    return {
+      state: this.stopping ? "stopping" : this.reconciliation ? "running" : "idle",
+      runCount: this.runCount, successCount: this.successCount, failureCount: this.failureCount, coalescedRequestCount: this.coalescedRequestCount,
+      lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastDurationMs: this.lastDurationMs, maxDurationMs: this.maxDurationMs, lastOutcome: this.lastOutcome
+    };
+  }
+
+  private async runMeasured(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
+    const started = performance.now();
+    this.runCount += 1;
+    this.lastStartedAt = new Date().toISOString();
+    try {
+      await this.reconcileOnce(requestedWorkspaceIds);
+      this.successCount += 1;
+      this.lastOutcome = "succeeded";
+    } catch (error) {
+      this.failureCount += 1;
+      this.lastOutcome = "failed";
+      throw error;
+    } finally {
+      const duration = Math.max(0, Math.round(performance.now() - started));
+      this.lastDurationMs = duration;
+      this.maxDurationMs = Math.max(this.maxDurationMs ?? 0, duration);
+      this.lastCompletedAt = new Date().toISOString();
     }
   }
 

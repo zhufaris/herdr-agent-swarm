@@ -64,10 +64,12 @@ describe("HerdrRuntimeReconciler", () => {
     const first = reconciler.reconcile();
     const second = reconciler.reconcile();
     await vi.waitFor(() => expect(listPanes).toHaveBeenCalledTimes(1));
+    expect(reconciler.snapshot()).toMatchObject({ state: "running", runCount: 1, coalescedRequestCount: 1, lastStartedAt: expect.any(String), lastCompletedAt: null });
     release();
     await Promise.all([first, second]);
 
     expect(listPanes).toHaveBeenCalledTimes(1);
+    expect(reconciler.snapshot()).toMatchObject({ state: "idle", runCount: 1, successCount: 1, failureCount: 0, coalescedRequestCount: 1, lastOutcome: "succeeded", lastDurationMs: expect.any(Number), maxDurationMs: expect.any(Number) });
     store.close();
   });
 
@@ -123,6 +125,7 @@ describe("HerdrRuntimeReconciler", () => {
     const stopping = reconciler.stop().then(() => { stopped = true; });
     await Promise.resolve();
     expect(stopped).toBe(false);
+    expect(reconciler.snapshot().state).toBe("stopping");
     release();
     await stopping;
     await vi.advanceTimersByTimeAsync(200);
@@ -211,6 +214,18 @@ describe("HerdrRuntimeReconciler", () => {
     await Promise.all([first, second]);
 
     expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(["w1", "w2"]);
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 2, successCount: 2, failureCount: 0, coalescedRequestCount: 1, lastOutcome: "succeeded" });
+    store.close();
+  });
+
+  it("records a failed physical reconciliation without swallowing the error", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    vi.spyOn(store, "listBindingsByState").mockImplementation(() => { throw new Error("scan failed"); });
+    const reconciler = fixture(store, { async listPanes() { return []; } } as unknown as HerdrPort);
+
+    expect(reconciler.snapshot()).toMatchObject({ state: "idle", runCount: 0, successCount: 0, failureCount: 0, lastOutcome: null });
+    await expect(reconciler.reconcile()).rejects.toThrow("scan failed");
+    expect(reconciler.snapshot()).toMatchObject({ state: "idle", runCount: 1, successCount: 0, failureCount: 1, lastStartedAt: expect.any(String), lastCompletedAt: expect.any(String), lastDurationMs: expect.any(Number), maxDurationMs: expect.any(Number), lastOutcome: "failed" });
     store.close();
   });
 
