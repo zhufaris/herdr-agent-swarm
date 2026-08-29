@@ -81,11 +81,12 @@ describe("Herdr TraeX managed start", () => {
 
   it("owns all TraeX lifecycle hooks and preserves caller arguments after them", () => {
     const args = shimLifecycleArguments("/opt/herdr", "/opt/shim/report-traex-lifecycle.js");
-    expect(args).toHaveLength(6);
+    expect(args).toHaveLength(7);
+    expect(args[0]).toBe("--dangerously-bypass-hook-trust");
     expect(args).toContainEqual(expect.stringContaining("hooks.SessionStart"));
     expect(args).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
     expect(args).toContainEqual(expect.stringContaining("hooks.Stop"));
-    expect(args.every((value, index) => index % 2 === 0 ? value === "-c" : value.includes("HERDR_TRAEX_REAL_HERDR"))).toBe(true);
+    expect(args.slice(1).every((value, index) => index % 2 === 0 ? value === "-c" : value.includes("HERDR_TRAEX_REAL_HERDR"))).toBe(true);
   });
 
   it("launches once, fences the process, and waits for managed identity", async () => {
@@ -128,7 +129,7 @@ describe("Herdr TraeX managed start", () => {
     expect(launch[0]![3]).not.toContain("codex");
     expect(calls.filter((args) => args[0] === "agent" && args[1] === "start")).toEqual([]);
     const request = (reports[0] as Buffer).toString("utf8").split("\0");
-    expect(request.slice(0, 2)).toEqual(["/opt/traex", "-c"]);
+    expect(request.slice(0, 3)).toEqual(["/opt/traex", "--dangerously-bypass-hook-trust", "-c"]);
     expect(request).toContainEqual(expect.stringContaining("hooks.SessionStart"));
     expect(request).toContainEqual(expect.stringContaining("hooks.UserPromptSubmit"));
     expect(request).toContainEqual(expect.stringContaining("hooks.Stop"));

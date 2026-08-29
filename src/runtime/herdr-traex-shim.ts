@@ -166,6 +166,7 @@ export async function runHerdrTraexStart(input: TraexStartInput, config: TraexLa
 export function shimLifecycleArguments(realHerdr: string, lifecycleReporter: string): string[] {
   const command = `HERDR_TRAEX_REAL_HERDR=${shellQuote(realHerdr)} node ${shellQuote(lifecycleReporter)}`;
   return [
+    "--dangerously-bypass-hook-trust",
     "-c", lifecycleHookArgument("SessionStart", "startup|resume", command),
     "-c", lifecycleHookArgument("UserPromptSubmit", ".*", command),
     "-c", lifecycleHookArgument("Stop", null, command)

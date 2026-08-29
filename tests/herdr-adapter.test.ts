@@ -24,7 +24,7 @@ describe("Herdr adapter structured control", () => {
 
     await new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex", args: ["--model", "x"] });
 
-    expect(calls[0]?.slice(0, 12)).toEqual(["agent", "start", "demo-primary", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto"]);
+    expect(calls[0]).toEqual(["agent", "start", "demo-primary", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto", "--model", "x"]);
     expect(calls[0]?.at(-2)).toBe("--model");
     expect(calls[0]?.at(-1)).toBe("x");
     expect(calls[0]).not.toContainEqual(expect.stringContaining("hooks."));
@@ -46,7 +46,7 @@ describe("Herdr adapter structured control", () => {
     await new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startTraex("w1:p1", "/opt/traex");
 
     const start = calls.find((args) => args[0] === "agent" && args[1] === "start");
-    expect(start?.slice(0, 13)).toEqual(["agent", "start", "traex-w1-p1", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto", "--dangerously-bypass-hook-trust"]);
+    expect(start).toEqual(["agent", "start", "traex-w1-p1", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto"]);
     expect(start).not.toContainEqual(expect.stringContaining("hooks."));
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });

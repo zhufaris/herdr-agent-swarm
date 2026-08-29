@@ -383,7 +383,8 @@ uses `/swarm reset` rather than local `/clear`.
 
 Managed TraeX startup uses the optional local `herdr` compatibility shim. The
 bridge invokes the formal `agent start --kind traex` surface without lifecycle
-hooks; the shim injects SessionStart, UserPromptSubmit, and Stop ahead of caller
+hooks or hook-trust overrides; the shim injects the required trust flag plus
+SessionStart, UserPromptSubmit, and Stop ahead of caller
 arguments, launches
 the configured real TraeX executable through a private request file and fixed
 opaque launcher, and owns a separate fenced reporter.

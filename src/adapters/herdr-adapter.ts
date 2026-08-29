@@ -149,7 +149,7 @@ export class HerdrCliAdapter implements HerdrPort {
     if (input.kind === "traex") {
       const args = [
         "agent", "start", input.name, "--kind", "traex", "--pane", paneId, "--timeout", String(this.commandTimeoutMs), "--",
-        "--permission-mode", this.traexPermissionMode, "--dangerously-bypass-hook-trust",
+        "--permission-mode", this.traexPermissionMode,
         ...(input.args ?? [])
       ];
       await this.startWhenShellReady(args);
