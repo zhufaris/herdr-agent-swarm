@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HerdrAgentSession } from "../src/domain/types.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
 
@@ -17,6 +17,37 @@ afterEach(async () => {
 });
 
 describe("Traex transcript path cache", () => {
+  it("caches a missing transcript briefly and discovers it after expiry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "traex-transcript-negative-")); roots.push(root);
+    let now = 1_000;
+    const discover = vi.fn(async () => ({ paths: [] as string[], exhausted: false }));
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, negativeCacheTtlMs: 100, now: () => now, discover });
+
+    await expect(reader.open(session(sessionIds[0]!))).resolves.toEqual({ mode: "unavailable", reason: "transcript_not_found" });
+    await expect(reader.open(session(sessionIds[0]!))).resolves.toEqual({ mode: "unavailable", reason: "transcript_not_found" });
+    expect(discover).toHaveBeenCalledOnce();
+    now += 101;
+    await reader.open(session(sessionIds[0]!));
+    expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent discovery for one session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "traex-transcript-inflight-")); roots.push(root);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const discover = vi.fn(async () => { await blocked; return { paths: [] as string[], exhausted: false }; });
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, discover });
+
+    const first = reader.open(session(sessionIds[0]!));
+    const second = reader.open(session(sessionIds[0]!));
+    await vi.waitFor(() => expect(discover).toHaveBeenCalledOnce());
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { mode: "unavailable", reason: "transcript_not_found" },
+      { mode: "unavailable", reason: "transcript_not_found" }
+    ]);
+  });
+
   it("evicts the least recently used validated path", async () => {
     const root = await mkdtemp(join(tmpdir(), "traex-transcript-cache-"));
     roots.push(root);

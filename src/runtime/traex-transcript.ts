@@ -11,6 +11,7 @@ const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
 const DEFAULT_MAX_DISCOVERY_ENTRIES = 100_000;
 const DEFAULT_MAX_CACHED_PATHS = 256;
+const DEFAULT_NEGATIVE_CACHE_TTL_MS = 250;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_EPOCH_SECONDS = 10_000_000_000;
@@ -74,6 +75,9 @@ export interface TraexTranscriptReaderOptions {
   maxRenderedDeltaChars?: number;
   maxDiscoveryEntries?: number;
   maxCachedPaths?: number;
+  negativeCacheTtlMs?: number;
+  now?: () => number;
+  discover?: (root: string, sessionId: string, maxEntries: number) => Promise<TranscriptDiscoveryResult>;
 }
 
 export class TraexTranscriptReader implements TraexTranscriptReaderPort {
@@ -82,7 +86,12 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   private readonly maxRenderedDeltaChars: number;
   private readonly maxDiscoveryEntries: number;
   private readonly maxCachedPaths: number;
+  private readonly negativeCacheTtlMs: number;
+  private readonly now: () => number;
+  private readonly discover: (root: string, sessionId: string, maxEntries: number) => Promise<TranscriptDiscoveryResult>;
   private readonly pathsBySessionId = new Map<string, string>();
+  private readonly missingUntilBySessionId = new Map<string, number>();
+  private readonly discoveryBySessionId = new Map<string, Promise<TranscriptDiscoveryResult>>();
 
   constructor(options: TraexTranscriptReaderOptions = {}) {
     this.sessionsRoot = resolve(options.sessionsRoot ?? resolve(homedir(), ".trae/cli/sessions"));
@@ -90,6 +99,9 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? DEFAULT_MAX_RENDERED_DELTA_CHARS;
     this.maxDiscoveryEntries = options.maxDiscoveryEntries ?? DEFAULT_MAX_DISCOVERY_ENTRIES;
     this.maxCachedPaths = Math.max(1, Math.floor(options.maxCachedPaths ?? DEFAULT_MAX_CACHED_PATHS));
+    this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? DEFAULT_NEGATIVE_CACHE_TTL_MS);
+    this.now = options.now ?? Date.now;
+    this.discover = options.discover ?? findExactTranscriptPaths;
   }
 
   async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
@@ -104,14 +116,18 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
           this.pathsBySessionId.delete(session.value);
           this.pathsBySessionId.set(session.value, cachedPath);
           const file = await stat(cachedPath);
-          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(cachedPath, file.size, this.maxReadBytes), await latestTurnLifecycle(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars)) };
+          const baseline = await latestTranscriptBaseline(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars);
+          return { mode: "typed", cursor: new FileTraexTranscriptCursor(cachedPath, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, baseline.turnLifecycle) };
         }
         this.pathsBySessionId.delete(session.value);
       }
-      const discovery = await findExactTranscriptPaths(this.sessionsRoot, session.value, this.maxDiscoveryEntries);
+      const missingUntil = this.missingUntilBySessionId.get(session.value);
+      if (missingUntil !== undefined && missingUntil > this.now()) return { mode: "unavailable", reason: "transcript_not_found" };
+      if (missingUntil !== undefined) this.missingUntilBySessionId.delete(session.value);
+      const discovery = await this.discoverOnce(session.value);
       if (discovery.exhausted) return { mode: "unavailable", reason: "transcript_validation_failed" };
       const paths = discovery.paths;
-      if (paths.length === 0) return { mode: "unavailable", reason: "transcript_not_found" };
+      if (paths.length === 0) { this.rememberMissing(session.value); return { mode: "unavailable", reason: "transcript_not_found" }; }
       if (paths.length > 1) return { mode: "unavailable", reason: "ambiguous_transcript" };
       const path = paths[0]!;
       if (!await containsMatchingSessionMeta(path, session.value)) {
@@ -119,19 +135,40 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       }
       this.rememberPath(session.value, path);
       const file = await stat(path);
-      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, await latestTokenCount(path, file.size, this.maxReadBytes), await latestTurnLifecycle(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars)) };
+      const baseline = await latestTranscriptBaseline(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars);
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, baseline.turnLifecycle) };
     } catch {
       return { mode: "unavailable", reason: "transcript_validation_failed" };
     }
   }
 
   private rememberPath(sessionId: string, path: string): void {
+    this.missingUntilBySessionId.delete(sessionId);
     this.pathsBySessionId.delete(sessionId);
     this.pathsBySessionId.set(sessionId, path);
     while (this.pathsBySessionId.size > this.maxCachedPaths) {
       const oldest = this.pathsBySessionId.keys().next().value;
       if (oldest === undefined) break;
       this.pathsBySessionId.delete(oldest);
+    }
+  }
+
+  private discoverOnce(sessionId: string): Promise<TranscriptDiscoveryResult> {
+    const existing = this.discoveryBySessionId.get(sessionId);
+    if (existing) return existing;
+    const discovery = this.discover(this.sessionsRoot, sessionId, this.maxDiscoveryEntries);
+    this.discoveryBySessionId.set(sessionId, discovery);
+    void discovery.finally(() => { if (this.discoveryBySessionId.get(sessionId) === discovery) this.discoveryBySessionId.delete(sessionId); });
+    return discovery;
+  }
+
+  private rememberMissing(sessionId: string): void {
+    this.missingUntilBySessionId.delete(sessionId);
+    this.missingUntilBySessionId.set(sessionId, this.now() + this.negativeCacheTtlMs);
+    while (this.missingUntilBySessionId.size > this.maxCachedPaths) {
+      const oldest = this.missingUntilBySessionId.keys().next().value;
+      if (oldest === undefined) break;
+      this.missingUntilBySessionId.delete(oldest);
     }
   }
 }
@@ -339,8 +376,13 @@ function parseWrappedPlan(value: unknown): ReturnType<typeof planArgumentsSchema
   return steps.length ? planArgumentsSchema.safeParse({ plan: steps }) : null;
 }
 
-async function latestTokenCount(path: string, end: number, maxBytes: number): Promise<number | null> {
-  if (end <= 0) return null;
+interface TranscriptBaseline {
+  tokenCount: number | null;
+  turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
+}
+
+async function latestTranscriptBaseline(path: string, end: number, maxBytes: number, maxRenderedDeltaChars: number): Promise<TranscriptBaseline> {
+  if (end <= 0) return { tokenCount: null, turnLifecycle: undefined };
   const start = Math.max(0, end - maxBytes);
   const handle = await open(path, "r");
   const buffer = Buffer.alloc(end - start);
@@ -349,38 +391,21 @@ async function latestTokenCount(path: string, end: number, maxBytes: number): Pr
     const source = buffer.subarray(0, bytesRead).toString("utf8");
     const lines = source.split("\n");
     if (start > 0) lines.shift();
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      try {
-        const envelope = envelopeSchema.safeParse(JSON.parse(lines[index]!));
-        if (!envelope.success || envelope.data.type !== "event_msg") continue;
-        const tokens = tokenCountEventSchema.safeParse(envelope.data.payload);
-        if (tokens.success) return tokens.data.info.total_token_usage.total_tokens;
-      } catch {}
-    }
-    return null;
-  } finally {
-    await handle.close();
-  }
-}
-
-async function latestTurnLifecycle(path: string, end: number, maxBytes: number, maxRenderedDeltaChars: number): Promise<TraexTranscriptObservation["turnLifecycle"]> {
-  if (end <= 0) return undefined;
-  const start = Math.max(0, end - maxBytes);
-  const handle = await open(path, "r");
-  const buffer = Buffer.alloc(end - start);
-  try {
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
-    if (start > 0) lines.shift();
-    let lifecycle: TraexTranscriptObservation["turnLifecycle"];
+    let tokenCount: number | null = null;
+    let turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const envelope = envelopeSchema.safeParse(JSON.parse(line));
-        if (envelope.success) lifecycle = reduceTurnLifecycle(lifecycle, envelope.data, maxRenderedDeltaChars);
+        if (!envelope.success) continue;
+        turnLifecycle = reduceTurnLifecycle(turnLifecycle, envelope.data, maxRenderedDeltaChars);
+        if (envelope.data.type === "event_msg") {
+          const tokens = tokenCountEventSchema.safeParse(envelope.data.payload);
+          if (tokens.success) tokenCount = tokens.data.info.total_token_usage.total_tokens;
+        }
       } catch {}
     }
-    return lifecycle;
+    return { tokenCount, turnLifecycle };
   } finally {
     await handle.close();
   }

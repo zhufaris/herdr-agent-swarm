@@ -49,6 +49,7 @@ type TurnOutputSource =
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
 const TRANSCRIPT_IDENTITY_POLL_MS = 50;
+const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -398,6 +399,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     );
     if (!canRetry() || current.hasCompletedTurn) return source;
     const deadline = Date.now() + FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS;
+    let pollMs = TRANSCRIPT_IDENTITY_POLL_MS;
     while (Date.now() < deadline) {
       current = this.options.store.getBinding(binding.id) ?? current;
       if (current.agentSessionValue) {
@@ -408,7 +410,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         }
         if (!canRetry()) return source;
       }
-      await abortableWait(Math.min(TRANSCRIPT_IDENTITY_POLL_MS, Math.max(1, deadline - Date.now())), signal);
+      await abortableWait(Math.min(pollMs, Math.max(1, deadline - Date.now())), signal);
+      pollMs = Math.min(TRANSCRIPT_IDENTITY_MAX_POLL_MS, pollMs * 2);
     }
     return source;
   }
