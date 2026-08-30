@@ -2004,8 +2004,9 @@ export class SqliteBindingStore implements BindingStorePort {
           return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
         }
       }
-      const lockedMainCard = before.kind === "card_update" && before.targetRole === "session_status" && metadata.larkErrorCode === "230099";
-      const failed = metadata.failureClass === "permanent" || lockedMainCard
+      const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status"
+        && (metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
+      const failed = metadata.failureClass === "permanent" || staleMainCard
         ? this.markOutboundReplyDeadLetter(id, error, metadata)
         : this.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
       if (!failed) { this.database.exec("COMMIT"); return null; }
@@ -2025,7 +2026,7 @@ export class SqliteBindingStore implements BindingStorePort {
         // Keep it quarantined instead of creating another page from the same
         // source offset, which would skip or duplicate canonical content.
         action = "blocked"; quarantineState = "active";
-      } else if (laneClass === "main_card" && lockedMainCard && failed.bindingId) {
+      } else if (laneClass === "main_card" && staleMainCard && failed.bindingId) {
         const replacement = this.database.prepare(`
           SELECT payload, COALESCE(view_version, 0) AS view_version
           FROM outbound_replies

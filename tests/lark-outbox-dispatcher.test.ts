@@ -74,6 +74,30 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("rebuilds a Main Card after a CardKit sequence conflict", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "stale-main" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Current", viewVersion: 8, deliveredVersion: 7 });
+    store.reserveMainCard(store.loadTopicView("b1")!, "root-1", { version: 8 });
+    const conflict = Object.assign(new Error('Lark CardKit update failed (code=300317, msg="sequence number compare failed")'), { larkCode: 300317 });
+    const updateCardKit = vi.fn(async () => { throw conflict; });
+    const replyCard = vi.fn(async () => ({ messageId: "replacement-main" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCardKit, replyCard }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(updateCardKit).toHaveBeenCalledOnce();
+    expect(replyCard).toHaveBeenCalledOnce();
+    expect(store.getBinding("b1")?.statusMessageId).toBe("replacement-main");
+    expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 8, deliveredVersion: 8 });
+    expect(store.database.prepare("SELECT kind, state, attempt_count, lark_error_code FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
+      { kind: "card_update", state: "dead_letter", attempt_count: 1, lark_error_code: "300317" },
+      { kind: "card_reply", state: "delivered", attempt_count: 1, lark_error_code: null }
+    ]);
+    store.close();
+  });
+
   it("records only the explicit session-status reply as the binding status card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
