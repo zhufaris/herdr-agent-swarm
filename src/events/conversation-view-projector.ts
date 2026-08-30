@@ -90,9 +90,9 @@ export class ConversationViewProjector {
     this.unsubscribeStreamCardCreated = null;
     this.unsubscribeMainCardCheckpoint?.();
     this.unsubscribeMainCardCheckpoint = null;
-    this.scheduler.stop();
     this.answerContentLengths.clear();
-    this.stopPromise = Promise.allSettled([...this.bindingTails.values()]).then(() => undefined);
+    this.stopPromise = Promise.allSettled([...this.bindingTails.values()])
+      .then(() => this.scheduler.stop());
     return this.stopPromise;
   }
 

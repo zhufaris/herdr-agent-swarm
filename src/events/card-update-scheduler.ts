@@ -16,7 +16,9 @@ export interface CardUpdateFlushResult { cardKey: string; desiredVersion: number
 
 export class CardUpdateScheduler {
   private readonly pending = new Map<string, PendingCardUpdate>();
+  private readonly activeFlushes = new Set<Promise<void>>();
   private stopped = false;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(
     private readonly deliver: (cardKey: string, version: number) => Promise<void>,
@@ -67,13 +69,18 @@ export class CardUpdateScheduler {
   }
 
   private launchFlush(cardKey: string): void {
-    void this.flush(cardKey).catch((error) => this.reportError(error, cardKey, this.pending.get(cardKey)?.desiredVersion ?? 0));
+    const work = this.flush(cardKey);
+    this.activeFlushes.add(work);
+    void work.catch((error) => this.reportError(error, cardKey, this.pending.get(cardKey)?.desiredVersion ?? 0)).finally(() => this.activeFlushes.delete(work));
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     this.stopped = true;
     for (const item of this.pending.values()) if (item.timer) clearTimeout(item.timer);
     this.pending.clear();
+    this.stopPromise = Promise.allSettled([...this.activeFlushes]).then(() => undefined);
+    return this.stopPromise;
   }
 
   private async flush(cardKey: string): Promise<void> {

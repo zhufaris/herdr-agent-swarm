@@ -103,9 +103,28 @@ describe("card update scheduler", () => {
 
     scheduler.schedule("p1", 1, true);
     await vi.waitFor(() => expect(delivered).toHaveBeenCalledOnce());
-    scheduler.stop();
+    await scheduler.stop();
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(delivered).toHaveBeenCalledOnce();
+  });
+
+  it("waits for an active flush and does not launch queued follow-up work after stop", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const delivered: number[] = [];
+    const scheduler = new CardUpdateScheduler(async (_cardKey, version) => { delivered.push(version); await gate; }, 0);
+    scheduler.schedule("answer:p1", 1, true);
+    await vi.waitFor(() => expect(delivered).toEqual([1]));
+    scheduler.schedule("answer:p1", 2, true);
+
+    let stopped = false;
+    const stopping = scheduler.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(delivered).toEqual([1]);
+    await expect(scheduler.stop()).resolves.toBeUndefined();
   });
 });

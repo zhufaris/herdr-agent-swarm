@@ -606,6 +606,30 @@ describe("event-driven card projection", () => {
     store.close();
   });
 
+  it("waits for active card convergence before projection stops", async () => {
+    let releaseConverge!: () => void;
+    const convergeBlocked = new Promise<void>((resolve) => { releaseConverge = resolve; });
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const bus = new BridgeEventBus();
+    const mainConverge = vi.fn(async () => convergeBlocked);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge });
+    projector.start();
+
+    await bus.publish({ eventId: "degraded-stop", bindingId: "b1", type: "BindingDegraded", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { reason: "pane unavailable" } });
+    await vi.waitFor(() => expect(mainConverge).toHaveBeenCalledOnce());
+    let stopped = false;
+    const stopping = projector.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    releaseConverge();
+    await stopping;
+    expect(stopped).toBe(true);
+    store.close();
+  });
+
   it("coalesces concurrent Main events for one binding to the newest durable view", async () => {
     vi.useFakeTimers();
     const updates: string[] = [];
