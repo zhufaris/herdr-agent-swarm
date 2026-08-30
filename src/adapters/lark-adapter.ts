@@ -54,7 +54,17 @@ export class LarkSdkAdapter implements LarkPort {
       "card.action.trigger": async (data: lark.RawCardActionEvent) => {
         const normalized = normalizeCardActionEvent(data);
         if (!normalized || normalized.chatId !== this.options.chatId || !onCardAction) return;
-        return onCardAction(normalized);
+        const startedAt = Date.now();
+        const action = cardActionName(normalized.value);
+        this.logger?.info({ event: "lark-card-action-received", action, messageId: normalized.messageId, outcome: "accepted" }, "Lark card action received");
+        try {
+          const result = await onCardAction(normalized);
+          this.logger?.info({ event: "lark-card-action-completed", action, messageId: normalized.messageId, outcome: "responded", responseKind: cardActionResponseKind(result), durationMs: Date.now() - startedAt }, "Lark card action completed");
+          return result;
+        } catch (error) {
+          this.logger?.error({ event: "lark-card-action-failed", action, messageId: normalized.messageId, outcome: "failed", durationMs: Date.now() - startedAt, err: safeLogError(error) }, "Lark card action failed");
+          return { toast: { type: "error", content: "操作失败，请稍后重试。" } };
+        }
       }
     });
     await this.wsClient.start({ eventDispatcher: dispatcher });
@@ -305,6 +315,17 @@ function normalizeFormValues(value: unknown): { formValues: Record<string, strin
   if (!parsed.success) return {};
   const formValues = Object.fromEntries(Object.entries(parsed.data).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
   return Object.keys(formValues).length ? { formValues } : {};
+}
+
+function cardActionName(value: unknown): string {
+  return isRecord(value) && typeof value.action === "string" ? value.action.slice(0, 128) : "unknown";
+}
+
+function cardActionResponseKind(result: LarkCardActionResult | void): "none" | "toast" | "card" | "toast_and_card" {
+  if (!result) return "none";
+  if (result.toast && result.card) return "toast_and_card";
+  if (result.card) return "card";
+  return result.toast ? "toast" : "none";
 }
 
 function requireMessageId(value: string | undefined): string {

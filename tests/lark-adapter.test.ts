@@ -401,12 +401,29 @@ describe("Lark card action normalization", () => {
   });
 
   it("returns Toast and card responses from the registered long-connection callback", async () => {
-    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    const info = vi.fn();
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, { info, warn: vi.fn(), error: vi.fn() } as never);
     await adapter.start(async () => undefined, async () => ({ toast: { type: "success", content: "已加入当前执行" }, card: { schema: "2.0" } }));
 
     await expect(registeredHandlers["card.action.trigger"]!({
       context: { open_message_id: "om_1", open_chat_id: "chat" }, operator: { open_id: "ou_1" },
       action: { value: { action: "submit_supplement" }, form_value: { supplement: "add tests" } }
     })).resolves.toEqual({ toast: { type: "success", content: "已加入当前执行" }, card: { schema: "2.0" } });
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-card-action-received", action: "submit_supplement", messageId: "om_1", outcome: "accepted" }), "Lark card action received");
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-card-action-completed", action: "submit_supplement", messageId: "om_1", outcome: "responded", responseKind: "toast_and_card", durationMs: expect.any(Number) }), "Lark card action completed");
+    expect(JSON.stringify(info.mock.calls)).not.toContain("add tests");
+  });
+
+  it("returns a safe error Toast and logs redacted metadata when a card action handler throws", async () => {
+    const info = vi.fn(); const error = vi.fn();
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, { info, warn: vi.fn(), error } as never);
+    await adapter.start(async () => undefined, async () => { throw new Error("private form value must not leak"); });
+
+    await expect(registeredHandlers["card.action.trigger"]!({
+      context: { open_message_id: "om_failed", open_chat_id: "chat" }, operator: { open_id: "ou_1" },
+      action: { value: { action: "instance_create_form", secret: "private payload" } }
+    })).resolves.toEqual({ toast: { type: "error", content: "操作失败，请稍后重试。" } });
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-card-action-failed", action: "instance_create_form", messageId: "om_failed", outcome: "failed", durationMs: expect.any(Number), err: expect.objectContaining({ message: "private form value must not leak" }) }), "Lark card action failed");
+    expect(JSON.stringify([...info.mock.calls, ...error.mock.calls])).not.toContain("private payload");
   });
 });
