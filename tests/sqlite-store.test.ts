@@ -86,6 +86,35 @@ describe("SQLite store", () => {
     ]);
   });
 
+  it("allows Worker listings to exclude a preserved legacy Primary row", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "legacy-primary", projectId: "project-a", name: "legacy", role: "primary", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-primary", kind: "main-checkout", cwd: "/repo", branch: null, baseCommit: "abc123" } });
+    store.createAgentInstance({ id: "worker", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-worker", kind: "git-worktree", cwd: "/repo/.worktree/worker", branch: "swarm/worker", baseCommit: "abc123" } });
+
+    expect(store.listAgentInstances("project-a").filter(({ role }) => role === "worker").map(({ id }) => id)).toEqual(["worker"]);
+    expect(store.getAgentInstance("legacy-primary")).toMatchObject({ id: "legacy-primary", role: "primary" });
+  });
+
+  it("atomically enforces the Worker limit while ignoring legacy Primary rows", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "legacy-primary", projectId: "project-a", name: "legacy", role: "primary", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-primary", kind: "main-checkout", cwd: "/repo", branch: null, baseCommit: "abc123" } });
+    const worker = (id: string) => ({ id, projectId: "project-a", name: id, role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const, workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" } });
+
+    expect(store.createWorkerAgentInstance(worker("one"), 1)).toMatchObject({ outcome: "created", instance: { id: "one", role: "worker" } });
+    expect(store.createWorkerAgentInstance(worker("two"), 1)).toEqual({ outcome: "limit-reached" });
+    expect(store.listAgentInstances("project-a").map(({ id }) => id)).toEqual(["legacy-primary", "one"]);
+    expect(store.getWorkspaceLease("ws-two")).toBeNull();
+  });
+
+  it("allows only one of two competing Worker inserts at the last slot", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const worker = (id: string) => ({ id, projectId: "project-a", name: id, role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const, workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" } });
+
+    const outcomes = await Promise.all(["one", "two"].map(async (id) => store!.createWorkerAgentInstance(worker(id), 1)));
+    expect(outcomes.map(({ outcome }) => outcome).sort()).toEqual(["created", "limit-reached"]);
+    expect(store.listAgentInstances("project-a").filter(({ role }) => role === "worker")).toHaveLength(1);
+  });
+
   it("rejects stale runtime attachment without changing the instance", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({

@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { HerdrAgentSession } from "../domain/types.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort } from "../domain/ports.js";
 import { projectToolCall, projectToolResult, projectToolResultState, type ToolActivityDescriptor } from "./tool-activity-projector.js";
+import { redactSecrets } from "./redact-secrets.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
@@ -489,15 +490,6 @@ async function readFirstJsonLine(handle: Awaited<ReturnType<typeof open>>): Prom
     position += bytesRead;
   }
   return null;
-}
-
-function redactSecrets(value: string): string {
-  return value
-    .replace(/(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s\"'&,;}]+/gi, "$1[REDACTED]")
-    .replace(/(bearer\s+)[a-z0-9._~-]+/gi, "$1[REDACTED]")
-    .replace(/((?:access[_-]?token|api[_-]?key|token|secret|password)\s*[=:]\s*[\"']?)([^\s\"'&,;}]+)/gi, "$1[REDACTED]")
-    .replace(/([?&](?:access_token|api_key|token|secret|password)=)[^&#\s]+/gi, "$1[REDACTED]")
-    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, "[REDACTED PRIVATE KEY]");
 }
 
 function boundMarkdown(value: string, maxLength: number): string {

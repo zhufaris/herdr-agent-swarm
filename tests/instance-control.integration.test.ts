@@ -10,7 +10,7 @@ import type { WorktreeManager } from "../src/runtime/worktree-manager.js";
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 
-const project = { id: "project-a", displayName: "Project A", description: "A", workspaceId: "herdr-a", cwd: "/repo", maxInstances: 4, instances: [] };
+const project = { id: "project-a", displayName: "Project A", description: "A", workspaceId: "herdr-a", cwd: "/repo", maxInstances: 4 };
 const pane = { paneId: "herdr-a:p1", workspaceId: "herdr-a", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term-1" };
 
 function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManager["prepare"]; primaryTools?: { issue: ReturnType<typeof vi.fn>; configuration: ReturnType<typeof vi.fn> }; agentKind?: AgentKind } = {}) {
@@ -33,63 +33,64 @@ function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManag
 }
 
 describe("InstanceControlWorkflow", () => {
-  it("creates and starts a primary in the main checkout without creating a worktree", async () => {
-    const { workflow, worktrees, paneHost } = setup();
-    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "primary", role: "primary", agentKind: "traex", model: null, start: true });
-    expect(instance).toMatchObject({ role: "primary", desiredState: "running", observedState: "idle", generation: 2, provisioningCheckpoint: "verified", runtimeRef: { paneId: "herdr-a:p1" } });
-    expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "main-checkout", cwd: "/repo", state: "ready" });
-    expect(worktrees.prepare).not.toHaveBeenCalled();
-    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo", expect.objectContaining({ bindingId: instance.id, projectId: "project-a" }));
-  });
-
-  it("injects trusted tools only into a capable primary runtime", async () => {
-    const primaryTools = { issue: vi.fn(() => ({ environment: { SWARM_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] })), configuration: vi.fn() };
-    const { workflow, paneHost, driver } = setup({ primaryTools });
-    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "primary", role: "primary", agentKind: "traex", model: null, start: true });
-    expect(primaryTools.issue).toHaveBeenCalledWith(instance.id, 1);
-    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo", expect.objectContaining({ environment: { SWARM_PRIMARY_CAPABILITY: "secret" } }));
-    expect(driver.start).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ primaryTools: { environment: { SWARM_PRIMARY_CAPABILITY: "secret" }, command: "node", args: ["mcp.js"] } }));
-  });
-
   it("accepts Herdr's canonical claude kind for a Claude Code instance", async () => {
     const { workflow, paneHost } = setup({ agentKind: "claude-code" });
     vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "claude", foregroundExecutables: ["claude"] });
-    await expect(workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "claude-code", model: null, start: true })).resolves.toMatchObject({ agentKind: "claude-code", observedState: "idle" });
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "claude-code", model: null, start: true })).resolves.toMatchObject({ status: "created", instance: { agentKind: "claude-code", observedState: "idle" } });
   });
 
   it("accepts Herdr's codex label for the TraeCode distribution", async () => {
     const { workflow, paneHost } = setup();
-    vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, agentKind: "codex", foregroundExecutables: ["traex"] });
-    await expect(workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "primary", role: "primary", agentKind: "traex", model: null, start: true })).resolves.toMatchObject({ agentKind: "traex", observedState: "idle" });
+    vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "codex", foregroundExecutables: ["traex"] });
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true })).resolves.toMatchObject({ status: "created", instance: { agentKind: "traex", observedState: "idle" } });
   });
 
   it("allocates a named branch and isolated worktree for an explicit worker", async () => {
     const { workflow, worktrees } = setup();
-    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
     expect(worktrees.prepare).toHaveBeenCalledWith({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseRef: "HEAD" });
     expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base-sha", state: "ready" });
   });
 
   it("persists the workspace checkpoint when runtime launch fails", async () => {
-    const { workflow } = setup({ start: async () => { throw new Error("launch failed"); } });
-    await expect(workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true })).rejects.toThrow("launch failed");
-    const [instance] = workflow.list("project-a");
-    expect(instance).toMatchObject({ observedState: "failed", provisioningCheckpoint: "pane-allocated", lastError: "launch failed" });
+    const { workflow } = setup({ start: async () => { throw new Error("launch failed Bearer live-secret"); } });
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true })).resolves.toMatchObject({ status: "created-start-failed", error: "launch failed Bearer [REDACTED]", instance: { observedState: "failed", lastError: "launch failed Bearer [REDACTED]" } });
+    const [instance] = workflow.listWorkers("project-a");
+    expect(instance).toMatchObject({ observedState: "failed", provisioningCheckpoint: "pane-allocated", lastError: "launch failed Bearer [REDACTED]" });
     expect(workflow.inspect(instance!.id).workspace).toMatchObject({ state: "ready" });
   });
 
-  it("switches the sole primary only through a human control request", async () => {
+  it("releases a pending pane before stopping a failed startup", async () => {
+    const { workflow, paneHost } = setup({ start: async () => { throw new Error("launch failed"); } });
+    const result = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
+    expect(result).toMatchObject({ status: "created-start-failed", instance: { pendingRuntimeRef: { paneId: "herdr-a:p1" } } });
+
+    await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: result.instance.id })).resolves.toMatchObject({ desiredState: "stopped", pendingRuntimeRef: null });
+    expect(paneHost.releasePane).toHaveBeenCalledWith("herdr-a:p1");
+  });
+
+  it("keeps pending pane ownership when release during stop fails", async () => {
+    const { workflow, paneHost } = setup({ start: async () => { throw new Error("launch failed"); } });
+    const result = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
+    vi.mocked(paneHost.releasePane).mockRejectedValueOnce(new Error("release failed"));
+
+    await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: result.instance.id })).rejects.toThrow("release failed");
+    expect(store!.getAgentInstance(result.instance.id)).toMatchObject({ desiredState: "running", observedState: "failed", pendingRuntimeRef: { paneId: "herdr-a:p1" }, lastError: "release failed" });
+    await expect(workflow.planRemoval({ actor: { kind: "human", userId: "u1" }, instanceId: result.instance.id })).rejects.toThrow("stopped");
+  });
+
+  it("counts only Workers against the project limit and preserves legacy Primary rows", async () => {
     const { workflow } = setup();
-    const first = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "one", role: "primary", agentKind: "traex", model: null, start: false });
-    const second = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "two", role: "worker", agentKind: "traex", model: null, start: false });
-    expect(workflow.setPrimary({ actor: { kind: "primary-agent", projectId: "project-a", instanceId: first.id, generation: 1 }, projectId: "project-a", instanceId: second.id })).toMatchObject({ ok: false, reason: "human_required" });
-    expect(workflow.setPrimary({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: second.id })).toMatchObject({ ok: true, instance: { role: "primary" } });
-    expect(workflow.list("project-a").filter(({ role }) => role === "primary")).toHaveLength(1);
+    store!.createAgentInstance({ id: "legacy-primary", projectId: "project-a", name: "legacy", role: "primary", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "legacy-ws", kind: "main-checkout", cwd: "/repo", branch: null, baseCommit: "base" } });
+    for (const name of ["one", "two", "three", "four"]) await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name, agentKind: "traex", model: null, start: false })).resolves.toMatchObject({ status: "created", instance: { role: "worker" } });
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "five", agentKind: "traex", model: null, start: false })).rejects.toThrow("Worker limit");
+    expect(workflow.listWorkers("project-a")).toHaveLength(4);
+    expect(store!.getAgentInstance("legacy-primary")).toMatchObject({ role: "primary" });
   });
 
   it("stops a running instance but retains its worktree", async () => {
     const { workflow, paneHost, worktrees } = setup();
-    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
     await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id })).resolves.toMatchObject({ desiredState: "stopped", observedState: "stopped", runtimeRef: null });
     expect(paneHost.releasePane).toHaveBeenCalledWith("herdr-a:p1");
     expect(worktrees.release).not.toHaveBeenCalled();
@@ -97,7 +98,7 @@ describe("InstanceControlWorkflow", () => {
 
   it("refuses to stop an instance with current-generation active work", async () => {
     const { workflow, paneHost } = setup();
-    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
     store!.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
     store!.claimNextInstanceTurn(instance.id, instance.generation);
     await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id })).rejects.toThrow(/active or uncertain turn/i);
@@ -107,7 +108,7 @@ describe("InstanceControlWorkflow", () => {
 
   it("restores running intent when pane release fails", async () => {
     const { workflow, paneHost } = setup();
-    const instance = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
     vi.mocked(paneHost.releasePane).mockRejectedValueOnce(new Error("close failed"));
     await expect(workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id })).rejects.toThrow("close failed");
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", runtimeRef: { paneId: "herdr-a:p1" }, lastError: "close failed" });
@@ -115,7 +116,7 @@ describe("InstanceControlWorkflow", () => {
 
   it("starts a stopped instance in a fresh pane generation while retaining its workspace", async () => {
     const { workflow, paneHost, worktrees } = setup();
-    const created = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: true });
+    const { instance: created } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
     await workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: created.id });
     const restarted = await workflow.start({ actor: { kind: "human", userId: "u1" }, instanceId: created.id });
     expect(restarted).toMatchObject({ desiredState: "running", observedState: "idle", generation: 3, provisioningCheckpoint: "verified" });
@@ -125,21 +126,33 @@ describe("InstanceControlWorkflow", () => {
 
   it("persists a removal plan and removes a stopped worker only after matching confirmation", async () => {
     const { workflow, worktrees } = setup();
-    const created = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: false });
+    const { instance: created } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: false });
     const plan = await workflow.planRemoval({ actor: { kind: "human", userId: "u1" }, instanceId: created.id });
     expect(plan).toMatchObject({ instanceId: created.id, safe: true, reason: "clean", state: "pending", worktreeFingerprint: "fingerprint-1" });
     await expect(workflow.confirmRemoval({ actor: { kind: "human", userId: "u1" }, planId: plan.id })).resolves.toBe(true);
     expect(worktrees.release).toHaveBeenCalledWith(expect.objectContaining({ fingerprint: "fingerprint-1" }), 1);
-    expect(workflow.list("project-a")).toEqual([]);
+    expect(workflow.listWorkers("project-a")).toEqual([]);
   });
 
   it("retains unsafe worktrees and rejects stale removal confirmations", async () => {
     const { workflow, worktrees } = setup();
     vi.mocked(worktrees.planRemoval).mockResolvedValueOnce({ repositoryRoot: "/repo", targetPath: "/repo/.worktree/reviewer", baseCommit: "HEAD", leaseGeneration: 1, safe: false, reason: "dirty", fingerprint: "dirty-fp", inspection: null });
-    const created = await workflow.create({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", role: "worker", agentKind: "traex", model: null, start: false });
+    const { instance: created } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: false });
     const unsafe = await workflow.planRemoval({ actor: { kind: "human", userId: "u1" }, instanceId: created.id });
     expect(unsafe).toMatchObject({ safe: false, reason: "dirty" });
     await expect(workflow.confirmRemoval({ actor: { kind: "human", userId: "u1" }, planId: unsafe.id })).rejects.toThrow(/not safe/);
-    expect(workflow.list("project-a")).toHaveLength(1);
+    expect(workflow.listWorkers("project-a")).toHaveLength(1);
+  });
+
+  it("never confirms a persisted removal plan for a legacy Primary", async () => {
+    const { workflow, worktrees } = setup();
+    const legacy = store!.createAgentInstance({ id: "legacy-primary", projectId: "project-a", name: "legacy", role: "primary", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "legacy-ws", kind: "main-checkout", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const workspace = store!.getWorkspaceLease(legacy.workspaceLeaseId)!;
+    store!.createInstanceRemovalPlan({ id: "legacy-plan", instanceId: legacy.id, instanceGeneration: legacy.generation, workspaceGeneration: workspace.generation, worktreeFingerprint: null, safe: true, reason: "main-checkout", state: "pending", createdAt: "now" });
+
+    await expect(workflow.confirmRemoval({ actor: { kind: "human", userId: "u1" }, planId: "legacy-plan" })).rejects.toThrow("Only Worker");
+    expect(store!.getAgentInstance(legacy.id)).toMatchObject({ role: "primary" });
+    expect(store!.getInstanceRemovalPlan("legacy-plan")).toMatchObject({ state: "pending" });
+    expect(worktrees.release).not.toHaveBeenCalled();
   });
 });

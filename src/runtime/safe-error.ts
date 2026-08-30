@@ -1,3 +1,5 @@
+import { redactSecrets } from "./redact-secrets.js";
+
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 interface SafeLogError {
@@ -49,8 +51,5 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function sanitizeMessage(message: string): string {
-  return message
-    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
-    .replace(/([?&](?:access_token|token|app_secret|secret)=)[^&\s]+/gi, "$1[REDACTED]")
-    .slice(0, MAX_ERROR_MESSAGE_LENGTH);
+  return redactSecrets(message).slice(0, MAX_ERROR_MESSAGE_LENGTH);
 }

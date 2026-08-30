@@ -36,6 +36,10 @@ export interface AgentInstance {
   lastError: string | null;
 }
 
+export type CreateWorkerResult =
+  | { status: "created"; instance: AgentInstance }
+  | { status: "created-start-failed"; instance: AgentInstance; error: string };
+
 export type WorkspaceLeaseState =
   | "allocating"
   | "ready"

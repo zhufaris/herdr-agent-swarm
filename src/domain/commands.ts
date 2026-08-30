@@ -1,12 +1,12 @@
 import type { BridgeCommand, InstanceCommand } from "./types.js";
-import type { AgentKind, InstanceRole } from "./agent-instance.js";
+import type { AgentKind } from "./agent-instance.js";
 
 export type ControlActor =
   | { kind: "human"; userId: string; channel?: "feishu" | "local" }
   | { kind: "primary-agent"; projectId: string; instanceId: string; generation: number; parentTurnId?: string };
 
-export interface CreateInstanceCommand {
-  actor: ControlActor; projectId: string; name: string; role: InstanceRole; agentKind: AgentKind; model: string | null; start: boolean;
+export interface CreateWorkerCommand {
+  actor: ControlActor; projectId: string; name: string; agentKind: AgentKind; model: string | null; start: boolean;
 }
 
 const MAX_TOPIC_TITLE_LENGTH = 80;

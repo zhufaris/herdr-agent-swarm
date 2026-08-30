@@ -1,3 +1,5 @@
+import { redactSecrets } from "./redact-secrets.js";
+
 export type ToolActivityCategory = "Skill" | "Read" | "Search" | "Edit" | "Command" | "Wait" | "Agent" | "Tool";
 
 export interface ToolActivityDescriptor {
@@ -240,12 +242,7 @@ function failureTail(output: string): string {
 }
 
 export function redactToolActivitySecrets(value: string): string {
-  return value
-    .replace(/(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s"'&,;}]+/gi, "$1[REDACTED]")
-    .replace(/(bearer\s+)[a-z0-9._~-]+/gi, "$1[REDACTED]")
-    .replace(/((?:access[_-]?token|api[_-]?key|token|secret|password)\s*[=:]\s*["']?)([^\s"'&,;}]+)/gi, "$1[REDACTED]")
-    .replace(/([?&](?:access_token|api_key|token|secret|password)=)[^&#\s]+/gi, "$1[REDACTED]")
-    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, "[REDACTED PRIVATE KEY]");
+  return redactSecrets(value);
 }
 
 function fence(language: string, value: string): string {

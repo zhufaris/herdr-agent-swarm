@@ -404,6 +404,35 @@ describe("TraexTranscriptReader", () => {
     expect(output.length).toBeLessThanOrEqual(240);
   });
 
+  it("redacts colon assignments and equals-form authorization in typed deltas", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{
+      type: "message",
+      id: "assignment-secrets",
+      role: "assistant",
+      content: [{ type: "output_text", text: [
+        "TOKEN: token-value",
+        "password: password-value",
+        "api_key: api-value",
+        "client_secret: client-value",
+        "Authorization=Basic basic-value",
+        "Authorization=Bearer bearer-value"
+      ].join("\n") }]
+    }]));
+
+    const output = await cursor.readDelta();
+    expect(output).toBe([
+      "TOKEN: [REDACTED]",
+      "password: [REDACTED]",
+      "api_key: [REDACTED]",
+      "client_secret: [REDACTED]",
+      "Authorization=Basic [REDACTED]",
+      "Authorization=Bearer [REDACTED]"
+    ].join("\n"));
+    expect(output).not.toMatch(/token-value|password-value|api-value|client-value|basic-value|bearer-value/);
+  });
+
   it("returns missing_session_identity when Herdr has no native session", async () => {
     const root = await createRoot();
     const reader = new TraexTranscriptReader({ sessionsRoot: root });

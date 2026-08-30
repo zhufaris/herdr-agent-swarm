@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { matchesHerdrAgentKind, type CreateAgentInstanceInput, type AgentInstance, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
-import type { ControlActor, CreateInstanceCommand } from "../domain/commands.js";
+import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
+import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
 import type { InstanceStore } from "../domain/ports.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
@@ -20,27 +20,31 @@ export class InstanceControlWorkflow {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   constructor(private readonly options: Options) { this.projects = new Map(options.projects.map((project) => [project.id, project])); }
 
-  async create(command: CreateInstanceCommand): Promise<AgentInstance> {
+  async createWorker(command: CreateWorkerCommand): Promise<CreateWorkerResult> {
     this.requireHuman(command.actor);
     const project = this.requireProject(command.projectId);
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(command.name)) throw new Error("Invalid instance name");
-    if (this.list(project.id).length >= (project.maxInstances ?? 8)) throw new Error("Project instance limit reached");
     const driver = this.options.drivers.get(command.agentKind);
     if (!driver?.describe().available) throw new Error(`Agent adapter is unavailable: ${command.agentKind}`);
-    if (command.role === "primary" && this.list(project.id).some(({ role }) => role === "primary")) throw new Error("Project already has a primary instance");
     const id = this.options.idFactory();
     const workspaceId = this.options.idFactory();
-    const worker = command.role === "worker";
-    const workspace: CreateAgentInstanceInput["workspace"] = worker
-      ? { id: workspaceId, kind: "git-worktree", cwd: join(project.cwd, ".worktree", command.name), branch: `swarm/${command.name}`, baseCommit: "HEAD" }
-      : { id: workspaceId, kind: "main-checkout", cwd: project.cwd, branch: null, baseCommit: "HEAD" };
-    const instance = this.options.store.createAgentInstance({ id, projectId: project.id, name: command.name, role: command.role, agentKind: command.agentKind, model: command.model, desiredState: command.start ? "running" : "stopped", workspace });
-    return command.start ? this.start({ actor: command.actor, instanceId: instance.id }) : instance;
+    const workspace = { id: workspaceId, kind: "git-worktree" as const, cwd: join(project.cwd, ".worktree", command.name), branch: `swarm/${command.name}`, baseCommit: "HEAD" };
+    const created = this.options.store.createWorkerAgentInstance({ id, projectId: project.id, name: command.name, role: "worker", agentKind: command.agentKind, model: command.model, desiredState: command.start ? "running" : "stopped", workspace }, project.maxInstances ?? 8);
+    if (created.outcome === "limit-reached") throw new Error("Project Worker limit reached");
+    const instance = created.instance;
+    if (!command.start) return { status: "created", instance };
+    try {
+      return { status: "created", instance: await this.start({ actor: command.actor, instanceId: instance.id }) };
+    } catch (error) {
+      const failed = this.options.store.getAgentInstance(instance.id) ?? instance;
+      return { status: "created-start-failed", instance: failed, error: failed.lastError ?? safeLogError(error).message };
+    }
   }
 
   async start(input: { actor: ControlActor; instanceId: string }): Promise<AgentInstance> {
     this.requireHuman(input.actor);
     let instance = this.requireInstance(input.instanceId);
+    this.requireWorker(instance);
     if (instance.runtimeRef && instance.observedState !== "stopped") return instance;
     if (instance.desiredState !== "running") {
       const starting = this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "running", observedState: "starting" });
@@ -51,7 +55,6 @@ export class InstanceControlWorkflow {
     const driver = this.options.drivers.get(instance.agentKind);
     if (!driver?.describe().available) throw new Error(`Agent adapter is unavailable: ${instance.agentKind}`);
     let workspace = this.requireWorkspace(instance.workspaceLeaseId);
-    let issuedPrimaryTools: { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] } | undefined;
     try {
       if (instance.provisioningCheckpoint === "verified" && !instance.runtimeRef) {
         instance = this.requireCheckpoint(instance, "workspace-ready", "starting");
@@ -64,16 +67,14 @@ export class InstanceControlWorkflow {
         instance = this.requireCheckpoint(instance, "workspace-ready", "starting");
       }
       if (instance.provisioningCheckpoint === "workspace-ready") {
-        issuedPrimaryTools = instance.role === "primary" && driver.describe().primaryTools ? this.options.primaryTools?.issue(instance.id, instance.generation) : undefined;
         await this.options.paneHost.ensureWorkspace(project.workspaceId);
-        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: instance.name, ...(issuedPrimaryTools ? { environment: issuedPrimaryTools.environment } : {}) });
+        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: instance.name });
         instance = this.requireCheckpoint(instance, "pane-allocated", "starting", pane.paneId, project.workspaceId);
       }
       const pending = instance.pendingRuntimeRef;
       if (!pending) throw new Error("Provisioning pane checkpoint is missing");
       if (instance.provisioningCheckpoint === "pane-allocated") {
-        const primaryTools = issuedPrimaryTools ?? (instance.role === "primary" && driver.describe().primaryTools ? this.options.primaryTools?.configuration(instance.id, instance.generation + 1) : undefined);
-        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, model: instance.model, ...(primaryTools ? { primaryTools } : {}) });
+        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, model: instance.model });
         instance = this.requireCheckpoint(instance, "runtime-started", "starting");
       }
       if (instance.provisioningCheckpoint === "runtime-started") {
@@ -94,25 +95,25 @@ export class InstanceControlWorkflow {
   async stop(input: { actor: ControlActor; instanceId: string }): Promise<AgentInstance> {
     this.requireHuman(input.actor);
     const instance = this.requireInstance(input.instanceId);
+    this.requireWorker(instance);
     const reservation = this.options.store.reserveAgentInstanceStop(instance.id, instance.generation);
     if (reservation.outcome === "busy") throw new Error("Instance has an active or uncertain turn; interrupt it or wait for durable completion before stopping");
     if (reservation.outcome !== "reserved") throw new Error("Instance generation changed while stopping");
-    try { if (reservation.instance.runtimeRef) await this.options.paneHost.releasePane(reservation.instance.runtimeRef.paneId); }
+    try {
+      const ownedPaneId = reservation.instance.runtimeRef?.paneId ?? reservation.instance.pendingRuntimeRef?.paneId;
+      if (ownedPaneId) await this.options.paneHost.releasePane(ownedPaneId);
+    }
     catch (error) { this.options.store.rollbackAgentInstanceStop(instance.id, instance.generation, safeLogError(error).message); throw error; }
     const stopped = this.options.store.finishAgentInstanceStop(instance.id, instance.generation);
     if (!stopped) throw new Error("Instance generation changed while stopping");
     return stopped;
   }
 
-  setPrimary(input: { actor: ControlActor; projectId: string; instanceId: string }): { ok: true; instance: AgentInstance } | { ok: false; reason: "human_required" } {
-    if (input.actor.kind !== "human") return { ok: false, reason: "human_required" };
-    return { ok: true, instance: this.options.store.setPrimaryAgentInstance(input.projectId, input.instanceId) };
-  }
-
   async planRemoval(input: { actor: ControlActor; instanceId: string }): Promise<InstanceRemovalPlan> {
     this.requireHuman(input.actor);
     const instance = this.requireInstance(input.instanceId);
-    if (instance.desiredState !== "stopped" || instance.runtimeRef) throw new Error("Instance must be stopped before removal planning");
+    this.requireWorker(instance);
+    if (instance.desiredState !== "stopped" || instance.runtimeRef || instance.pendingRuntimeRef) throw new Error("Instance must be stopped before removal planning");
     const workspace = this.requireWorkspace(instance.workspaceLeaseId);
     const project = this.requireProject(instance.projectId);
     let safe = true;
@@ -132,6 +133,7 @@ export class InstanceControlWorkflow {
     if (!plan.safe) throw new Error(`Removal plan is not safe: ${plan.reason}`);
     if (plan.state === "stale") throw new Error("Removal plan is stale");
     const instance = this.requireInstance(plan.instanceId);
+    this.requireWorker(instance);
     const workspace = this.requireWorkspace(instance.workspaceLeaseId);
     if (instance.generation !== plan.instanceGeneration || workspace.generation !== plan.workspaceGeneration) throw new Error("Removal plan is stale");
     if (plan.state === "pending") {
@@ -151,11 +153,12 @@ export class InstanceControlWorkflow {
     const instance = this.requireInstance(instanceId);
     return { instance, workspace: this.requireWorkspace(instance.workspaceLeaseId) };
   }
-  list(projectId: string): AgentInstance[] { return this.options.store.listAgentInstances(projectId); }
+  listWorkers(projectId: string): AgentInstance[] { return this.options.store.listAgentInstances(projectId).filter(({ role }) => role === "worker"); }
 
   private requireHuman(actor: ControlActor): void { if (actor.kind !== "human") throw new Error("Instance topology changes require a human actor"); }
   private requireProject(id: string): ProjectConfig { const value = this.projects.get(id); if (!value) throw new Error(`Project not found: ${id}`); return value; }
   private requireInstance(id: string): AgentInstance { const value = this.options.store.getAgentInstance(id); if (!value) throw new Error(`Agent instance not found: ${id}`); return value; }
+  private requireWorker(instance: AgentInstance): void { if (instance.role !== "worker") throw new Error("Only Worker instances can be controlled"); }
   private requireWorkspace(id: string): WorkspaceLease { const value = this.options.store.getWorkspaceLease(id); if (!value) throw new Error(`Workspace lease not found: ${id}`); return value; }
   private requireUpdatedWorkspace(input: Parameters<InstanceStore["updateWorkspaceLease"]>[0]): WorkspaceLease { const value = this.options.store.updateWorkspaceLease(input); if (!value) throw new Error("Workspace lease generation changed"); return value; }
   private requireCheckpoint(instance: AgentInstance, checkpoint: AgentInstance["provisioningCheckpoint"], observedState: AgentInstance["observedState"], pendingPaneId?: string, pendingWorkspaceId?: string): AgentInstance {

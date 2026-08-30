@@ -43,6 +43,7 @@ export interface InstanceStore {
   resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
   consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch";
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
+  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" };
   getAgentInstance(id: string): AgentInstance | null;
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;

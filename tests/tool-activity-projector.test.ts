@@ -36,6 +36,28 @@ describe("tool activity projector", () => {
     expect(projected.descriptor.target).not.toMatch(/top-secret|query-secret/);
   });
 
+  it("redacts colon assignments and equals-form authorization from command output", () => {
+    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "inspect failure" }));
+    const output = [
+      "TOKEN: token-value",
+      "password: password-value",
+      "api_key: api-value",
+      "client_secret: client-value",
+      "Authorization=Basic basic-value",
+      "Authorization=Bearer bearer-value"
+    ].join("\n");
+
+    expect(projectToolResult(descriptor, output)).toContain([
+      "TOKEN: [REDACTED]",
+      "password: [REDACTED]",
+      "api_key: [REDACTED]",
+      "client_secret: [REDACTED]",
+      "Authorization=Basic [REDACTED]",
+      "Authorization=Bearer [REDACTED]"
+    ].join("\n"));
+    expect(projectToolResult(descriptor, output)).not.toMatch(/token-value|password-value|api-value|client-value|basic-value|bearer-value/);
+  });
+
   it("preserves shell backticks inside the fenced command", () => {
     const projected = projectToolCall("exec_command", JSON.stringify({ cmd: "echo `date`" }));
 

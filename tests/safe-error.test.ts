@@ -28,6 +28,19 @@ describe("safeLogError", () => {
     expect(safe.message).toBe("failed Bearer [REDACTED] at /x?access_token=[REDACTED]&next=1");
   });
 
+  it.each([
+    ["Authorization Basic", "Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"],
+    ["assignment API key", "API_KEY=super-secret", "API_KEY=[REDACTED]"],
+    ["assignment password", "password='hunter2'", "password=[REDACTED]"],
+    ["JSON secret", '{"client_secret":"json-secret"}', '{"client_secret":"[REDACTED]"}'],
+    ["header API key", "X-API-Key: header-secret", "X-API-Key: [REDACTED]"],
+    ["private key", "-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----", "[REDACTED PRIVATE KEY]"]
+  ])("redacts %s", (_label, source, expected) => {
+    const safe = safeLogError(new Error(source));
+    expect(safe.message).toContain(expected);
+    expect(safe.message).not.toMatch(/dXNlcjpwYXNz|super-secret|hunter2|json-secret|header-secret|secret-material/);
+  });
+
   it("preserves the safe shape when a logger serializer applies it again", () => {
     const safe = { name: "Error", message: "request failed", code: "ERR_BAD_REQUEST", status: 400, larkCode: 230099, requestId: "request-1" };
     expect(safeLogError(safe)).toEqual(safe);

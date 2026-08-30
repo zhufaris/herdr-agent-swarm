@@ -203,6 +203,27 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
+  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const count = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE project_id = ? AND role = 'worker'").get(input.projectId) as { count: number };
+      if (count.count >= maxWorkers) { this.database.exec("COMMIT"); return { outcome: "limit-reached" }; }
+      this.database.prepare(`
+        INSERT INTO agent_instances(
+          id, project_id, name, role, agent_kind, model, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
+          provisioning_checkpoint, last_error
+        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.desiredState, input.workspace.id, timestamp, timestamp);
+      this.database.prepare(`
+        INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
+      `).run(input.workspace.id, input.projectId, input.id, input.workspace.kind, input.workspace.cwd, input.workspace.branch, input.workspace.baseCommit, timestamp, timestamp);
+      this.database.exec("COMMIT");
+      return { outcome: "created", instance: this.getAgentInstance(input.id)! };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   getAgentInstance(id: string): AgentInstance | null {
     const row = this.database.prepare("SELECT * FROM agent_instances WHERE id = ?").get(id) as AgentInstanceRow | undefined;
     return row ? mapAgentInstance(row) : null;
@@ -271,7 +292,7 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null {
-    const result = this.database.prepare("UPDATE agent_instances SET desired_state = 'running', last_error = ?, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped' AND pane_id IS NOT NULL").run(error, now(), instanceId, expectedGeneration);
+    const result = this.database.prepare("UPDATE agent_instances SET desired_state = 'running', last_error = ?, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped' AND (pane_id IS NOT NULL OR pending_pane_id IS NOT NULL)").run(error, now(), instanceId, expectedGeneration);
     return result.changes === 1 ? this.getAgentInstance(instanceId) : null;
   }
 
@@ -326,7 +347,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const instance = this.getAgentInstance(input.instanceId);
-      if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef) { this.database.exec("COMMIT"); return false; }
+      if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef || instance.pendingRuntimeRef) { this.database.exec("COMMIT"); return false; }
       const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
       if (!lease || lease.generation !== input.expectedWorkspaceGeneration) { this.database.exec("COMMIT"); return false; }
       this.database.prepare("DELETE FROM workspace_leases WHERE id = ? AND generation = ?").run(lease.id, lease.generation);
