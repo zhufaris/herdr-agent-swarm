@@ -45,6 +45,24 @@ if [ "$STANDALONE" -eq 1 ]; then
     STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
     bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR"
     SWARM_RUNTIME_ROOT="$(readlink -f "$STATE_DIR/current")"
+    CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
+    ENV_FILE="$CONFIG_DIR/.env"
+    PROJECTS_FILE="$CONFIG_DIR/projects.json"
+    CONFIGURATION_INCOMPLETE=0
+    if [ ! -f "$ENV_FILE" ] || [ ! -r "$ENV_FILE" ] || [ ! -f "$PROJECTS_FILE" ] || [ ! -r "$PROJECTS_FILE" ]; then
+        CONFIGURATION_INCOMPLETE=1
+    else
+        for placeholder in "replace-me" "REPLACE_WITH_HERDR_WORKSPACE_ID" "/absolute/path/to/your/project"; do
+            if grep -Fq -- "$placeholder" "$ENV_FILE" "$PROJECTS_FILE"; then
+                CONFIGURATION_INCOMPLETE=1
+                break
+            fi
+        done
+    fi
+    if [ "$CONFIGURATION_INCOMPLETE" -eq 1 ]; then
+        echo "Configuration is missing or still contains placeholders. Run: npm run swarm:setup" >&2
+        exit 1
+    fi
     SWARM_ROOT="$SWARM_RUNTIME_ROOT" SWARM_STATE_DIR="$STATE_DIR" node "$SWARM_RUNTIME_ROOT/dist/cli/plugin-lifecycle.js" install
     echo "Standalone service installed. Run 'npm run swarm:start' after configuration is ready."
     exit 0

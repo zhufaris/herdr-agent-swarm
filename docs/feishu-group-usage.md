@@ -10,6 +10,16 @@ Herdr Lark Bridge 模式提供，可将飞书话题绑定到 Herdr pane 中运�
 
 ## 开始使用
 
+管理员完成 `npm run swarm:setup`、启动服务，并确认 `npm run swarm:status` 正常后，
+群成员即可开始操作。传统单话题 TraeX 流程的第一个飞书动作是在目标话题群发送：
+
+```text
+@Bot /swarm new 任务说明
+```
+
+它只会展示项目选择卡；选择项目后才创建 Pane 并提交首个请求。安装、密钥和服务恢复
+属于管理员操作，不在飞书群内完成。
+
 多 Agent 模式先选择项目，再打开实例目录：
 
 ```text

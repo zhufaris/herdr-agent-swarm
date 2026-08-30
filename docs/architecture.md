@@ -591,6 +591,36 @@ a mandatory headless pane/process authority, but the TUI and plugin are not
 runtime dependencies. The application also holds a fenced SQLite lease,
 which protects against accidental duplicate processes sharing one database.
 
+### First-run setup boundary
+
+The standalone `swarm:setup` command and compatibility plugin setup action use
+one deterministic workflow. That workflow depends on explicit ports for terminal
+prompts, configuration persistence, local/Herdr/Lark probes, and service
+lifecycle operations. Terminal handling, atomic private-file replacement,
+external commands, bounded HTTP calls, and systemd remain behind their adapters;
+the workflow itself decides only collection, check policy, review, save, and the
+separately confirmed lifecycle steps. `swarm:doctor` reuses the validation and
+probe ports without prompts or mutations.
+
+Setup validation is observational. The Herdr adapter may list and inspect
+workspaces and agent capabilities, but it may not create panes or start agents.
+The Lark adapter may authenticate and read the configured chat and bot identity,
+but it has no message-send or tenant-management operation. Therefore successful
+probes do not claim that event subscriptions, permissions, application
+publication, or group membership were configured; those remain operator checks.
+Failures block persistence and lifecycle changes, warnings require explicit
+acceptance, and explicitly skipped network checks permit save but prohibit the
+one-flow install/start path.
+
+Configuration is committed as one logical `.env`/`projects.json` pair. The
+configuration directory is private, drafts and final files are mode `0600`, and
+a valid replaced pair is copied to a timestamped private backup first. A caught
+partial replacement restores both old files. An ambiguous pair or transaction
+marker blocks overwrite and requires operator recovery. The standalone installer
+performs a narrower non-interactive guard after staging: missing configuration
+or an exact shipped placeholder stops before lifecycle installation and points
+the operator to `swarm:setup`; it never launches the wizard implicitly.
+
 Health endpoints have separate meanings:
 
 - `/health` means the process can answer requests.

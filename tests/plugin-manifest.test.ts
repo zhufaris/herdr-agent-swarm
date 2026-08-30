@@ -92,6 +92,28 @@ describe("Herdr plugin manifest", () => {
     expect(productionBuildScript).not.toContain('npm --prefix "$ROOT" prune');
   });
 
+  it("guards standalone service installation until private configuration is complete", () => {
+    const standaloneBranch = installScript.slice(
+      installScript.indexOf('if [ "$STANDALONE" -eq 1 ]'),
+      installScript.indexOf('if ! command -v herdr')
+    );
+    const staging = standaloneBranch.indexOf('bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR"');
+    const guard = standaloneBranch.indexOf('Configuration is missing or still contains placeholders. Run: npm run swarm:setup');
+    const lifecycleInstall = standaloneBranch.indexOf('plugin-lifecycle.js" install');
+
+    expect(standaloneBranch).toContain('CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"');
+    expect(standaloneBranch).toContain('"$CONFIG_DIR/.env"');
+    expect(standaloneBranch).toContain('"$CONFIG_DIR/projects.json"');
+    for (const placeholder of ["replace-me", "REPLACE_WITH_HERDR_WORKSPACE_ID", "/absolute/path/to/your/project"]) {
+      expect(standaloneBranch).toContain(placeholder);
+    }
+    expect(guard).toBeGreaterThan(staging);
+    expect(lifecycleInstall).toBeGreaterThan(guard);
+    expect(standaloneBranch).not.toMatch(/(?:source|\.)\s+["']?\$CONFIG_DIR\/.env/);
+    expect(standaloneBranch).not.toMatch(/\b(?:cat|sed|awk)\b[^\n]*"\$(?:ENV_FILE|PROJECTS_FILE)"/);
+    expect(standaloneBranch).not.toMatch(/^\s*(?:npm run swarm:setup|node .*dist\/cli\/setup\.js)(?:\s|$)/m);
+  });
+
   it("keeps source maps but rejects declaration artifacts in production builds", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> };
     const tsconfig = JSON.parse(readFileSync("tsconfig.json", "utf8")) as { compilerOptions: Record<string, unknown> };

@@ -120,15 +120,47 @@ management; leaving it empty preserves the existing configured-chat behavior.
 ## Install as a standalone service
 
 The standalone service needs a running Herdr server, but it does not need the
-Herdr TUI or plugin. Initialize private XDG configuration, edit the generated
-files, then install and start the user service:
+Herdr TUI or plugin. The recommended first run is the guided setup wizard:
 
 ```bash
 npm ci
 npm run build
+npm run swarm:setup
+```
+
+The wizard collects the Lark application and project route, discovers live
+Herdr workspaces, validates the complete draft, shows a redacted review, and
+asks separately before saving, installing, and starting the user service.
+Secret input is hidden. When rerunning setup, the existing secret can be kept
+without displaying or re-entering it. Cancelling before save leaves the current
+configuration unchanged; replacing a valid configuration creates a private
+`backup-<UTC timestamp>` directory beside `.env` and `projects.json`.
+
+The read-only checks authenticate the Lark application, confirm that the target
+chat is readable, and compare the configured bot open ID when Lark exposes it.
+They also inspect the selected Herdr workspace, agent capabilities, local
+executables, user systemd, private directory access, and the loopback HTTP port.
+The wizard cannot prove or change Lark console settings: permissions,
+`im.message.receive_v1`, `card.action.trigger`, application publication, and bot
+membership in the target group must still be checked manually. It never creates
+a Lark application, sends a message, creates a pane, or starts an agent while
+validating.
+
+A failed check blocks save. A warning remains visible but allows save and
+startup after explicit acceptance; for example, Lark may not expose bot identity
+under the granted read scope. `npm run swarm:setup -- --skip-network` marks the
+Lark checks skipped: the configuration may be saved after explicit acceptance,
+but the wizard will not install or start the service.
+
+### Non-interactive setup
+
+For automation or experienced operators, keep the template flow explicit:
+
+```bash
 npm run swarm:init
 $EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm/.env"
 $EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm/projects.json"
+npm run swarm:doctor
 npm run swarm:install
 npm run swarm:start
 npm run swarm:status
@@ -142,14 +174,22 @@ user systemd unit. Override them with `SWARM_CONFIG_DIR`,
 absolute paths and the expected build identity into the unit; secrets remain in
 the mode-600 environment file.
 
-Useful lifecycle commands are `npm run swarm:restart`, `npm run swarm:stop`, and
-`npm run swarm:logs`. `./install.sh --standalone` combines dependency install,
-build, validation, and service installation after configuration has been
-initialized. It stages an immutable runtime under the state directory with only
-production dependencies, then atomically points `current` at that release; the
-development checkout keeps its test and build dependencies. The checked-in
-service file is an explanatory template; the installer renders the production
-unit and enables source maps for actionable stack traces.
+Useful recovery commands are `npm run swarm:doctor`, `npm run swarm:status`, and
+`npm run swarm:logs`; lifecycle controls include `npm run swarm:restart` and
+`npm run swarm:stop`. If setup reports an incomplete configuration transaction,
+restore a matching `.env` and `projects.json` pair from the named private backup
+before rerunning it.
+
+`./install.sh --standalone` combines dependency installation, build, immutable
+runtime staging, and service installation for an already configured machine. It
+is deliberately non-interactive: missing files or the exact shipped template
+placeholders stop before service installation and direct the operator to
+`npm run swarm:setup`. The installer never enters the wizard implicitly. It
+stages only production dependencies under the state directory, then atomically
+points `current` at that release; the development checkout keeps its test and
+build dependencies. The checked-in service file is an explanatory template;
+the installer renders the production unit and enables source maps for actionable
+stack traces.
 
 `npm run swarm:migrate` is a guarded one-to-one migration from the compatibility
 plugin service into an unused standalone service identity. It copies private
@@ -256,14 +296,15 @@ automatic restore across a Herdr server restart is not claimed.
 
 ## Configure the bridge
 
-Invoke the setup action:
+Invoke the same guided setup workflow from the compatibility plugin:
 
 ```bash
 herdr plugin action invoke setup --plugin herdr-lark-bridge
 ```
 
-The setup pane creates private files under the Herdr plugin config directory,
-opens them in `$EDITOR` (default `vim`), validates them, and starts the bridge:
+The setup pane collects and validates values, shows a redacted review, and asks
+separately before saving and changing the service. It writes private files under
+the Herdr plugin config directory:
 
 ```text
 $HERDR_PLUGIN_CONFIG_DIR/.env
