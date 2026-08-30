@@ -9,7 +9,7 @@ describe("build identity", () => {
   it("hashes compiled files, locked dependencies, and the Node runtime deterministically", async () => {
     const { calculateBuildId } = await import(pathToFileURL(join(process.cwd(), "scripts/build-id-input.mjs")).href);
     const base = {
-      serviceId: "herdr-lark-bridge", version: "0.2.0", nodeVersion: "24.1.0", nodeModulesAbi: "137",
+      serviceId: "herdr-agent-swarm", version: "0.2.0", nodeVersion: "24.1.0", nodeModulesAbi: "137",
       lockfile: Buffer.from("lock-a"), files: [{ path: "main.js", content: Buffer.from("code-a") }]
     };
     const id = calculateBuildId(base);
@@ -23,13 +23,13 @@ describe("build identity", () => {
   });
 
   it("loads strict sanitized build metadata", () => {
-    const path = fixture({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567" });
-    expect(loadBuildIdentity(path)).toEqual({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567" });
+    const path = fixture({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567" });
+    expect(loadBuildIdentity(path)).toEqual({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567" });
   });
 
   it("rejects another service and an expected-build mismatch", () => {
-    expect(() => loadBuildIdentity(fixture({ serviceId: "other", version: "0.2.0", buildId: "sha256:abc123", gitCommit: null }))).toThrow(/serviceId/);
-    const path = fixture({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:abc123", gitCommit: null });
+    expect(() => loadBuildIdentity(fixture({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:abc123", gitCommit: null }))).toThrow(/serviceId/);
+    const path = fixture({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: null });
     expect(() => loadBuildIdentity(path, "sha256:different")).toThrow(/does not match expected/);
   });
 });

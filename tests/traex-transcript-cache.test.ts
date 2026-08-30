@@ -67,7 +67,7 @@ describe("Traex transcript path cache", () => {
 });
 
 function session(value: string): HerdrAgentSession {
-  return { source: "herdr-lark-bridge:traex", agent: "traex", kind: "id", value };
+  return { source: "herdr-agent-swarm:traex", agent: "traex", kind: "id", value };
 }
 
 async function writeTranscript(root: string, directory: string, id: string): Promise<void> {

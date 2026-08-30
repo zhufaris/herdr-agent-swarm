@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 describe("health server", () => {
-  const buildIdentity = { serviceId: "herdr-lark-bridge" as const, version: "0.2.0", buildId: "sha256:test-build", gitCommit: null };
+  const buildIdentity = { serviceId: "herdr-agent-swarm" as const, version: "0.2.0", buildId: "sha256:test-build", gitCommit: null };
   const reconciliationSnapshot = { state: "idle" as const, runCount: 3, successCount: 2, failureCount: 1, coalescedRequestCount: 4, lastStartedAt: "2026-08-29T00:00:00.000Z", lastCompletedAt: "2026-08-29T00:00:00.025Z", lastDurationMs: 25, maxDurationMs: 40, lastOutcome: "succeeded" as const };
 
   it("reports card convergence scheduler diagnostics without changing readiness", async () => {
@@ -76,7 +76,7 @@ describe("health server", () => {
     });
     const port = (server.address() as AddressInfo).port;
     const health = await fetch(`http://127.0.0.1:${port}/health`);
-    expect(await health.json()).toEqual({ status: "ok", serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build" });
+    expect(await health.json()).toEqual({ status: "ok", serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build" });
 
     const ready = await fetch(`http://127.0.0.1:${port}/ready`);
     expect(ready.status).toBe(503);

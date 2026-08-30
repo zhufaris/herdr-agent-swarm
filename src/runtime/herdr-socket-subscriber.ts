@@ -113,7 +113,7 @@ export class HerdrSocketSubscriber {
       this.transportFailures += 1;
       return Promise.reject(new HerdrSocketRequestError("socket_unavailable", false));
     }
-    const id = `herdr-lark-bridge:${this.nextRequestId++}`;
+    const id = `herdr-agent-swarm:${this.nextRequestId++}`;
     return new Promise((resolve, reject) => {
       const socket = createConnection({ path: this.socketPath });
       let buffer = "";
@@ -197,7 +197,7 @@ export class HerdrSocketSubscriber {
         { type: "pane.exited" }, { type: "pane.moved" }, { type: "pane.agent_detected" },
         ...[...this.subscribedPaneIds].map((pane_id) => ({ type: "pane.agent_status_changed", pane_id }))
       ];
-      socket.write(`${JSON.stringify({ id: "herdr-lark-bridge-events", method: "events.subscribe", params: { subscriptions } })}\n`);
+      socket.write(`${JSON.stringify({ id: "herdr-agent-swarm-events", method: "events.subscribe", params: { subscriptions } })}\n`);
       const recovery = this.failureLogs.recover("event-stream");
       this.logger.info({ event: recovery ? "herdr-socket-recovered" : "herdr-socket-connected", subscriptionCount: subscriptions.length, paneCount: this.subscribedPaneIds.size, ...(recovery ?? {}), outcome: "connected" }, recovery ? "Herdr native event stream recovered" : "connected to Herdr native event stream");
       this.emit({ event: "socket.connected", workspaceIds: [], paneIds: [] });

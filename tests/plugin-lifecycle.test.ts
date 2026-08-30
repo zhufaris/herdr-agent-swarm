@@ -122,7 +122,7 @@ describe("plugin lifecycle", () => {
   it("refreshes the unit identity before restarting a rebuilt plugin", async () => {
     const fixture = createFixture();
     await runPluginLifecycle("install", fixture.environment);
-    writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
+    writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
     await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" }, { force: true })).rejects.toThrow();
     expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block test-bridge.service");
@@ -132,10 +132,10 @@ describe("plugin lifecycle", () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/status") {
-        response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:old-build" }, operational: { prompts: { running: 2, queued: 3 } } }));
+        response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:old-build" }, operational: { prompts: { running: 2, queued: 3 } } }));
         return;
       }
-      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", buildId: "sha256:test-build" }));
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -150,7 +150,7 @@ describe("plugin lifecycle", () => {
   it("refuses restart when an active worker remains after durable running work clears", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { running: 0, queued: 1 } }, promptWorker: { activeTurnWorkers: 1 } }));
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm" }, operational: { prompts: { running: 0, queued: 1 } }, promptWorker: { activeTurnWorkers: 1 } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -164,7 +164,7 @@ describe("plugin lifecycle", () => {
   it("refuses restart while multi-agent work remains active or uncertain", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { running: 0, queued: 0 } }, promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 1, activeTurns: 1, uncertainTurns: 2 } }));
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm" }, operational: { prompts: { running: 0, queued: 0 } }, promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 1, activeTurns: 1, uncertainTurns: 2 } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -178,7 +178,7 @@ describe("plugin lifecycle", () => {
   it("uses instance work to block restart even when legacy prompt metrics are absent", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, instanceWorker: { activeDispatchWorkers: 1, activeObservers: 0, activeTurns: 1, uncertainTurns: 0 } }));
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm" }, instanceWorker: { activeDispatchWorkers: 1, activeObservers: 0, activeTurns: 1, uncertainTurns: 0 } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -214,7 +214,7 @@ describe("plugin lifecycle", () => {
   it("refuses an unforced restart when active-unit work metrics are incomplete", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { queued: 0 } } }));
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm" }, operational: { prompts: { queued: 0 } } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -286,12 +286,12 @@ describe("plugin lifecycle", () => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/status") {
         response.end(JSON.stringify({
-          status: "ok", identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:test-build" },
+          status: "ok", identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" },
           startupRecovery: { state: "running" }
         }));
         return;
       }
-      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-lark-bridge", buildId: "sha256:test-build" }));
+      response.end(JSON.stringify({ status: "ok", serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -378,13 +378,13 @@ describe("plugin lifecycle", () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
-      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:rebuilt" } })));
+      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:rebuilt" } })));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runPluginLifecycle("install", fixture.environment);
-      writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
+      writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
       await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
       expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
       expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user start test-bridge.service");
@@ -454,7 +454,7 @@ describe("plugin lifecycle", () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
-      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:stale-build" } })));
+      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:stale-build" } })));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -471,7 +471,7 @@ describe("plugin lifecycle", () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
-      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:stale-build" } })));
+      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:stale-build" } })));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -487,7 +487,7 @@ describe("plugin lifecycle", () => {
 
 function completedStartupStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    status: "ok", identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:test-build" },
+    status: "ok", identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" },
     startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 } },
     promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 },
     ...overrides
@@ -509,7 +509,7 @@ function createFixture(options: { active?: boolean; port?: number } = {}) {
     `BRIDGE_HTTP_PORT=${options.port ?? 39001}`, "BRIDGE_HTTP_HOST=127.0.0.1"
   ].join("\n") + "\n");
   writeFileSync(join(dist, "main.js"), "// fixture\n");
-  writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
+  writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
   writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${active ? 'echo active; exit 0' : 'echo inactive; exit 3'}; fi\nexit 0\n`);
   writeFileSync(join(bin, "journalctl"), "#!/bin/sh\nexit 0\n");

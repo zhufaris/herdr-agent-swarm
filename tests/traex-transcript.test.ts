@@ -33,7 +33,7 @@ async function createTranscript(options: { id?: string; useFixture?: boolean; me
 }
 
 function session(overrides: Partial<HerdrAgentSession> = {}): HerdrAgentSession {
-  return { source: "herdr-lark-bridge:traex", agent: "traex", kind: "id", value: sessionId, ...overrides };
+  return { source: "herdr-agent-swarm:traex", agent: "traex", kind: "id", value: sessionId, ...overrides };
 }
 
 function mutation(items: unknown[], operation = "append"): string {

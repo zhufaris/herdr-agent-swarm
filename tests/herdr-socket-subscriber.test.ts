@@ -35,6 +35,9 @@ describe("Herdr socket subscriber", () => {
     await vi.waitFor(() => expect(requests.filter(({ method }) => method !== "events.subscribe")).toHaveLength(2));
     const snapshotRequest = requests.find(({ method }) => method === "session.snapshot")!;
     const agentRequest = requests.find(({ method }) => method === "agent.get")!;
+    expect(snapshotRequest.id).toBe("herdr-agent-swarm:1");
+    expect(agentRequest.id).toBe("herdr-agent-swarm:2");
+    expect(requests.find(({ method }) => method === "events.subscribe")?.id).toBe("herdr-agent-swarm-events");
     requestClients.get(agentRequest.id)!.write(`${JSON.stringify({ id: agentRequest.id, result: { type: "agent_info", pane_id: "w1:p1" } })}\n`);
     requestClients.get(snapshotRequest.id)!.write(`${JSON.stringify({ id: snapshotRequest.id, result: { type: "session_snapshot", snapshot: { panes: [], agents: [] } } })}\n`);
 
@@ -143,7 +146,8 @@ describe("Herdr socket subscriber", () => {
     const subscriber = new HerdrSocketSubscriber(socketPath, async () => ["w1:p1"], received, pino({ enabled: false }), 5, 20);
     subscriber.start();
     await vi.waitFor(() => expect(request).toContain("events.subscribe"));
-    const subscription = JSON.parse(request.trim()) as { params: { subscriptions: Array<Record<string, string>> } };
+    const subscription = JSON.parse(request.trim()) as { id: string; params: { subscriptions: Array<Record<string, string>> } };
+    expect(subscription.id).toBe("herdr-agent-swarm-events");
     expect(subscription.params.subscriptions).toContainEqual({ type: "pane.agent_status_changed", pane_id: "w1:p1" });
 
     client.write('{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed",');
