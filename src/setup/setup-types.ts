@@ -8,6 +8,7 @@ export interface SetupDraft { environment: Record<string, string>; registry: Set
 export interface SetupContext { root: string; configDirectory: string; stateDirectory: string; serviceName: string; cwd: string }
 export interface SetupCommitResult { environmentFile: string; projectsFile: string; backupDirectory?: string }
 export interface SetupCheckReport { checks: SetupCheck[]; policy: SetupCheckPolicy }
+export interface SetupWorkspace { id: string; name: string; current: boolean }
 
 export interface SetupPromptPort {
   text(message: string, defaultValue?: string): Promise<string>;
@@ -22,7 +23,10 @@ export interface SetupConfigPort {
   validate(draft: SetupDraft, context: SetupContext): Promise<SetupCheck[]>;
   commit(draft: SetupDraft, context: SetupContext): Promise<SetupCommitResult>;
 }
-export interface SetupHerdrProbe { check(draft: SetupDraft, context: SetupContext): Promise<SetupCheck[]> }
+export interface SetupHerdrProbe {
+  listWorkspaces(): Promise<SetupWorkspace[]>;
+  check(draft: SetupDraft, context: SetupContext): Promise<SetupCheck[]>;
+}
 export interface SetupLarkProbe { check(draft: SetupDraft): Promise<SetupCheck[]> }
 export interface SetupLifecyclePort {
   inspect(context: SetupContext): Promise<{ installed: boolean; active: boolean; summary: string }>;
