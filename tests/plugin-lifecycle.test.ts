@@ -310,6 +310,35 @@ describe("plugin lifecycle", () => {
     }
   });
 
+  it("enables and starts the standalone user service in one operation", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      const environment = {
+        ...fixture.environment,
+        HERDR_PLUGIN_ROOT: undefined,
+        HERDR_PLUGIN_CONFIG_DIR: undefined,
+        HERDR_PLUGIN_STATE_DIR: undefined,
+        SWARM_ROOT: fixture.root,
+        SWARM_CONFIG_DIR: fixture.config,
+        SWARM_STATE_DIR: fixture.state,
+        BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-agent-swarm.service",
+        BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000"
+      };
+      await runPluginLifecycle("install", environment);
+      writeFileSync(fixture.calls, "");
+      await expect(runPluginLifecycle("start", environment)).resolves.toBe(0);
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user enable --now herdr-agent-swarm.service");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("refuses service control before installation", async () => {
     const fixture = createFixture();
     await expect(runPluginLifecycle("start", fixture.environment)).rejects.toThrow(/service is not installed/);

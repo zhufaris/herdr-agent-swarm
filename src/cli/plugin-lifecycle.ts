@@ -42,7 +42,9 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   }
   const argumentsForAction = action === "restart"
     ? ["--user", "restart", "--no-block", paths.serviceName]
-    : ["--user", action, paths.serviceName];
+    : action === "start" && Boolean(environment.SWARM_ROOT)
+      ? ["--user", "enable", "--now", paths.serviceName]
+      : ["--user", action, paths.serviceName];
   const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
   return waitForStartupCompletion(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment));
