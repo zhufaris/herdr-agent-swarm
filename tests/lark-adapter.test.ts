@@ -87,7 +87,7 @@ describe("Lark streaming Answer cards", () => {
     const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
 
     await expect(adapter.replyStreamingCard("root-1", { schema: "2.0" })).rejects.toThrow(
-      'Lark CardKit create returned no card_id (code=99991672, msg="Access denied", dataKeys=[request_id], responseKeys=[code,data,msg,raw_token])'
+      'Lark CardKit create failed (code=99991672, msg="Access denied", dataKeys=[request_id], responseKeys=[code,data,msg,raw_token])'
     );
   });
 
@@ -140,6 +140,44 @@ describe("Lark streaming Answer cards", () => {
       data: { card: { type: "card_json", data: JSON.stringify(card) }, sequence: 42, uuid: "update-main-card-1-42" }
     });
     expect(patchMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a CardKit Main Card update business failure returned with HTTP success", async () => {
+    convertCardId.mockResolvedValue({ code: 0, data: { card_id: "main-card-1" } });
+    updateCardEntity.mockResolvedValue({ code: 230099, msg: "Card is locked", data: { request_id: "req-1" }, raw_token: "must-not-leak" });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.updateCardKit("main-message-1", { schema: "2.0" }, 42)).rejects.toMatchObject({
+      message: 'Lark CardKit update failed (code=230099, msg="Card is locked", dataKeys=[request_id], responseKeys=[code,data,msg,raw_token])',
+      larkCode: 230099
+    });
+  });
+
+  it("rejects a CardKit ID conversion business failure before caching an identity", async () => {
+    convertCardId
+      .mockResolvedValueOnce({ code: 99991400, msg: "Invalid message", data: { request_id: "req-1" } })
+      .mockResolvedValueOnce({ code: 0, data: { card_id: "main-card-1" } });
+    updateCardEntity.mockResolvedValue({ code: 0 });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.updateCardKit("main-message-1", {}, 1)).rejects.toThrow(
+      'Lark CardKit ID conversion failed (code=99991400, msg="Invalid message", dataKeys=[request_id], responseKeys=[code,data,msg])'
+    );
+    await expect(adapter.updateCardKit("main-message-1", {}, 2)).resolves.toBeUndefined();
+    expect(convertCardId).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects CardKit stream and finish business failures returned with HTTP success", async () => {
+    streamContent.mockResolvedValue({ code: 230099, msg: "Card is locked" });
+    updateSettings.mockResolvedValue({ code: 99991400, msg: "Invalid sequence" });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.streamCardContent("card-1", "answer-content-p1", "answer", 4)).rejects.toThrow(
+      'Lark CardKit content update failed (code=230099, msg="Card is locked", dataKeys=[], responseKeys=[code,msg])'
+    );
+    await expect(adapter.finishStreamingCard("card-1", 5, "Completed")).rejects.toThrow(
+      'Lark CardKit settings update failed (code=99991400, msg="Invalid sequence", dataKeys=[], responseKeys=[code,msg])'
+    );
   });
 
   it("evicts old message-to-card identities and reloads them from Lark", async () => {

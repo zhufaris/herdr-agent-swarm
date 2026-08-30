@@ -123,6 +123,7 @@ export class LarkSdkAdapter implements LarkPort {
 
   async createStreamingCard(card: object): Promise<{ cardId: string }> {
     const created = await this.client.cardkit.v1.card.create({ data: { type: "card_json", data: JSON.stringify(normalizeLarkCardElementIds(card)) } });
+    assertCardKitSuccess("create", created);
     const cardId = created.data?.card_id;
     if (!cardId) throw new Error(`Lark CardKit create returned no card_id (${safeResponseMetadata(created)})`);
     return { cardId };
@@ -137,10 +138,13 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   async streamCardContent(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
-    const request = (nextContent: string) => this.client.cardkit.v1.cardElement.content({
-      path: { card_id: cardId, element_id: normalizeLarkElementId(elementId) },
-      data: { content: nextContent, sequence, uuid: `stream-${cardId}-${sequence}` }
-    });
+    const request = async (nextContent: string): Promise<void> => {
+      const response = await this.client.cardkit.v1.cardElement.content({
+        path: { card_id: cardId, element_id: normalizeLarkElementId(elementId) },
+        data: { content: nextContent, sequence, uuid: `stream-${cardId}-${sequence}` }
+      });
+      assertCardKitSuccess("content update", response);
+    };
     try {
       await request(content);
     } catch (error) {
@@ -151,10 +155,11 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   async finishStreamingCard(cardId: string, sequence: number, summary: string): Promise<void> {
-    await this.client.cardkit.v1.card.settings({
+    const response = await this.client.cardkit.v1.card.settings({
       path: { card_id: cardId },
       data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: summary } } }), sequence, uuid: `finish-${cardId}-${sequence}` }
     });
+    assertCardKitSuccess("settings update", response);
   }
 
   async shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }> {
@@ -182,17 +187,19 @@ export class LarkSdkAdapter implements LarkPort {
     let cardId = this.cardIdsByMessageId.get(messageId);
     if (!cardId) {
       const converted = await this.client.cardkit.v1.card.idConvert({ data: { message_id: messageId } });
+      assertCardKitSuccess("ID conversion", converted);
       cardId = converted.data?.card_id;
-      if (!cardId) throw new Error(`Lark CardKit ID conversion returned no card_id for message ${messageId}`);
+      if (!cardId) throw new Error(`Lark CardKit ID conversion returned no card_id (${safeResponseMetadata(converted)})`);
       this.cardIdsByMessageId.set(messageId, cardId);
     }
-    await this.client.cardkit.v1.card.update({
+    const response = await this.client.cardkit.v1.card.update({
       path: { card_id: cardId },
       data: {
         card: { type: "card_json", data: JSON.stringify(normalizeLarkCardElementIds(card)) },
         sequence, uuid: `update-${cardId}-${sequence}`
       }
     });
+    assertCardKitSuccess("update", response);
   }
 
   private async resolveThreadId(rootMessageId: string): Promise<string> {
@@ -351,6 +358,13 @@ function safeResponseMetadata(response: unknown): string {
   const dataKeys = data ? Object.keys(data).sort().join(",") : "";
   const responseKeys = Object.keys(response).sort().join(",");
   return `code=${code}, msg=${msg}, dataKeys=[${dataKeys}], responseKeys=[${responseKeys}]`;
+}
+
+function assertCardKitSuccess(operation: string, response: unknown): void {
+  if (!isRecord(response)) return;
+  const code = response.code;
+  if (code === undefined || code === null || code === 0 || code === "0" || code === "") return;
+  throw Object.assign(new Error(`Lark CardKit ${operation} failed (${safeResponseMetadata(response)})`), { larkCode: code });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
