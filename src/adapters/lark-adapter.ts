@@ -18,6 +18,7 @@ interface LarkAdapterOptions {
 export class LarkSdkAdapter implements LarkPort {
   private readonly client: lark.Client;
   private readonly wsClient: lark.WSClient;
+  private readonly cardIdsByMessageId = new Map<string, string>();
   private ready = false;
 
   constructor(private readonly options: LarkAdapterOptions, private readonly logger?: Logger) {
@@ -158,6 +159,23 @@ export class LarkSdkAdapter implements LarkPort {
     await this.client.im.v1.message.patch({
       path: { message_id: messageId },
       data: { content: JSON.stringify(normalizeLarkCardElementIds(card)) }
+    });
+  }
+
+  async updateCardKit(messageId: string, card: object, sequence: number): Promise<void> {
+    let cardId = this.cardIdsByMessageId.get(messageId);
+    if (!cardId) {
+      const converted = await this.client.cardkit.v1.card.idConvert({ data: { message_id: messageId } });
+      cardId = converted.data?.card_id;
+      if (!cardId) throw new Error(`Lark CardKit ID conversion returned no card_id for message ${messageId}`);
+      this.cardIdsByMessageId.set(messageId, cardId);
+    }
+    await this.client.cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: {
+        card: { type: "card_json", data: JSON.stringify(normalizeLarkCardElementIds(card)) },
+        sequence, uuid: `update-${cardId}-${sequence}`
+      }
     });
   }
 

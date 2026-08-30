@@ -96,6 +96,7 @@ export interface LarkPort {
   finishStreamingCard?(cardId: string, sequence: number, summary: string): Promise<void>;
   shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
+  updateCardKit?(messageId: string, card: object, sequence: number): Promise<void>;
 }
 
 export interface HerdrPort {

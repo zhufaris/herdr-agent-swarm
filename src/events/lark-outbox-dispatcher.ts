@@ -214,7 +214,10 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       }
       if (reply.kind === "card_update") {
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
-        await this.lark.updateCard(reply.rootMessageId, JSON.parse(reply.payload) as object);
+        const card = JSON.parse(reply.payload) as object;
+        if (reply.targetRole === "session_status" && this.lark.updateCardKit) {
+          await this.lark.updateCardKit(reply.rootMessageId, card, reply.viewVersion ?? 0);
+        } else await this.lark.updateCard(reply.rootMessageId, card);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_card_create") {

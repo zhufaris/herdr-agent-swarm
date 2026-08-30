@@ -34,6 +34,22 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("delivers Main Card updates through CardKit rather than legacy message patch", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+    store.reserveMainCard({ ...initialTopicView("b1"), title: "Version 7", viewVersion: 7, deliveredVersion: 6 }, "root-1", { version: 7 });
+    const updateCardKit = vi.fn(async () => {});
+    const updateCard = vi.fn(async () => {});
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCardKit, updateCard }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(updateCardKit).toHaveBeenCalledWith("main-1", { version: 7 }, 7);
+    expect(updateCard).not.toHaveBeenCalled();
+    store.close();
+  });
+
   it("rebuilds a locked Main Card once instead of retrying its stale message target", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
