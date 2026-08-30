@@ -111,7 +111,7 @@ describe("card interactions", () => {
     const replacement = h.store.database.prepare("SELECT id FROM prompt_jobs WHERE source_prompt_id = 'failed-auto'").get() as { id: string };
     expect(h.store.getPrompt(replacement.id)).toMatchObject({ dispatchKind: "turn", steeringOrigin: null, sourcePromptId: "failed-auto", body: "继续" });
     expect(h.wakePrompt).toHaveBeenCalledTimes(1);
-    expect(h.store.loadRunCard(replacement.id)).not.toBeNull();
+    expect(h.store.loadRunCard(replacement.id)).toMatchObject({ sessionTitle: "task" });
     expect(h.store.listPendingOutboundReplies().some((reply) => reply.promptId === replacement.id)).toBe(true);
 
     const duplicate = await h.workflow.handle({ messageId: "failed-card", chatId: "chat", operatorOpenId: "member", value });

@@ -38,6 +38,7 @@ export interface RunCardView {
   answerPageStart: number;
   phase: RunCardPhase;
   title: string;
+  sessionTitle?: string;
   requestText: string;
   workspaceId: string;
   spaceName: string;
@@ -72,12 +73,12 @@ export type RunCardChange =
   | { type: "failed"; occurredAt: string; notice: string };
 
 export function createQueuedRunCard(input: {
-  promptId: string; bindingId: string; title: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
+  promptId: string; bindingId: string; title: string; sessionTitle?: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
   queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null; steeringOrigin?: RunCardSteeringOrigin | null;
 }): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, steeringOrigin: input.steeringOrigin ?? null, steeringFailureKind: null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
-    title: input.title, requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
+    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };

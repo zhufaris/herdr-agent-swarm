@@ -491,7 +491,7 @@ describe("run card", () => {
   });
 
   it("renders lifecycle only on the task card and gives the answer a stable stream element", () => {
-    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", sessionTitle: "datasage_semantic_knowledge / task-7kq2", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerSnapshot: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "2026-08-22T10:00:02Z", answer: "Fixed." });
     const taskCard = renderRequestRunCard(completed);
@@ -511,7 +511,7 @@ describe("run card", () => {
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
     expect(panels).toEqual([]);
-    expect(answerCard).toMatchObject({ header: { title: { content: "✅ TraeX 回复已完成" }, subtitle: { content: "Fix login" }, template: "green" } });
+    expect(answerCard).toMatchObject({ header: { title: { content: "✅ TraeX 回复已完成" }, subtitle: { content: "datasage_semantic_knowledge / task-7kq2 · Fix login" }, template: "green" } });
     expect(answerCard).toMatchObject({ config: { streaming_mode: false, summary: { content: "完成 · Fix login" } } });
     const answerElements = (answerCard as { body: { elements: Array<{ tag?: string; element_id?: string }> } }).body.elements;
     expect(answerElements).toContainEqual(expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" }));
@@ -585,11 +585,11 @@ describe("run card", () => {
   });
 
   it("renders a conversational answer with compact metadata and arbitrary continuation pages", () => {
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", workspaceId: "w1", paneId: "w1:p9", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", sessionTitle: "datasage / task-7kq2", workspaceId: "w1", paneId: "w1:p9", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
     const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
     const card = renderRequestAnswerCard(completed, { pageNumber: 7, initialContent: "Only page seven" }) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string; element_id?: string }> } };
 
-    expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "Explain rollout" } });
+    expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "datasage / task-7kq2 · Explain rollout" } });
     expect(card).toMatchObject({ config: { streaming_mode: false }, header: { title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, template: "green" } });
     expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "最终结果  ·  ✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
@@ -606,6 +606,14 @@ describe("run card", () => {
     expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "running" }))).not.toContain("streaming_config");
     expect(renderRequestAnswerCard({ ...view, phase: "completed" })).toMatchObject({ config: { streaming_mode: false } });
     expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed" }))).not.toContain("streaming_config");
+  });
+
+  it("falls back to space and pane id for legacy Answer Card views", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stream", workspaceId: "w1", spaceName: "datasage", paneId: "w5:p3G", requestText: "go", queuePosition: 0, occurredAt: "start" });
+
+    expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
+      header: { title: { content: "✨ TraeX 回复" }, subtitle: { content: "datasage / w5:p3G · Stream" } }
+    });
   });
 
   it("keeps native TraeX task status out of the answer card", () => {

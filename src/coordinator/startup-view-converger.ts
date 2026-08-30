@@ -65,9 +65,10 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId });
       const runCards = this.store.listRunCards(binding.id);
       for (const view of runCards) {
-        if (!view.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(view.promptId, binding.rootMessageId, renderRequestAnswerCard(view)); this.outboundWork.wake(); }
-        const current = view.spaceName !== spaceName ? this.store.saveRunCard({ ...view, spaceName, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
-        if (!current.answerCardId && current.answerMessageId && (view.spaceName !== spaceName || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
+        const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title;
+        const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
+        if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, renderRequestAnswerCard(current)); this.outboundWork.wake(); }
+        if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
         else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId);
       }
       const activeRun = runCards.find((view) => view.phase === "running" || view.phase === "blocked")

@@ -125,4 +125,19 @@ describe("StartupViewConverger", () => {
     expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", bindingId: "b1", targetRole: "session_status" }));
     store.close();
   });
+
+  it("backfills the binding title on legacy Run Cards", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "herdr-lark-bridge / task-ab12" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
+    const legacy = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "work", workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: "wH:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "request", actorOpenId: "u1", body: "go" }, view: legacy, rootMessageId: "root", answerCard: {} });
+
+    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }).converge();
+
+    expect(store.loadRunCard("p1")).toMatchObject({ sessionTitle: "herdr-lark-bridge / task-ab12", viewVersion: 2 });
+    const answerCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1" && reply.kind === "stream_card_create");
+    expect(JSON.parse(answerCreate!.payload)).toMatchObject({ header: { subtitle: { content: "herdr-lark-bridge / task-ab12 · work" } } });
+    store.close();
+  });
 });

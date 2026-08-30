@@ -31,12 +31,15 @@ Run Cards receive the current `binding.title` when they are created. Converting
 a rejected automatic steering request into an ordinary queued turn carries the
 same session title forward.
 
-Startup view convergence compares persisted Run Cards with their binding and
+SQLite stores Run Card projections in normalized columns and exposes them
+through a JSON view. Add a nullable `session_title` column using the existing
+idempotent startup migration pattern, and include it in that JSON view. Startup
+view convergence compares persisted Run Cards with their binding and
 backfills or refreshes `sessionTitle` from `binding.title`. A changed value is a
 normal projection update: increment `viewVersion` and update the timestamp so
 the durable publisher can converge the visible card. Keeping the field optional
-allows existing SQLite JSON views to load before convergence without a schema
-migration.
+and the new column nullable allows existing databases to upgrade and legacy
+rows to load before convergence.
 
 Answer Card rendering uses one pure subtitle helper for streaming, completed,
 and paginated variants:

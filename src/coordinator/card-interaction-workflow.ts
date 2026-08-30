@@ -99,7 +99,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (!interaction) interaction = this.options.store.createCardInteraction({ id: interactionId, bindingId, bindingGeneration: generation, actorOpenId: action.operatorOpenId, actionKind: "enqueue_failed_steering", parentPromptId: null, targetPromptId: sourcePromptId, expiresAt: "9999-12-31T23:59:59.999Z" });
     const now = new Date().toISOString();
     const newPromptId = randomUUID();
-    const view = createQueuedRunCard({ promptId: newPromptId, bindingId, bindingGeneration: generation, title: sourceView.title, workspaceId: sourceView.workspaceId, spaceName: sourceView.spaceName, paneId: binding.paneId, requestText: source.body, queuePosition: 1, occurredAt: now });
+    const view = createQueuedRunCard({ promptId: newPromptId, bindingId, bindingGeneration: generation, title: sourceView.title, sessionTitle: binding.title, workspaceId: sourceView.workspaceId, spaceName: sourceView.spaceName, paneId: binding.paneId, requestText: source.body, queuePosition: 1, occurredAt: now });
     const result = this.options.store.convertFailedSteeringToTurn({ interactionId: interaction.id, actorOpenId: action.operatorOpenId, bindingId, bindingGeneration: generation, sourcePromptId, newPromptId, newLarkMessageId: `card:${interaction.id}`, now, view, rootMessageId: binding.rootMessageId, answerCardFor: renderRequestAnswerCard });
     if (result.outcome === "converted") {
       this.options.logger.info({ event: "failed-auto-steering-converted", bindingId, sourcePromptId, promptId: result.prompt!.id, outcome: "converted" }, "queued rejected automatic steering as a new task");

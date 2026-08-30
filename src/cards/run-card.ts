@@ -211,7 +211,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     },
     header: {
       title: { tag: "plain_text", content: input.phase === "completed" && !streaming ? (pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成") : (pageNumber > 1 ? `✨ TraeX 继续回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复") },
-      subtitle: { tag: "plain_text", content: boundedTitle(input.title) },
+      subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
       template: input.phase === "completed" && !streaming ? "green" : state.color
     },
     body: { elements }
@@ -242,7 +242,7 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
     config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
       title: { tag: "plain_text", content: pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成" },
-      subtitle: { tag: "plain_text", content: boundedTitle(input.title) },
+      subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
       template: "green"
     },
     body: { elements: [
@@ -455,6 +455,10 @@ function agentTitle(title: string): string {
   return boundedTitle(title);
 }
 function boundedTitle(title: string): string { return truncate(title.replace(/\s+/g, " " ).trim() || "未命名任务", 64); }
+function answerCardSubtitle(input: RunCardView): string {
+  const sessionTitle = input.sessionTitle?.trim() || [input.spaceName, input.paneId].filter(Boolean).join(" / " ) || "unknown";
+  return boundedTitle(`${sessionTitle} · ${input.title}`);
+}
 function requestSummaryLabel(phase: RunCardView["phase"]): string {
   return { queued: "排队中", running: "执行中", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
 }

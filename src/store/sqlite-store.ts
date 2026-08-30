@@ -1613,8 +1613,8 @@ export class SqliteBindingStore implements BindingStorePort {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
     const view = this.loadRunCard(promptId);
     if (!view || view.answerMessageId) return;
-    const existing = this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`);
-    if (existing) return;
+    const existing = this.database.prepare("SELECT view_version FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`) as { view_version: number | null } | undefined;
+    if (existing && (existing.view_version ?? 0) >= view.viewVersion) return;
     const prompt = this.requirePrompt(promptId);
     this.enqueueOutboundReply({
       id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.bindingId, promptId, viewVersion: view.viewVersion,
@@ -2407,8 +2407,8 @@ export class SqliteBindingStore implements BindingStorePort {
     const ownsTransaction = !this.database.isTransaction;
     if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, steering_origin = ?, steering_failure_kind = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
-        .run(view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
+      this.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, steering_origin = ?, steering_failure_kind = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, session_title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
+        .run(view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
       const result = this.loadRunCard(view.promptId)!;
       if (ownsTransaction) this.database.exec("COMMIT");
       return result;
@@ -2568,8 +2568,8 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   private insertRunCard(view: RunCardView): void {
-    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, steering_origin, steering_failure_kind, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, steering_origin, steering_failure_kind, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
     this.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
   }
@@ -2734,7 +2734,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE TABLE IF NOT EXISTS run_cards(
         prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL DEFAULT 1, conversion_parent_prompt_id TEXT, steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain')), queue_feedback_json TEXT, lark_message_id TEXT, answer_message_id TEXT, answer_card_id TEXT, answer_element_id TEXT NOT NULL DEFAULT '', answer_sequence INTEGER NOT NULL DEFAULT 0, answer_page_index INTEGER NOT NULL DEFAULT 0, answer_page_start INTEGER NOT NULL DEFAULT 0,
-        phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, space_name TEXT NOT NULL DEFAULT 'unknown', pane_id TEXT,
+        phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, session_title TEXT, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, space_name TEXT NOT NULL DEFAULT 'unknown', pane_id TEXT,
         answer TEXT NOT NULL, answer_segments_json TEXT NOT NULL DEFAULT '[]', answer_draft TEXT NOT NULL DEFAULT '', answer_draft_transient INTEGER NOT NULL DEFAULT 0, progress_events_json TEXT NOT NULL, queue_position INTEGER NOT NULL, started_at TEXT, finished_at TEXT, notice TEXT, activity_at TEXT NOT NULL,
         view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, answer_delivered_version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
@@ -2756,6 +2756,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureRunCardQueueFeedbackColumn();
     this.ensureRunCardRequestText();
     this.ensureRunCardSpaceName();
+    this.ensureRunCardSessionTitle();
     this.ensureDualRequestCardColumns();
     this.ensureRunCardAnswerState();
     this.ensureRunCardInteractionColumns();
@@ -3348,11 +3349,16 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!columns.some((column) => column.name === "space_name")) this.database.exec("ALTER TABLE run_cards ADD COLUMN space_name TEXT NOT NULL DEFAULT 'unknown'");
   }
 
+  private ensureRunCardSessionTitle(): void {
+    const columns = this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "session_title")) this.database.exec("ALTER TABLE run_cards ADD COLUMN session_title TEXT");
+  }
+
   private recreateRunCardsView(): void {
     this.database.exec(`
       DROP VIEW IF EXISTS run_cards_view;
       CREATE VIEW run_cards_view AS SELECT *, json_object(
-        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'requestText', request_text,
+        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'sessionTitle', session_title, 'requestText', request_text,
         'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END, 'progressEvents', json(progress_events_json),
         'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'activityAt', activity_at,
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'answerDeliveredVersion', answer_delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
@@ -3367,7 +3373,7 @@ export class SqliteBindingStore implements BindingStorePort {
     return [
       "binding_generation", "conversion_parent_prompt_id", "steering_origin", "steering_failure_kind", "queue_feedback_json",
       "answer_message_id", "answer_card_id", "answer_element_id", "answer_sequence", "answer_page_index", "answer_page_start",
-      "request_text", "space_name", "answer_segments_json", "answer_draft", "answer_draft_transient", "activity_at", "answer_delivered_version"
+      "request_text", "space_name", "session_title", "answer_segments_json", "answer_draft", "answer_draft_transient", "activity_at", "answer_delivered_version"
     ].some((column) => !columns.has(column));
   }
 

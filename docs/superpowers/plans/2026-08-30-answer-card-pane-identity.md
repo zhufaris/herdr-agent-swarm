@@ -15,7 +15,7 @@
 - Keep the interactive card as the Lark thread root; `[Card Message]` remains client-owned.
 - Answer Card subtitle is `<space> / <pane name> · <request title>`.
 - Fall back to `<space> / <paneId>` only when the durable session title is absent.
-- Existing persisted Run Card JSON must remain readable without a SQLite migration.
+- Existing databases must gain a nullable `session_title` column through the idempotent startup migration path.
 - Do not change prompt dispatch, answer offsets, stream sequencing, or frozen Answer Card pages.
 - Do not force restart the service without a new explicit authorization.
 
@@ -26,7 +26,9 @@
 **Files:**
 - Modify: `src/domain/run-card-view.ts`
 - Modify: `src/cards/run-card.ts`
+- Modify: `src/store/sqlite-store.ts`
 - Test: `tests/run-card.test.ts`
+- Test: `tests/sqlite-store.test.ts`
 
 **Interfaces:**
 - Produces: optional `RunCardView.sessionTitle?: string` and matching `createQueuedRunCard()` input.
@@ -43,7 +45,7 @@ Expected: FAIL because Answer Card subtitles contain only the request title.
 
 - [ ] **Step 3: Add the optional durable field and subtitle helper**
 
-Extend the interface and constructor input with `sessionTitle?: string`; initialize it from the input. Add a pure helper equivalent to:
+Extend the interface and constructor input with `sessionTitle?: string`; initialize it from the input. Add nullable `session_title` persistence, startup column creation, and JSON-view projection in `SqliteBindingStore`. Add a pure helper equivalent to:
 
 ```ts
 function answerCardSubtitle(input: RunCardView): string {
@@ -54,11 +56,11 @@ function answerCardSubtitle(input: RunCardView): string {
 }
 ```
 
-Use it only in `renderRequestAnswerCard()` so Request Cards and root cards retain their existing copy.
+Use it in `renderRequestAnswerCard()` and `renderFinalAnswerCard()` so streaming and frozen completion cards agree while Request Cards and root cards retain their existing copy.
 
 - [ ] **Step 4: Run the rendering tests and verify pass**
 
-Run: `npx vitest run tests/run-card.test.ts`
+Run: `npx vitest run tests/run-card.test.ts tests/sqlite-store.test.ts`
 Expected: PASS.
 
 ### Task 2: Capture and preserve binding titles
@@ -130,7 +132,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Run affected suites together**
 
-Run: `npx vitest run tests/run-card.test.ts tests/startup-view-converger.test.ts tests/card-interaction-integration.test.ts tests/concurrency-controls.integration.test.ts`
+Run: `npx vitest run tests/run-card.test.ts tests/sqlite-store.test.ts tests/startup-view-converger.test.ts tests/card-interaction-integration.test.ts tests/concurrency-controls.integration.test.ts`
 Expected: all tests pass.
 
 - [ ] **Step 2: Run static and build checks**

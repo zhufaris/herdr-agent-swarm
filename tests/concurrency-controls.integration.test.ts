@@ -188,6 +188,7 @@ describe("coordinator concurrency controls", () => {
       await vi.waitFor(() => expect(runCount).toBe(1));
       await vi.advanceTimersByTimeAsync(1_300);
       await vi.waitFor(() => expect(store.loadRunCard(store.listRunCards("b1")[0]!.promptId)?.answerMessageId).toBe("answer-1"));
+      expect(store.listRunCards("b1")[0]).toMatchObject({ sessionTitle: "Task" });
       expect(runCount).toBe(1);
     } finally {
       await coordinator.stop(); await publisher.stop(); store.close(); vi.useRealTimers();

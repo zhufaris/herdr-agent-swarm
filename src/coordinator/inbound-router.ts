@@ -251,7 +251,7 @@ export class InboundRouter implements InboundRouterPort {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     if (!forcedParentPromptId) return this.enqueueClassified(binding, message, body);
     const promptId = randomUUID(); const occurredAt = new Date().toISOString(); const parentPromptId = forcedParentPromptId; const dispatchKind = "steering" as const;
-    const view = createQueuedRunCard({ promptId, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: null, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: 0, occurredAt });
+    const view = createQueuedRunCard({ promptId, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: null, title: requestTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: 0, occurredAt });
     const { prompt, inserted } = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view) });
     this.options.outboundWork.wake();
     if (!inserted) { if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true; }
@@ -270,7 +270,7 @@ export class InboundRouter implements InboundRouterPort {
     const promptId = randomUUID();
     const acceptedAt = new Date().toISOString();
     const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
-    const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: requestTitle(body), workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
+    const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: requestTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
     const result = this.options.store.acceptClassifiedPrompt({
       prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body },
       ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }),
