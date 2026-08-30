@@ -35,5 +35,5 @@
 - [x] Extract the existing answer/status publication into `publishTypedObservation` and call it from both the attached callback/final read and detached loop.
 - [x] Re-run `npx vitest run tests/pane-thread-lifecycle-integration.test.ts tests/concurrency-controls.integration.test.ts`.
 - [x] Run `npm run typecheck`, `npm run build`, and `git diff --check`.
-- [ ] Wait for live prompt/outbox work to drain, restart `herdr-agent-swarm.service`, and verify `/ready`, build identity, and zero replay.
-- [ ] Commit the source, regression test, and checked plan as `fix: stream detached TraeX answers`.
+- [x] Restart `herdr-agent-swarm.service` with detached/no-replay recovery for the active diagnostic turn, then verify `/ready`, build identity, and zero replay.
+- [x] Commit the source, regression test, and checked implementation steps as `fix: stream detached TraeX answers`.
