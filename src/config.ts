@@ -4,17 +4,6 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import type { ProjectConfig } from "./domain/types.js";
 
-const projectInstanceSchema = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/),
-  role: z.enum(["primary", "worker"]),
-  agent: z.enum(["pi", "claude-code", "codex", "traex"]),
-  model: z.string().trim().min(1).optional(),
-  workspace: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("main-checkout") }),
-    z.object({ kind: z.literal("git-worktree"), baseRef: z.string().trim().min(1), branchName: z.string().trim().min(1).optional() }),
-    z.object({ kind: z.literal("shared-read-only") })
-  ])
-});
 const projectSchema = z.object({
   id: z.string().regex(/^[a-z0-9_-]+$/),
   displayName: z.string().trim().min(1),
@@ -22,22 +11,8 @@ const projectSchema = z.object({
   description: z.string().trim().min(1),
   workspaceId: z.string().trim().min(1),
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
-  maxInstances: z.number().int().min(1).max(64).default(8),
-  instances: z.array(projectInstanceSchema).default([])
-}).superRefine((project, context) => {
-  const names = new Set<string>();
-  let primaryCount = 0;
-  for (const instance of project.instances) {
-    if (names.has(instance.name)) context.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate instance name: ${instance.name}` });
-    names.add(instance.name);
-    if (instance.role === "primary") primaryCount += 1;
-    if (instance.role === "worker" && instance.workspace.kind === "main-checkout") {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `worker instance cannot use main checkout: ${instance.name}` });
-    }
-  }
-  if (primaryCount > 1) context.addIssue({ code: z.ZodIssueCode.custom, message: "project has multiple primary instances" });
-  if (project.instances.length > project.maxInstances) context.addIssue({ code: z.ZodIssueCode.custom, message: "project exceeds maxInstances" });
-});
+  maxInstances: z.number().int().min(1).max(64).default(8)
+}).strict();
 const projectRegistrySchema = z.object({
   defaultProjectId: z.string().min(1),
   projects: z.array(projectSchema).min(1)

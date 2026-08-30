@@ -55,11 +55,10 @@ describe("setup workflow", () => {
     await expect(runSetupWorkflow(fixture.value, context)).resolves.toMatchObject({ status: "started" });
     expect(fixture.committed?.registry).toEqual({
       defaultProjectId: "my-app",
-      projects: [expect.objectContaining({ id: "my-app", displayName: "My App!", spaceName: "My App!", workspaceId: "w-current", cwd: "/work/My App!", maxInstances: 8, instances: [
-        { name: "primary", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } },
-        { name: "worker", role: "worker", agent: "traex", workspace: { kind: "git-worktree", baseRef: "HEAD" } }
-      ] })]
+      projects: [expect.objectContaining({ id: "my-app", displayName: "My App!", spaceName: "My App!", workspaceId: "w-current", cwd: "/work/My App!", maxInstances: 8 })]
     });
+    expect(fixture.committed?.registry.projects[0]).not.toHaveProperty("instances");
+    expect(fixture.prompts.output.join("\n")).toContain("Worker limit: 8");
     expect(fixture.events).toEqual(["load", "collect:lark", "collect:project", "validate:local", "validate:herdr", "validate:lark", "review", "commit", "inspect-service", "confirm-install", "install", "confirm-start", "start"]);
   });
 

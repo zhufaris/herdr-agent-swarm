@@ -64,7 +64,7 @@ export async function runLocalSetupChecks(draft: SetupDraft, context: SetupConte
     ? { id: "local.http-port", status: "fail", summary: `Port ${port} is occupied by another process`, remediation: "Choose a free loopback port or stop the unrelated listener." }
     : { id: "local.http-port", status: "pass", summary: portState === "free" ? `Port ${port} is available` : `Port ${port} belongs to ${context.serviceName}` });
 
-  for (const [name, fallback] of requiredExecutables(draft)) {
+  for (const [name, fallback] of requiredExecutables()) {
     const executable = draft.environment[name] ?? fallback;
     const id = `local.executable.${name.replace(/_BIN$/, "").toLowerCase().replace("claude_code", "claude-code")}`;
     checks.push(resolveExecutable(executable, pathValue)
@@ -82,14 +82,8 @@ function supportsNode(version: string): boolean {
   return major > 22 || (major === 22 && minor >= 12);
 }
 
-function requiredExecutables(draft: SetupDraft): Array<[string, string]> {
-  const required = new Map<string, string>([["HERDR_BIN", "herdr"], ["TRAEX_BIN", "traex"]]);
-  const mapping = { traex: ["TRAEX_BIN", "traex"], codex: ["CODEX_BIN", "codex"], "claude-code": ["CLAUDE_CODE_BIN", "claude"], pi: ["PI_BIN", "pi"] } as const;
-  for (const project of draft.registry.projects) for (const instance of project.instances ?? []) {
-    const [name, fallback] = mapping[instance.agent];
-    required.set(name, fallback);
-  }
-  return [...required.entries()];
+function requiredExecutables(): Array<[string, string]> {
+  return [["HERDR_BIN", "herdr"], ["TRAEX_BIN", "traex"]];
 }
 
 async function directoryMode(path: string): Promise<number | null> {

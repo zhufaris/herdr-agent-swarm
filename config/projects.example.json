@@ -8,11 +8,7 @@
       "description": "A repository managed by Herdr Agent Swarm through Feishu",
       "workspaceId": "REPLACE_WITH_HERDR_WORKSPACE_ID",
       "cwd": "/absolute/path/to/your/project",
-      "maxInstances": 8,
-      "instances": [
-        { "name": "primary", "role": "primary", "agent": "traex", "workspace": { "kind": "main-checkout" } },
-        { "name": "worker", "role": "worker", "agent": "traex", "workspace": { "kind": "git-worktree", "baseRef": "HEAD" } }
-      ]
+      "maxInstances": 8
     }
   ]
 }

@@ -2,7 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { HerdrSetupProbe, type HerdrCapabilityReader } from "../src/adapters/herdr-setup-probe.js";
+import { HerdrSetupProbe } from "../src/adapters/herdr-setup-probe.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 import { runLocalSetupChecks } from "../src/setup/setup-checks.js";
 import type { SetupContext, SetupDraft } from "../src/setup/setup-types.js";
@@ -10,7 +10,7 @@ import type { SetupContext, SetupDraft } from "../src/setup/setup-types.js";
 const context: SetupContext = { root: "/app", configDirectory: "/config", stateDirectory: "/state", serviceName: "herdr-agent-swarm.service", cwd: "/repo" };
 const draft: SetupDraft = {
   environment: { HERDR_BIN: "herdr", TRAEX_BIN: "traex", BRIDGE_HTTP_HOST: "127.0.0.1", BRIDGE_HTTP_PORT: "8787" },
-  registry: { defaultProjectId: "demo", projects: [{ id: "demo", displayName: "Demo", description: "Demo", workspaceId: "w1", spaceName: "Demo Space", cwd: "/repo", instances: [{ name: "primary", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } }] }] }
+  registry: { defaultProjectId: "demo", projects: [{ id: "demo", displayName: "Demo", description: "Demo", workspaceId: "w1", spaceName: "Demo Space", cwd: "/repo" }] }
 };
 
 function json(value: unknown) { return { stdout: JSON.stringify(value), stderr: "" }; }
@@ -25,11 +25,7 @@ describe("Herdr setup probe", () => {
       if (executable === "bash") return { stdout: "status: ready\nrelease: abc123\nherdr: 0.7.5\ntraex: 0.201.6(internal edition)\n", stderr: "" };
       throw new Error("unexpected command");
     } };
-    const capabilityReader: HerdrCapabilityReader = { async read(executable, args) {
-      calls.push([executable, args]);
-      return { exitCode: 2, stdout: realAgentUsage, stderr: "" };
-    } };
-    const probe = new HerdrSetupProbe(runner, "herdr", 500, { PATH: process.env.PATH }, capabilityReader);
+    const probe = new HerdrSetupProbe(runner, "herdr", 500, { PATH: process.env.PATH });
 
     expect(await probe.check(draft, context)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "herdr.available", status: "pass" }),
@@ -51,22 +47,8 @@ describe("Herdr setup probe", () => {
       if (executable === "bash") return { stdout: "status: not installed\n", stderr: "" };
       throw new Error("unexpected command");
     } };
-    const capabilityReader: HerdrCapabilityReader = { async read() { return { exitCode: 2, stdout: realAgentUsage, stderr: "" }; } };
-    const checks = await new HerdrSetupProbe(runner, "herdr", 500, {}, capabilityReader).check(draft, context);
+    const checks = await new HerdrSetupProbe(runner, "herdr", 500, {}).check(draft, context);
     expect(checks).toContainEqual(expect.objectContaining({ id: "herdr.agent.traex", status: "fail", remediation: expect.stringContaining("install-herdr-traex-shim.sh install") }));
-  });
-
-  it("accepts exit-2 agent usage and maps claude-code to the native claude kind", async () => {
-    const changed = structuredClone(draft);
-    changed.registry.projects[0]!.instances = [{ name: "primary", role: "primary", agent: "claude-code", workspace: { kind: "main-checkout" } }];
-    const runner: CommandRunner = { async run(_executable, args) {
-      if (args[1] === "list") return json({ id: "list", result: { type: "workspace_list", workspaces: [{ workspace_id: "w1", label: "Demo Space" }] } });
-      return json({ id: "get", result: { type: "workspace_info", workspace: { workspace_id: "w1", label: "Demo Space" } } });
-    } };
-    const capabilityReader: HerdrCapabilityReader = { async read() { return { exitCode: 2, stdout: realAgentUsage, stderr: "" }; } };
-    const checks = await new HerdrSetupProbe(runner, "herdr", 500, {}, capabilityReader).check(changed, context);
-    expect(checks).toContainEqual(expect.objectContaining({ id: "herdr.agent.claude-code", status: "pass" }));
-    expect(checks).not.toContainEqual(expect.objectContaining({ id: "herdr.agent-capabilities", status: "fail" }));
   });
 
   it("marks only a live HERDR_WORKSPACE_ID as current", async () => {
@@ -95,45 +77,10 @@ describe("Herdr setup probe", () => {
       if (args[1] === "get") return json({ id: "get", result: { type: "workspace_info", workspace: workspaces[0] } });
       return { stdout: "", stderr: "" };
     } };
-    const capabilityReader: HerdrCapabilityReader = { async read() { return { exitCode: 2, stdout: realAgentUsage, stderr: "" }; } };
-    expect(await new HerdrSetupProbe(runner, "herdr", 500, {}, capabilityReader).check(changed, context)).toContainEqual(expect.objectContaining({ id: expectedId, status: "fail" }));
+    expect(await new HerdrSetupProbe(runner, "herdr", 500, {}).check(changed, context)).toContainEqual(expect.objectContaining({ id: expectedId, status: "fail" }));
   });
 
-  it("reports unsupported agent kinds and unavailable selected executables", async () => {
-    const changed = structuredClone(draft);
-    changed.registry.projects[0]!.instances = [
-      { name: "primary", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } },
-      { name: "worker", role: "worker", agent: "codex", workspace: { kind: "git-worktree", baseRef: "HEAD" } }
-    ];
-    changed.environment.CODEX_BIN = "missing-codex";
-    const runner: CommandRunner = { async run(_executable, args) {
-      if (args[1] === "list") return json({ id: "list", result: { type: "workspace_list", workspaces: [{ workspace_id: "w1", label: "Demo Space" }] } });
-      if (args[1] === "get") return json({ id: "get", result: { type: "workspace_info", workspace: { workspace_id: "w1", label: "Demo Space" } } });
-      if (_executable === "bash") return { stdout: "status: ready\n", stderr: "" };
-      return { stdout: "", stderr: "" };
-    } };
-    const capabilityReader: HerdrCapabilityReader = { async read() { return { exitCode: 2, stdout: realAgentUsage.replace("|codex", ""), stderr: "" }; } };
-    const checks = await new HerdrSetupProbe(runner, "herdr", 500, { PATH: "" }, capabilityReader).check(changed, context);
-    expect(checks).toContainEqual(expect.objectContaining({ id: "herdr.agent.traex", status: "pass" }));
-    expect(checks).toContainEqual(expect.objectContaining({ id: "herdr.agent.codex", status: "fail" }));
-  });
 });
-
-const realAgentUsage = `herdr agent commands:
-  herdr agent list
-  herdr agent get <target>
-  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
-  herdr agent send-keys <target> <key> [key ...]
-  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
-  herdr agent rename <target> <name>|--clear
-  herdr agent focus <target>
-  herdr agent wait <target> [--until STATUS]... [--timeout MS]
-  herdr agent attach <target> [--takeover]
-  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]
-  herdr agent explain <target> [--json|--format text|json] [--verbose]
-  herdr agent explain --file PATH --agent LABEL [--json|--format text|json] [--verbose]
-  targets accept unique agent names and pane ids that currently host agents
-  kinds: pi|claude|codex|gemini|cursor|devin|agy|cline|omp|mastracode|opencode|copilot|kimi|kiro|droid|amp|grok|hermes|kilo|qodercli|maki`;
 
 describe("local setup checks", () => {
   it("reports supported runtime, systemd, private directory, executables, loopback, and free port", async () => {
@@ -159,12 +106,11 @@ describe("local setup checks", () => {
 
   it("fails unsupported Node, non-loopback hosts, missing executables, and an unrelated port owner", async () => {
     const changed = structuredClone(draft);
-    changed.registry.projects[0]!.instances!.push({ name: "worker", role: "worker", agent: "codex", workspace: { kind: "git-worktree", baseRef: "HEAD" } });
-    changed.environment = { ...changed.environment, HERDR_BIN: "missing-herdr", TRAEX_BIN: "missing-traex", CODEX_BIN: "missing-codex", BRIDGE_HTTP_HOST: "0.0.0.0" };
+    changed.environment = { ...changed.environment, HERDR_BIN: "missing-herdr", TRAEX_BIN: "missing-traex", BRIDGE_HTTP_HOST: "0.0.0.0" };
     const checks = await runLocalSetupChecks(changed, context, {
       runner: { async run() { throw new Error("no user bus"); } }, nodeVersion: "22.11.9", pathValue: "", inspectPort: async () => "occupied-other", inspectDirectoryMode: async () => 0o755
     });
-    for (const id of ["local.node", "local.systemd", "local.config-directory", "local.http-host", "local.http-port", "local.executable.herdr", "local.executable.traex", "local.executable.codex"]) {
+    for (const id of ["local.node", "local.systemd", "local.config-directory", "local.http-host", "local.http-port", "local.executable.herdr", "local.executable.traex"]) {
       expect(checks).toContainEqual(expect.objectContaining({ id, status: "fail", remediation: expect.any(String) }));
     }
   });

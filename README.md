@@ -2,9 +2,10 @@
 
 Herdr Agent Swarm is a standalone, human-controlled multi-agent service built on the
 Herdr headless runtime. One Feishu gateway can manage multiple projects; each
-project may have one Primary and several explicitly created Workers using
-TraeX, Codex, Claude Code, or Pi. Herdr owns live panes and processes, while its
-CLI and socket API remain the required runtime control plane. The standalone
+bound Lark thread owns its sole TraeX Primary, while durable project instances
+are explicitly created Workers using TraeX, Codex, Claude Code, or Pi. Herdr
+owns live panes and processes, while its CLI and socket API remain the required
+runtime control plane. The standalone
 user-systemd service is the repository's only supported deployment identity.
 
 Each ordinary Lark message gets an Answer CardKit entity. The bridge streams safe
@@ -331,9 +332,9 @@ LARK_MESSAGE_CHUNK_SIZE=3500
 
 `projects.json` is the project allowlist. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
-absolute `cwd`, optional `maxInstances`, and optional desired instance
-descriptors; `defaultProjectId` must reference one entry. Workers may not use
-the main checkout. The registry is
+absolute `cwd`, and optional `maxInstances`; `maxInstances` limits the number of
+durable Worker rows and defaults to 8. Worker templates are not configured in
+the registry, and `defaultProjectId` must reference one entry. The registry is
 required; a missing or invalid file prevents startup. `npm run swarm:init` can
 write templates into the standalone config directory for non-interactive setup.
 
@@ -501,11 +502,11 @@ Available commands:
 ```
 
 The short commands operate the standalone multi-agent directory. Select a
-project with `/project`, create instances from `/instances`, and choose a stable
-target from an instance detail card. Ordinary messages then go to that target,
-or to the project's current Primary when the symbolic Primary target is active.
-All creation, promotion, stopping, and safe removal actions are explicit human
-card actions.
+project with `/project`, create Workers from `/instances`, and choose a stable
+target from a Worker detail card. Ordinary messages then go to that Worker, or
+through the current thread's binding prompt FIFO when the symbolic Primary
+target is active. Worker creation, stopping, and safe removal actions are
+explicit human card actions.
 
 Run the non-mutating adapter preflight with:
 

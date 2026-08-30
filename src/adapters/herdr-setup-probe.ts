@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { z } from "zod";
 import type { CommandRunner } from "../infra/command-runner.js";
@@ -8,34 +7,14 @@ const workspaceSchema = z.object({ workspace_id: z.string().min(1), label: z.str
 const workspaceListSchema = z.object({ result: z.object({ type: z.literal("workspace_list"), workspaces: z.array(workspaceSchema) }) });
 const workspaceGetSchema = z.object({ result: z.object({ type: z.literal("workspace_info"), workspace: workspaceSchema }) });
 
-const nativeAgentKind = { codex: "codex", "claude-code": "claude", pi: "pi" } as const;
-const capabilityResultSchema = z.object({ exitCode: z.union([z.literal(0), z.literal(2)]), stdout: z.string(), stderr: z.string() });
 const shimStatusSchema = z.string().refine((value) => /^status: ready$/m.test(value));
-
-export interface HerdrCapabilityReader {
-  read(executable: string, args: string[], timeoutMs: number): Promise<{ exitCode: number; stdout: string; stderr: string }>;
-}
-
-class ExecFileHerdrCapabilityReader implements HerdrCapabilityReader {
-  read(executable: string, args: string[], timeoutMs: number): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
-      execFile(executable, args, { timeout: timeoutMs, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
-        if (!error) { resolve({ exitCode: 0, stdout, stderr }); return; }
-        const code = typeof error.code === "number" ? error.code : null;
-        if (code === 2 && stdout.trim()) { resolve({ exitCode: code, stdout, stderr }); return; }
-        reject(new Error("Herdr capability output is unavailable"));
-      });
-    });
-  }
-}
 
 export class HerdrSetupProbe implements SetupHerdrProbe {
   constructor(
     private readonly runner: CommandRunner,
     private readonly executable: string,
     private readonly timeoutMs: number,
-    private readonly environment: NodeJS.ProcessEnv = process.env,
-    private readonly capabilityReader: HerdrCapabilityReader = new ExecFileHerdrCapabilityReader()
+    private readonly environment: NodeJS.ProcessEnv = process.env
   ) {}
 
   async listWorkspaces(): Promise<SetupWorkspace[]> {
@@ -74,27 +53,7 @@ export class HerdrSetupProbe implements SetupHerdrProbe {
       }
     }
 
-    const selected = new Set(draft.registry.projects.flatMap((project) => (project.instances ?? []).map((instance) => instance.agent)));
-    if (selected.has("traex")) checks.push(await this.checkTraexShim(context));
-    const selectedNative = [...selected].filter((kind): kind is keyof typeof nativeAgentKind => kind !== "traex");
-    if (selectedNative.length === 0) return checks;
-
-    let kinds: Set<string>;
-    try {
-      const result = capabilityResultSchema.parse(await this.capabilityReader.read(this.executable, ["agent"], this.timeoutMs));
-      const match = result.stdout.match(/^\s*kinds:\s*([^\n]+)$/mi);
-      if (!match) throw new Error("missing kinds");
-      kinds = new Set(match[1]!.split("|").map((value) => value.trim()));
-    } catch {
-      checks.push({ id: "herdr.agent-capabilities", status: "fail", summary: "Herdr agent capabilities could not be inspected", remediation: `Run ${this.executable} agent and verify the installed Herdr version.` });
-      return checks;
-    }
-    for (const selectedKind of selectedNative) {
-      const supported = kinds.has(nativeAgentKind[selectedKind]);
-      checks.push(supported
-        ? { id: `herdr.agent.${selectedKind}`, status: "pass", summary: `Herdr supports ${selectedKind}` }
-        : { id: `herdr.agent.${selectedKind}`, status: "fail", summary: `Herdr does not support agent kind ${selectedKind}`, remediation: "Upgrade Herdr or select a supported agent kind." });
-    }
+    checks.push(await this.checkTraexShim(context));
     return checks;
   }
 

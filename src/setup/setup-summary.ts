@@ -34,6 +34,6 @@ function renderProject(project: ProjectConfig): string[] {
   return [
     `Project ${project.id}: ${project.displayName} (${project.workspaceId} -> ${project.cwd})`,
     `  Space: ${project.spaceName ?? project.displayName}`,
-    ...(project.instances ?? []).map((instance) => `  ${instance.name} (${instance.role}, ${instance.agent}, ${instance.workspace.kind})`)
+    `  Worker limit: ${project.maxInstances ?? 8}`
   ];
 }

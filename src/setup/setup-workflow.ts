@@ -128,11 +128,7 @@ async function collectProjects(prompts: SetupPromptPort, herdr: SetupHerdrProbe,
   const workspaceId = await prompts.choose("Herdr workspace", orderedWorkspaces.map((workspace) => ({ value: workspace.id, label: `${workspace.name}${workspace.current ? " (current)" : ""}` })));
   const cwd = resolve(await prompts.text("Project working directory", current?.cwd ?? context.cwd));
   const project: ProjectConfig = {
-    id, displayName, spaceName, description: current?.description ?? displayName, workspaceId: workspaceId || preferred?.id || "", cwd, maxInstances: current?.maxInstances ?? 8,
-    instances: current?.instances?.length ? current.instances : [
-      { name: "primary", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } },
-      { name: "worker", role: "worker", agent: "traex", workspace: { kind: "git-worktree", baseRef: "HEAD" } }
-    ]
+    id, displayName, spaceName, description: current?.description ?? displayName, workspaceId: workspaceId || preferred?.id || "", cwd, maxInstances: current?.maxInstances ?? 8
   };
   const projects = current
     ? draft.registry.projects.map((candidate) => candidate.id === current.id ? project : candidate)

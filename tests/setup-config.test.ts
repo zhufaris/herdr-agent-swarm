@@ -26,10 +26,7 @@ function fixture() {
     },
     registry: { defaultProjectId: "bridge", projects: [{
       id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "w1", cwd,
-      maxInstances: 8, instances: [
-        { name: "primary", role: "primary", agent: "traex", workspace: { kind: "main-checkout" } },
-        { name: "worker", role: "worker", agent: "traex", workspace: { kind: "git-worktree", baseRef: "HEAD" } }
-      ]
+      maxInstances: 8
     }] }
   };
   return { root, cwd, configDirectory, context, draft };
@@ -177,6 +174,6 @@ describe("setup summary", () => {
     expect(summary).toContain("cli_test");
     expect(summary).toContain("127.0.0.1:8787");
     expect(summary).toContain("herdr-agent-swarm.service");
-    expect(summary).toContain("primary (primary, traex, main-checkout)");
+    expect(summary).toContain("Worker limit: 8");
   });
 });

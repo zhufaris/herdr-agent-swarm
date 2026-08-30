@@ -1,9 +1,9 @@
 # 飞书群使用指南
 
-Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目和多个 Agent 实例；Herdr UI
-不是必需组件。每个项目最多一个 Primary，并可有多个由用户显式创建的 Worker，底层
-可以是 TraeX、Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以
-Herdr Lark Bridge 模式提供，可将飞书话题绑定到 Herdr pane 中运行的 TraeX；
+Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目；Herdr UI 不是必需组件。
+每个已绑定的飞书 Thread 都以其 Herdr pane 中运行的 TraeX 作为该 Thread 唯一的 Primary。
+项目中的持久化 Agent 实例仅包含由用户显式创建的 Worker，Worker 可以使用 TraeX、
+Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以 Herdr Lark Bridge 模式提供；
 该名称不代表当前多 Agent 产品或项目。用户可以在
 飞书中创建任务、查看状态、修改名称和发送后续要求；开发者仍可在 Herdr 中
 观察或接管同一个终端会话。
@@ -28,8 +28,11 @@ Herdr Lark Bridge 模式提供，可将飞书话题绑定到 Herdr pane 中运�
 /instances
 ```
 
-在实例目录点击“创建实例”，明确填写名称、角色、Agent 和是否立即启动。Primary 默认
-使用主 checkout；可写 Worker 默认获得独立 branch/worktree。每个项目只能有一个 Primary。
+项目配置中的 `maxInstances` 只限制可持久化的 Worker 数量；`projects.json` 不再配置
+Primary 或 Worker 模板。当前飞书 Thread 本身就是该 Thread 的 Primary。
+
+在实例目录点击“创建 Worker”，填写名称、Agent 和是否立即启动。可写 Worker 默认获得
+独立 branch/worktree；Primary 由当前 Thread 的 binding 提供，不作为实例创建或提升。
 创建后可用以下命令查看和发任务：
 
 ```text
@@ -40,7 +43,7 @@ Herdr Lark Bridge 模式提供，可将飞书话题绑定到 Herdr pane 中运�
 ```
 
 在实例详情卡选择“设为当前目标”后，普通消息会持续发给该实例；若目标为 symbolic
-Primary，则 Primary 变更后自动解析到新 Primary。实例 generation 变化时旧卡片和固定
+Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
 目标会失效，必须刷新后重新选择。Primary 可直接调用同项目中已存在的 Worker，不需要
 逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
 触发 Primary turn。
