@@ -314,6 +314,19 @@ describe("run card", () => {
     expect(serialized).not.toContain("**项目任务**");
   });
 
+  it("keeps only the eight newest activity summaries on the project card", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running",
+      recentProgress: Array.from({ length: 10 }, (_, index) => ({
+        key: `activity:${index + 1}`, kind: "read" as const, label: `activity-${index + 1}`, state: "done" as const, occurredAt: String(index + 1)
+      }))
+    });
+    const serialized = JSON.stringify(card);
+    const visibleActivities = [...serialized.matchAll(/activity-(\d+)/g)].map((match) => Number(match[1]));
+
+    expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
   it("bounds the 12-line project-card preview at 6000 characters", () => {
     const lines = Array.from({ length: 25 }, (_, index) => `line-${index + 1}: ${String(index % 10).repeat(700)}`);
     const card = renderProjectEntryCard({

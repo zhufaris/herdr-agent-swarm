@@ -11,6 +11,72 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 
 describe("event-driven card projection", () => {
+  it("persists the newest Main view immediately and coalesces delivery within the Main budget", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const bus = new BridgeEventBus();
+    const mainConverge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { cardUpdateDebounceMs: 1_500, mainCardUpdateDebounceMs: 2_500 });
+    projector.start();
+
+    await bus.publish({ eventId: "rename-1", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { title: "First" } });
+    await bus.publish({ eventId: "rename-2", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-30T00:00:01.000Z", payload: { title: "Newest" } });
+
+    expect(store.loadTopicView("b1")).toMatchObject({ title: "Newest", viewVersion: 2 });
+    expect(mainConverge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_499);
+    expect(mainConverge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mainConverge).toHaveBeenCalledOnce();
+    expect(mainConverge).toHaveBeenCalledWith("b1");
+
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
+  it("flushes a terminal Main view immediately", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const bus = new BridgeEventBus();
+    const mainConverge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { mainCardUpdateDebounceMs: 2_500 });
+    projector.start();
+
+    await bus.publish({ eventId: "degraded", bindingId: "b1", type: "BindingDegraded", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { reason: "pane unavailable" } });
+    await Promise.resolve();
+
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "degraded", notice: "pane unavailable" });
+    expect(mainConverge).toHaveBeenCalledOnce();
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
+  it("routes Answer and Main delivery checkpoints through immediate unified convergence", async () => {
+    let answerCheckpoint: ((promptId: string, version: number) => void) | undefined;
+    let mainCheckpoint: ((bindingId: string, version: number) => void) | undefined;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const answerConverge = vi.fn(async () => undefined);
+    const mainConverge = vi.fn(async () => undefined);
+    const checkpoints = {
+      onAnswerCheckpoint(listener: (promptId: string, version: number) => void) { answerCheckpoint = listener; return () => {}; },
+      onMainCardCheckpoint(listener: (bindingId: string, version: number) => void) { mainCheckpoint = listener; return () => {}; },
+      requestScan: async () => {}
+    };
+    const publisher = { async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, checkpoints, pino({ enabled: false }), { converge: answerConverge }, { project: async () => undefined, converge: mainConverge });
+    projector.start();
+
+    answerCheckpoint?.("p1", 7);
+    mainCheckpoint?.("b1", 9);
+    await vi.waitFor(() => expect(answerConverge).toHaveBeenCalledWith("p1"));
+    expect(mainConverge).toHaveBeenCalledWith("b1");
+
+    await projector.stop(); store.close();
+  });
+
   it("flushes the first answer immediately and batches later small deltas", async () => {
     vi.useFakeTimers();
     const store = new SqliteBindingStore(":memory:");
@@ -32,6 +98,30 @@ describe("event-driven card projection", () => {
     expect(converge).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     await vi.waitFor(() => expect(converge).toHaveBeenCalledTimes(2));
+
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
+  it("caps a configured Answer debounce at the 1.5-second visibility budget", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const converge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 10_000 });
+    projector.start();
+
+    await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "first", answerUpdate: "replace", progressEvents: [] } });
+    await Promise.resolve();
+    converge.mockClear();
+    await bus.publish({ eventId: "small", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "delta", answerUpdate: "append", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(converge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(converge).toHaveBeenCalledOnce();
 
     await projector.stop(); store.close(); vi.useRealTimers();
   });
@@ -516,9 +606,8 @@ describe("event-driven card projection", () => {
     store.close();
   });
 
-  it("projects concurrent events for one binding in publication order", async () => {
-    let releaseFirst!: () => void;
-    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  it("coalesces concurrent Main events for one binding to the newest durable view", async () => {
+    vi.useFakeTimers();
     const updates: string[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
@@ -526,7 +615,6 @@ describe("event-driven card projection", () => {
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "card1" }; },
       async updateCard(_messageId, card) {
         const value = JSON.stringify(card);
-        if (value.includes("First")) await firstBlocked;
         updates.push(value);
       }
     };
@@ -535,20 +623,19 @@ describe("event-driven card projection", () => {
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), undefined, undefined, { mainCardUpdateDebounceMs: 2_500 }); projector.start();
 
     const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "First" } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
     const second = bus.publish({ eventId: "second", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:01Z", payload: { title: "Second" } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(store.loadTopicView("b1")?.title).toBe("Second");
-
-    releaseFirst();
     await Promise.all([first, second]);
     expect(store.loadTopicView("b1")?.title).toBe("Second");
-    await vi.waitFor(() => expect(updates).toHaveLength(2));
-    expect(updates.map((value) => value.includes("First") ? "First" : "Second")).toEqual(["First", "Second"]);
-    await projector.stop(); await publisher.stop(); store.close();
+    expect(updates).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2_500);
+    await publisher.drain();
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toContain("Second");
+    expect(updates[0]).not.toContain("First");
+    await projector.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
   });
 
   it("continues a binding projection tail after one event fails", async () => {

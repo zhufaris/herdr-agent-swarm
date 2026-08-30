@@ -9,11 +9,13 @@ import { MainCardWorkflow } from "../coordinator/main-card-workflow.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
-import { CardUpdateScheduler } from "./card-update-scheduler.js";
+import { CardUpdateScheduler, type CardUpdateSchedulerDiagnostics } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 const ANSWER_STREAM_INTERVAL_MS = 500;
+const ANSWER_UPDATE_BUDGET_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 80;
+const MAIN_CARD_UPDATE_INTERVAL_MS = 2_500;
 
 export class ConversationViewProjector {
   private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
@@ -27,6 +29,8 @@ export class ConversationViewProjector {
   private readonly answerContentLengths = new Map<string, number>();
   private readonly answerPages: AnswerPageWorkflowPort;
   private readonly mainCards: MainCardWorkflowPort;
+  private readonly answerUpdateDelayMs: number;
+  private readonly mainUpdateDelayMs: number;
 
   constructor(
     private readonly bus: LifecycleEventSubscriber,
@@ -36,11 +40,19 @@ export class ConversationViewProjector {
     private readonly logger: Logger,
     answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
-    options: { cardUpdateDebounceMs?: number } = {}
+    options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}
   ) {
     this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, logger);
     this.mainCards = mainCards ?? new MainCardWorkflow(store as ProjectionStore & MainCardStore, () => { void checkpoints.requestScan(); }, logger);
-    this.scheduler = new CardUpdateScheduler(async (promptId) => {
+    this.answerUpdateDelayMs = Math.min(options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, ANSWER_UPDATE_BUDGET_MS);
+    this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? MAIN_CARD_UPDATE_INTERVAL_MS;
+    this.scheduler = new CardUpdateScheduler(async (cardKey) => {
+      const [family, id] = splitCardKey(cardKey);
+      if (family === "main") {
+        await this.mainCards.converge(id);
+        return;
+      }
+      const promptId = id;
       const view = this.store.loadRunCard(promptId);
       if (!view?.answerCardId && view?.answerMessageId) {
         await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
@@ -49,22 +61,22 @@ export class ConversationViewProjector {
       }
       await this.answerPages.converge(promptId);
       if (view) this.answerContentLengths.set(promptId, view.answer.length);
-    }, options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, (error, promptId, version) => {
-      this.logger.error({ event: "answer-card-update-failed", err: safeLogError(error), promptId, viewVersion: version, outcome: "retry" }, "failed to update Answer card; retry scheduled");
+    }, this.answerUpdateDelayMs, (error, cardKey, version) => {
+      this.logger.error({ event: "card-update-failed", err: safeLogError(error), cardKey, viewVersion: version, outcome: "retry" }, "failed to converge card; retry scheduled");
+    }, (result) => {
+      this.logger.debug({ event: "card-convergence-flushed", ...result }, "card convergence flush completed");
     });
   }
 
+  snapshot(): CardUpdateSchedulerDiagnostics { return this.scheduler.diagnostics(); }
+
   start(): () => void {
     this.unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
-    this.unsubscribeStreamCardCreated = this.checkpoints.onAnswerCheckpoint((promptId) => {
-      void this.answerPages.converge(promptId).catch((error) => {
-        this.logger.error({ event: "answer-page-checkpoint-convergence-failed", err: safeLogError(error), promptId, outcome: "failed" }, "failed to converge Answer page after delivery checkpoint");
-      });
+    this.unsubscribeStreamCardCreated = this.checkpoints.onAnswerCheckpoint((promptId, viewVersion) => {
+      this.scheduler.schedule(answerCardKey(promptId), viewVersion, { priority: "terminal" });
     });
-    this.unsubscribeMainCardCheckpoint = this.checkpoints.onMainCardCheckpoint?.((bindingId) => {
-      void this.mainCards.converge(bindingId).catch((error) => {
-        this.logger.error({ event: "main-card-checkpoint-convergence-failed", err: safeLogError(error), bindingId, outcome: "failed" }, "failed to converge Main Card after delivery checkpoint");
-      });
+    this.unsubscribeMainCardCheckpoint = this.checkpoints.onMainCardCheckpoint?.((bindingId, viewVersion) => {
+      this.scheduler.schedule(mainCardKey(bindingId), viewVersion, { priority: "terminal" });
     }) ?? null;
     return () => { this.unsubscribe?.(); this.unsubscribeStreamCardCreated?.(); this.unsubscribeMainCardCheckpoint?.(); };
   }
@@ -99,12 +111,15 @@ export class ConversationViewProjector {
           const previousLength = this.answerContentLengths.get(promptId) ?? 0;
           const firstContent = previousLength === 0 && contentLength > 0;
           const progressChanged = event.type === "TurnOutputObserved" && normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0;
-          this.scheduler.schedule(promptId, next.viewVersion, terminal || firstContent || progressChanged || contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS);
+          this.scheduler.schedule(answerCardKey(promptId), next.viewVersion, {
+            priority: terminal || firstContent || progressChanged || contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS ? "terminal" : "normal",
+            delayMs: this.answerUpdateDelayMs
+          });
           if (terminal) this.answerContentLengths.delete(promptId);
         } else if (["blocked", "completed", "failed"].includes(runCard.phase) && runCard.viewVersion > runCard.answerDeliveredVersion) {
           // The durable workflow transition may have projected the terminal view
           // before this process-local lifecycle notification arrived.
-          this.scheduler.schedule(promptId, runCard.viewVersion, true);
+          this.scheduler.schedule(answerCardKey(promptId), runCard.viewVersion, { priority: "terminal" });
         }
       }
     }
@@ -112,9 +127,13 @@ export class ConversationViewProjector {
     const next = reduceTopicView(current, event);
     if (next === current) return;
     this.views.set(event.bindingId, next);
+    this.store.saveTopicView(next);
 
     try {
-      await this.mainCards.project(next);
+      this.scheduler.schedule(mainCardKey(event.bindingId), next.viewVersion, {
+        priority: isImmediateMainEvent(event, next.phase) ? "terminal" : isInteractiveMainEvent(event) ? "interactive" : "normal",
+        delayMs: isInteractiveMainEvent(event) ? Math.min(1_000, this.mainUpdateDelayMs) : this.mainUpdateDelayMs
+      });
     }
     catch (error) {
       this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");
@@ -132,6 +151,25 @@ export class ConversationViewProjector {
     });
     return work;
   }
+}
+
+function answerCardKey(promptId: string): string { return `answer:${promptId}`; }
+function mainCardKey(bindingId: string): string { return `main:${bindingId}`; }
+function splitCardKey(cardKey: string): ["answer" | "main", string] {
+  const separator = cardKey.indexOf(":");
+  const family = cardKey.slice(0, separator);
+  const id = cardKey.slice(separator + 1);
+  if ((family !== "answer" && family !== "main") || !id) throw new Error(`Invalid card update key: ${cardKey}`);
+  return [family, id];
+}
+
+function isImmediateMainEvent(event: BridgeEvent, phase: ReturnType<typeof initialTopicView>["phase"]): boolean {
+  return ["blocked", "done", "error", "degraded", "draining", "archived", "orphaned"].includes(phase)
+    || event.type === "BindingCreated" || event.type === "BindingActivated";
+}
+
+function isInteractiveMainEvent(event: BridgeEvent): boolean {
+  return event.type === "TurnStarted" || event.type === "AgentStateChanged" || event.type === "TurnOutputObserved" && normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0;
 }
 
 function promptIdOf(event: BridgeEvent): string | null {

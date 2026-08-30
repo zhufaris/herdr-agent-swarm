@@ -131,7 +131,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
-  const recentActivity = progress.filter((event) => !planKeys.has(event.key));
+  const recentActivity = progress.filter((event) => !planKeys.has(event.key)).slice(-8);
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });

@@ -4,6 +4,7 @@ import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, InstanceWorkerDiag
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
+import type { CardUpdateSchedulerDiagnostics } from "../events/card-update-scheduler.js";
 import type { HerdrSocketStatus } from "../runtime/herdr-socket-subscriber.js";
 
 interface ComponentState { ok: boolean; error?: string }
@@ -26,6 +27,7 @@ export function startHealthServer(options: {
   startupRecovery?: { snapshot(): StartupRecoveryDiagnostics };
   sqliteIntegrity?: { snapshot(): SqliteIntegrityDiagnostics };
   lifecycleEvents?: LifecycleEventDiagnostics;
+  cardConvergence?: { snapshot(): CardUpdateSchedulerDiagnostics };
   outboxDispatcher?: { snapshot(): OutboxDispatcherDiagnostics };
   promptWorker?: { snapshot(): PromptWorkerDiagnostics };
   instanceWorker?: { snapshot(): InstanceWorkerDiagnostics };
@@ -77,6 +79,9 @@ export function startHealthServer(options: {
       let instanceRuntime: ({ ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics>) | { error: string } | undefined;
       try { instanceRuntime = options.instanceRuntime?.snapshot(); }
       catch (error) { instanceRuntime = { error: boundedError(error) }; }
+      let cardConvergence: CardUpdateSchedulerDiagnostics | { error: string } | undefined;
+      try { cardConvergence = options.cardConvergence?.snapshot(); }
+      catch (error) { cardConvergence = { error: boundedError(error) }; }
       const reconciliation = bindingRuntime || instanceRuntime ? { ...(bindingRuntime ? { bindingRuntime } : {}), ...(instanceRuntime ? { instanceRuntime } : {}) } : undefined;
       response.statusCode = 200;
       const operationalDegraded = "error" in operational
@@ -102,6 +107,7 @@ export function startHealthServer(options: {
         ...(startupRecovery ? { startupRecovery } : {}),
         ...(sqliteIntegrity ? { sqliteIntegrity } : {}),
         ...(reconciliation ? { reconciliation } : {}),
+        ...(cardConvergence ? { cardConvergence } : {}),
         ...(options.herdrSocket ? { herdrSocket: options.herdrSocket.status() } : {}),
         ...(options.lifecycleEvents ? { lifecycleEvents: options.lifecycleEvents.snapshot() } : {})
       }));
