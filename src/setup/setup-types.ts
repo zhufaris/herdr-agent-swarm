@@ -27,6 +27,16 @@ export interface SetupHerdrProbe {
   listWorkspaces(): Promise<SetupWorkspace[]>;
   check(draft: SetupDraft, context: SetupContext): Promise<SetupCheck[]>;
 }
+export interface SetupHttpRequest {
+  method: "GET" | "POST";
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs: number;
+}
+export interface SetupHttpClient {
+  request(input: SetupHttpRequest): Promise<{ status: number; body: unknown }>;
+}
 export interface SetupLarkProbe { check(draft: SetupDraft): Promise<SetupCheck[]> }
 export interface SetupLifecyclePort {
   inspect(context: SetupContext): Promise<{ installed: boolean; active: boolean; summary: string }>;
