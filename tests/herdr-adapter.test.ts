@@ -107,6 +107,39 @@ describe("Herdr adapter structured control", () => {
     });
   });
 
+  it("temporarily bypasses a failing native transport and probes it after cooldown", async () => {
+    let now = 0;
+    const native = { request: vi.fn(async () => { throw new Error("native unavailable"); }) };
+    const runner: CommandRunner = { async run(_executable, args) {
+      expect(args).toEqual(["api", "snapshot"]);
+      return json({ snapshot: { panes: [], agents: [] } });
+    } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native, { nativeFailureThreshold: 2, nativeOpenMs: 100, now: () => now });
+
+    await adapter.listAllPanes();
+    await adapter.listAllPanes();
+    await adapter.listAllPanes();
+    expect(native.request).toHaveBeenCalledTimes(2);
+    expect(adapter.nativeTransportStatus()).toMatchObject({ state: "open", consecutiveFailures: 2 });
+
+    now = 101;
+    await adapter.listAllPanes();
+    expect(native.request).toHaveBeenCalledTimes(3);
+  });
+
+  it("closes the native transport circuit after a successful recovery probe", async () => {
+    let now = 0; let fail = true;
+    const native = { request: vi.fn(async () => { if (fail) throw new Error("native unavailable"); return { snapshot: { panes: [], agents: [] } }; }) };
+    const runner: CommandRunner = { async run() { return json({ snapshot: { panes: [], agents: [] } }); } };
+    const adapter = new HerdrCliAdapter(runner, "herdr", 1000, "auto", native, { nativeFailureThreshold: 1, nativeOpenMs: 100, now: () => now });
+
+    await adapter.listAllPanes();
+    now = 101; fail = false;
+    await adapter.listAllPanes();
+
+    expect(adapter.nativeTransportStatus()).toMatchObject({ state: "closed", consecutiveFailures: 0 });
+  });
+
   it("treats structured done as ready without reading terminal content", async () => {
     const native = { async request(method: string) {
       if (method === "session.snapshot") return { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "done", agent: "traex" }], agents: [] } };

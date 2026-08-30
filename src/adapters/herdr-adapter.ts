@@ -33,14 +33,28 @@ interface HerdrNativeRequestClient {
   waitForPaneEvent?(paneId: string, timeoutMs: number): Promise<boolean>;
 }
 
+export interface HerdrNativeCircuitOptions { nativeFailureThreshold?: number; nativeOpenMs?: number; now?: () => number }
+export interface HerdrNativeTransportStatus { state: "closed" | "open" | "half-open"; consecutiveFailures: number; nextProbeAt: number | null }
+
 export class HerdrCliAdapter implements HerdrPort {
   constructor(
     private readonly runner: CommandRunner,
     private readonly executable: string,
     private readonly commandTimeoutMs: number,
     private readonly traexPermissionMode = "auto",
-    private readonly native?: HerdrNativeRequestClient
+    private readonly native?: HerdrNativeRequestClient,
+    private readonly nativeCircuitOptions: HerdrNativeCircuitOptions = {}
   ) {}
+
+  private nativeFailures = 0;
+  private nativeOpenUntil = 0;
+  private nativeProbeInFlight = false;
+
+  nativeTransportStatus(): HerdrNativeTransportStatus {
+    if (this.nativeOpenUntil === 0) return { state: "closed", consecutiveFailures: this.nativeFailures, nextProbeAt: null };
+    const now = (this.nativeCircuitOptions.now ?? Date.now)();
+    return { state: now >= this.nativeOpenUntil ? "half-open" : "open", consecutiveFailures: this.nativeFailures, nextProbeAt: this.nativeOpenUntil };
+  }
 
   async assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> {
     const result = await this.json(["workspace", "get", workspaceId]);
@@ -64,7 +78,7 @@ export class HerdrCliAdapter implements HerdrPort {
   async listAllPanes(): Promise<HerdrPane[]> {
     let parsed: z.infer<typeof snapshotSchema>;
     if (this.native) {
-      try { parsed = snapshotSchema.parse(await this.native.request("session.snapshot", {}, this.commandTimeoutMs)); }
+      try { parsed = snapshotSchema.parse(await this.nativeRequest("session.snapshot", {})); }
       catch { parsed = snapshotSchema.parse(await this.json(["api", "snapshot"])); }
     } else parsed = snapshotSchema.parse(await this.json(["api", "snapshot"]));
     const result = parsed.snapshot;
@@ -270,7 +284,7 @@ export class HerdrCliAdapter implements HerdrPort {
     try {
       let value: unknown;
       if (this.native) {
-        try { value = await this.native.request("pane.process_info", { pane_id: paneId }, this.commandTimeoutMs); }
+        try { value = await this.nativeRequest("pane.process_info", { pane_id: paneId }); }
         catch { value = await this.json(["pane", "process-info", "--pane", paneId]); }
       } else value = await this.json(["pane", "process-info", "--pane", paneId]);
       const processInfo = nativeProcessInfoSchema.parse(value).process_info;
@@ -280,6 +294,28 @@ export class HerdrCliAdapter implements HerdrPort {
       }))];
     } catch {
       return [];
+    }
+  }
+
+  private async nativeRequest(method: string, params: object): Promise<unknown> {
+    if (!this.native) throw new Error("Herdr native transport is unavailable");
+    const now = (this.nativeCircuitOptions.now ?? Date.now)();
+    if (this.nativeOpenUntil > now || this.nativeProbeInFlight) throw new Error("Herdr native transport circuit is open");
+    const probing = this.nativeOpenUntil > 0;
+    if (probing) this.nativeProbeInFlight = true;
+    try {
+      const result = await this.native.request(method, params, this.commandTimeoutMs);
+      this.nativeFailures = 0;
+      this.nativeOpenUntil = 0;
+      return result;
+    } catch (error) {
+      this.nativeFailures += 1;
+      if (this.nativeFailures >= Math.max(1, this.nativeCircuitOptions.nativeFailureThreshold ?? 3)) {
+        this.nativeOpenUntil = now + Math.max(1, this.nativeCircuitOptions.nativeOpenMs ?? 10_000);
+      }
+      throw error;
+    } finally {
+      if (probing) this.nativeProbeInFlight = false;
     }
   }
 
