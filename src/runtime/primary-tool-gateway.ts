@@ -9,6 +9,8 @@ import { PrimaryToolBroker } from "./primary-tool-broker.js";
 import { safeLogError } from "./safe-error.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_CONNECTIONS = 64;
 const requestSchema = z.object({
   instanceId: z.string().min(1).max(128), generation: z.number().int().positive(), capability: z.string().regex(/^[a-f0-9]{64}$/),
   tool: z.enum(["listInstances", "promptInstance", "followUpInstance", "steerInstance", "inspectInstance", "waitInstance", "interruptInstance"]),
@@ -16,12 +18,13 @@ const requestSchema = z.object({
 }).strict();
 
 export interface PrimaryToolLaunch { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] }
+export interface PrimaryToolGatewayOptions { idleTimeoutMs?: number; maxConnections?: number }
 
 export class PrimaryToolGateway {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
 
-  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: InstanceMessagingWorkflow, private readonly logger: Logger, private readonly agentArgs: string[] = []) {}
+  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: InstanceMessagingWorkflow, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}) {}
 
   issue(instanceId: string, expectedGeneration: number): PrimaryToolLaunch {
     const runtimeGeneration = expectedGeneration + 1;
@@ -54,20 +57,31 @@ export class PrimaryToolGateway {
   }
 
   private accept(socket: Socket): void {
+    const maxConnections = Math.max(1, this.options.maxConnections ?? DEFAULT_MAX_CONNECTIONS);
+    if (this.sockets.size >= maxConnections) { socket.destroy(); return; }
     this.sockets.add(socket);
-    socket.once("close", () => this.sockets.delete(socket));
+    const idleTimer = setTimeout(() => socket.destroy(), Math.max(1, this.options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS));
+    idleTimer.unref();
+    socket.once("close", () => { clearTimeout(idleTimer); this.sockets.delete(socket); });
     socket.setEncoding("utf8");
     let input = "";
-    socket.on("data", (chunk: string) => {
+    let handled = false;
+    const onData = (chunk: string): void => {
+      if (handled) return;
       input += chunk;
       if (Buffer.byteLength(input) > MAX_REQUEST_BYTES) { socket.destroy(); return; }
       const newline = input.indexOf("\n");
       if (newline < 0) return;
+      handled = true;
+      clearTimeout(idleTimer);
+      socket.removeListener("data", onData);
+      socket.pause();
       void this.handle(input.slice(0, newline)).then((result) => socket.end(`${JSON.stringify({ ok: true, result })}\n`), (error) => {
         this.logger.warn({ event: "primary-tool-call-failed", err: safeLogError(error), outcome: "rejected" }, "Primary tool call failed");
         socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
       });
-    });
+    };
+    socket.on("data", onData);
   }
 
   private async handle(raw: string): Promise<unknown> {

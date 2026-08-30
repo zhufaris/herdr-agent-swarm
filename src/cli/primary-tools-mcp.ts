@@ -2,6 +2,7 @@ import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number; method: string; params?: Record<string, unknown> };
+export const MAX_PRIMARY_TOOL_RESPONSE_BYTES = 1024 * 1024;
 const definitions = [
   tool("list_instances", "List existing agent instances in this Primary's project. Use this before choosing a Worker. This cannot create or retarget instances.", { state: { type: "string", description: "Optional observed-state filter." } }),
   tool("prompt_instance", "Send a new FIFO task to an existing same-project Worker. Use an idempotency key stable for this intended call. This never creates a Worker.", required({ instanceId: stringField("Worker instance ID from list_instances."), task: stringField("Complete task for the Worker."), idempotencyKey: stringField("Stable unique key for this intended submission.") })),
@@ -38,19 +39,25 @@ async function main(): Promise<void> {
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {
     let response: object | null;
-    try { response = await handlePrimaryMcpRequest(JSON.parse(line) as JsonRpcRequest, (toolName, args) => callGateway(socketPath, { instanceId, generation, capability, tool: toolName, arguments: args })); }
+    try { response = await handlePrimaryMcpRequest(JSON.parse(line) as JsonRpcRequest, (toolName, args) => callPrimaryToolGateway(socketPath, { instanceId, generation, capability, tool: toolName, arguments: args })); }
     catch (error) { response = failure(null, -32700, actionableError(error)); }
     if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
   }
 }
 
-function callGateway(socketPath: string, request: object): Promise<unknown> {
+export function callPrimaryToolGateway(socketPath: string, request: object): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath); let response = "";
-    const timer = setTimeout(() => { socket.destroy(); reject(new Error("Primary tool gateway timed out; inspect the instance and retry with the same idempotency key.")); }, 30_000); timer.unref();
-    socket.setEncoding("utf8"); socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`)); socket.on("data", (chunk) => { response += chunk; });
-    socket.once("end", () => { clearTimeout(timer); try { const decoded = JSON.parse(response) as { ok: boolean; result?: unknown; error?: string }; decoded.ok ? resolve(decoded.result) : reject(new Error(decoded.error ?? "Primary tool call was rejected")); } catch { reject(new Error("Primary tool gateway returned an invalid response")); } });
-    socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+    const socket = createConnection(socketPath); const chunks: Buffer[] = []; let responseBytes = 0; let settled = false;
+    const settle = (action: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); action(); };
+    const timer = setTimeout(() => settle(() => { socket.destroy(); reject(new Error("Primary tool gateway timed out; inspect the instance and retry with the same idempotency key.")); }), 30_000); timer.unref();
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk: Buffer) => {
+      responseBytes += chunk.length;
+      if (responseBytes > MAX_PRIMARY_TOOL_RESPONSE_BYTES) { settle(() => { socket.destroy(); reject(new Error("Primary tool gateway response was too large")); }); return; }
+      chunks.push(chunk);
+    });
+    socket.once("end", () => settle(() => { try { const decoded = JSON.parse(Buffer.concat(chunks, responseBytes).toString("utf8")) as { ok: boolean; result?: unknown; error?: string }; decoded.ok ? resolve(decoded.result) : reject(new Error(decoded.error ?? "Primary tool call was rejected")); } catch { reject(new Error("Primary tool gateway returned an invalid response")); } }));
+    socket.once("error", (error) => settle(() => reject(error)));
   });
 }
 function tool(name: string, description: string, properties: Record<string, unknown> | { type: string; properties: Record<string, unknown>; required?: string[] }) { return { name, description, inputSchema: "type" in properties ? properties : { type: "object", properties, additionalProperties: false } }; }

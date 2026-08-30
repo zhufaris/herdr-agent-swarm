@@ -1,5 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
-import { handlePrimaryMcpRequest } from "../src/cli/primary-tools-mcp.js";
+import { createServer, type Socket } from "node:net";
+import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { callPrimaryToolGateway, handlePrimaryMcpRequest, MAX_PRIMARY_TOOL_RESPONSE_BYTES } from "../src/cli/primary-tools-mcp.js";
+
+const temporaryDirectories: string[] = [];
+afterEach(async () => { await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("Primary tools MCP surface", () => {
   it("advertises only the fixed non-topology tools with model-facing guidance", async () => {
@@ -17,5 +24,20 @@ describe("Primary tools MCP surface", () => {
   it("returns actionable tool errors as MCP results", async () => {
     const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "inspect_instance", arguments: { instanceId: "missing" } } }, async () => { throw new Error("Target instance not found"); });
     expect(response).toMatchObject({ result: { isError: true, content: [{ text: expect.stringMatching(/Target instance not found.*Inspect the target instance/) }] } });
+  });
+
+  it("rejects an oversized gateway response before buffering it indefinitely", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "primary-tools-response-")); temporaryDirectories.push(directory);
+    const socketPath = join(directory, "gateway.sock");
+    let accepted: Socket | null = null;
+    const server = createServer((socket) => { accepted = socket; socket.end(Buffer.alloc(MAX_PRIMARY_TOOL_RESPONSE_BYTES + 1, 97)); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    try {
+      await expect(callPrimaryToolGateway(socketPath, {})).rejects.toThrow(/response.*large/i);
+    } finally {
+      const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      (accepted as Socket | null)?.destroy();
+      await closed;
+    }
   });
 });

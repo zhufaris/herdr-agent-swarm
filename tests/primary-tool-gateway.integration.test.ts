@@ -15,6 +15,34 @@ let directory: string | undefined; let store: SqliteBindingStore | undefined; le
 afterEach(async () => { await gateway?.stop(); store?.close(); if (directory) await rm(directory, { recursive: true, force: true }); gateway = undefined; store = undefined; directory = undefined; });
 
 describe("Primary tool gateway", () => {
+  it("executes at most one request per connection and closes idle clients", async () => {
+    directory = await mkdtemp(join(tmpdir(), "primary-tools-framing-"));
+    store = new SqliteBindingStore(join(directory, "bridge.db"));
+    store.createAgentInstance({ id: "primary", projectId: "p1", name: "primary", role: "primary", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "primary-ws", kind: "main-checkout", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const messaging = { interrupt: vi.fn(() => new Promise(() => undefined)) } as never;
+    const socketPath = join(directory, "tools.sock");
+    gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }), [], { idleTimeoutMs: 25 });
+    const launch = gateway.issue("primary", 1);
+    store.attachAgentInstanceRuntime({ instanceId: "primary", expectedGeneration: 1, herdrWorkspaceId: "w", paneId: "p", nativeSessionId: null });
+    store.acceptInstanceTurn({ id: "parent", idempotencyKey: "parent", actor: { kind: "human", userId: "u" }, projectId: "p1", instanceId: "primary", instanceGeneration: 2, kind: "turn", text: "coordinate" });
+    store.claimNextInstanceTurn("primary", 2);
+    await gateway.start();
+    const payload = { instanceId: "primary", generation: 2, capability: launch.environment.SWARM_PRIMARY_CAPABILITY, tool: "interruptInstance", arguments: { instanceId: "worker", idempotencyKey: "interrupt" } };
+    const socket = createConnection(socketPath);
+    await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+    socket.write(`${JSON.stringify(payload)}\n`);
+    await vi.waitFor(() => expect(messaging.interrupt).toHaveBeenCalledOnce());
+    socket.write(`${JSON.stringify(payload)}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(messaging.interrupt).toHaveBeenCalledOnce();
+    socket.destroy();
+
+    const idle = createConnection(socketPath);
+    await new Promise<void>((resolve, reject) => { idle.once("connect", resolve); idle.once("error", reject); });
+    await new Promise<void>((resolve) => idle.once("close", () => resolve()));
+    expect(idle.destroyed).toBe(true);
+  });
+
   it("derives the parent turn server-side and rejects forged or stale credentials", async () => {
     directory = await mkdtemp(join(tmpdir(), "primary-tools-"));
     store = new SqliteBindingStore(join(directory, "bridge.db"));
