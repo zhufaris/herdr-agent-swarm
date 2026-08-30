@@ -136,6 +136,38 @@ describe("Lark Markdown normalization", () => {
 });
 
 describe("source-aware Lark Markdown pages", () => {
+  it("treats unmatched and differently-sized backtick runs as literal text", () => {
+    const unmatched = "`".repeat(20_000);
+    const source = "prefix " + unmatched + " <b>visible</b>\n\n``code``` and `kept <i>inline</i>`";
+
+    expect(renderLarkMarkdownPage(source, 0, source.length + 20)).toEqual({
+      page: "prefix " + unmatched + " visible\n\n``code``` and `kept <i>inline</i>`",
+      nextPageStart: null
+    });
+  });
+
+  it("keeps many complete tool activities atomic while making monotonic source progress", () => {
+    const activity = (index: number) => [
+      `◆ **Ran** · command ${index}`, "", "```bash", `echo ${index}`, "```", "",
+      "```text", ...Array.from({ length: 30 }, (_, line) => `output ${index}.${line}`), "```"
+    ].join("\n");
+    const source = Array.from({ length: 80 }, (_, index) => activity(index)).join("\n");
+    const starts = [0];
+    const pages: string[] = [];
+    while (starts.at(-1)! < source.length) {
+      const rendered = renderLarkMarkdownPage(source, starts.at(-1)!, 900);
+      pages.push(rendered.page);
+      if (rendered.nextPageStart === null) break;
+      expect(rendered.nextPageStart).toBeGreaterThan(starts.at(-1)!);
+      starts.push(rendered.nextPageStart);
+    }
+
+    expect(pages.length).toBeGreaterThan(20);
+    expect(pages.every((page) => page.length <= 900)).toBe(true);
+    expect(pages.join("\n")).toContain("… 已省略中间 11 行 …");
+    expect(starts.every((start, index) => index === 0 || start > starts[index - 1]!)).toBe(true);
+  });
+
   it("normalizes mixed Markdown without changing the canonical source", () => {
     const source = [
       "# Result",

@@ -56,7 +56,8 @@ export function normalizeLarkMarkdown(source: string): string {
 export function renderLarkMarkdownPage(source: string, pageStart: number, limit: number): RenderedLarkMarkdownPage {
   const start = Math.max(0, Math.min(pageStart, source.length));
   const boundedLimit = Math.max(0, limit);
-  const complete = renderCardMarkdownRange(source, start, source.length);
+  const blocks = markdownBlocks(source);
+  const complete = renderCardMarkdownRange(source, start, source.length, blocks);
   if (complete.length <= boundedLimit) return { page: complete, nextPageStart: null };
 
   const lineEnds: number[] = [];
@@ -65,21 +66,27 @@ export function renderLarkMarkdownPage(source: string, pageStart: number, limit:
     if (end < source.length) lineEnds.push(end);
   }
   const protectedRanges = atomicToolActivityRanges(source, boundedLimit);
-  const candidates = lineEnds.filter((end) => !protectedRanges.some((range) => end > range.start && end < range.end));
-  const lineEnd = latestFittingEnd(source, start, boundedLimit, candidates);
-  if (lineEnd !== null) return { page: renderCardMarkdownRange(source, start, lineEnd), nextPageStart: lineEnd };
+  const candidates: number[] = [];
+  let rangeIndex = 0;
+  for (const end of lineEnds) {
+    while (rangeIndex < protectedRanges.length && protectedRanges[rangeIndex]!.end <= end) rangeIndex += 1;
+    const range = protectedRanges[rangeIndex];
+    if (!range || end <= range.start || end >= range.end) candidates.push(end);
+  }
+  const lineEnd = latestFittingEnd(source, start, boundedLimit, candidates, blocks);
+  if (lineEnd !== null) return { page: renderCardMarkdownRange(source, start, lineEnd, blocks), nextPageStart: lineEnd };
 
   let low = start + 1;
   let high = source.length - 1;
   let hardEnd: number | null = null;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    if (renderCardMarkdownRange(source, start, middle).length <= boundedLimit) {
+    if (renderCardMarkdownRange(source, start, middle, blocks).length <= boundedLimit) {
       hardEnd = middle;
       low = middle + 1;
     } else high = middle - 1;
   }
-  if (hardEnd !== null) return { page: renderCardMarkdownRange(source, start, hardEnd), nextPageStart: hardEnd };
+  if (hardEnd !== null) return { page: renderCardMarkdownRange(source, start, hardEnd, blocks), nextPageStart: hardEnd };
 
   const forcedEnd = Math.min(source.length, start + Math.max(1, boundedLimit));
   return { page: source.slice(start, forcedEnd).slice(0, boundedLimit), nextPageStart: forcedEnd < source.length ? forcedEnd : null };
@@ -87,11 +94,29 @@ export function renderLarkMarkdownPage(source: string, pageStart: number, limit:
 
 function atomicToolActivityRanges(source: string, limit: number): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
-  const pattern = /^◆ \*\*Ran\*\*(?: · .+)?\n\n```bash\n[\s\S]*?\n```(?:\n\n```text\n[\s\S]*?\n```)?(?=\n|$)/gmu;
-  for (const match of source.matchAll(pattern)) {
-    const start = match.index;
-    const end = start + match[0].length;
-    if (renderToolActivityResults(match[0]).length <= limit) ranges.push({ start, end });
+  const lines = sourceLines(source);
+  for (let index = 0; index < lines.length;) {
+    if (!/^◆ \*\*Ran\*\*(?: · .+)?$/.test(lines[index]!.text)) { index += 1; continue; }
+    const startIndex = index;
+    index += 1;
+    while (index < lines.length && lines[index]!.text === "") index += 1;
+    if (lines[index]?.text !== "```bash") { index = startIndex + 1; continue; }
+    index += 1;
+    while (index < lines.length && lines[index]!.text !== "```") index += 1;
+    if (index >= lines.length) break;
+    let endIndex = index++;
+    const afterBash = index;
+    while (index < lines.length && lines[index]!.text === "") index += 1;
+    if (lines[index]?.text === "```text") {
+      index += 1;
+      while (index < lines.length && lines[index]!.text !== "```") index += 1;
+      if (index < lines.length) endIndex = index++;
+      else index = afterBash;
+    } else index = afterBash;
+    const start = lines[startIndex]!.start;
+    const endLine = lines[endIndex]!;
+    const end = endLine.end - (source[endLine.end - 1] === "\n" ? 1 : 0) - (source[endLine.end - 2] === "\r" ? 1 : 0);
+    if (renderToolActivityResults(source.slice(start, end)).length <= limit) ranges.push({ start, end });
   }
   return ranges;
 }
@@ -215,7 +240,7 @@ function preferredTailStart(source: string, start: number): number {
 
 function normalizeProse(source: string): string {
   const inlineCode: string[] = [];
-  let value = source.replace(/(`+)([^\n]*?)\1/g, (match) => {
+  let value = protectInlineCode(source, (match) => {
     const token = `\uE000${inlineCode.length}\uE001`;
     inlineCode.push(match);
     return token;
@@ -249,14 +274,42 @@ function normalizeProse(source: string): string {
   return value.replace(/\uE000(\d+)\uE001/g, (_, index: string) => inlineCode[Number(index)] ?? "");
 }
 
-function latestFittingEnd(source: string, start: number, limit: number, candidates: readonly number[]): number | null {
+function protectInlineCode(source: string, protect: (match: string) => string): string {
+  let output = "";
+  let cursor = 0;
+  while (cursor < source.length) {
+    const opening = source.indexOf("`", cursor);
+    if (opening < 0) { output += source.slice(cursor); break; }
+    output += source.slice(cursor, opening);
+    let markerEnd = opening + 1;
+    while (source[markerEnd] === "`") markerEnd += 1;
+    const marker = source.slice(opening, markerEnd);
+    const lineEnd = source.indexOf("\n", markerEnd);
+    const searchEnd = lineEnd < 0 ? source.length : lineEnd;
+    let closing = source.indexOf(marker, markerEnd);
+    while (closing >= 0 && closing < searchEnd && (source[closing - 1] === "`" || source[closing + marker.length] === "`")) {
+      closing = source.indexOf(marker, closing + 1);
+    }
+    if (closing < 0 || closing >= searchEnd) {
+      output += marker;
+      cursor = markerEnd;
+      continue;
+    }
+    const end = closing + marker.length;
+    output += protect(source.slice(opening, end));
+    cursor = end;
+  }
+  return output;
+}
+
+function latestFittingEnd(source: string, start: number, limit: number, candidates: readonly number[], blocks: readonly MarkdownBlock[]): number | null {
   let low = 0;
   let high = candidates.length - 1;
   let result: number | null = null;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const end = candidates[middle]!;
-    if (renderCardMarkdownRange(source, start, end).length <= limit) {
+    if (renderCardMarkdownRange(source, start, end, blocks).length <= limit) {
       result = end;
       low = middle + 1;
     } else high = middle - 1;
@@ -264,8 +317,8 @@ function latestFittingEnd(source: string, start: number, limit: number, candidat
   return result;
 }
 
-function renderCardMarkdownRange(source: string, start: number, end: number): string {
-  return renderToolActivityResults(renderMarkdownRange(source, start, end));
+function renderCardMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {
+  return renderToolActivityResults(renderMarkdownRange(source, start, end, blocks));
 }
 
 /** Applies Answer Card-only tool result folding without changing source offsets. */
@@ -298,9 +351,11 @@ function renderToolActivityResults(markdown: string): string {
   return rendered.join("\n");
 }
 
-function renderMarkdownRange(source: string, start: number, end: number): string {
+function renderMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {
   const output: string[] = [];
-  for (const block of markdownBlocks(source)) {
+  for (let index = firstOverlappingBlock(blocks, start); index < blocks.length; index += 1) {
+    const block = blocks[index]!;
+    if (block.start >= end) break;
     const from = Math.max(start, block.start);
     const to = Math.min(end, block.end);
     if (from >= to) continue;
@@ -321,6 +376,17 @@ function renderMarkdownRange(source: string, start: number, end: number): string
     output.push(`${prefix}${raw}${suffix}`);
   }
   return output.join("");
+}
+
+function firstOverlappingBlock(blocks: readonly MarkdownBlock[], start: number): number {
+  let low = 0;
+  let high = blocks.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (blocks[middle]!.end <= start) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 function markdownBlocks(source: string): MarkdownBlock[] {
