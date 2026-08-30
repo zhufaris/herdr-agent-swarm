@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { InstanceInteractionWorkflow } from "../src/coordinator/instance-interaction-workflow.js";
+import { normalizeCardActionEvent } from "../src/adapters/lark-adapter.js";
 import type { IncomingLarkMessage } from "../src/domain/types.js";
 
 let store: SqliteBindingStore | undefined;
@@ -98,6 +99,22 @@ describe("instance routing", () => {
     await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
     await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(store!.listAgentInstances("p1").find(({ name }) => name === "reviewer")).toBeDefined();
+  });
+  it("creates an instance from the CardKit v2 form callback shape", async () => {
+    const { workflow, control } = setup();
+    const action = normalizeCardActionEvent({
+      context: { open_message_id: "card", open_chat_id: "chat" },
+      operator: { open_id: "u1" },
+      action: {
+        tag: "button", name: "instance_create_submit",
+        value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" },
+        form_value: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" }
+      }
+    } as never);
+
+    expect(action).not.toBeNull();
+    await expect(workflow.handleCardAction(action!)).resolves.toMatchObject({ toast: { type: "success" } });
+    expect(control.create).toHaveBeenCalledWith(expect.objectContaining({ projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", start: false }));
   });
   it("reloads the current instance before steering from an actor-bound form", async () => {
     const { create, workflow, messaging } = setup(); const worker = create("worker", "worker");

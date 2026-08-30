@@ -9,5 +9,5 @@ export function callbackButton(content: string, value: object, type?: "primary" 
 }
 
 export function formSubmitButton(content: string, name: string, value: object, type?: "primary" | "default" | "danger"): object {
-  return callbackButton(content, value, type, { name, form_action_type: "submit" });
+  return callbackButton(content, value, type, { name, action_type: "form_submit" });
 }

@@ -34,9 +34,12 @@ describe("instance cards", () => {
     expect(create).toContain('\"action\":\"instance_create_submit\"');
     expect(create).toContain('\"projectId\":\"p1\"');
     expect(create).toContain('\"requestedBy\":\"u1\"');
-    expect(create).toContain('\"form_action_type\":\"submit\"');
+    expect(create).toContain('\"action_type\":\"form_submit\"');
+    expect(create).not.toContain("form_action_type");
     expect(steer).toContain('\"action\":\"instance_steer_submit\"');
     expect(steer).toContain('\"generation\":2');
+    expect(steer).toContain('\"action_type\":\"form_submit\"');
+    expect(steer).not.toContain("form_action_type");
   });
 
   it("shows destructive confirmation only for a safe fresh removal plan", () => {

@@ -115,10 +115,10 @@ describe("run card", () => {
     const submit = findTaggedNodes(card, "button")[0]!;
 
     expect(submit).toMatchObject({
-      name: "submit_supplement", form_action_type: "submit",
+      name: "submit_supplement", action_type: "form_submit",
       behaviors: [{ type: "callback", value: { action: "submit_supplement", interactionId: "i1", bindingId: "b1", bindingGeneration: 2 } }]
     });
-    expect(submit).not.toHaveProperty("action_type");
+    expect(submit).not.toHaveProperty("form_action_type");
     expect(submit).not.toHaveProperty("value");
   });
 
