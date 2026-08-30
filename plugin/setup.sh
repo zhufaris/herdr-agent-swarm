@@ -10,7 +10,7 @@ ENV_DRAFT="$(mktemp "$(plugin_config_dir)/.env.draft.XXXXXX")"
 PROJECTS_DRAFT="$(mktemp "$(plugin_config_dir)/projects.draft.XXXXXX")"
 trap 'rm -f "$ENV_DRAFT" "$PROJECTS_DRAFT"' EXIT
 if [ -e "$ENV_FILE" ]; then cp "$ENV_FILE" "$ENV_DRAFT"; else cp "$ROOT/.env.example" "$ENV_DRAFT"; fi
-if [ -e "$PROJECTS" ]; then cp "$PROJECTS" "$PROJECTS_DRAFT"; else cp "$ROOT/config/projects.json" "$PROJECTS_DRAFT"; fi
+if [ -e "$PROJECTS" ]; then cp "$PROJECTS" "$PROJECTS_DRAFT"; else cp "$ROOT/config/projects.example.json" "$PROJECTS_DRAFT"; fi
 chmod 600 "$ENV_DRAFT" "$PROJECTS_DRAFT"
 EDITOR_COMMAND="${EDITOR:-vim}"
 printf 'Editing private bridge environment: %s\n' "$ENV_FILE"

@@ -103,7 +103,7 @@ describe("plugin lifecycle", () => {
     const fixture = createFixture();
     await runPluginLifecycle("install", fixture.environment);
     writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-lark-bridge", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
-    await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" })).rejects.toThrow();
+    await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" }, { force: true })).rejects.toThrow();
     expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block test-bridge.service");
   });
@@ -168,28 +168,54 @@ describe("plugin lifecycle", () => {
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
-  it("allows restart when status is unavailable or belongs to another service", async () => {
-    let statusRequests = 0;
+  it("refuses an unforced restart when the active unit status belongs to another service", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
-      if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
-      statusRequests += 1;
-      response.end(JSON.stringify(statusRequests === 1
-        ? { status: "ok", identity: { serviceId: "another-service" }, operational: { prompts: { running: 9, queued: 9 } }, promptWorker: { activeTurnWorkers: 9 } }
-        : completedStartupStatus()));
+      response.end(JSON.stringify({ status: "ok", identity: { serviceId: "another-service" }, operational: { prompts: { running: 0, queued: 0 } }, promptWorker: { activeTurnWorkers: 0 } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runPluginLifecycle("install", fixture.environment);
-      await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+      writeFileSync(fixture.calls, "");
+      await expect(runPluginLifecycle("restart", fixture.environment)).rejects.toThrow(/identity.*another-service.*--force/i);
+      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
 
+  it("refuses an unforced restart when the active unit status is unavailable", async () => {
     const unavailable = createFixture({ port: 1 });
     await runPluginLifecycle("install", unavailable.environment);
-    await expect(runPluginLifecycle("restart", { ...unavailable.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "50" })).rejects.toThrow(/did not complete startup/);
-    expect(readFileSync(unavailable.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+    writeFileSync(unavailable.calls, "");
+    await expect(runPluginLifecycle("restart", unavailable.environment)).rejects.toThrow(/status.*unreachable.*--force/i);
+    expect(readFileSync(unavailable.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+  });
+
+  it("refuses an unforced restart when active-unit work metrics are incomplete", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ identity: { serviceId: "herdr-lark-bridge" }, operational: { prompts: { queued: 0 } } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("restart", fixture.environment)).rejects.toThrow(/incomplete.*--force/i);
+      expect(readFileSync(fixture.calls, "utf8")).not.toContain("restart --no-block");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("uses the installed environment file instead of shell config values", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", { ...fixture.environment, BRIDGE_HTTP_PORT: "1" });
+      await expect(runPluginLifecycle("restart", { ...fixture.environment, BRIDGE_HTTP_PORT: "1", BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
   it("rejects force for lifecycle actions other than restart", async () => {
@@ -425,7 +451,9 @@ describe("plugin lifecycle", () => {
 function completedStartupStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: "ok", identity: { serviceId: "herdr-lark-bridge", buildId: "sha256:test-build" },
-    startupRecovery: { state: "completed" }, ...overrides
+    startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 } },
+    promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 },
+    ...overrides
   };
 }
 

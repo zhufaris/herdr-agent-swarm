@@ -225,7 +225,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       try {
         const workspacePanes = panesByWorkspace.get(binding.workspaceId);
         if (!workspacePanes) {
-          const next = binding.degradationCount + 1 >= 2
+          binding.degradationCount + 1 >= 2
             ? await this.orphanMissingPane(binding, `Herdr workspace ${binding.workspaceId} remained unavailable`)
             : this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
           continue;

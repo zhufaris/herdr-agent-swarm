@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 describe("Herdr plugin manifest", () => {
   const manifest = readFileSync("herdr-plugin.toml", "utf8");
   const setupScript = readFileSync("plugin/setup.sh", "utf8");
+  const configureProjectsScript = readFileSync("plugin/configure-projects.sh", "utf8");
   const installScript = readFileSync("install.sh", "utf8");
   const buildScript = readFileSync("plugin/build.sh", "utf8");
 
@@ -45,6 +46,13 @@ describe("Herdr plugin manifest", () => {
     expect(setupScript).toContain('"$SCRIPT_DIR/service.sh" install');
     expect(setupScript).toContain('"$SCRIPT_DIR/service.sh" restart');
     expect(setupScript).not.toContain('"$SCRIPT_DIR/service.sh" start\n');
+  });
+
+  it("seeds private project configuration from the checked-in example", () => {
+    expect(setupScript).toContain('$ROOT/config/projects.example.json');
+    expect(configureProjectsScript).toContain('$ROOT/config/projects.example.json');
+    expect(setupScript).not.toContain('$ROOT/config/projects.json');
+    expect(configureProjectsScript).not.toContain('$ROOT/config/projects.json');
   });
 
   it("keeps installation non-interactive unless setup is requested explicitly", () => {

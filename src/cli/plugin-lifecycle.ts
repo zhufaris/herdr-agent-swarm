@@ -56,23 +56,25 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): 
   try {
     const config = loadConfig(loadRuntimeEnvironment(paths, base));
     status = await getJson(config.http.host, config.http.port, "/status", true);
-  } catch { return; }
+  } catch (error) {
+    throw new Error(`restart blocked: active service status is unreachable (${safeMessage(error)}); verify the running unit or retry with --force`);
+  }
   const record = asRecord(status);
   const identity = asRecord(record?.identity);
-  if (identity?.serviceId !== BRIDGE_SERVICE_ID) return;
+  if (identity?.serviceId !== BRIDGE_SERVICE_ID) throw new Error(`restart blocked: active service identity is ${typeof identity?.serviceId === "string" ? identity.serviceId : "missing"}, expected ${BRIDGE_SERVICE_ID}; verify the endpoint or retry with --force`);
   const operational = asRecord(record?.operational);
   const prompts = asRecord(operational?.prompts);
   const promptWorker = asRecord(record?.promptWorker);
   const running = nonNegativeInteger(prompts?.running);
-  const queued = nonNegativeInteger(prompts?.queued) ?? 0;
+  const queued = nonNegativeInteger(prompts?.queued);
   const activeWorkers = nonNegativeInteger(promptWorker?.activeTurnWorkers);
   const instanceWorker = asRecord(record?.instanceWorker);
-  const instanceDispatchers = nonNegativeInteger(instanceWorker?.activeDispatchWorkers) ?? 0;
-  const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers) ?? 0;
-  const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns) ?? 0;
-  const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns) ?? 0;
-  if (running === null && activeWorkers === null && !instanceWorker) return;
-  if ((running ?? 0) > 0 || (activeWorkers ?? 0) > 0 || instanceDispatchers > 0 || instanceObservers > 0 || activeInstanceTurns > 0 || uncertainInstanceTurns > 0) throw new Error(`restart blocked: ${running ?? "unknown"} running prompts, ${queued} queued prompts, ${activeWorkers ?? "unknown"} active turn workers; instance work has ${instanceDispatchers} dispatchers, ${instanceObservers} observers, ${activeInstanceTurns} active turns, ${uncertainInstanceTurns} uncertain turns; wait for active work to drain or retry with --force`);
+  const instanceDispatchers = nonNegativeInteger(instanceWorker?.activeDispatchWorkers);
+  const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers);
+  const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns);
+  const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns);
+  if (running! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
+  if ([running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns].some((value) => value === null)) throw new Error("restart blocked: active service status has incomplete work metrics; verify the running unit or retry with --force");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -82,6 +84,8 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function nonNegativeInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
+
+function metric(value: number | null): number | "unknown" { return value ?? "unknown"; }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const standalone = Boolean(environment.SWARM_ROOT);
@@ -109,13 +113,15 @@ function requiredDirectory(value: string | undefined, name: string, mustExist = 
 
 function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (!existsSync(paths.environmentFile)) throw new Error(`configuration file not found: ${paths.environmentFile}; run the setup action first`);
-  const environment = { ...readEnvironmentFile(paths.environmentFile), ...base };
+  const environment = { ...base, ...readEnvironmentFile(paths.environmentFile) };
+  if (base.HERDR_SOCKET_PATH) environment.HERDR_SOCKET_PATH = base.HERDR_SOCKET_PATH;
   if (!base.SWARM_ROOT) {
     environment.HERDR_PLUGIN_ROOT = paths.root;
     environment.HERDR_PLUGIN_CONFIG_DIR = paths.configDirectory;
     environment.HERDR_PLUGIN_STATE_DIR = paths.stateDirectory;
   }
-  environment.PROJECTS_CONFIG_PATH ||= resolve(paths.configDirectory, "projects.json");
+  if (base.SWARM_ROOT) environment.PROJECTS_CONFIG_PATH = resolve(paths.configDirectory, "projects.json");
+  else environment.PROJECTS_CONFIG_PATH ||= resolve(paths.configDirectory, "projects.json");
   environment.BRIDGE_DATABASE_PATH ||= resolve(paths.stateDirectory, "bridge.db");
   const config = loadConfig(environment);
   validateProjectDirectories(config.projects);

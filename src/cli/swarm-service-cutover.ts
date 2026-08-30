@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";

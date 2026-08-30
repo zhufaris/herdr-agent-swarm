@@ -13,7 +13,6 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 export interface BindingProvisioningWorkflowPort {
-  createRoot(message: IncomingLarkMessage, title: string): Promise<Binding>;
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
   completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null>;
   attach(message: IncomingLarkMessage, spaceName: string, paneReference: string): Promise<boolean>;
@@ -55,36 +54,6 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       const projects = this.projectsBySpaceName.get(spaceName) ?? [];
       projects.push(project);
       this.projectsBySpaceName.set(spaceName, projects);
-    }
-  }
-
-  async createRoot(message: IncomingLarkMessage, requestedTitle: string): Promise<Binding> {
-    const { config, store, herdr } = this.options;
-    const project = this.projectsById.get(config.defaultProjectId) ?? config.projects[0]!;
-    const paneTitle = randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
-    let binding = store.createPendingBinding({
-      id: randomUUID(), projectId: project.id, workspaceId: project.workspaceId, chatId: message.chatId,
-      topicId: message.topicId ?? message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, title, creatorOpenId: message.actorOpenId
-    });
-    await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null });
-    try {
-      const pane = await herdr.createPane(binding.workspaceId, project.cwd, paneCreationOptions(binding.id, binding.generation, project.id, paneTitle));
-      binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
-      binding = store.transitionBinding(binding.id, { type: "pane_created" });
-      await herdr.startTraex(pane.paneId, config.traex.executable);
-      const startedPane = await this.requireStartedPane(project, pane.paneId, binding.traexSessionId);
-      binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(startedPane));
-      binding = store.transitionBinding(binding.id, { type: "runtime_started", runtime: startedPane.agentState });
-      binding = store.transitionBinding(binding.id, { type: "thread_created" });
-      binding = store.transitionBinding(binding.id, { type: "activate" });
-      await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: binding.topicId! });
-      store.audit({ actorOpenId: message.actorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
-      return binding;
-    } catch (error) {
-      store.transitionBinding(binding.id, { type: "provisioning_failed" });
-      await this.publish(binding.id, "TurnFailed", "bridge", { promptId: message.messageId, error: errorMessage(error), queueDepth: 0 });
-      throw error;
     }
   }
 
@@ -182,7 +151,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     }
     const project = this.projectsById.get(binding.projectId);
     if (!project) { await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。"); return false; }
-    const paneTitle = randomPaneName();
+    const paneTitle = requestedTitle?.replace(/\s+/g, " " ).trim() || randomPaneName();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     const candidate = store.createResetCandidate({ oldBindingId: binding.id, newBindingId: randomUUID(), title, actorOpenId: message.actorOpenId, resetMessageId: message.messageId });
     try {
@@ -283,7 +252,6 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const { config, herdr, store } = this.options;
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
-    const existingPane = binding.paneId ? await herdr.getPane(binding.paneId) : null;
     const paneTitle = randomPaneName();
     const nextGeneration = binding.generation + 1;
     const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle));

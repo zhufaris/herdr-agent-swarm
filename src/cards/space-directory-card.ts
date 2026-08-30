@@ -1,6 +1,6 @@
 import type { AgentState } from "../domain/types.js";
 import { callbackButton } from "./cardkit-button.js";
-import { MAX_CARD_SERIALIZED_LENGTH, appendWithinCardLimit } from "./card-payload.js";
+import { appendWithinCardLimit } from "./card-payload.js";
 
 const MAX_PANE_ROWS_PER_PAGE = 16;
 const MAX_FIELD_LENGTH = 160;

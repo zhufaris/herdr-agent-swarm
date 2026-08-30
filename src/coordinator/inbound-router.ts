@@ -267,7 +267,6 @@ export class InboundRouter implements InboundRouterPort {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const classification = classifyContinuation({ text: body, hasUnsupportedContent: message.hasUnsupportedContent ?? false });
     if (!classification.eligible && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
-    const candidate = null;
     const promptId = randomUUID();
     const acceptedAt = new Date().toISOString();
     const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;

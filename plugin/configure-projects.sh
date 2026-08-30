@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 ensure_private_config_dir
 PROJECTS="$(projects_file)"
 ROOT="$(plugin_root)"
-if [ ! -e "$PROJECTS" ]; then install -m 600 "$ROOT/config/projects.json" "$PROJECTS"; fi
+if [ ! -e "$PROJECTS" ]; then install -m 600 "$ROOT/config/projects.example.json" "$PROJECTS"; fi
 DRAFT="$(mktemp "$(plugin_config_dir)/projects.draft.XXXXXX")"
 trap 'rm -f "$DRAFT"' EXIT
 cp "$PROJECTS" "$DRAFT"

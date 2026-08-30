@@ -1,7 +1,7 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView, RunProgressEvent } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
-import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
+import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { callbackButton } from "./cardkit-button.js";

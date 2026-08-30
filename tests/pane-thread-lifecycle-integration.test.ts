@@ -101,6 +101,7 @@ describe("pane/thread lifecycle integration", () => {
     const newPane = { paneId: "w1:new", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     let oldClosed = false;
     const closePane = vi.fn(async () => { oldClosed = true; });
+    const createdTitles: string[] = [];
     let replacementCreated = false;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
@@ -109,7 +110,7 @@ describe("pane/thread lifecycle integration", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return replacementCreated ? [oldPane, newPane] : [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; },
       async observeRuntime(id) { const pane = id === oldPane.paneId && !oldClosed ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentState === "idle", evidenceSource: pane ? "structured" : "none" }; },
-      async createPane() { replacementCreated = true; return newPane; }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, closePane
+      async createPane(_workspaceId, _cwd, options) { replacementCreated = true; createdTitles.push(options?.title ?? ""); return newPane; }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, closePane
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -122,6 +123,8 @@ describe("pane/thread lifecycle integration", () => {
     await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
     await vi.waitFor(() => expect(store.getBinding("old")?.lifecycle).toBe("closed"));
     expect(closePane).toHaveBeenCalledWith(oldPane.paneId);
+    expect(createdTitles).toEqual(["fresh"]);
+    expect(store.findBindingByLarkScope("topic", "root")?.title).toBe("repo / fresh");
     expect(store.getBinding("old")).toMatchObject({ lifecycle: "closed", attachment: "unattached" });
     expect(store.listRetiredPaneCleanupOperations(["succeeded"])).toMatchObject([{ oldBindingId: "old", replacementBindingId: expect.any(String), paneId: oldPane.paneId, state: "succeeded" }]);
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
@@ -224,7 +227,7 @@ describe("pane/thread lifecycle integration", () => {
     expect(retired).toMatchObject({ id: "old", lifecycle: "archived", topicId: null, retiredTopicId: "topic", paneId: oldPane.paneId });
     expect(replacement).toMatchObject({ lifecycle: "active", topicId: "topic", rootMessageId: "root", paneId: newPane.paneId });
     expect(created).toHaveLength(1);
-    expect(created[0]).toMatch(/^task-[a-z0-9]{4}$/);
+    expect(created[0]).toBe("fresh session");
     expect(replacement.title).toBe(`repo / ${created[0]}`);
     expect(oldObserverAborted).toBe(true);
     expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = 'm2'").get()).toEqual({ state: "cancelled" });
