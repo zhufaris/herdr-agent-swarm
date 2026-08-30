@@ -20,6 +20,13 @@ export function serializeEnvironmentValue(value: string): string {
   return JSON.stringify(value);
 }
 
+export function serializeEnvironmentFile(environment: Record<string, string>, order: readonly string[]): string {
+  const known = order.filter((key) => environment[key] !== undefined);
+  const knownSet = new Set(known);
+  const remaining = Object.keys(environment).filter((key) => !knownSet.has(key)).sort();
+  return [...known, ...remaining].map((key) => `${key}=${serializeEnvironmentValue(environment[key]!)}`).join("\n") + "\n";
+}
+
 function parseValue(rawValue: string, path: string, line: number): string {
   const value = rawValue.trim();
   if (!value.startsWith('\"')) {

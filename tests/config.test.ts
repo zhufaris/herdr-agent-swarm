@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { serializeEnvironmentFile } from "../src/runtime/environment-file.js";
 import {
   loadConfig, validateEnvironmentAndRegistry, validateProjectDirectories, validateProjectRegistry, withPluginDefaults
 } from "../src/config.js";
@@ -18,6 +19,11 @@ const requiredEnvironment = {
 };
 
 describe("project registry configuration", () => {
+  it("serializes environment values in stable order", () => {
+    expect(serializeEnvironmentFile({ Z_FUTURE: "kept", LARK_APP_ID: "app id", A_FUTURE: "quoted\"value" }, ["LARK_APP_ID"]))
+      .toBe('LARK_APP_ID="app id"\nA_FUTURE="quoted\\\"value"\nZ_FUTURE="kept"\n');
+  });
+
   it("validates a registry object without reading a file", () => {
     expect(validateProjectRegistry({
       defaultProjectId: "bridge",
