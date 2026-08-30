@@ -31,6 +31,14 @@ to that target continues through the existing binding prompt FIFO, not through
 `InstanceMessagingWorkflow`. A selected Worker target continues through the
 instance turn queue. Commands that name a Worker operate only on Worker rows.
 
+Primary-to-Worker MCP authority follows the same boundary. Its capability is
+issued to a binding generation and authorizes calls only while that binding has
+the server-owned active ordinary prompt. The gateway derives `projectId`,
+Primary identity, and parent prompt ID from the binding and prompt store; the
+client cannot supply them. Replacing, archiving, or advancing the binding
+generation invalidates the credential. Worker targeting remains fenced by the
+Worker's instance generation.
+
 ## Boundary changes
 
 `InstanceInteractionWorkflow` receives the current binding context when it
@@ -74,6 +82,8 @@ Regression coverage must prove all of the following:
   Primary row;
 - symbolic Primary routing continues through the binding prompt path;
 - an explicitly selected Worker routes through the instance workflow;
+- a current binding Primary can call a same-project Worker, while stale binding
+  generations and calls outside an active Primary prompt are rejected;
 - legacy Primary rows cannot create a second Primary authority or appear as
   ordinary Workers;
 - Worker creation failure leaves durable, inspectable state without duplicates;
