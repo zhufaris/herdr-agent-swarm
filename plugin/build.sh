@@ -15,4 +15,12 @@ test -r "$ROOT/dist/main.js"
 test -r "$ROOT/dist/build-info.json"
 test -r "$ROOT/dist/cli/validate-config.js"
 test -r "$ROOT/dist/cli/relay-herdr-event.js"
+if find "$ROOT/dist" -type f -name '*.d.ts' -print -quit | grep -q .; then
+    echo "Unexpected TypeScript declaration artifact under dist" >&2
+    exit 1
+fi
+if ! find "$ROOT/dist" -type f -name '*.js.map' -print -quit | grep -q .; then
+    echo "Expected production source maps under dist" >&2
+    exit 1
+fi
 echo "Herdr Lark Bridge plugin build complete. Run the setup action to configure the service."

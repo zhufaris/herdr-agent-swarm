@@ -145,8 +145,11 @@ the mode-600 environment file.
 Useful lifecycle commands are `npm run swarm:restart`, `npm run swarm:stop`, and
 `npm run swarm:logs`. `./install.sh --standalone` combines dependency install,
 build, validation, and service installation after configuration has been
-initialized. The checked-in service file is an explanatory template; the
-installer renders the production unit.
+initialized. It stages an immutable runtime under the state directory with only
+production dependencies, then atomically points `current` at that release; the
+development checkout keeps its test and build dependencies. The checked-in
+service file is an explanatory template; the installer renders the production
+unit and enables source maps for actionable stack traces.
 
 `npm run swarm:migrate` is a guarded one-to-one migration from the compatibility
 plugin service into an unused standalone service identity. It copies private

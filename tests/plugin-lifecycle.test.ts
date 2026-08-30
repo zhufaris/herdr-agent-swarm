@@ -80,7 +80,7 @@ describe("plugin lifecycle", () => {
     const unit = readFileSync(join(fixture.units, "test-bridge.service"), "utf8");
     expect(unit).toContain(`WorkingDirectory=${fixture.root}`);
     expect(unit).toContain(`EnvironmentFile=${fixture.config}/.env`);
-    expect(unit).toContain(`ExecStart=${process.execPath} ${fixture.root}/dist/main.js`);
+    expect(unit).toContain(`ExecStart=${process.execPath} --enable-source-maps ${fixture.root}/dist/main.js`);
     expect(unit).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:test-build");
     expect(unit).toContain("Environment=HERDR_SOCKET_PATH=/tmp/test-herdr.sock");
     expect(unit).toContain("Restart=on-failure");

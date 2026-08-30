@@ -170,7 +170,7 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     ]),
     ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
-    `ExecStart=${systemdEscape(paths.nodeExecutable)} ${systemdEscape(paths.entrypoint)}`,
+    `ExecStart=${systemdEscape(paths.nodeExecutable)} --enable-source-maps ${systemdEscape(paths.entrypoint)}`,
     "Restart=on-failure",
     "RestartSec=5",
     "TimeoutStopSec=50",

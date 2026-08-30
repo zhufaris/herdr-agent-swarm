@@ -23,7 +23,7 @@
     "swarm:stop": "bash scripts/swarm-service.sh stop",
     "swarm:logs": "bash scripts/swarm-service.sh logs",
     "dev": "tsx watch src/main.ts",
-    "start": "node dist/main.js",
+    "start": "node --enable-source-maps dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",

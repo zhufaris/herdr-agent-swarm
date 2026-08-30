@@ -42,7 +42,10 @@ node "$ROOT/scripts/check-node-version.mjs"
 if [ "$STANDALONE" -eq 1 ]; then
     npm ci
     npm run build
-    bash "$ROOT/scripts/swarm-service.sh" install
+    STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
+    bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR"
+    SWARM_RUNTIME_ROOT="$(readlink -f "$STATE_DIR/current")"
+    SWARM_ROOT="$SWARM_RUNTIME_ROOT" SWARM_STATE_DIR="$STATE_DIR" node "$SWARM_RUNTIME_ROOT/dist/cli/plugin-lifecycle.js" install
     echo "Standalone service installed. Run 'npm run swarm:start' after configuration is ready."
     exit 0
 fi
