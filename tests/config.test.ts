@@ -2,7 +2,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig, validateProjectDirectories, withPluginDefaults } from "../src/config.js";
+import {
+  loadConfig, validateEnvironmentAndRegistry, validateProjectDirectories, validateProjectRegistry, withPluginDefaults
+} from "../src/config.js";
 
 const defaultDirectory = mkdtempSync(join(tmpdir(), "herdr-default-projects-"));
 const defaultRegistryPath = join(defaultDirectory, "projects.json");
@@ -16,6 +18,34 @@ const requiredEnvironment = {
 };
 
 describe("project registry configuration", () => {
+  it("validates a registry object without reading a file", () => {
+    expect(validateProjectRegistry({
+      defaultProjectId: "bridge",
+      projects: [{ id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" }]
+    })).toEqual({
+      defaultProjectId: "bridge",
+      projects: [{
+        id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge",
+        maxInstances: 8, instances: []
+      }]
+    });
+  });
+
+  it("validates an environment with an explicit registry object", () => {
+    const registry = validateProjectRegistry({
+      defaultProjectId: "bridge",
+      projects: [{ id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" }]
+    });
+
+    const config = validateEnvironmentAndRegistry({
+      ...requiredEnvironment, PROJECTS_CONFIG_PATH: "/not/read/by-object-validation.json"
+    }, registry);
+
+    expect(config.defaultProjectId).toBe("bridge");
+    expect(config.herdr).toMatchObject({ workspaceId: "wH", workspaceCwd: "/work/bridge" });
+    expect(config.projectsConfigPath).toBe("/not/read/by-object-validation.json");
+  });
+
   it("loads the repository registry as the authoritative project allowlist", () => {
     const directory = mkdtempSync(join(tmpdir(), "herdr-projects-"));
     const registryPath = join(directory, "projects.json");

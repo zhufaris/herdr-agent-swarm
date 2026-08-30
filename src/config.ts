@@ -97,6 +97,13 @@ export type BridgeConfig = ReturnType<typeof loadConfig>;
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const value = environmentSchema.parse(withPluginDefaults(environment));
   const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH);
+  return buildConfig(value, registry);
+}
+
+function buildConfig(
+  value: z.infer<typeof environmentSchema>,
+  registry: { defaultProjectId: string; projects: ProjectConfig[] }
+) {
   if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
     throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
   }
@@ -143,12 +150,23 @@ export function withPluginDefaults(environment: NodeJS.ProcessEnv): NodeJS.Proce
 function loadProjectRegistry(path: string): { defaultProjectId: string; projects: ProjectConfig[] } {
   if (!existsSync(path)) throw new Error(`Project registry not found at ${path}`);
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  return validateProjectRegistry(raw);
+}
+
+export function validateProjectRegistry(raw: unknown) {
   return projectRegistrySchema.parse(raw);
+}
+
+export function validateEnvironmentAndRegistry(
+  environment: NodeJS.ProcessEnv,
+  registry: { defaultProjectId: string; projects: ProjectConfig[] }
+) {
+  return buildConfig(environmentSchema.parse(withPluginDefaults(environment)), registry);
 }
 
 export function validateProjectRegistryFile(path: string): void {
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-  projectRegistrySchema.parse(raw);
+  validateProjectRegistry(raw);
 }
 
 export function validateProjectDirectories(projects: readonly ProjectConfig[]): void {
