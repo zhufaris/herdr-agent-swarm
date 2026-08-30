@@ -15,6 +15,7 @@
     "herdr:traex:status": "bash scripts/install-herdr-traex-shim.sh status",
     "herdr:traex:uninstall": "bash scripts/install-herdr-traex-shim.sh uninstall",
     "swarm:init": "bash scripts/swarm-service.sh init",
+    "swarm:migrate": "bash scripts/swarm-service.sh migrate",
     "swarm:install": "bash scripts/swarm-service.sh install",
     "swarm:start": "bash scripts/swarm-service.sh start",
     "swarm:status": "bash scripts/swarm-service.sh status",
