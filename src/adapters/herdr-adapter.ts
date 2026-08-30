@@ -177,7 +177,7 @@ export class HerdrCliAdapter implements HerdrPort {
       catch (error) {
         lastError = error;
         if (!String(error).includes("agent_pane_busy")) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, herdrRetryDelay(attempt)));
       }
     }
     throw lastError;
@@ -243,10 +243,15 @@ export class HerdrCliAdapter implements HerdrPort {
     } catch (error) {
       closeError = error;
     }
+    if (this.native?.waitForPaneEvent) {
+      const observed = await this.native.waitForPaneEvent(paneId, this.commandTimeoutMs).catch(() => false);
+      if (observed && !await this.getPane(paneId)) return;
+    }
     const deadline = Date.now() + this.commandTimeoutMs;
+    let attempt = 0;
     while (Date.now() < deadline) {
       if (!await this.getPane(paneId)) return;
-      await abortableDelay(100);
+      await abortableDelay(Math.min(herdrRetryDelay(attempt++), Math.max(1, deadline - Date.now())));
     }
     if (closeError) throw closeError;
     throw new Error(`Herdr pane ${paneId} remained present after close`);
@@ -331,6 +336,8 @@ export class HerdrCliAdapter implements HerdrPort {
     return envelope.result;
   }
 }
+
+export function herdrRetryDelay(attempt: number): number { return Math.min(1_000, 100 * (2 ** Math.max(0, Math.floor(attempt)))); }
 
 function managedTraexName(paneId: string): string {
   return `traex-${paneId.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`.slice(0, 32);

@@ -70,4 +70,28 @@ describe("InstanceTurnSupervisor", () => {
     expect(store.getInstanceTurn("turn-healthy")).toMatchObject({ state: "completed" });
     expect(supervisor.snapshot()).toMatchObject({ lastFailure: "temporary Herdr failure" });
   });
+
+  it("uses one shared pane snapshot for multiple observable turns", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const actor = { kind: "human" as const, userId: "u1" };
+    const panes = [];
+    for (const id of ["one", "two"]) {
+      store.createAgentInstance({ id, projectId: "p1", name: id, role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: `/repo/${id}`, branch: null, baseCommit: "base" } });
+      const instance = store.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: `w1:${id}`, nativeSessionId: null })!;
+      store.acceptInstanceTurn({ id: `turn-${id}`, idempotencyKey: `turn-${id}`, actor, projectId: "p1", instanceId: id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+      store.claimNextInstanceTurn(id, instance.generation);
+      store.updateInstanceTurn({ turnId: `turn-${id}`, expectedGeneration: instance.generation, state: "running", eventKind: "turn.running" });
+      panes.push({ paneId: `w1:${id}`, workspaceId: "w1", cwd: `/repo/${id}`, label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex" as const, terminalId: "term" });
+    }
+    const snapshotPanes = vi.fn(async () => panes);
+    const inspectPane = vi.fn(async () => { throw new Error("individual inspection should not run"); });
+    const supervisor = new InstanceTurnSupervisor({ store, paneHost: { snapshotPanes, inspectPane } as unknown as PaneHost, wake: vi.fn() });
+
+    await supervisor.reconcile();
+
+    expect(snapshotPanes).toHaveBeenCalledOnce();
+    expect(inspectPane).not.toHaveBeenCalled();
+    expect(store.getInstanceTurn("turn-one")).toMatchObject({ state: "completed" });
+    expect(store.getInstanceTurn("turn-two")).toMatchObject({ state: "completed" });
+  });
 });

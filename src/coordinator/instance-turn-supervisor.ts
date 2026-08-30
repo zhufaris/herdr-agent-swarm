@@ -44,8 +44,13 @@ export class InstanceTurnSupervisor {
 
   private async reconcileOnce(): Promise<void> {
     const turns = this.options.store.listObservableInstanceTurns();
+    let panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null = null;
+    if (this.options.paneHost.snapshotPanes) {
+      try { panesById = new Map((await this.options.paneHost.snapshotPanes()).map((pane) => [pane.paneId, pane])); }
+      catch { /* Older or degraded Herdr paths retain targeted observation. */ }
+    }
     for (const turn of turns) {
-      try { await this.observe(turn.id); }
+      try { await this.observe(turn.id, panesById); }
       catch (error) {
         this.lastFailureAt = new Date().toISOString(); this.lastFailure = safeLogError(error).message;
         this.options.logger?.warn({ event: "instance-turn-observation-failed", err: safeLogError(error), instanceId: turn.instanceId, turnId: turn.id, outcome: "retry_later" }, "instance turn observation failed");
@@ -54,13 +59,13 @@ export class InstanceTurnSupervisor {
     this.lastScanAt = new Date().toISOString();
   }
 
-  private async observe(turnId: string): Promise<void> {
+  private async observe(turnId: string, panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null): Promise<void> {
     const turn = this.options.store.getInstanceTurn(turnId);
     if (!turn || !["dispatching", "running", "blocked", "dispatch-uncertain"].includes(turn.state)) return;
     const instance = this.options.store.getAgentInstance(turn.instanceId);
     if (!instance || instance.generation !== turn.instanceGeneration || !instance.runtimeRef) return;
     const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
-    const pane = await this.options.paneHost.inspectPane(instance.runtimeRef.paneId);
+    const pane = panesById ? panesById.get(instance.runtimeRef.paneId) ?? null : await this.options.paneHost.inspectPane(instance.runtimeRef.paneId);
     if (!pane || pane.workspaceId !== instance.runtimeRef.herdrWorkspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
       this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${instance.runtimeRef.paneId} is missing or mismatched during turn recovery` });
       return;

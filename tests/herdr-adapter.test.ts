@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
+import { herdrRetryDelay, HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 
 describe("Herdr adapter structured control", () => {
   afterEach(() => vi.useRealTimers());
+
+  it("backs off busy-pane retries with a one-second ceiling", () => {
+    expect(Array.from({ length: 8 }, (_, attempt) => herdrRetryDelay(attempt))).toEqual([100, 200, 400, 800, 1000, 1000, 1000, 1000]);
+  });
 
   it("rejects a configured workspace whose live Space label differs", async () => {
     const runner: CommandRunner = { async run() {
@@ -175,6 +179,23 @@ describe("Herdr adapter structured control", () => {
     const runner: CommandRunner = { async run(_executable, args) { calls.push(args); return { stdout: "", stderr: "" }; } };
     await new HerdrCliAdapter(runner, "herdr", 1000).sendEscape("w1:p1");
     expect(calls).toEqual([["agent", "send-keys", "w1:p1", "esc"]]);
+  });
+
+  it("waits for a native close event before one authoritative verification", async () => {
+    const requests: string[] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] === "pane" && args[1] === "close") return { stdout: "", stderr: "" };
+      throw new Error(`unexpected CLI call: ${args.join(" ")}`);
+    } };
+    const native = {
+      async request(method: string) { requests.push(method); return { snapshot: { panes: [], agents: [] } }; },
+      waitForPaneEvent: vi.fn(async () => true)
+    };
+
+    await new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).closePane("w1:p1");
+
+    expect(native.waitForPaneEvent).toHaveBeenCalledWith("w1:p1", 1000);
+    expect(requests).toEqual(["session.snapshot"]);
   });
 
   it("creates a dedicated Lark tab without stealing focus", async () => {

@@ -208,19 +208,21 @@ function isAvailableShell(info: ProcessInfo): boolean {
 
 async function waitForTraexProcess(paneId: string, executable: string, deadline: number, dependencies: TraexStartDependencies): Promise<ProcessRecord> {
   let first = true;
+  let attempt = 0;
   while (first || dependencies.now() <= deadline) {
     first = false;
     const info = parseProcessInfo((await dependencies.runHerdr(["pane", "process-info", "--pane", paneId])).stdout);
     for (const process of info.foreground) {
       if (await dependencies.processExecutable(process.pid) === executable) return process;
     }
-    await dependencies.sleep(50);
+    await dependencies.sleep(pollingDelay(attempt++));
   }
   throw new Error("Timed out waiting for the TraeX process");
 }
 
 async function waitForManagedAgent(input: TraexStartInput, deadline: number, dependencies: TraexStartDependencies): Promise<Record<string, unknown>> {
   let first = true;
+  let attempt = 0;
   while (first || dependencies.now() <= deadline) {
     first = false;
     try {
@@ -231,10 +233,12 @@ async function waitForManagedAgent(input: TraexStartInput, deadline: number, dep
       // The detached reporter names the already-running agent asynchronously.
       // A transient agent_not_found is expected until that structured update lands.
     }
-    await dependencies.sleep(50);
+    await dependencies.sleep(pollingDelay(attempt++));
   }
   throw new Error("Timed out waiting for managed TraeX identity");
 }
+
+export function pollingDelay(attempt: number): number { return Math.min(1_000, 50 * (2 ** Math.max(0, Math.floor(attempt)))); }
 
 function parseEnvelope(stdout: string): unknown {
   const parsed = JSON.parse(stdout) as { result?: unknown };

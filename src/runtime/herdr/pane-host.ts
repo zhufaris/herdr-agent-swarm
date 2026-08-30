@@ -6,6 +6,7 @@ export interface PaneHost {
   listPanes(workspaceId: string): Promise<HerdrPane[]>;
   allocatePane(workspaceId: string, cwd: string, options: HerdrPaneCreationOptions): Promise<HerdrPane>;
   inspectPane(paneId: string): Promise<HerdrPane | null>;
+  snapshotPanes?(): Promise<HerdrPane[]>;
   interruptPane(paneId: string): Promise<void>;
   releasePane(paneId: string): Promise<void>;
 }
@@ -19,6 +20,10 @@ export class HerdrPaneHost implements PaneHost {
     return this.herdr.createPane(workspaceId, cwd, options);
   }
   inspectPane(paneId: string): Promise<HerdrPane | null> { return this.herdr.getPane(paneId); }
+  snapshotPanes(): Promise<HerdrPane[]> {
+    if (!this.herdr.listAllPanes) throw new Error("Herdr adapter does not support an all-workspace snapshot");
+    return this.herdr.listAllPanes();
+  }
   interruptPane(paneId: string): Promise<void> {
     if (!this.herdr.sendEscape) throw new Error("Herdr pane interruption is unavailable");
     return this.herdr.sendEscape(paneId);

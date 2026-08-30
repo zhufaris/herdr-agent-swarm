@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeLaunchRequest, parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexStart, TraexStartError, validateShimPaths } from "../src/runtime/herdr-traex-shim.js";
+import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexStart, TraexStartError, validateShimPaths } from "../src/runtime/herdr-traex-shim.js";
 
 describe("Herdr TraeX shim invocation", () => {
   it.each([
@@ -73,6 +73,10 @@ describe("Herdr TraeX shim invocation", () => {
 });
 
 describe("Herdr TraeX managed start", () => {
+  it("backs off repeated startup probes with a one-second ceiling", () => {
+    expect(Array.from({ length: 8 }, (_, attempt) => pollingDelay(attempt))).toEqual([50, 100, 200, 400, 800, 1000, 1000, 1000]);
+  });
+
   it("encodes executable and arguments without losing boundaries", () => {
     expect(encodeLaunchRequest("/opt/traex", ["--model", "GPT 5", "x=y"]).equals(
       Buffer.from("/opt/traex\0--model\0GPT 5\0x=y\0")
