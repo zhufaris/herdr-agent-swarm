@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 
 export const AGENT_SWARM_SERVICE_ID = "herdr-agent-swarm" as const;
-export const BRIDGE_SERVICE_ID = AGENT_SWARM_SERVICE_ID;
 
 export interface BuildIdentity {
   serviceId: typeof AGENT_SWARM_SERVICE_ID;

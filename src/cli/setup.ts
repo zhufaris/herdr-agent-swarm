@@ -8,7 +8,7 @@ import { FileSetupConfigRepository } from "../setup/setup-config.js";
 import { SetupCancelledError, TerminalSetupPrompts } from "../setup/setup-prompts.js";
 import type { SetupContext } from "../setup/setup-types.js";
 import { runSetupWorkflow, type SetupOutcome, type SetupWorkflowDependencies } from "../setup/setup-workflow.js";
-import { createSetupLifecycleAdapter } from "./plugin-lifecycle.js";
+import { createSetupLifecycleAdapter } from "./service-lifecycle.js";
 
 interface SetupCliOverrides {
   context?: SetupContext;
@@ -18,13 +18,12 @@ interface SetupCliOverrides {
 }
 
 export function resolveSetupContext(environment: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): SetupContext {
-  const plugin = Boolean(environment.HERDR_PLUGIN_ROOT && !environment.SWARM_ROOT);
-  const root = resolve(environment.SWARM_ROOT || environment.HERDR_PLUGIN_ROOT || cwd);
-  const configDirectory = resolve(environment.SWARM_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm`);
-  const stateDirectory = resolve(environment.SWARM_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm`);
+  const root = resolve(environment.SWARM_ROOT || cwd);
+  const configDirectory = resolve(environment.SWARM_CONFIG_DIR || `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm`);
+  const stateDirectory = resolve(environment.SWARM_STATE_DIR || `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm`);
   return {
     root, configDirectory, stateDirectory, cwd: resolve(cwd),
-    serviceName: environment.BRIDGE_SYSTEMD_SERVICE_NAME || (plugin ? "herdr-lark-bridge.service" : "herdr-agent-swarm.service")
+    serviceName: environment.BRIDGE_SYSTEMD_SERVICE_NAME || "herdr-agent-swarm.service"
   };
 }
 
@@ -40,7 +39,7 @@ export function createSetupCheckDependencies(environment: NodeJS.ProcessEnv) {
 }
 
 export function createSetupDependencies(environment: NodeJS.ProcessEnv, skipNetwork: boolean, context = resolveSetupContext(environment)): SetupWorkflowDependencies {
-  const lifecycleEnvironment = environment.HERDR_PLUGIN_ROOT && !environment.SWARM_ROOT ? environment : {
+  const lifecycleEnvironment = {
     ...environment, SWARM_ROOT: context.root, SWARM_CONFIG_DIR: context.configDirectory,
     SWARM_STATE_DIR: context.stateDirectory, BRIDGE_SYSTEMD_SERVICE_NAME: context.serviceName
   };

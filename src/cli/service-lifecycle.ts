@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadConfig, validateProjectDirectories } from "../config.js";
 import { readEnvironmentFile } from "../runtime/environment-file.js";
-import { BRIDGE_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
+import { AGENT_SWARM_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
 import type { SetupLifecyclePort } from "../setup/setup-types.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
@@ -29,7 +29,7 @@ interface RuntimePaths {
   nodeExecutable: string;
 }
 
-export async function runPluginLifecycle(action: Action, environment: NodeJS.ProcessEnv = process.env, options: LifecycleOptions = {}): Promise<number> {
+export async function runServiceLifecycle(action: Action, environment: NodeJS.ProcessEnv = process.env, options: LifecycleOptions = {}): Promise<number> {
   if (options.force && action !== "restart") throw new Error("--force is supported only for restart");
   const paths = runtimePaths(environment);
   mkdirSync(paths.configDirectory, { recursive: true, mode: 0o700 });
@@ -49,7 +49,7 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   }
   const argumentsForAction = action === "restart"
     ? ["--user", "restart", "--no-block", paths.serviceName]
-    : action === "start" && Boolean(environment.SWARM_ROOT)
+    : action === "start"
       ? ["--user", "enable", "--now", paths.serviceName]
       : ["--user", action, paths.serviceName];
   const result = delegate("systemctl", argumentsForAction, environment);
@@ -57,7 +57,7 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   return waitForStartupCompletion(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment), options.requireReady ?? false);
 }
 
-export async function inspectPluginLifecycle(environment: NodeJS.ProcessEnv = process.env): Promise<LifecycleInspection> {
+export async function inspectServiceLifecycle(environment: NodeJS.ProcessEnv = process.env): Promise<LifecycleInspection> {
   const paths = runtimePaths(environment);
   const installed = existsSync(paths.unitFile);
   const active = isUnitActive(paths.serviceName, environment);
@@ -69,11 +69,11 @@ export async function inspectPluginLifecycle(environment: NodeJS.ProcessEnv = pr
 
 export function createSetupLifecycleAdapter(environment: NodeJS.ProcessEnv = process.env): SetupLifecyclePort {
   const successful = async (action: "install" | "start" | "restart", options: LifecycleOptions = {}) => {
-    const result = await runPluginLifecycle(action, environment, options);
+    const result = await runServiceLifecycle(action, environment, options);
     if (result !== 0) throw new Error(`Service ${action} failed with exit code ${result}`);
   };
   return {
-    inspect: async () => inspectPluginLifecycle(environment),
+    inspect: async () => inspectServiceLifecycle(environment),
     install: async () => successful("install"),
     start: async () => successful("start", { requireReady: true }),
     restart: async () => successful("restart", { requireReady: true })
@@ -91,7 +91,7 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): 
   }
   const record = asRecord(status);
   const identity = asRecord(record?.identity);
-  if (identity?.serviceId !== BRIDGE_SERVICE_ID) throw new Error(`restart blocked: active service identity is ${typeof identity?.serviceId === "string" ? identity.serviceId : "missing"}, expected ${BRIDGE_SERVICE_ID}; verify the endpoint or retry with --force`);
+  if (identity?.serviceId !== AGENT_SWARM_SERVICE_ID) throw new Error(`restart blocked: active service identity is ${typeof identity?.serviceId === "string" ? identity.serviceId : "missing"}, expected ${AGENT_SWARM_SERVICE_ID}; verify the endpoint or retry with --force`);
   const operational = asRecord(record?.operational);
   const prompts = asRecord(operational?.prompts);
   const promptWorker = asRecord(record?.promptWorker);
@@ -118,11 +118,10 @@ function nonNegativeInteger(value: unknown): number | null {
 function metric(value: number | null): number | "unknown" { return value ?? "unknown"; }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
-  const standalone = Boolean(environment.SWARM_ROOT);
-  const root = requiredDirectory(environment.SWARM_ROOT || environment.HERDR_PLUGIN_ROOT, standalone ? "SWARM_ROOT" : "HERDR_PLUGIN_ROOT");
-  const configDirectory = requiredDirectory(environment.SWARM_CONFIG_DIR || environment.HERDR_PLUGIN_CONFIG_DIR || (standalone ? `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm` : undefined), standalone ? "SWARM_CONFIG_DIR" : "HERDR_PLUGIN_CONFIG_DIR", false);
-  const stateDirectory = requiredDirectory(environment.SWARM_STATE_DIR || environment.HERDR_PLUGIN_STATE_DIR || (standalone ? `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm` : undefined), standalone ? "SWARM_STATE_DIR" : "HERDR_PLUGIN_STATE_DIR", false);
-  const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || (standalone ? "herdr-agent-swarm.service" : "herdr-lark-bridge.service");
+  const root = requiredDirectory(environment.SWARM_ROOT, "SWARM_ROOT");
+  const configDirectory = requiredDirectory(environment.SWARM_CONFIG_DIR || `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm`, "SWARM_CONFIG_DIR", false);
+  const stateDirectory = requiredDirectory(environment.SWARM_STATE_DIR || `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm`, "SWARM_STATE_DIR", false);
+  const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || "herdr-agent-swarm.service";
   if (!/^[A-Za-z0-9_.@-]+\.service$/.test(serviceName)) throw new Error(`invalid systemd service name: ${serviceName}`);
   const unitDirectory = resolve(environment.BRIDGE_SYSTEMD_UNIT_DIR || `${homedir()}/.config/systemd/user`);
   return {
@@ -135,7 +134,7 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
 }
 
 function requiredDirectory(value: string | undefined, name: string, mustExist = true): string {
-  if (!value) throw new Error(`${name} is required; invoke this command through Herdr`);
+  if (!value) throw new Error(`${name} is required`);
   const path = resolve(value);
   if (mustExist && (!existsSync(path) || !statSync(path).isDirectory())) throw new Error(`${name} is not an accessible directory: ${path}`);
   return path;
@@ -145,13 +144,7 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
   if (!existsSync(paths.environmentFile)) throw new Error(`configuration file not found: ${paths.environmentFile}; run the setup action first`);
   const environment = { ...base, ...readEnvironmentFile(paths.environmentFile) };
   if (base.HERDR_SOCKET_PATH) environment.HERDR_SOCKET_PATH = base.HERDR_SOCKET_PATH;
-  if (!base.SWARM_ROOT) {
-    environment.HERDR_PLUGIN_ROOT = paths.root;
-    environment.HERDR_PLUGIN_CONFIG_DIR = paths.configDirectory;
-    environment.HERDR_PLUGIN_STATE_DIR = paths.stateDirectory;
-  }
-  if (base.SWARM_ROOT) environment.PROJECTS_CONFIG_PATH = resolve(paths.configDirectory, "projects.json");
-  else environment.PROJECTS_CONFIG_PATH ||= resolve(paths.configDirectory, "projects.json");
+  environment.PROJECTS_CONFIG_PATH = resolve(paths.configDirectory, "projects.json");
   environment.BRIDGE_DATABASE_PATH ||= resolve(paths.stateDirectory, "bridge.db");
   const config = loadConfig(environment);
   validateProjectDirectories(config.projects);
@@ -159,7 +152,7 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
 }
 
 function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
-  if (!existsSync(paths.entrypoint)) throw new Error(`compiled bridge entrypoint not found: ${paths.entrypoint}; run the plugin build first`);
+  if (!existsSync(paths.entrypoint)) throw new Error(`compiled service entrypoint not found: ${paths.entrypoint}; run npm run build first`);
   const identity = loadBuildIdentity(paths.buildInfo);
   const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
@@ -179,10 +172,9 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
 }
 
 function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): string {
-  const standalone = Boolean(environment.SWARM_ROOT);
   return [
     "[Unit]",
-    `Description=${standalone ? "Herdr Agent Swarm" : "Herdr Lark Bridge"}`,
+    "Description=Herdr Agent Swarm",
     "After=network-online.target",
     "Wants=network-online.target",
     "",
@@ -190,14 +182,8 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     "Type=simple",
     `WorkingDirectory=${systemdEscape(paths.root)}`,
     `EnvironmentFile=${systemdEscape(paths.environmentFile)}`,
-    ...(standalone ? [
-      `Environment=PROJECTS_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "projects.json"))}`,
-      `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(environment.BRIDGE_DATABASE_PATH || resolve(paths.stateDirectory, "bridge.db")))}`
-    ] : [
-      `Environment=HERDR_PLUGIN_ROOT=${systemdEscape(paths.root)}`,
-      `Environment=HERDR_PLUGIN_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,
-      `Environment=HERDR_PLUGIN_STATE_DIR=${systemdEscape(paths.stateDirectory)}`
-    ]),
+    `Environment=PROJECTS_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "projects.json"))}`,
+    `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(environment.BRIDGE_DATABASE_PATH || resolve(paths.stateDirectory, "bridge.db")))}`,
     ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
     `ExecStart=${systemdEscape(paths.nodeExecutable)} --enable-source-maps ${systemdEscape(paths.entrypoint)}`,
@@ -240,7 +226,7 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
     const startup = active ? await probeStartupStatus(config.http.host, config.http.port) : null;
     observedBuildId = startup?.buildId ?? "unavailable";
     observedStartupState = startup?.startupRecoveryState ?? "unavailable";
-    const healthy = startup?.status === "ok" && startup.serviceId === BRIDGE_SERVICE_ID
+    const healthy = startup?.status === "ok" && startup.serviceId === AGENT_SWARM_SERVICE_ID
       && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed";
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
@@ -333,8 +319,8 @@ const action = process.argv[2] as Action | undefined;
 const flags = process.argv.slice(3);
 if (import.meta.url === `file://${process.argv[1]}`) {
   if (!action || !["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action) || flags.some((flag) => flag !== "--force") || flags.length > 1 || flags.includes("--force") && action !== "restart") {
-    process.stderr.write("usage: plugin-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart]\n"); process.exitCode = 2;
+    process.stderr.write("usage: service-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart]\n"); process.exitCode = 2;
   } else {
-    runPluginLifecycle(action, process.env, { force: flags.includes("--force") }).then((code) => { process.exitCode = code; }).catch((error) => { process.stderr.write(`plugin lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 1; });
+    runServiceLifecycle(action, process.env, { force: flags.includes("--force") }).then((code) => { process.exitCode = code; }).catch((error) => { process.stderr.write(`service lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 1; });
   }
 }

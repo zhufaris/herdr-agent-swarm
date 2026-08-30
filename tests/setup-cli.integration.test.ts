@@ -10,9 +10,15 @@ import type { SetupCheck, SetupContext, SetupDraft } from "../src/setup/setup-ty
 const context: SetupContext = { root: "/repo", configDirectory: "/config", stateDirectory: "/state", serviceName: "swarm.service", cwd: "/project" };
 
 describe("setup CLI", () => {
-  it("resolves standalone and plugin runtime paths", () => {
+  it("resolves only standalone runtime paths", () => {
     expect(resolveSetupContext({ SWARM_ROOT: "/repo", SWARM_CONFIG_DIR: "/config", SWARM_STATE_DIR: "/state", BRIDGE_SYSTEMD_SERVICE_NAME: "swarm.service" }, "/project")).toEqual(context);
-    expect(resolveSetupContext({ HERDR_PLUGIN_ROOT: "/plugin", HERDR_PLUGIN_CONFIG_DIR: "/plugin-config", HERDR_PLUGIN_STATE_DIR: "/plugin-state" }, "/project")).toMatchObject({ root: "/plugin", configDirectory: "/plugin-config", stateDirectory: "/plugin-state", serviceName: "herdr-lark-bridge.service" });
+    expect(resolveSetupContext({
+      HERDR_PLUGIN_ROOT: "/plugin", HERDR_PLUGIN_CONFIG_DIR: "/plugin-config", HERDR_PLUGIN_STATE_DIR: "/plugin-state",
+      XDG_CONFIG_HOME: "/xdg-config", XDG_STATE_HOME: "/xdg-state"
+    }, "/project")).toEqual({
+      root: "/project", configDirectory: "/xdg-config/herdr-agent-swarm", stateDirectory: "/xdg-state/herdr-agent-swarm",
+      serviceName: "herdr-agent-swarm.service", cwd: "/project"
+    });
   });
 
   it.each(["saved", "installed", "started"] as const)("returns zero for a %s outcome", async (status) => {

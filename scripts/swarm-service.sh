@@ -36,6 +36,6 @@ if { [ -n "$FORCE" ] && { [ "$ACTION" != "restart" ] || [ "$FORCE" != "--force" 
   exit 2
 fi
 
-args=("$ROOT/dist/cli/plugin-lifecycle.js" "$ACTION")
+args=("$ROOT/dist/cli/service-lifecycle.js" "$ACTION")
 if [ -n "$FORCE" ]; then args+=("$FORCE"); fi
 exec node "${args[@]}"
