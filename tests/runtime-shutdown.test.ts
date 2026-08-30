@@ -47,7 +47,6 @@ describe("bridge runtime shutdown", () => {
     let releaseProjector!: () => void;
     const projectorBlocked = new Promise<void>((resolve) => { releaseProjector = resolve; });
     const runtime = new BridgeRuntimeShutdown({
-      herdrEventInbox: { async stop() { calls.push("inbox"); } },
       herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       queueFeedbackProjector: { async stop() { calls.push("queue-feedback"); } },
@@ -62,12 +61,12 @@ describe("bridge runtime shutdown", () => {
     const first = runtime.shutdown("SIGTERM");
     const second = runtime.shutdown("SIGINT");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(calls).toEqual(["inbox", "subscriber", "coordinator", "queue-feedback", "projector:start"]);
+    expect(calls).toEqual(["subscriber", "coordinator", "queue-feedback", "projector:start"]);
 
     releaseProjector();
     await Promise.all([first, second]);
 
-    expect(calls).toEqual(["inbox", "subscriber", "coordinator", "queue-feedback", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
+    expect(calls).toEqual(["subscriber", "coordinator", "queue-feedback", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
   });
 
   it("continues releasing resources when an earlier stop fails", async () => {

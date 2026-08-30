@@ -32,7 +32,6 @@ import { InstanceLeaseController } from "./runtime/instance-lease.js";
 import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
 import { HerdrCircuitBreaker } from "./runtime/herdr-circuit-breaker.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
-import { HerdrEventInbox } from "./runtime/herdr-event-inbox.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
 import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
 import { SqliteIntegrityAuditor } from "./runtime/sqlite-integrity-auditor.js";
@@ -149,11 +148,7 @@ const reconciler = new HerdrRuntimeReconciler({
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
 const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
-const herdrEventInbox = process.env.HERDR_PLUGIN_ROOT
-  ? new HerdrEventInbox(Number(process.env.HERDR_BRIDGE_EVENT_PORT || "18787"), async (workspaceIds) => { await Promise.all([coordinator.reconcileHerdrWorkspaces(workspaceIds), instanceRuntime.reconcile()]); }, logger, config.runtimeTuning.herdrEventDebounceMs)
-  : null;
 try {
-  await herdrEventInbox?.start();
   lease.acquire();
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
@@ -172,7 +167,7 @@ try {
     return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure };
   } };
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => {
     outboxRetention.stop();
@@ -191,7 +186,6 @@ try {
   await coordinator.start();
   instanceRuntime.start(config.reconcileIntervalMs);
   instanceTurns.start(config.reconcileIntervalMs);
-  herdrEventInbox?.activate();
   herdrSocketSubscriber?.startEvents();
   logger.info({ event: "bridge-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], http: config.http, durationMs: Date.now() - startupStartedAt, outcome: "ready" }, "bridge started");
 } catch (error) {
@@ -199,7 +193,7 @@ try {
   outboxRetention.stop();
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
   else {
-    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrEventInbox ? { herdrEventInbox } : {}), ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, lease, store, logger });
+    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, lease, store, logger });
   }
   process.exitCode = 1;
 }

@@ -21,7 +21,6 @@ function fixture() {
       BRIDGE_HTTP_HOST: "127.0.0.1", BRIDGE_HTTP_PORT: "8787", FUTURE_SUPPORTED_SETTING: "keep me",
       PATH: "/secret/process/path", HOME: "/secret/home", SWARM_ROOT: "/launcher/root",
       SWARM_CONFIG_DIR: "/launcher/config", SWARM_STATE_DIR: "/launcher/state",
-      HERDR_PLUGIN_ROOT: "/plugin/root", HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state",
       XDG_CONFIG_HOME: "/xdg/config", XDG_STATE_HOME: "/xdg/state", NODE_BIN: "/launcher/node",
       HERDR_SOCKET_PATH: "/run/user/1000/herdr.sock"
     },
@@ -43,8 +42,8 @@ describe("file setup configuration repository", () => {
     expect(rendered.indexOf("LARK_APP_ID")).toBeLessThan(rendered.indexOf("BRIDGE_HTTP_PORT"));
     expect(rendered).toContain('FUTURE_SUPPORTED_SETTING="keep me"');
     for (const key of [
-      "PATH", "HOME", "SWARM_ROOT", "SWARM_CONFIG_DIR", "SWARM_STATE_DIR", "HERDR_PLUGIN_ROOT",
-      "HERDR_PLUGIN_CONFIG_DIR", "HERDR_PLUGIN_STATE_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "NODE_BIN"
+      "PATH", "HOME", "SWARM_ROOT", "SWARM_CONFIG_DIR", "SWARM_STATE_DIR",
+      "XDG_CONFIG_HOME", "XDG_STATE_HOME", "NODE_BIN"
     ]) expect(rendered).not.toMatch(new RegExp(`^${key}=`, "m"));
     expect(rendered).toContain('HERDR_SOCKET_PATH="/run/user/1000/herdr.sock"');
   });

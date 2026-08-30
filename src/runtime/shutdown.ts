@@ -9,7 +9,6 @@ interface ShutdownLogger {
 
 interface ShutdownDependencies {
   primaryToolGateway?: { stop(): Promise<void> };
-  herdrEventInbox?: { stop(): Promise<void> };
   herdrSocketSubscriber?: { stop(): Promise<void> };
   instanceRuntime?: { stop(): Promise<void> };
   instanceWorker?: { stop(context?: ShutdownContext): Promise<void> };
@@ -28,7 +27,6 @@ interface ShutdownDependencies {
 
 interface StartupCleanupDependencies {
   integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
-  herdrEventInbox?: { stop(): Promise<void> };
   herdrSocketSubscriber?: { stop(): Promise<void> };
   primaryToolGateway?: { stop(): Promise<void> };
   lease: { release(): void };
@@ -61,7 +59,7 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<BridgeRuntimeShutdownOutcome> {
-    const { herdrEventInbox, herdrSocketSubscriber, primaryToolGateway, instanceRuntime, instanceWorker, integrityAuditor, coordinator, queueFeedbackProjector, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+    const { herdrSocketSubscriber, primaryToolGateway, instanceRuntime, instanceWorker, integrityAuditor, coordinator, queueFeedbackProjector, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     const startedAt = Date.now();
     const budgetMs = this.dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     const { context, abort } = createShutdownContext(budgetMs);
@@ -77,7 +75,6 @@ export class BridgeRuntimeShutdown {
     }, budgetMs);
     this.deadlineAbortTimer.unref?.();
     logger.info({ event: "bridge-shutdown-started", signal, deadlineAt: context.deadlineAt, budgetMs }, "shutting down");
-    if (herdrEventInbox) await this.stopComponent("herdrEventInbox", () => herdrEventInbox.stop(), context, logger, failures, timeouts);
     if (primaryToolGateway) writers.push({ component: "primaryToolGateway", ...(await this.stopComponent("primaryToolGateway", () => primaryToolGateway.stop(), context, logger, failures, timeouts)) });
     if (herdrSocketSubscriber) await this.stopComponent("herdrSocketSubscriber", () => herdrSocketSubscriber.stop(), context, logger, failures, timeouts);
     if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
@@ -125,7 +122,6 @@ export async function cleanupStartupFailure(dependencies: StartupCleanupDependen
   const writers: TrackedWriter[] = [];
   const cleanup: Promise<void>[] = [];
   if (dependencies.integrityAuditor) cleanup.push(stopSafely("integrityAuditor", () => dependencies.integrityAuditor!.stop(context), dependencies.logger, failures));
-  if (dependencies.herdrEventInbox) cleanup.push(stopSafely("herdrEventInbox", () => dependencies.herdrEventInbox!.stop(), dependencies.logger, failures));
   if (dependencies.herdrSocketSubscriber) cleanup.push(stopSafely("herdrSocketSubscriber", () => dependencies.herdrSocketSubscriber!.stop(), dependencies.logger, failures));
   if (dependencies.primaryToolGateway) {
     const writer = launch("primaryToolGateway", () => dependencies.primaryToolGateway!.stop());

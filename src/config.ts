@@ -79,7 +79,6 @@ const environmentSchema = z.object({
   HERDR_SNAPSHOT_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60_000).default(2_000),
   OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
   CARD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).max(10_000).default(500),
-  HERDR_EVENT_DEBOUNCE_MS: z.coerce.number().int().min(0).max(5_000).default(100),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
   HERDR_CIRCUIT_OPEN_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),
   INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
@@ -95,7 +94,7 @@ const environmentSchema = z.object({
 export type BridgeConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
-  const value = environmentSchema.parse(withPluginDefaults(environment));
+  const value = environmentSchema.parse(environment);
   const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH);
   return buildConfig(value, registry);
 }
@@ -125,8 +124,7 @@ function buildConfig(
     runtimeTuning: {
       herdrSnapshotCacheTtlMs: value.HERDR_SNAPSHOT_CACHE_TTL_MS,
       outboxSafetyScanIntervalMs: value.OUTBOX_SAFETY_SCAN_INTERVAL_MS,
-      cardUpdateDebounceMs: value.CARD_UPDATE_DEBOUNCE_MS,
-      herdrEventDebounceMs: value.HERDR_EVENT_DEBOUNCE_MS
+      cardUpdateDebounceMs: value.CARD_UPDATE_DEBOUNCE_MS
     },
     herdrCircuitBreaker: { failureThreshold: value.HERDR_CIRCUIT_FAILURE_THRESHOLD, openMs: value.HERDR_CIRCUIT_OPEN_MS },
     instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
@@ -135,16 +133,6 @@ function buildConfig(
     outboxRetention: { days: value.OUTBOX_RETENTION_DAYS, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE, maxBatches: value.OUTBOX_RETENTION_MAX_BATCHES },
     sqliteIntegrityAudit: { intervalMs: value.SQLITE_INTEGRITY_AUDIT_INTERVAL_MS, issueLimit: 20 }
   } as const;
-}
-
-export function withPluginDefaults(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const configDirectory = environment.HERDR_PLUGIN_CONFIG_DIR;
-  const stateDirectory = environment.HERDR_PLUGIN_STATE_DIR;
-  return {
-    ...environment,
-    ...(!environment.PROJECTS_CONFIG_PATH && configDirectory ? { PROJECTS_CONFIG_PATH: `${configDirectory}/projects.json` } : {}),
-    ...(!environment.BRIDGE_DATABASE_PATH && stateDirectory ? { BRIDGE_DATABASE_PATH: `${stateDirectory}/bridge.db` } : {})
-  };
 }
 
 function loadProjectRegistry(path: string): { defaultProjectId: string; projects: ProjectConfig[] } {
@@ -161,7 +149,7 @@ export function validateEnvironmentAndRegistry(
   environment: NodeJS.ProcessEnv,
   registry: { defaultProjectId: string; projects: ProjectConfig[] }
 ) {
-  return buildConfig(environmentSchema.parse(withPluginDefaults(environment)), registry);
+  return buildConfig(environmentSchema.parse(environment), registry);
 }
 
 export function validateProjectRegistryFile(path: string): void {

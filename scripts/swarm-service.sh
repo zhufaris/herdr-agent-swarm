@@ -24,15 +24,11 @@ case "$ACTION" in
     printf 'Created private Herdr Agent Swarm configuration in %s\nEdit .env and projects.json, then run: npm run swarm:install\n' "$CONFIG_DIR"
     exit 0
     ;;
-  migrate)
-    if [ "$#" -gt 1 ]; then printf 'usage: %s migrate\n' "$0" >&2; exit 2; fi
-    exec node "$SOURCE_ROOT/dist/cli/swarm-service-cutover.js"
-    ;;
   install|uninstall|start|status|restart|stop|logs) ;;
-  *) printf 'usage: %s <setup|doctor|init|migrate|install|uninstall|start|status|restart|stop|logs> [options]\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s <setup|doctor|init|install|uninstall|start|status|restart|stop|logs> [options]\n' "$0" >&2; exit 2 ;;
 esac
 if { [ -n "$FORCE" ] && { [ "$ACTION" != "restart" ] || [ "$FORCE" != "--force" ]; }; } || [ "$#" -gt 2 ]; then
-  printf 'usage: %s <init|migrate|install|uninstall|start|status|restart|stop|logs> [--force for restart]\n' "$0" >&2
+  printf 'usage: %s <init|install|uninstall|start|status|restart|stop|logs> [--force for restart]\n' "$0" >&2
   exit 2
 fi
 

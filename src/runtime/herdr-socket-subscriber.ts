@@ -1,7 +1,7 @@
 import { createConnection, type Socket } from "node:net";
 import type { Logger } from "pino";
 import { z } from "zod";
-import { extractHerdrEventIds } from "./herdr-event-inbox.js";
+import { extractHerdrEventIds } from "./herdr-event-ids.js";
 import { safeLogError } from "./safe-error.js";
 import { FailureLogGate } from "./failure-log-gate.js";
 

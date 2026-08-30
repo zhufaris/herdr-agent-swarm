@@ -3,9 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { serializeEnvironmentFile } from "../src/runtime/environment-file.js";
-import {
-  loadConfig, validateEnvironmentAndRegistry, validateProjectDirectories, validateProjectRegistry, withPluginDefaults
-} from "../src/config.js";
+import { loadConfig, validateEnvironmentAndRegistry, validateProjectDirectories, validateProjectRegistry } from "../src/config.js";
 
 const defaultDirectory = mkdtempSync(join(tmpdir(), "herdr-default-projects-"));
 const defaultRegistryPath = join(defaultDirectory, "projects.json");
@@ -205,29 +203,18 @@ describe("project registry configuration", () => {
 
   it("configures bounded runtime cache, safety scan, and debounce intervals", () => {
     expect(loadConfig(requiredEnvironment).runtimeTuning).toEqual({
-      herdrSnapshotCacheTtlMs: 2_000, outboxSafetyScanIntervalMs: 30_000, cardUpdateDebounceMs: 500, herdrEventDebounceMs: 100
+      herdrSnapshotCacheTtlMs: 2_000, outboxSafetyScanIntervalMs: 30_000, cardUpdateDebounceMs: 500
     });
     expect(loadConfig({
       ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "0", OUTBOX_SAFETY_SCAN_INTERVAL_MS: "1000",
-      CARD_UPDATE_DEBOUNCE_MS: "10000", HERDR_EVENT_DEBOUNCE_MS: "0"
+      CARD_UPDATE_DEBOUNCE_MS: "10000"
     }).runtimeTuning).toEqual({
-      herdrSnapshotCacheTtlMs: 0, outboxSafetyScanIntervalMs: 1_000, cardUpdateDebounceMs: 10_000, herdrEventDebounceMs: 0
+      herdrSnapshotCacheTtlMs: 0, outboxSafetyScanIntervalMs: 1_000, cardUpdateDebounceMs: 10_000
     });
     expect(() => loadConfig({ ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "60001" })).toThrow();
     expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "999" })).toThrow();
     expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "300001" })).toThrow();
     expect(() => loadConfig({ ...requiredEnvironment, CARD_UPDATE_DEBOUNCE_MS: "10001" })).toThrow();
-    expect(() => loadConfig({ ...requiredEnvironment, HERDR_EVENT_DEBOUNCE_MS: "5001" })).toThrow();
-  });
-
-  it("uses plugin-native paths unless explicit paths override them", () => {
-    expect(withPluginDefaults({ HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state" })).toMatchObject({
-      PROJECTS_CONFIG_PATH: "/plugin/config/projects.json", BRIDGE_DATABASE_PATH: "/plugin/state/bridge.db"
-    });
-    expect(withPluginDefaults({
-      HERDR_PLUGIN_CONFIG_DIR: "/plugin/config", HERDR_PLUGIN_STATE_DIR: "/plugin/state",
-      PROJECTS_CONFIG_PATH: "/custom/projects.json", BRIDGE_DATABASE_PATH: "/custom/bridge.db"
-    })).toMatchObject({ PROJECTS_CONFIG_PATH: "/custom/projects.json", BRIDGE_DATABASE_PATH: "/custom/bridge.db" });
   });
 
   it("rejects project paths that are missing or not directories", () => {

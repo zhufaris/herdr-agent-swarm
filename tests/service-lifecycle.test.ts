@@ -92,19 +92,21 @@ describe("service lifecycle", () => {
 
   it("exposes only canonical swarm lifecycle package commands", () => {
     const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> };
-    for (const action of ["init", "migrate", "install", "start", "status", "restart", "stop", "logs"]) {
+    for (const action of ["init", "install", "start", "status", "restart", "stop", "logs"]) {
       expect(packageJson.scripts[`swarm:${action}`]).toBe(`bash scripts/swarm-service.sh ${action}`);
     }
+    expect(packageJson.scripts).not.toHaveProperty("swarm:migrate");
     expect(packageJson.scripts["swarm:setup"]).toBe("node dist/cli/setup.js");
     expect(packageJson.scripts["swarm:doctor"]).toBe("node dist/cli/doctor.js");
-    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:setup", "swarm:doctor", "swarm:migrate", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
+    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:setup", "swarm:doctor", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
     expect(packageJson.scripts).toMatchObject({
       "herdr:traex:install": "bash scripts/install-herdr-traex-shim.sh install",
       "herdr:traex:status": "bash scripts/install-herdr-traex-shim.sh status",
       "herdr:traex:uninstall": "bash scripts/install-herdr-traex-shim.sh uninstall"
     });
     const script = readFileSync(join(process.cwd(), "scripts/swarm-service.sh"), "utf8");
-    expect(script.indexOf('export SWARM_ROOT="$ROOT"')).toBeLessThan(script.indexOf('migrate)'));
+    expect(script).not.toContain("migrate)");
+    expect(script).not.toContain("swarm-service-cutover");
     expect(script).toContain('setup) exec node "$ROOT/dist/cli/setup.js"');
     expect(script).toContain('doctor) exec node "$ROOT/dist/cli/doctor.js"');
     expect(script).toContain('args=("$ROOT/dist/cli/service-lifecycle.js" "$ACTION")');
