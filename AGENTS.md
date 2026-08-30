@@ -1,11 +1,12 @@
-# Herdr Lark Bridge: Agent Guide
+# Herdr Agent Swarm: Agent Guide
 
 ## Project overview
 
-Herdr Lark Bridge connects one Lark topic to a TraeX process running in a real
-Herdr pane. It is a durable workflow coordinator, not a direct message relay:
-incoming work is persisted, observed through Herdr, projected into CardKit
-answer cards, and delivered through a retryable Lark outbox.
+Herdr Agent Swarm is a durable, human-controlled multi-agent workflow
+coordinator. It manages project-scoped Primary and Worker instances in real
+Herdr panes and projects their work into Lark CardKit cards through a retryable
+outbox. The original one-topic/one-TraeX Herdr Lark Bridge remains available as
+a compatibility workflow; it is not the identity of this repository.
 
 The source of truth is deliberately split:
 
@@ -86,11 +87,11 @@ connections. The Herdr plugin requires Herdr >= 0.7.5.
 | Start compiled service in foreground | `npm start` |
 | Validate an environment file and project registry | `npm run config:validate -- <env-file> <projects-file>` |
 | Observe a real configured bridge without sending Lark messages | `npm run smoke:real-user` |
-| Build, link, and enable the Herdr plugin | `./install.sh` |
-| Configure, install, and start the managed service | `./install.sh --setup` |
-| Restart a linked, rebuilt plugin service | `herdr plugin action invoke restart --plugin herdr-lark-bridge` |
-| Inspect service health and recent failures | `herdr plugin action invoke status --plugin herdr-lark-bridge` |
-| Inspect bounded logs | `herdr plugin action invoke logs --plugin herdr-lark-bridge` |
+| Build, link, and enable the compatibility Herdr plugin | `./install.sh` |
+| Configure, install, and start the compatibility Herdr plugin service | `./install.sh --setup` |
+| Restart a linked, rebuilt compatibility Herdr plugin service | `herdr plugin action invoke restart --plugin herdr-lark-bridge` |
+| Inspect compatibility Herdr plugin service health and recent failures | `herdr plugin action invoke status --plugin herdr-lark-bridge` |
+| Inspect bounded compatibility Herdr plugin logs | `herdr plugin action invoke logs --plugin herdr-lark-bridge` |
 
 Run `npm run build` after source changes before using the plugin restart action;
 the managed unit verifies the expected generated build identity. Do not manually
