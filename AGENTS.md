@@ -92,12 +92,17 @@ connections. Herdr >= 0.7.5 is required for the CLI/socket runtime contract.
 | Start the installed service | `npm run swarm:start` |
 | Inspect service health and recent failures | `npm run swarm:status` |
 | Restart or stop the service | `npm run swarm:restart` / `npm run swarm:stop` |
-| Inspect bounded service logs | `npm run swarm:logs` |
+| Inspect the final 100 lines (at most 1 MiB) of the private service log | `npm run swarm:logs` |
 
 Run `./install.sh` after source changes to build and stage an immutable release;
 then use `npm run swarm:restart` when the active-work safety gate permits it. The
 managed unit verifies the expected generated build identity. Do not manually edit
 generated `dist/` output. Installation enables the unit but does not start it.
+The canonical unit appends stdout and stderr to
+`${SWARM_STATE_DIR}/logs/service.log`; the lifecycle keeps `logs/` private at
+`0700` and the log at `0600`. Logs rotate at 16 MiB while the unit is stopped,
+retaining only `service.log.1` and the current file. Host journal access is not
+required for supported log inspection.
 
 For foreground development, load the same environment used by the service before
 starting the process. The service exposes `/health`, `/ready`, and `/status` on

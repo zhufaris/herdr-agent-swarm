@@ -401,8 +401,10 @@ npm run swarm:stop
 
 `swarm:start` waits for process-local `/health`; dependency failures remain visible as
 degraded `/ready` state without killing the service. systemd applies restart and
-bounded stop policy. Structured logs are available from the logs action and the
-user journal. Durable state remains under the standalone state directory.
+bounded stop policy. Structured logs are available from the logs action without
+requiring host journal access. The canonical unit appends stdout and stderr to
+the private `${SWARM_STATE_DIR}/logs/service.log` file (`logs/` is `0700`; the
+file is `0600`). Durable state remains under the standalone state directory.
 
 Supported native Herdr Pane and Agent events wake the bridge through the Unix
 Socket API. The managed unit receives the invocation-time `HERDR_SOCKET_PATH`;
@@ -434,7 +436,11 @@ Set `SMOKE_TIMEOUT_MS` or `BRIDGE_STATUS_URL` only when a different observation
 window or local endpoint is needed.
 
 Logs are newline-delimited Pino JSON with a stable `event` field. `npm run swarm:logs`
-prints the most recent bounded tail. Correlate a
+reads the private service log directly and prints at most its final 100 lines
+from a read window of at most 1 MiB. The lifecycle rotates logs larger than 16
+MiB only while the service is stopped and retains only `service.log.1` plus the
+current file. Host `systemd-journal` access is an optional platform capability,
+not an application prerequisite. Correlate a
 request using `eventId`, `bindingId`, `promptId`, `paneId`, or `replyId`. The
 bridge deliberately excludes Lark message bodies, terminal output, card payloads,
 and credentials from operational logs. For example:
@@ -628,9 +634,11 @@ Then perform a Lark smoke test:
 - The service cannot write SQLite: verify that
   `${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}`
   exists and is writable by the service account.
-- A standalone service action fails: inspect `systemctl --user status
-  herdr-agent-swarm.service` and `journalctl --user -u
-  herdr-agent-swarm.service -n 100 --no-pager`.
+- A standalone service action fails: run `npm run swarm:logs` and inspect
+  `systemctl --user status herdr-agent-swarm.service`. If the host separately
+  grants `systemd-journal` access, `journalctl --user -u
+  herdr-agent-swarm.service -n 100 --no-pager` is an optional platform-level
+  diagnostic.
 - A running card becomes detached after restart. The bridge observes the existing
   Herdr turn and does not replay the prompt because doing so could repeat side
   effects. If completion cannot be observed reliably, inspect the pane before

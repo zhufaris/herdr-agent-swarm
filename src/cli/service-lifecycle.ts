@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -10,7 +10,12 @@ import type { SetupLifecyclePort } from "../setup/setup-types.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
 const SERVICE_NAME = "herdr-agent-swarm.service";
-export interface LifecycleOptions { force?: boolean; requireReady?: boolean }
+export interface LifecycleOptions {
+  force?: boolean;
+  requireReady?: boolean;
+  renameLogFile?: (source: string, destination: string) => void;
+  readLogChunk?: typeof readSync;
+}
 
 export interface LifecycleInspection {
   installed: boolean;
@@ -22,6 +27,9 @@ interface RuntimePaths {
   root: string;
   configDirectory: string;
   stateDirectory: string;
+  logDirectory: string;
+  logFile: string;
+  rotatedLogFile: string;
   environmentFile: string;
   entrypoint: string;
   buildInfo: string;
@@ -30,32 +38,52 @@ interface RuntimePaths {
   nodeExecutable: string;
 }
 
+export interface PrivateLogMetadata { kind: "directory" | "file"; uid: number | bigint; nlink: number | bigint }
+
+export function validatePrivateLogMetadata(path: string, metadata: PrivateLogMetadata): void {
+  const effectiveUid = process.geteuid?.();
+  if (effectiveUid === undefined) throw new Error(`effective UID is unavailable; refusing private log path: ${path}`);
+  if (BigInt(metadata.uid) !== BigInt(effectiveUid)) throw new Error(`private log path must be owned by effective UID ${effectiveUid}: ${path}`);
+  if (metadata.kind === "file" && BigInt(metadata.nlink) !== 1n) throw new Error(`private log file must have a single link: ${path}`);
+}
+
 export async function runServiceLifecycle(action: Action, environment: NodeJS.ProcessEnv = process.env, options: LifecycleOptions = {}): Promise<number> {
   if (options.force && action !== "restart") throw new Error("--force is supported only for restart");
   const paths = runtimePaths(environment);
   mkdirSync(paths.configDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(paths.stateDirectory, { recursive: true, mode: 0o700 });
-  if (action === "install") return install(paths, environment);
+  if (action === "install") return install(paths, environment, options.renameLogFile ?? renameSync);
   if (action === "uninstall") return uninstall(paths, environment);
-  if (action === "logs") return delegate("journalctl", ["--user", "-u", paths.serviceName, "-n", "100", "--no-pager"], environment);
+  if (action === "logs") return printLogs(paths, options.readLogChunk ?? readSync);
   if (action === "status") return printStatus(paths, environment);
 
   requireInstalled(paths);
-  if (action === "restart" && !options.force) await assertRestartSafe(paths, environment);
-  if (action === "start" || action === "restart") {
-    const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
-    atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), runtimeEnvironment), 0o600);
+  if (action === "restart") await assertRestartSafe(paths, environment, options.force ?? false);
+  if (action === "restart") {
+    const stopped = delegate("systemctl", ["--user", "stop", paths.serviceName], environment);
+    if (stopped !== 0) return stopped;
+    convergeLogPaths(paths);
+    rotateLogs(paths, options.renameLogFile ?? renameSync);
+    rewriteUnit(paths, environment);
+    const reloaded = delegate("systemctl", ["--user", "daemon-reload"], environment);
+    if (reloaded !== 0) return reloaded;
+    const started = delegate("systemctl", ["--user", "start", "--no-block", paths.serviceName], environment);
+    if (started !== 0) return started;
+    return waitForStartupCompletion(paths, environment, action, restartTimeoutMs(environment), options.requireReady ?? false);
+  }
+  if (action === "start") {
+    convergeLogPaths(paths);
+    if (isUnitConfirmedInactive(paths.serviceName, environment)) rotateLogs(paths, options.renameLogFile ?? renameSync);
+    rewriteUnit(paths, environment);
     const reload = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (reload !== 0) return reload;
   }
-  const argumentsForAction = action === "restart"
-    ? ["--user", "restart", "--no-block", paths.serviceName]
-    : action === "start"
-      ? ["--user", "enable", "--now", paths.serviceName]
-      : ["--user", action, paths.serviceName];
+  const argumentsForAction = action === "start"
+    ? ["--user", "enable", "--now", paths.serviceName]
+    : ["--user", action, paths.serviceName];
   const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
-  return waitForStartupCompletion(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment), options.requireReady ?? false);
+  return waitForStartupCompletion(paths, environment, action, startTimeoutMs(environment), options.requireReady ?? false);
 }
 
 export async function inspectServiceLifecycle(environment: NodeJS.ProcessEnv = process.env): Promise<LifecycleInspection> {
@@ -81,8 +109,10 @@ export function createSetupLifecycleAdapter(environment: NodeJS.ProcessEnv = pro
   };
 }
 
-async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<void> {
-  if (!isUnitActive(paths.serviceName, base)) return;
+async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, force: boolean): Promise<void> {
+  const activity = unitActivity(paths.serviceName, base);
+  if (activity === "inactive") return;
+  if (activity === "indeterminate") throw new Error(`restart blocked: cannot determine ${paths.serviceName} unit activity; refusing to stop`);
   let status: unknown;
   try {
     const config = loadConfig(loadRuntimeEnvironment(paths, base));
@@ -112,12 +142,15 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): 
   const sqliteIntegrity = asRecord(record?.sqliteIntegrity);
   const sqliteIntegrityState = typeof sqliteIntegrity?.state === "string" ? sqliteIntegrity.state : null;
   const sqliteQuickCheck = typeof sqliteIntegrity?.quickCheck === "string" ? sqliteIntegrity.quickCheck : null;
-  if (running! > 0 || queued! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
-  if (pendingOutbox! > 0) throw new Error(`restart blocked: ${pendingOutbox} pending outbox items; wait for delivery to drain or retry with --force`);
-  if (activeDeliveries! > 0) throw new Error(`restart blocked: ${activeDeliveries} active deliveries; wait for delivery to drain or retry with --force`);
+  if (!force) {
+    if (running! > 0 || queued! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
+    if (pendingOutbox! > 0) throw new Error(`restart blocked: ${pendingOutbox} pending outbox items; wait for delivery to drain or retry with --force`);
+    if (activeDeliveries! > 0) throw new Error(`restart blocked: ${activeDeliveries} active deliveries; wait for delivery to drain or retry with --force`);
+  }
   if (startupRecoveryState !== null && startupRecoveryState !== "completed") throw new Error(`restart blocked: startup recovery is ${startupRecoveryState}, expected completed; wait for recovery or retry with --force`);
   if (sqliteIntegrityState !== null && sqliteIntegrityState !== "healthy" || sqliteQuickCheck !== null && sqliteQuickCheck !== "ok") throw new Error(`restart blocked: SQLite integrity is ${sqliteIntegrityState ?? "missing"} with quickCheck ${sqliteQuickCheck ?? "missing"}; repair integrity or retry with --force`);
-  if ([running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, pendingOutbox, activeDeliveries].some((value) => value === null) || startupRecoveryState === null || sqliteIntegrityState === null || sqliteQuickCheck === null) throw new Error("restart blocked: active service status has incomplete restart safety metrics; verify the running unit or retry with --force");
+  const workloadIncomplete = !force && [running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, pendingOutbox, activeDeliveries].some((value) => value === null);
+  if (workloadIncomplete || startupRecoveryState === null || sqliteIntegrityState === null || sqliteQuickCheck === null) throw new Error("restart blocked: active service status has incomplete restart safety metrics; verify the running unit or retry with --force");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -135,8 +168,10 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const configDirectory = requiredDirectory(environment.SWARM_CONFIG_DIR || `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm`, "SWARM_CONFIG_DIR", false);
   const stateDirectory = requiredDirectory(environment.SWARM_STATE_DIR || `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm`, "SWARM_STATE_DIR", false);
   const unitDirectory = resolve(environment.BRIDGE_SYSTEMD_UNIT_DIR || `${homedir()}/.config/systemd/user`);
+  const logDirectory = resolve(stateDirectory, "logs");
+  const logFile = resolve(logDirectory, "service.log");
   return {
-    root, configDirectory, stateDirectory, serviceName: SERVICE_NAME,
+    root, configDirectory, stateDirectory, logDirectory, logFile, rotatedLogFile: `${logFile}.1`, serviceName: SERVICE_NAME,
     environmentFile: resolve(configDirectory, ".env"),
     entrypoint: resolve(root, "dist/main.js"), buildInfo: resolve(root, "dist/build-info.json"),
     unitFile: resolve(unitDirectory, SERVICE_NAME),
@@ -162,10 +197,12 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
   return environment;
 }
 
-function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
+function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv, renameFile: (source: string, destination: string) => void): number {
   if (!existsSync(paths.entrypoint)) throw new Error(`compiled service entrypoint not found: ${paths.entrypoint}; run npm run build first`);
   const identity = loadBuildIdentity(paths.buildInfo);
   const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
+  convergeLogPaths(paths);
+  if (unitActivity(paths.serviceName, environment) === "inactive") rotateLogs(paths, renameFile);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
   atomicWrite(paths.unitFile, renderUnit(paths, identity, runtimeEnvironment), 0o600);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
@@ -198,6 +235,8 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
     `ExecStart=${systemdEscape(paths.nodeExecutable)} --enable-source-maps ${systemdEscape(paths.entrypoint)}`,
+    `StandardOutput=append:${systemdEscape(paths.logFile)}`,
+    `StandardError=append:${systemdEscape(paths.logFile)}`,
     "Restart=on-failure",
     "RestartSec=5",
     "TimeoutStopSec=50",
@@ -208,9 +247,107 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
   ].join("\n");
 }
 
+function convergeLogPaths(paths: RuntimePaths): void {
+  const existingDirectory = lstatOptional(paths.logDirectory);
+  if (!existingDirectory) mkdirSync(paths.logDirectory, { mode: 0o700 });
+  validateLogDirectory(paths.logDirectory);
+  const directoryDescriptor = openSync(paths.logDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const openedDirectory = fstatSync(directoryDescriptor);
+    if (!openedDirectory.isDirectory()) throw new Error(`private log directory must be a directory: ${paths.logDirectory}`);
+    validatePrivateLogMetadata(paths.logDirectory, { kind: "directory", uid: openedDirectory.uid, nlink: openedDirectory.nlink });
+    fchmodSync(directoryDescriptor, 0o700);
+  } finally { closeSync(directoryDescriptor); }
+  const descriptor = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
+  try { fchmodSync(descriptor, 0o600); } finally { closeSync(descriptor); }
+  validateOptionalRegularLogFile(paths.rotatedLogFile);
+}
+
+function rotateLogs(paths: RuntimePaths, renameFile: (source: string, destination: string) => void): void {
+  const descriptor = openRegularLogFile(paths.logFile, constants.O_RDONLY);
+  let size: number;
+  try { size = fstatSync(descriptor).size; } finally { closeSync(descriptor); }
+  if (size <= 16 * 1024 * 1024) return;
+  validateOptionalRegularLogFile(paths.rotatedLogFile);
+  renameFile(paths.logFile, paths.rotatedLogFile);
+  const replacement = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_EXCL, 0o600);
+  closeSync(replacement);
+}
+
+function openRegularLogFile(path: string, flags: number, mode?: number): number {
+  const existing = lstatOptional(path);
+  if (existing && (existing.isSymbolicLink() || !existing.isFile())) throw new Error(`private log path must be a regular file without symlinks: ${path}`);
+  if (existing) validatePrivateLogMetadata(path, { kind: "file", uid: existing.uid, nlink: existing.nlink });
+  let descriptor: number;
+  try { descriptor = openSync(path, flags | constants.O_NOFOLLOW, mode); } catch (error) {
+    throw new Error(`private log path must be a regular file without symlinks: ${path} (${safeMessage(error)})`);
+  }
+  const opened = fstatSync(descriptor);
+  if (!opened.isFile()) { closeSync(descriptor); throw new Error(`private log path must be a regular file: ${path}`); }
+  try { validatePrivateLogMetadata(path, { kind: "file", uid: opened.uid, nlink: opened.nlink }); } catch (error) { closeSync(descriptor); throw error; }
+  return descriptor;
+}
+
+function validateOptionalRegularLogFile(path: string): void {
+  const status = lstatOptional(path);
+  if (!status) return;
+  if (status.isSymbolicLink() || !status.isFile()) throw new Error(`private log path must be a regular file without symlinks: ${path}`);
+  validatePrivateLogMetadata(path, { kind: "file", uid: status.uid, nlink: status.nlink });
+  const descriptor = openRegularLogFile(path, constants.O_RDONLY);
+  closeSync(descriptor);
+}
+
+function validateLogDirectory(path: string): void {
+  const directory = lstatSync(path);
+  if (directory.isSymbolicLink()) throw new Error(`private log directory must not be a symlink: ${path}`);
+  if (!directory.isDirectory()) throw new Error(`private log directory must be a directory: ${path}`);
+  validatePrivateLogMetadata(path, { kind: "directory", uid: directory.uid, nlink: directory.nlink });
+}
+
+function lstatOptional(path: string): ReturnType<typeof lstatSync> | null {
+  try { return lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function rewriteUnit(paths: RuntimePaths, environment: NodeJS.ProcessEnv): void {
+  const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
+  atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), runtimeEnvironment), 0o600);
+}
+
+function printLogs(paths: RuntimePaths, readChunk: typeof readSync): number {
+  validateLogDirectory(paths.logDirectory);
+  const descriptor = openRegularLogFile(paths.logFile, constants.O_RDONLY);
+  try {
+    const size = fstatSync(descriptor).size;
+    const length = Math.min(size, 1024 * 1024);
+    const position = size - length;
+    const buffer = Buffer.alloc(length);
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const count = readChunk(descriptor, buffer, bytesRead, length - bytesRead, position + bytesRead);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    let startsAtBoundary = position === 0;
+    if (position > 0) {
+      const preceding = Buffer.alloc(1);
+      startsAtBoundary = readChunk(descriptor, preceding, 0, 1, position - 1) === 1 && preceding[0] === 0x0a;
+    }
+    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
+    if (!startsAtBoundary) lines.shift();
+    if (lines.at(-1) === "") lines.pop();
+    process.stdout.write(`private service log: ${paths.logFile} (final 100 lines, final 1 MiB maximum)\n`);
+    const tail = lines.slice(-100);
+    if (tail.length > 0) process.stdout.write(`${tail.join("\n")}\n`);
+    return 0;
+  } finally { closeSync(descriptor); }
+}
+
 function systemdEscape(value: string): string {
-  if (!value || /[\r\n]/.test(value)) throw new Error("invalid systemd value");
-  return value.replaceAll("%", "%%").replaceAll(" ", "\\x20");
+  if (!value || /[\x00-\x1f\x7f]/.test(value)) throw new Error("invalid systemd value");
+  return value.replaceAll("%", "%%").replaceAll("\\", "\\x5c").replaceAll("\"", "\\x22").replaceAll(" ", "\\x20");
 }
 
 function atomicWrite(path: string, content: string, mode: number): void {
@@ -324,6 +461,20 @@ function normalizeIpAddress(value: string): string {
 function isUnitActive(serviceName: string, environment: NodeJS.ProcessEnv): boolean {
   const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: environment, encoding: "utf8", timeout: 5_000 });
   return unit.status === 0 && unit.stdout.trim() === "active";
+}
+
+function isUnitConfirmedInactive(serviceName: string, environment: NodeJS.ProcessEnv): boolean {
+  const activity = unitActivity(serviceName, environment);
+  if (activity === "active") return false;
+  if (activity === "inactive") return true;
+  throw new Error(`cannot confirm ${serviceName} is inactive; refusing log rotation`);
+}
+
+function unitActivity(serviceName: string, environment: NodeJS.ProcessEnv): "active" | "inactive" | "indeterminate" {
+  const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: environment, encoding: "utf8", timeout: 5_000 });
+  if (unit.status === 0 && unit.stdout.trim() === "active") return "active";
+  if (unit.status === 3 && unit.stdout.trim() === "inactive") return "inactive";
+  return "indeterminate";
 }
 
 function delegate(command: string, args: string[], environment: NodeJS.ProcessEnv, tolerateFailure = false): number {

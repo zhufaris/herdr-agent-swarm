@@ -1,10 +1,11 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { createSetupLifecycleAdapter, inspectServiceLifecycle, runServiceLifecycle } from "../src/cli/service-lifecycle.js";
+import { describe, expect, it, vi } from "vitest";
+import { createSetupLifecycleAdapter, inspectServiceLifecycle, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
 
 describe("service lifecycle", () => {
   it("inspects installation and activity without mutating lifecycle state", async () => {
@@ -134,10 +135,241 @@ describe("service lifecycle", () => {
     expect(unit).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:test-build");
     expect(unit).toContain("Environment=HERDR_SOCKET_PATH=/tmp/test-herdr.sock");
     expect(unit).toContain("Restart=on-failure");
+    expect(unit).toContain(`StandardOutput=append:${fixture.state}/logs/service.log`);
+    expect(unit).toContain(`StandardError=append:${fixture.state}/logs/service.log`);
+    expect(statSync(join(fixture.state, "logs")).mode & 0o777).toBe(0o700);
+    expect(statSync(join(fixture.state, "logs/service.log")).mode & 0o777).toBe(0o600);
     await expect(runServiceLifecycle("stop", fixture.environment)).resolves.toBe(0);
     expect(readFileSync(fixture.calls, "utf8").trim().split(/\n/)).toEqual([
-      "--user daemon-reload", "--user enable herdr-agent-swarm.service", "--user stop herdr-agent-swarm.service"
+      "--user is-active herdr-agent-swarm.service", "--user daemon-reload", "--user enable herdr-agent-swarm.service", "--user stop herdr-agent-swarm.service"
     ]);
+  });
+
+  it("converges private log permissions without rotating during install", async () => {
+    const fixture = createFixture({ active: true });
+    const logDirectory = join(fixture.state, "logs");
+    const logFile = join(logDirectory, "service.log");
+    mkdirSync(logDirectory, { mode: 0o755 });
+    writeFileSync(logFile, "active writer content", { mode: 0o644 });
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+
+    await runServiceLifecycle("install", fixture.environment);
+
+    expect(statSync(logDirectory).mode & 0o777).toBe(0o700);
+    expect(statSync(logFile).mode & 0o777).toBe(0o600);
+    expect(statSync(logFile).size).toBe(16 * 1024 * 1024 + 1);
+    expect(existsSync(`${logFile}.1`)).toBe(false);
+  });
+
+  it("rotates an oversized log during install only when inactivity is confirmed", async () => {
+    const fixture = createFixture({ active: false });
+    const logDirectory = join(fixture.state, "logs");
+    const logFile = join(logDirectory, "service.log");
+    mkdirSync(logDirectory, { mode: 0o700 });
+    writeFileSync(logFile, "old log", { mode: 0o600 });
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+
+    await runServiceLifecycle("install", fixture.environment);
+
+    expect(statSync(logFile).size).toBe(0);
+    expect(statSync(`${logFile}.1`).size).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it("does not rotate during install when unit activity is indeterminate", async () => {
+    const fixture = createFixture({ activeStatus: "unknown" });
+    const logDirectory = join(fixture.state, "logs");
+    const logFile = join(logDirectory, "service.log");
+    mkdirSync(logDirectory, { mode: 0o700 });
+    writeFileSync(logFile, "old log", { mode: 0o600 });
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+
+    await runServiceLifecycle("install", fixture.environment);
+
+    expect(statSync(logFile).size).toBe(16 * 1024 * 1024 + 1);
+    expect(existsSync(`${logFile}.1`)).toBe(false);
+  });
+
+  it.each([false, true])("rejects indeterminate restart activity before stop with force=%s", async (force) => {
+    const fixture = createFixture({ activeStatus: "unknown" });
+    await runServiceLifecycle("install", fixture.environment);
+    writeFileSync(fixture.calls, "");
+
+    await expect(runServiceLifecycle("restart", fixture.environment, { force })).rejects.toThrow(/cannot determine.*unit.*activity/i);
+    expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
+  });
+
+  it("rejects symlink and non-regular private log paths without following or blocking", async () => {
+    const directoryFixture = createFixture();
+    const outside = join(directoryFixture.root, "outside");
+    mkdirSync(outside);
+    symlinkSync(outside, join(directoryFixture.state, "logs"));
+    await expect(runServiceLifecycle("install", directoryFixture.environment)).rejects.toThrow(/log directory.*symlink/i);
+
+    const fileFixture = createFixture();
+    mkdirSync(join(fileFixture.state, "logs"));
+    const outsideFile = join(fileFixture.root, "outside.log");
+    writeFileSync(outsideFile, "outside");
+    symlinkSync(outsideFile, join(fileFixture.state, "logs/service.log"));
+    await expect(runServiceLifecycle("install", fileFixture.environment)).rejects.toThrow(/regular file.*service.log/i);
+    expect(readFileSync(outsideFile, "utf8")).toBe("outside");
+
+    const fifoFixture = createFixture();
+    mkdirSync(join(fifoFixture.state, "logs"));
+    execFileSync("mkfifo", [join(fifoFixture.state, "logs/service.log")]);
+    await expect(runServiceLifecycle("install", fifoFixture.environment)).rejects.toThrow(/regular file.*service.log/i);
+  });
+
+  it("does not traverse a symlinked log directory while reading logs", async () => {
+    const fixture = createFixture();
+    const outside = join(fixture.root, "outside-logs");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "service.log"), "must-not-be-read\n");
+    symlinkSync(outside, join(fixture.state, "logs"));
+
+    await expect(runServiceLifecycle("logs", fixture.environment)).rejects.toThrow(/log directory.*symlink/i);
+  });
+
+  it("rejects hard-linked current logs before install chmod or log reading", async () => {
+    for (const action of ["install", "logs"] as const) {
+      const fixture = createFixture();
+      const logs = join(fixture.state, "logs");
+      mkdirSync(logs);
+      const outside = join(fixture.root, "outside.log");
+      writeFileSync(outside, "outside", { mode: 0o644 });
+      linkSync(outside, join(logs, "service.log"));
+
+      await expect(runServiceLifecycle(action, fixture.environment)).rejects.toThrow(/single link.*service.log/i);
+      expect(statSync(outside).mode & 0o777).toBe(0o644);
+      expect(readFileSync(outside, "utf8")).toBe("outside");
+    }
+  });
+
+  it("rejects a hard-linked rotated log before rotation", async () => {
+    const fixture = createFixture({ active: false });
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log"), "current");
+    truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
+    const outside = join(fixture.root, "outside.log");
+    writeFileSync(outside, "prior");
+    linkSync(outside, join(logs, "service.log.1"));
+
+    await expect(runServiceLifecycle("install", fixture.environment)).rejects.toThrow(/single link.*service.log.1/i);
+    expect(statSync(join(logs, "service.log")).size).toBe(16 * 1024 * 1024 + 1);
+    expect(readFileSync(outside, "utf8")).toBe("prior");
+  });
+
+  it("rejects foreign-owned file and directory metadata", () => {
+    const effectiveUid = process.geteuid?.();
+    expect(effectiveUid).toBeTypeOf("number");
+    expect(() => validatePrivateLogMetadata("logs", { kind: "directory", uid: effectiveUid! + 1, nlink: 2 })).toThrow(/owned by effective UID/);
+    expect(() => validatePrivateLogMetadata("service.log", { kind: "file", uid: effectiveUid! + 1, nlink: 1 })).toThrow(/owned by effective UID/);
+  });
+
+  it("rejects unsafe rotated targets before replacing them", async () => {
+    const fixture = createFixture({ active: false });
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log"), "current");
+    truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
+    symlinkSync(join(fixture.root, "outside.log"), join(logs, "service.log.1"));
+
+    await expect(runServiceLifecycle("install", fixture.environment)).rejects.toThrow(/regular file.*service.log.1/i);
+    expect(statSync(join(logs, "service.log")).size).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it("preserves the prior rotated log when atomic rename fails", async () => {
+    const fixture = createFixture({ active: false });
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log"), "current");
+    truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
+    writeFileSync(join(logs, "service.log.1"), "prior");
+
+    await expect(runServiceLifecycle("install", fixture.environment, { renameLogFile: () => { throw new Error("injected rename failure"); } }))
+      .rejects.toThrow(/injected rename failure/);
+    expect(readFileSync(join(logs, "service.log.1"), "utf8")).toBe("prior");
+    expect(statSync(join(logs, "service.log")).size).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it("escapes systemd path metacharacters in log directives", async () => {
+    const fixture = createFixture();
+    const state = join(fixture.root, 'state path%\\"quoted');
+    const environment = { ...fixture.environment, SWARM_STATE_DIR: state };
+
+    await runServiceLifecycle("install", environment);
+
+    const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
+    const escaped = `${fixture.root}/${String.raw`state\x20path%%\x5c\x22quoted/logs/service.log`}`;
+    expect(unit).toContain(`StandardOutput=append:${escaped}`);
+    expect(unit).toContain(`StandardError=append:${escaped}`);
+  });
+
+  it.each(["\t", "\u0001"])("rejects systemd paths containing control character %j", async (control) => {
+    const fixture = createFixture();
+    await expect(runServiceLifecycle("install", { ...fixture.environment, SWARM_STATE_DIR: join(fixture.root, `state${control}path`) }))
+      .rejects.toThrow(/invalid systemd value/);
+  });
+
+  it("prints at most the final 100 records from at most the final 1 MiB without journalctl", async () => {
+    const fixture = createFixture();
+    const logDirectory = join(fixture.state, "logs");
+    const logFile = join(logDirectory, "service.log");
+    mkdirSync(logDirectory, { mode: 0o700 });
+    const records = Array.from({ length: 120 }, (_, index) => `record-${index + 1}`);
+    writeFileSync(logFile, `excluded-old-record\n${"x".repeat(1024 * 1024)}\n${records.join("\n")}\n`, { mode: 0o600 });
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try {
+      await expect(runServiceLifecycle("logs", fixture.environment)).resolves.toBe(0);
+    } finally { write.mockRestore(); }
+
+    expect(output).toContain(`private service log: ${logFile}`);
+    expect(output).not.toContain("excluded-old-record");
+    const printedRecords = output.split("\n").filter((line) => line.startsWith("record-"));
+    expect(printedRecords).toHaveLength(100);
+    expect(printedRecords[0]).toBe("record-21");
+    expect(printedRecords.at(-1)).toBe("record-120");
+    expect(existsSync(fixture.journalCalls)).toBe(false);
+  });
+
+  it("discards a partial first record when the bounded log window starts mid-line", async () => {
+    const fixture = createFixture();
+    const logDirectory = join(fixture.state, "logs");
+    const logFile = join(logDirectory, "service.log");
+    mkdirSync(logDirectory, { mode: 0o700 });
+    writeFileSync(logFile, `${"partial-record".repeat(100_000)}\ncomplete-1\ncomplete-2\n`, { mode: 0o600 });
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try { await runServiceLifecycle("logs", fixture.environment); } finally { write.mockRestore(); }
+
+    expect(output).not.toContain("partial-record");
+    expect(output).toContain("complete-1\ncomplete-2\n");
+  });
+
+  it("keeps a complete first record when the bounded window starts on a newline boundary", async () => {
+    const fixture = createFixture();
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    const suffix = `complete-first\n${"x".repeat(1024 * 1024 - 16)}\n`;
+    writeFileSync(join(logs, "service.log"), `old\n${suffix}`);
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try { await runServiceLifecycle("logs", fixture.environment); } finally { write.mockRestore(); }
+    expect(output).toContain("complete-first\n");
+  });
+
+  it("continues bounded reads after a short read", async () => {
+    const fixture = createFixture();
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log"), "one\ntwo\nthree\n");
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try {
+      await runServiceLifecycle("logs", fixture.environment, { readLogChunk: (fd, buffer, offset, length, position) => readSync(fd, buffer, offset, Math.min(length, 2), position) });
+    } finally { write.mockRestore(); }
+    expect(output).toContain("one\ntwo\nthree\n");
   });
 
   it("preserves config and state while uninstalling only the service", async () => {
@@ -150,12 +382,46 @@ describe("service lifecycle", () => {
   });
 
   it("refreshes the unit identity before restarting a rebuilt service", async () => {
-    const fixture = createFixture();
+    const fixture = createFixture({ active: false });
     await runServiceLifecycle("install", fixture.environment);
     writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
     await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }, { force: true })).rejects.toThrow();
     expect(readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
-    expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block herdr-agent-swarm.service");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user stop herdr-agent-swarm.service\n--user daemon-reload\n--user start --no-block herdr-agent-swarm.service");
+  });
+
+  it("rotates an oversized log before starting an inactive unit", async () => {
+    const fixture = createFixture({ active: false });
+    await runServiceLifecycle("install", fixture.environment);
+    const logFile = join(fixture.state, "logs/service.log");
+    writeFileSync(logFile, "old log");
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+    writeFileSync(fixture.calls, "");
+
+    await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "20" })).rejects.toThrow(/did not complete startup/);
+
+    expect(statSync(logFile).size).toBe(0);
+    expect(statSync(`${logFile}.1`).size).toBe(16 * 1024 * 1024 + 1);
+    expect(statSync(logFile).mode & 0o777).toBe(0o600);
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user is-active herdr-agent-swarm.service\n--user daemon-reload\n--user enable --now herdr-agent-swarm.service");
+  });
+
+  it("fails closed when restart cannot stop the active writer", async () => {
+    const fixture = createFixture({ active: false, stopExit: 7 });
+    await runServiceLifecycle("install", fixture.environment);
+    const unitFile = join(fixture.units, "herdr-agent-swarm.service");
+    const unitBefore = readFileSync(unitFile, "utf8");
+    const logFile = join(fixture.state, "logs/service.log");
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+    writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
+    writeFileSync(fixture.calls, "");
+
+    await expect(runServiceLifecycle("restart", fixture.environment, { force: true })).resolves.toBe(7);
+
+    expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n--user stop herdr-agent-swarm.service\n");
+    expect(statSync(logFile).size).toBe(16 * 1024 * 1024 + 1);
+    expect(existsSync(`${logFile}.1`)).toBe(false);
+    expect(readFileSync(unitFile, "utf8")).toBe(unitBefore);
   });
 
   it("refuses an unforced restart while the running service reports active turns", async () => {
@@ -326,7 +592,26 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("install", fixture.environment);
       await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" }, { force: true })).resolves.toBe(0);
       expect(statusRequests).toBeGreaterThanOrEqual(2);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block herdr-agent-swarm.service");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user start --no-block herdr-agent-swarm.service");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it.each([
+    ["foreign identity", { identity: { serviceId: "another-service", buildId: "sha256:test-build" } }, /identity.*another-service/i],
+    ["incomplete recovery", { startupRecovery: { state: "running" } }, /startup recovery.*running/i],
+    ["unhealthy SQLite", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /SQLite integrity/i]
+  ])("does not let force bypass %s validation", async (_name, override, expected) => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus(override)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      writeFileSync(fixture.calls, "");
+      await expect(runServiceLifecycle("restart", fixture.environment, { force: true })).rejects.toThrow(expected);
+      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -344,7 +629,7 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("install", fixture.environment);
       await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
       expect(statusRequests).toBeGreaterThanOrEqual(2);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block herdr-agent-swarm.service");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user start --no-block herdr-agent-swarm.service");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -631,7 +916,7 @@ describe("service lifecycle", () => {
 
       await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }, { force: true }))
         .rejects.toThrow(/listener.*PID.*canonical unit.*MainPID/i);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block herdr-agent-swarm.service");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user start --no-block herdr-agent-swarm.service");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -703,7 +988,7 @@ function completedStartupStatus(overrides: Record<string, unknown> = {}): Record
   };
 }
 
-function createFixture(options: { active?: boolean; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number } = {}) {
+function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "agent-swarm-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -712,6 +997,7 @@ function createFixture(options: { active?: boolean; port?: number; mainPid?: num
   const bin = join(root, "bin");
   const calls = join(root, "systemctl.calls");
   const ssCalls = join(root, "ss.calls");
+  const journalCalls = join(root, "journalctl.calls");
   for (const directory of [config, state, dist, units, bin]) mkdirSync(directory);
   writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: root }] }));
   writeFileSync(join(config, ".env"), [
@@ -721,14 +1007,15 @@ function createFixture(options: { active?: boolean; port?: number; mainPid?: num
   writeFileSync(join(dist, "main.js"), "// fixture\n");
   writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${active ? 'echo active; exit 0' : 'echo inactive; exit 3'}; fi\nif [ "$2" = "show" ]; then echo ${options.mainPid ?? process.pid}; exit 0; fi\nexit 0\n`);
+  const activity = options.activeStatus === "unknown" ? "echo unknown; exit 4" : active ? "echo active; exit 0" : "echo inactive; exit 3";
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then echo ${options.mainPid ?? process.pid}; exit 0; fi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nexit 0\n`);
   const ssOutput = options.ssOutput ?? `LISTEN 0 511 127.0.0.1:${options.port ?? 39001} 0.0.0.0:* users:(("node",pid=${options.listenerPid ?? process.pid},fd=20))`;
   writeFileSync(join(bin, "ss"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(ssCalls)}\nprintf '%b\n' ${JSON.stringify(ssOutput)}\nexit ${options.ssExit ?? 0}\n`);
-  writeFileSync(join(bin, "journalctl"), "#!/bin/sh\nexit 0\n");
+  writeFileSync(join(bin, "journalctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(journalCalls)}\nexit 0\n`);
   chmodSync(join(bin, "systemctl"), 0o755);
   chmodSync(join(bin, "journalctl"), 0o755);
   chmodSync(join(bin, "ss"), 0o755);
-  return { root, config, state, units, calls, ssCalls, environment: {
+  return { root, config, state, units, calls, ssCalls, journalCalls, environment: {
     PATH: `${bin}:${process.env.PATH}`,
     SWARM_ROOT: root, SWARM_CONFIG_DIR: config, SWARM_STATE_DIR: state,
     BRIDGE_SYSTEMD_UNIT_DIR: units, HERDR_SOCKET_PATH: "/tmp/test-herdr.sock"
