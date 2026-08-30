@@ -350,6 +350,23 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("logs one workspace outage and one recovery across repeated scans", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const warnings: object[] = [];
+    const infos: object[] = [];
+    const logger = { warn(value: object) { warnings.push(value); }, info(value: object) { infos.push(value); }, error() {}, debug() {} } as unknown as pino.Logger;
+    const listPanes = vi.fn().mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline")).mockResolvedValue([]);
+    const reconciler = fixture(store, { listPanes } as unknown as HerdrPort, undefined, logger);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(warnings.filter((value) => (value as { event?: string }).event === "workspace-reconciliation-failed")).toHaveLength(1);
+    expect(infos.filter((value) => (value as { event?: string }).event === "workspace-reconciliation-recovered")).toHaveLength(1);
+    store.close();
+  });
+
   it("projects a changed authoritative Herdr tab ID for the main card", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

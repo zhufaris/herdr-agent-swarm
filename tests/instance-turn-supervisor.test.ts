@@ -71,6 +71,21 @@ describe("InstanceTurnSupervisor", () => {
     expect(supervisor.snapshot()).toMatchObject({ lastFailure: "temporary Herdr failure" });
   });
 
+  it("logs repeated observation failures once and emits one recovery record", async () => {
+    const { supervisor, inspectPane } = setup("running");
+    const warnings: object[] = [];
+    const infos: object[] = [];
+    (supervisor as unknown as { options: { logger: object } }).options.logger = { warn(value: object) { warnings.push(value); }, info(value: object) { infos.push(value); } };
+    inspectPane.mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"));
+
+    await supervisor.reconcile();
+    await supervisor.reconcile();
+    expect(warnings.filter((value) => (value as { event?: string }).event === "instance-turn-observation-failed")).toHaveLength(1);
+
+    await supervisor.reconcile();
+    expect(infos.filter((value) => (value as { event?: string }).event === "instance-turn-observation-recovered")).toHaveLength(1);
+  });
+
   it("uses one shared pane snapshot for multiple observable turns", async () => {
     store = new SqliteBindingStore(":memory:");
     const actor = { kind: "human" as const, userId: "u1" };

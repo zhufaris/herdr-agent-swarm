@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { extractHerdrEventIds } from "./herdr-event-inbox.js";
 import { safeLogError } from "./safe-error.js";
+import { FailureLogGate } from "./failure-log-gate.js";
 
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_FRAMES_PER_TICK = 256;
@@ -66,6 +67,7 @@ export class HerdrSocketSubscriber {
   private responses = 0;
   private requestFailures = 0;
   private transportFailures = 0;
+  private readonly failureLogs = new FailureLogGate();
 
   constructor(
     private readonly socketPath: string,
@@ -97,6 +99,7 @@ export class HerdrSocketSubscriber {
     this.eventsConnected = false;
     this.rejectPending("socket_stopped");
     this.resolveAllPaneWaiters(false);
+    this.failureLogs.clear();
     const socket = this.socket;
     this.socket = null;
     for (const pending of this.pendingRequests.values()) pending.socket.destroy();
@@ -195,11 +198,12 @@ export class HerdrSocketSubscriber {
         ...[...this.subscribedPaneIds].map((pane_id) => ({ type: "pane.agent_status_changed", pane_id }))
       ];
       socket.write(`${JSON.stringify({ id: "herdr-lark-bridge-events", method: "events.subscribe", params: { subscriptions } })}\n`);
-      this.logger.info({ event: "herdr-socket-connected", subscriptionCount: subscriptions.length, paneCount: this.subscribedPaneIds.size, outcome: "connected" }, "connected to Herdr native event stream");
+      const recovery = this.failureLogs.recover("event-stream");
+      this.logger.info({ event: recovery ? "herdr-socket-recovered" : "herdr-socket-connected", subscriptionCount: subscriptions.length, paneCount: this.subscribedPaneIds.size, ...(recovery ?? {}), outcome: "connected" }, recovery ? "Herdr native event stream recovered" : "connected to Herdr native event stream");
       this.emit({ event: "socket.connected", workspaceIds: [], paneIds: [] });
     });
     socket.on("data", (chunk: string) => this.receive(chunk));
-    socket.on("error", (error) => this.logger.warn({ event: "herdr-socket-error", err: safeLogError(error), outcome: "reconnecting" }, "Herdr native event stream failed"));
+    socket.on("error", (error) => this.logConnectionFailure(error, "herdr-socket-error", "Herdr native event stream failed"));
     socket.once("close", () => {
       if (this.socket === socket) this.socket = null;
       this.eventsConnected = false;
@@ -363,8 +367,15 @@ export class HerdrSocketSubscriber {
   }
 
   private failed(error: unknown): void {
-    this.logger.warn({ event: "herdr-socket-connect-failed", err: safeLogError(error), outcome: "reconnecting" }, "could not prepare Herdr native event subscription");
+    this.logConnectionFailure(error, "herdr-socket-connect-failed", "could not prepare Herdr native event subscription");
     this.scheduleReconnect();
+  }
+
+  private logConnectionFailure(error: unknown, event: string, message: string): void {
+    const safe = safeLogError(error);
+    const decision = this.failureLogs.fail("event-stream", safe.message);
+    if (decision.kind === "suppressed") return;
+    this.logger.warn({ event: decision.kind === "summary" ? "herdr-socket-failure-summary" : event, err: safe, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "reconnecting" }, message);
   }
 
   private scheduleReconnect(): void {

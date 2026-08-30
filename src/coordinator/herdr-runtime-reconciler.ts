@@ -10,6 +10,7 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
+import { FailureLogGate } from "../runtime/failure-log-gate.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -62,6 +63,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private lastDurationMs: number | null = null;
   private maxDurationMs: number | null = null;
   private lastOutcome: ReconciliationDiagnostics["lastOutcome"] = null;
+  private readonly workspaceFailureLogs = new FailureLogGate();
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
@@ -226,7 +228,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
           const next = binding.degradationCount + 1 >= 2
             ? await this.orphanMissingPane(binding, `Herdr workspace ${binding.workspaceId} remained unavailable`)
             : this.options.store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: false, orphanThreshold: 2 });
-          this.options.logger.warn({ event: "binding-pane-probe-failed", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, degradationCount: next.degradationCount, outcome: next.attachment, reason: "workspace_unavailable" }, "could not observe binding because its workspace was unavailable");
           continue;
         }
         if (binding.paneId && !paneIdsByWorkspace.get(binding.workspaceId)!.has(binding.paneId)) await this.orphanMissingPane(binding);
@@ -363,9 +364,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
   private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {
     await Promise.all(workspaceIds.map(async (workspaceId) => {
-      try { panesByWorkspace.set(workspaceId, await this.options.herdr.listPanes(workspaceId)); }
+      try {
+        panesByWorkspace.set(workspaceId, await this.options.herdr.listPanes(workspaceId));
+        const recovery = this.workspaceFailureLogs.recover(workspaceId);
+        if (recovery) this.options.logger.info({ event: "workspace-reconciliation-recovered", workspaceId, ...recovery, outcome: "recovered" }, "workspace reconciliation recovered");
+      }
       catch (error) {
-        this.options.logger.error({ event: "workspace-reconciliation-failed", err: safeLogError(error), workspaceId, outcome: "failed" }, "workspace reconciliation failed");
+        const safe = safeLogError(error);
+        const decision = this.workspaceFailureLogs.fail(workspaceId, safe.message);
+        if (decision.kind !== "suppressed") this.options.logger.warn({ event: decision.kind === "summary" ? "workspace-reconciliation-failure-summary" : "workspace-reconciliation-failed", err: safe, workspaceId, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "failed" }, "workspace reconciliation failed");
       }
     }));
   }

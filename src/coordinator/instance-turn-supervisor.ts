@@ -3,6 +3,7 @@ import { matchesHerdrAgentKind } from "../domain/agent-instance.js";
 import type { InstanceStore } from "../domain/ports.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { FailureLogGate } from "../runtime/failure-log-gate.js";
 
 interface Options { store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; logger?: Pick<Logger, "info" | "warn"> }
 
@@ -14,6 +15,7 @@ export class InstanceTurnSupervisor {
   private lastScanAt: string | null = null;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
+  private readonly failureLogs = new FailureLogGate();
 
   constructor(private readonly options: Options) {}
 
@@ -50,10 +52,16 @@ export class InstanceTurnSupervisor {
       catch { /* Older or degraded Herdr paths retain targeted observation. */ }
     }
     for (const turn of turns) {
-      try { await this.observe(turn.id, panesById); }
+      try {
+        await this.observe(turn.id, panesById);
+        const recovery = this.failureLogs.recover(turn.instanceId);
+        if (recovery) this.options.logger?.info({ event: "instance-turn-observation-recovered", instanceId: turn.instanceId, turnId: turn.id, ...recovery, outcome: "recovered" }, "instance turn observation recovered");
+      }
       catch (error) {
         this.lastFailureAt = new Date().toISOString(); this.lastFailure = safeLogError(error).message;
-        this.options.logger?.warn({ event: "instance-turn-observation-failed", err: safeLogError(error), instanceId: turn.instanceId, turnId: turn.id, outcome: "retry_later" }, "instance turn observation failed");
+        const safe = safeLogError(error);
+        const decision = this.failureLogs.fail(turn.instanceId, safe.message);
+        if (decision.kind !== "suppressed") this.options.logger?.warn({ event: decision.kind === "summary" ? "instance-turn-observation-failure-summary" : "instance-turn-observation-failed", err: safe, instanceId: turn.instanceId, turnId: turn.id, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "retry_later" }, "instance turn observation failed");
       }
     }
     this.lastScanAt = new Date().toISOString();
