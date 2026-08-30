@@ -5,6 +5,7 @@ import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle,
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { callbackButton } from "./cardkit-button.js";
+import { appendWithinCardLimit } from "./card-payload.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 
 const RUN_STATE_VIEW = {
@@ -37,14 +38,24 @@ const CODE_FOLD_LINE_LIMIT = 80;
 const CODE_FOLD_CHARACTER_LIMIT = 6_000;
 
 export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }): object {
+  const elements: object[] = [];
+  let visible = 0;
+  for (const project of input.projects) {
+    const entry = [
+      { tag: "markdown", content: `**${escapeMarkdown(project.displayName)}**\n${escapeMarkdown(project.description)}` },
+      callbackButton(`打开 ${project.displayName}`, { action: "select_project", selectionId: input.selectionId, projectId: project.id }, "primary")
+    ];
+    if (!appendWithinCardLimit(elements, entry)) break;
+    elements.push(...entry);
+    visible += 1;
+  }
+  const omitted = input.projects.length - visible;
+  if (omitted > 0) elements.push({ tag: "markdown", content: `… 另有 ${omitted} 个项目未在本卡展示，请缩小项目注册表后重试。` });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: "选择 Herdr 项目" } },
     header: { title: { tag: "plain_text", content: "选择项目" }, subtitle: { tag: "plain_text", content: "HERDR PROJECTS" }, template: "blue" },
-    body: { elements: input.projects.flatMap((project) => [
-      { tag: "markdown", content: `**${escapeMarkdown(project.displayName)}**\n${escapeMarkdown(project.description)}` },
-      callbackButton(`打开 ${project.displayName}`, { action: "select_project", selectionId: input.selectionId, projectId: project.id }, "primary")
-    ]) }
+    body: { elements }
   };
 }
 

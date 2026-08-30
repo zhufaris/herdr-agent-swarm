@@ -1,9 +1,10 @@
 import type { AgentState } from "../domain/types.js";
 import { callbackButton } from "./cardkit-button.js";
+import { MAX_CARD_SERIALIZED_LENGTH, appendWithinCardLimit } from "./card-payload.js";
 
-const MAX_CARD_SERIALIZED_LENGTH = 12_000;
 const MAX_PANE_ROWS_PER_PAGE = 16;
 const MAX_FIELD_LENGTH = 160;
+const MAX_VISIBLE_DIRECTORIES = 8;
 
 interface SpaceDirectoryPane {
   paneId: string;
@@ -37,7 +38,7 @@ export function renderSpaceDirectoryCards(groups: SpaceDirectoryGroup[]): object
   for (const section of sections) {
     const separator = page.length ? [{ tag: "hr" }] : [];
     const candidate = [...page, ...separator, ...section.elements];
-    if (page.length && (paneRows + section.paneRows > MAX_PANE_ROWS_PER_PAGE || JSON.stringify(candidate).length > MAX_CARD_SERIALIZED_LENGTH)) {
+    if (page.length && (paneRows + section.paneRows > MAX_PANE_ROWS_PER_PAGE || !appendWithinCardLimit([], candidate))) {
       pages.push(page);
       page = [...section.elements];
       paneRows = section.paneRows;
@@ -78,7 +79,7 @@ function groupSections(group: SpaceDirectoryGroup): SpaceSection[] {
 
 function groupPrefix(group: SpaceDirectoryGroup, rows: object[]): object[] {
   const directories = group.directories.length
-    ? group.directories.map((value) => `\`${escapeCode(bound(value))}\``).join("、")
+    ? `${group.directories.slice(0, MAX_VISIBLE_DIRECTORIES).map((value) => `\`${escapeCode(bound(value))}\``).join("、")}${group.directories.length > MAX_VISIBLE_DIRECTORIES ? `、… 另 ${group.directories.length - MAX_VISIBLE_DIRECTORIES} 个` : ""}`
     : "未注册";
   return [
     { tag: "markdown", content: `**${escapeMarkdown(bound(group.spaceName))}**\n目录：${directories}` },

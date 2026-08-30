@@ -53,6 +53,25 @@ describe("event-driven card projection", () => {
     await projector.stop(); store.close(); vi.useRealTimers();
   });
 
+  it("evicts terminal topic views after scheduling their durable projection", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const bus = new BridgeEventBus();
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
+    projector.start();
+
+    await bus.publish({ eventId: "active", bindingId: "b1", type: "BindingActivated", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { paneId: "w1:p1", tabId: null, topicId: "t1" } });
+    expect(projector.cacheDiagnostics().topicViews).toBe(1);
+    await bus.publish({ eventId: "archived", bindingId: "b1", type: "BindingArchived", origin: "bridge", occurredAt: "2026-08-30T00:00:01.000Z", payload: { reason: "done" } });
+
+    expect(store.loadTopicView("b1")?.phase).toBe("archived");
+    expect(projector.cacheDiagnostics().topicViews).toBe(0);
+    await projector.stop();
+    expect(projector.cacheDiagnostics()).toEqual({ topicViews: 0, answerLengths: 0 });
+    store.close();
+  });
+
   it("routes Answer and Main delivery checkpoints through immediate unified convergence", async () => {
     let answerCheckpoint: ((promptId: string, version: number) => void) | undefined;
     let mainCheckpoint: ((bindingId: string, version: number) => void) | undefined;

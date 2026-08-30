@@ -7,15 +7,9 @@ const VISIBLE_EVENT_COUNT = 3;
 export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string } = {}): object[] {
   if (!events.length) return [];
   const visible = events.slice(-VISIBLE_EVENT_COUNT);
-  const earlier = events.slice(0, -VISIBLE_EVENT_COUNT);
+  const earlierCount = Math.max(0, events.length - VISIBLE_EVENT_COUNT);
   const elements: object[] = [{ tag: "markdown", content: visible.map(progressLine).join("\n") }];
-  if (earlier.length) {
-    elements.push({
-      tag: "collapsible_panel", expanded: false,
-      header: { title: { tag: "plain_text", content: `查看完整过程（${earlier.length}）` } },
-      elements: [{ tag: "markdown", content: earlier.map(progressLine).join("\n") }]
-    });
-  }
+  if (earlierCount) elements.push({ tag: "markdown", content: `… 更早 ${earlierCount} 项已省略，可在 Herdr pane 查看完整过程。` });
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: timelineColor(phase), corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: options.title ? activityTitle(options.title, events, phase) : timelineTitle(events, phase) } },

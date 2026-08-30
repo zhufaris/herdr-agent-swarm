@@ -14,6 +14,15 @@ describe("instance cards", () => {
     const text = JSON.stringify(card);
     expect(text).toContain("PRIMARY"); expect(text).toContain("lead"); expect(text).toContain("TARGET"); expect(text).toContain("reviewer"); expect(text).toContain("queue 3"); expect(text).toContain("swarm/reviewer");
   });
+  it("bounds a large instance directory and summarizes omitted rows", () => {
+    const entries = Array.from({ length: 200 }, (_, index) => ({ instance: { ...instance, id: `i${index}`, name: `worker-${index}-${"x".repeat(100)}` }, workspace: { ...workspace, id: `ws${index}`, instanceId: `i${index}` }, capabilities, queueDepth: index }));
+    const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries, target: { kind: "primary" } });
+    const serialized = JSON.stringify(card);
+    expect(serialized.length).toBeLessThanOrEqual(12_000);
+    expect(serialized).toMatch(/另有 \d+ 个实例未在本卡展示/);
+    expect(serialized).not.toContain("worker\-199");
+    expect(entries).toHaveLength(200);
+  });
   it("shows runtime and Git evidence but hides unsupported steering controls", () => {
     const text = JSON.stringify(renderInstanceDetailCard({ instance, workspace, capabilities, turns: [], queueDepth: 0 }));
     expect(text).toContain("w1:p1"); expect(text).toContain("abc123"); expect(text).toContain("claude-code"); expect(text).not.toContain("instance_steer_form");

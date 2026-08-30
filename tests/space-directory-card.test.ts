@@ -49,6 +49,14 @@ describe("space directory card", () => {
     for (const pane of panes) expect(serialized).toContain(`\`p${pane.paneId.split(":p")[1]}\``);
   });
 
+  it("bounds a group's directory list without exceeding the card budget", () => {
+    const directories = Array.from({ length: 500 }, (_, index) => `/work/${index}/${"x".repeat(200)}`);
+    const cards = renderSpaceDirectoryCards([{ spaceName: "large", workspaceId: "w1", directories, panes: [] }]);
+    expect(cards.every((card) => JSON.stringify(card).length <= 12_000)).toBe(true);
+    expect(JSON.stringify(cards)).toContain("另 492 个");
+    expect(directories).toHaveLength(500);
+  });
+
   it("renders only open and claim actions and never a close action", () => {
     const cards = renderSpaceDirectoryCards([{ spaceName: "alpha", workspaceId: "w1", directories: ["/work/a"], panes: [
       { paneId: "w1:p1", name: "Bound", agentState: "idle", foregroundExecutables: ["traex"], bindingId: "b1" },

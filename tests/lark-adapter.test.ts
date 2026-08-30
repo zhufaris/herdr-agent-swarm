@@ -142,6 +142,20 @@ describe("Lark streaming Answer cards", () => {
     expect(patchMessage).not.toHaveBeenCalled();
   });
 
+  it("evicts old message-to-card identities and reloads them from Lark", async () => {
+    convertCardId.mockImplementation(async ({ data }: { data: { message_id: string } }) => ({ data: { card_id: `card-${data.message_id}` } }));
+    updateCardEntity.mockResolvedValue({ code: 0 });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", cardIdCacheCapacity: 2 });
+
+    await adapter.updateCardKit("m1", {}, 1);
+    await adapter.updateCardKit("m2", {}, 1);
+    await adapter.updateCardKit("m1", {}, 2);
+    await adapter.updateCardKit("m3", {}, 1);
+    await adapter.updateCardKit("m2", {}, 2);
+
+    expect(convertCardId.mock.calls.map(([request]) => request.data.message_id)).toEqual(["m1", "m2", "m3", "m2"]);
+  });
+
   it("retries an unsupported fenced language as a plain code fence", async () => {
     streamContent
       .mockRejectedValueOnce(new Error("unsupported markdown code fence language: bash"))

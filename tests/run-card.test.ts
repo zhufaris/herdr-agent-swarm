@@ -71,6 +71,15 @@ describe("run card", () => {
     expect(serialized).not.toContain("wH");
   });
 
+  it("bounds a large project selector and summarizes omitted projects", () => {
+    const projects = Array.from({ length: 200 }, (_, index) => ({ id: `project-${index}`, displayName: `Project ${index}`, description: "x".repeat(500), workspaceId: `w${index}`, cwd: `/repo/${index}` }));
+    const card = renderProjectSelectorCard({ selectionId: "selection-1", projects });
+    const serialized = JSON.stringify(card);
+    expect(serialized.length).toBeLessThanOrEqual(12_000);
+    expect(serialized).toMatch(/另有 \d+ 个项目未在本卡展示/);
+    expect(projects).toHaveLength(200);
+  });
+
   it("shows observed model and context in the main-card metrics", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), model: "GPT-5.6-Sol", context: "31.1K tokens"
@@ -308,8 +317,8 @@ describe("run card", () => {
     expect(serialized).toContain("🛠️ 修改卡片渲染");
     expect(serialized).toContain("🧪 运行聚焦测试");
     expect(serialized).toContain("🔎 检查调用位置");
-    expect(serialized).toContain("读取旧配置");
-    expect(serialized).toContain("查看完整过程（1）");
+    expect(serialized).not.toContain("读取旧配置");
+    expect(serialized).toContain("更早 1 项已省略");
     expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-12));
     expect(serialized).not.toContain("**项目任务**");
   });
@@ -324,7 +333,8 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     const visibleActivities = [...serialized.matchAll(/activity-(\d+)/g)].map((match) => Number(match[1]));
 
-    expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([3, 4, 5, 6, 7, 8, 9, 10]);
+    expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([8, 9, 10]);
+    expect(serialized).toContain("更早 5 项已省略");
   });
 
   it("bounds the 12-line project-card preview at 6000 characters", () => {

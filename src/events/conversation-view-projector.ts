@@ -11,14 +11,17 @@ import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler, type CardUpdateSchedulerDiagnostics } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { LruMap } from "../runtime/lru-map.js";
 
 const ANSWER_STREAM_INTERVAL_MS = 500;
 const ANSWER_UPDATE_BUDGET_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 80;
 const MAIN_CARD_UPDATE_INTERVAL_MS = 2_500;
+const TOPIC_VIEW_CACHE_CAPACITY = 256;
+const ANSWER_LENGTH_CACHE_CAPACITY = 512;
 
 export class ConversationViewProjector {
-  private readonly views = new Map<string, ReturnType<typeof initialTopicView>>();
+  private readonly views = new LruMap<string, ReturnType<typeof initialTopicView>>(TOPIC_VIEW_CACHE_CAPACITY);
   private readonly bindingTails = new Map<string, Promise<void>>();
   private unsubscribe: (() => void) | null = null;
   private unsubscribeStreamCardCreated: (() => void) | null = null;
@@ -26,7 +29,7 @@ export class ConversationViewProjector {
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
   private readonly scheduler: CardUpdateScheduler;
-  private readonly answerContentLengths = new Map<string, number>();
+  private readonly answerContentLengths = new LruMap<string, number>(ANSWER_LENGTH_CACHE_CAPACITY);
   private readonly answerPages: AnswerPageWorkflowPort;
   private readonly mainCards: MainCardWorkflowPort;
   private readonly answerUpdateDelayMs: number;
@@ -69,6 +72,9 @@ export class ConversationViewProjector {
   }
 
   snapshot(): CardUpdateSchedulerDiagnostics { return this.scheduler.diagnostics(); }
+  cacheDiagnostics(): { topicViews: number; answerLengths: number } {
+    return { topicViews: this.views.size, answerLengths: this.answerContentLengths.size };
+  }
 
   start(): () => void {
     this.unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
@@ -90,6 +96,7 @@ export class ConversationViewProjector {
     this.unsubscribeStreamCardCreated = null;
     this.unsubscribeMainCardCheckpoint?.();
     this.unsubscribeMainCardCheckpoint = null;
+    this.views.clear();
     this.answerContentLengths.clear();
     this.stopPromise = Promise.allSettled([...this.bindingTails.values()])
       .then(() => this.scheduler.stop());
@@ -134,6 +141,7 @@ export class ConversationViewProjector {
         priority: isImmediateMainEvent(event, next.phase) ? "terminal" : isInteractiveMainEvent(event) ? "interactive" : "normal",
         delayMs: isInteractiveMainEvent(event) ? Math.min(1_000, this.mainUpdateDelayMs) : this.mainUpdateDelayMs
       });
+      if (["done", "error", "archived", "orphaned"].includes(next.phase)) this.views.delete(event.bindingId);
     }
     catch (error) {
       this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");

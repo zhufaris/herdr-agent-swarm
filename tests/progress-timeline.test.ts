@@ -11,15 +11,25 @@ describe("progress timeline", () => {
     expect(renderProgressTimeline([], "running")).toEqual([]);
   });
 
-  it("keeps the newest three visible and collapses all older entries", () => {
+  it("keeps the newest three visible and summarizes older entries without serializing them", () => {
     const events = [1, 2, 3, 4].map(event);
     const timeline = renderProgressTimeline(events, "running") as Array<{ header: { title: { content: string } }; elements: Array<{ content?: string; header?: { title: { content: string } } }> }> ;
 
     expect(timeline[0]!.header.title.content).toBe("过程轨迹 · 进行中 · 4 项");
     expect(timeline[0]!.elements[0]!.content).not.toContain("step 1");
     expect(timeline[0]!.elements[0]!.content).toContain("step 2");
-    expect(timeline[0]!.elements[1]!.header?.title.content).toBe("查看完整过程（1）");
-    expect(JSON.stringify(timeline)).toContain("step 1");
+    expect(timeline[0]!.elements[1]!.content).toContain("更早 1 项已省略");
+    expect(JSON.stringify(timeline)).not.toContain("step 1");
+  });
+
+  it("keeps serialized history bounded while preserving the caller's durable events", () => {
+    const events = Array.from({ length: 1_000 }, (_, index) => event(index));
+    const serialized = JSON.stringify(renderProgressTimeline(events, "running"));
+
+    expect(serialized.length).toBeLessThan(2_000);
+    expect(serialized).toContain("更早 997 项已省略");
+    expect(serialized).toContain("step 999");
+    expect(events).toHaveLength(1_000);
   });
 
   it("bounds and normalizes labels without mutating input", () => {

@@ -6,6 +6,9 @@ import type { LarkPort } from "../domain/ports.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/types.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { LruMap } from "../runtime/lru-map.js";
+
+const CARD_ID_CACHE_CAPACITY = 512;
 
 interface LarkAdapterOptions {
   appId: string;
@@ -13,15 +16,17 @@ interface LarkAdapterOptions {
   chatId: string;
   botOpenId: string;
   requestTimeoutMs?: number;
+  cardIdCacheCapacity?: number;
 }
 
 export class LarkSdkAdapter implements LarkPort {
   private readonly client: lark.Client;
   private readonly wsClient: lark.WSClient;
-  private readonly cardIdsByMessageId = new Map<string, string>();
+  private readonly cardIdsByMessageId: LruMap<string, string>;
   private ready = false;
 
   constructor(private readonly options: LarkAdapterOptions, private readonly logger?: Logger) {
+    this.cardIdsByMessageId = new LruMap(options.cardIdCacheCapacity ?? CARD_ID_CACHE_CAPACITY);
     this.client = new lark.Client({
       appId: options.appId, appSecret: options.appSecret,
       httpInstance: withRequestTimeout(lark.defaultHttpInstance as unknown as lark.HttpInstance, options.requestTimeoutMs ?? 30_000)
@@ -58,6 +63,7 @@ export class LarkSdkAdapter implements LarkPort {
   async stop(): Promise<void> {
     this.wsClient.close();
     this.ready = false;
+    this.cardIdsByMessageId.clear();
   }
 
   isReady(): boolean { return this.ready; }
