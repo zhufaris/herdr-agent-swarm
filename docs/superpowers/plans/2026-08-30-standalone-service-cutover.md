@@ -32,11 +32,11 @@
 - Consumes: standalone detection through `SWARM_ROOT`.
 - Produces: `runPluginLifecycle("start", env)` delegates to `systemctl --user enable --now <service>` only in standalone mode.
 
-- [ ] Add a lifecycle test asserting standalone start records `--user enable --now herdr-agent-swarm.service`, while plugin-mode start still records `--user start <service>`.
-- [ ] Run `npx vitest run tests/plugin-lifecycle.test.ts` and confirm the standalone assertion fails.
-- [ ] Change only the start argument selection in `runPluginLifecycle`; keep restart, stop, install, and plugin behavior unchanged.
-- [ ] Re-run `npx vitest run tests/plugin-lifecycle.test.ts` and confirm it passes.
-- [ ] Commit `src/cli/plugin-lifecycle.ts` and `tests/plugin-lifecycle.test.ts` as `fix: enable standalone service on start`.
+- [x] Add a lifecycle test asserting standalone start records `--user enable --now herdr-agent-swarm.service`, while plugin-mode start still records `--user start <service>`.
+- [x] Run `npx vitest run tests/plugin-lifecycle.test.ts` and confirm the standalone assertion fails.
+- [x] Change only the start argument selection in `runPluginLifecycle`; keep restart, stop, install, and plugin behavior unchanged.
+- [x] Re-run `npx vitest run tests/plugin-lifecycle.test.ts` and confirm it passes.
+- [x] Commit `src/cli/plugin-lifecycle.ts` and `tests/plugin-lifecycle.test.ts` as `fix: enable standalone service on start`.
 
 ### Task 2: Safe compatibility-to-standalone cutover command
 
@@ -50,14 +50,14 @@
 - Consumes: compatibility config/state defaults, standalone config/state defaults, generated build identity, `runPluginLifecycle`, systemd status, and `/status`.
 - Produces: `runStandaloneCutover(environment): Promise<number>` and `npm run swarm:migrate`.
 
-- [ ] Add focused tests with fake `systemctl` and HTTP status endpoints for private config copy, active-work rejection, strict old-stop/new-start ordering, rollback after failed new startup, and idempotent already-migrated execution.
-- [ ] Run `npx vitest run tests/swarm-service-cutover.test.ts` and confirm failure because the module and command do not exist.
-- [ ] Implement configuration preparation with `0700` directories and `0600` files; retain explicit `BRIDGE_DATABASE_PATH` and validate before stopping a service.
-- [ ] Implement a bounded safety parser requiring zero running prompts, active prompt workers, active or uncertain instance turns, and pending outbox.
-- [ ] Implement stop-before-start handoff using the existing lifecycle verifier; on failure stop the new unit before restoring the old unit's prior active/enabled state.
-- [ ] Add `migrate` to `scripts/swarm-service.sh` and `swarm:migrate` to `package.json`.
-- [ ] Re-run `npx vitest run tests/swarm-service-cutover.test.ts tests/plugin-lifecycle.test.ts` and confirm all cases pass.
-- [ ] Commit the module, tests, shell entrypoint, and package manifest as `feat: add standalone service cutover`.
+- [x] Add focused tests with fake `systemctl` and HTTP status endpoints for private config copy, active-work rejection, strict old-stop/new-start ordering, rollback after failed new startup, and idempotent already-migrated execution.
+- [x] Run `npx vitest run tests/swarm-service-cutover.test.ts` and confirm failure because the module and command do not exist.
+- [x] Implement configuration preparation with `0700` directories and `0600` files; retain explicit `BRIDGE_DATABASE_PATH` and validate before stopping a service.
+- [x] Implement a bounded safety parser requiring zero running prompts, active prompt workers, active or uncertain instance turns, and pending outbox.
+- [x] Implement stop-before-start handoff using the existing lifecycle verifier; on failure stop the new unit before restoring the old unit's prior active/enabled state.
+- [x] Add `migrate` to `scripts/swarm-service.sh` and `swarm:migrate` to `package.json`.
+- [x] Re-run `npx vitest run tests/swarm-service-cutover.test.ts tests/plugin-lifecycle.test.ts` and confirm all cases pass.
+- [x] Commit the module, tests, shell entrypoint, and package manifest as `feat: add standalone service cutover`.
 
 ### Task 3: Operator documentation and repository verification
 
@@ -70,11 +70,11 @@
 - Consumes: `npm run swarm:migrate`, canonical service/config/state paths, and rollback behavior.
 - Produces: one documented production operator path with the compatibility unit explicitly non-authoritative.
 
-- [ ] Document prerequisites, migration command, safety refusal, retained absolute database path, success checks, and rollback outcome.
-- [ ] Update architecture ownership to name `herdr-agent-swarm.service` as canonical and the plugin service as compatibility-only.
-- [ ] Run `rg -n "herdr-lark-bridge.service|herdr-agent-swarm.service|swarm:migrate" README.md docs/architecture.md` and verify every active reference has the correct role.
-- [ ] Run `npm run typecheck`, `npm run build`, and `npm test`.
-- [ ] Run `git diff --check`.
+- [x] Document prerequisites, migration command, safety refusal, retained absolute database path, success checks, and rollback outcome.
+- [x] Update architecture ownership to name `herdr-agent-swarm.service` as canonical and the plugin service as compatibility-only.
+- [x] Run `rg -n "herdr-lark-bridge.service|herdr-agent-swarm.service|swarm:migrate" README.md docs/architecture.md` and verify every active reference has the correct role.
+- [x] Run `npm run typecheck`, `npm run build`, and `npm test`.
+- [x] Run `git diff --check`.
 - [ ] Commit documentation and checked plan state as `docs: document standalone service cutover`.
 
 ### Task 4: Live single-instance migration

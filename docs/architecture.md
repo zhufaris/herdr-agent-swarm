@@ -27,7 +27,7 @@ transaction by itself.
 | Typed turn output, live status heading, structured plan, and token counters for an active turn | Exactly identified TraeX JSONL transcript | The transcript is parsed once into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
-| Process lifecycle | user systemd service | Standalone CLI or the optional plugin controls the service; the application does not manage PID files. |
+| Process lifecycle | `herdr-agent-swarm.service` | The standalone user systemd unit is canonical; the optional `herdr-lark-bridge.service` unit exists only for compatibility and bounded migration rollback. |
 | Plugin events | bounded wake-up hints | Events improve latency but do not create a second event log. |
 
 When these sources disagree, do not repair SQLite from a Lark card or infer a
@@ -585,11 +585,15 @@ head update are committed in one SQLite transaction.
 
 ## Process lifecycle and diagnostics
 
-The supported production owner is a user systemd service installed through the
-standalone CLI or operated through optional Herdr plugin actions. Herdr remains
-a mandatory headless pane/process authority, but the TUI and plugin are not
-runtime dependencies. The application also holds a fenced SQLite lease,
-which protects against accidental duplicate processes sharing one database.
+The supported production owner is the `herdr-agent-swarm.service` user systemd
+unit installed and operated through the standalone CLI. Herdr remains a
+mandatory headless pane/process authority, but the TUI and plugin are not
+runtime dependencies. The compatibility `herdr-lark-bridge.service` unit may be
+retained for rollback but is inactive and disabled after cutover. The migration
+stops it before starting the standalone unit and preserves the existing absolute
+SQLite path rather than copying a live database. The application also holds a
+fenced SQLite lease, which protects against accidental duplicate processes
+sharing one database.
 
 Health endpoints have separate meanings:
 
