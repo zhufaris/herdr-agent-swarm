@@ -75,9 +75,13 @@
 - [x] Run `rg -n "herdr-lark-bridge.service|herdr-agent-swarm.service|swarm:migrate" README.md docs/architecture.md` and verify every active reference has the correct role.
 - [x] Run `npm run typecheck`, `npm run build`, and `npm test`.
 - [x] Run `git diff --check`.
-- [ ] Commit documentation and checked plan state as `docs: document standalone service cutover`.
+- [x] Commit documentation and checked plan state as `docs: document standalone service cutover`.
 
 ### Task 4: Live single-instance migration
+
+Live execution is conditional on the target standalone identity being unused or
+configuration-compatible. If it is already an independent deployment, stop at
+the preflight and require an explicit multi-instance/consolidation decision.
 
 **Files:**
 - Runtime configuration: `~/.config/herdr-agent-swarm/.env` and `projects.json`

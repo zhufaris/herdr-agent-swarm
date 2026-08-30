@@ -148,24 +148,14 @@ build, validation, and service installation after configuration has been
 initialized. The checked-in service file is an explanatory template; the
 installer renders the production unit.
 
-To migrate a running compatibility-plugin deployment, first build this checkout
-and then run:
-
-```bash
-npm run build
-npm run swarm:migrate
-```
-
-The migration copies the compatibility `.env` and `projects.json` into the
-private standalone config directory, but preserves the existing absolute
-`BRIDGE_DATABASE_PATH`. It refuses to cut over while prompts, workers, instance
-turns, deliveries, or outbox work are active or uncertain. It then stops
-`herdr-lark-bridge.service` before enabling and starting
-`herdr-agent-swarm.service`; the compatibility unit is disabled only after the
-new service reports the expected build, completed startup recovery, healthy
-SQLite, a held lease, and ready dependencies. A failed startup stops the new
-unit and restores the previous compatibility service state. Never move or copy
-the live database as part of this service-name migration.
+`npm run swarm:migrate` is a guarded one-to-one migration from the compatibility
+plugin service into an unused standalone service identity. It copies private
+configuration, preserves an explicit `BRIDGE_DATABASE_PATH`, rejects active or
+uncertain work, and performs a stop-before-start handoff with rollback. It
+refuses an existing standalone deployment whose Lark route, project registry,
+port, or database represents a different service; consolidating two such
+deployments requires an explicit multi-instance design rather than overwriting
+either configuration.
 
 `npm run swarm:restart` refuses to interrupt active TraeX turns and reports the
 running and queued prompt counts. Wait for the active work to drain whenever
@@ -628,9 +618,8 @@ Then perform a Lark smoke test:
   and is writable by the Herdr account.
 - A standalone service action fails: inspect `systemctl --user status
   herdr-agent-swarm.service` and `journalctl --user -u
-  herdr-agent-swarm.service -n 100 --no-pager`. After `npm run swarm:migrate`,
-  this is the canonical production unit; `herdr-lark-bridge.service` remains
-  compatibility-only and disabled unless a cutover rollback restores it.
+  herdr-agent-swarm.service -n 100 --no-pager`. Compatibility plugin installs
+  continue to use `herdr-lark-bridge.service`.
 - A running card becomes detached after restart. The bridge observes the existing
   Herdr turn and does not replay the prompt because doing so could repeat side
   effects. If completion cannot be observed reliably, inspect the pane before
