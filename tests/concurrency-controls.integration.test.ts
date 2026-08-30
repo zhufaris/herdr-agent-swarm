@@ -441,6 +441,77 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
+  it("recovers a dispatched turn when Herdr reports stalled before observing it", async () => {
+    const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    let startedAt = "";
+    let reads = 0;
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "typed", cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          reads += 1;
+          return { turnId, freshTurnStart: true, answerDelta: reads === 1 ? "Recovered answer" : "", turnLifecycle: { turnId, state: "completed" as const, startedAt, finalAnswer: "Recovered answer" } };
+        }
+      } }; }
+    };
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await onDispatched?.();
+      startedAt = new Date(Date.now() + 100).toISOString();
+      throw new Error("agent_prompt_stalled");
+    });
+    const herdr: HerdrPort = {
+      ...emptyHerdr(), runPrompt,
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async observeRuntime() { return { pane: { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "stalled-e1", messageId: "stalled-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "recover me", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce());
+    expect(runPrompt.mock.calls[0]?.[1]).toBe("recover me");
+    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "recover me")!;
+    await vi.waitFor(() => expect(target()).toMatchObject({ phase: "completed", answer: "Recovered answer" }), { timeout: 7_000 });
+    expect(runPrompt).toHaveBeenCalledOnce();
+    expect(store.getPrompt(target().promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt });
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  }, 10_000);
+
+  it("does not recover an old transcript turn after Herdr reports stalled", async () => {
+    const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
+        return { turnId, freshTurnStart: true, answerDelta: "Old answer", turnLifecycle: { turnId, state: "completed" as const, startedAt: "2020-01-01T00:00:00.000Z", finalAnswer: "Old answer" } };
+      } } }; }
+    };
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => { await onDispatched?.(); throw new Error("agent_prompt_stalled"); });
+    const herdr: HerdrPort = { ...emptyHerdr(), runPrompt, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; } };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "old-stalled-e1", messageId: "old-stalled-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do not recover old", mentionsBot: false, isRootMessage: false });
+    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "do not recover old")!;
+    await vi.waitFor(() => expect(store.getPrompt(target().promptId)).toMatchObject({ state: "running", observationState: "detached" }));
+    expect(store.getPrompt(target().promptId)?.transcriptTurnId).toBeNull();
+    expect(target().answer).toBe("");
+    expect(runPrompt).toHaveBeenCalledOnce();
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("rejects transcript output whose lifecycle predates dispatch tolerance", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     const transcriptReader: TraexTranscriptReaderPort = {

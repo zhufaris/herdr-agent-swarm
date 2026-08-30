@@ -258,11 +258,13 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       const abortController = this.turns.attach(bindingId, prompt.id, paneId);
       let observerDetached = false;
       let dispatched = false;
+      let outputSource: TurnOutputSource = { mode: "unavailable", reason: "transcript_not_opened" };
+      let turnStartedPublication: Promise<void> = Promise.resolve();
       try {
-        const turnStartedPublication = this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth }).catch((error) => {
+        turnStartedPublication = this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth }).catch((error) => {
           this.options.logger.error({ event: "turn-started-publication-failed", err: safeLogError(error), bindingId, promptId: prompt.id, outcome: "workflow_continued" }, "TurnStarted lifecycle publication failed; prompt dispatch continued");
         });
-        let outputSource = await this.acquireTranscript(binding, abortController.signal);
+        outputSource = await this.acquireTranscript(binding, abortController.signal);
         this.options.logger.info({
           event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth,
           outputMode: outputSource.mode, ...(outputSource.mode === "unavailable" ? { unavailableReason: outputSource.reason } : {}), outcome: "running"
@@ -301,6 +303,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       } catch (error) {
         if (!this.isBindingActive(bindingId)) { observerDetached = true; return; }
         if (dispatched) {
+          await turnStartedPublication;
+          outputSource = await this.drainAvailableTranscript(outputSource, binding, prompt, startedAt);
           const notice = this.stopping ? "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。" : `TraeX 请求已尝试投递，但 Bridge 无法确认最终结果：${errorMessage(error)}；不会自动重发。`;
           observerDetached = true;
           this.options.store.markPromptObservationDetached(prompt.id, notice);
