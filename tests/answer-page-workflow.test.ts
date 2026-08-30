@@ -148,6 +148,30 @@ describe("AnswerPageWorkflow", () => {
     store.close();
   });
 
+  it("preserves the last delivered continuation when the completed answer shrinks below its page start", async () => {
+    const store = readyStore();
+    const visibleContinuation = "the last visible continuation";
+    const elementId = "answer_content_p1_1";
+    store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1' AND page_index = 0");
+    store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 1, 'answer-2', 'card-2', ?, 9351, 10, 'finished', 'now', 'now')").run(elementId);
+    store.database.prepare("UPDATE run_cards SET answer_message_id = 'answer-2', answer_card_id = 'card-2', answer_element_id = ?, answer_page_index = 1, answer_page_start = 9351 WHERE prompt_id = 'p1'").run(elementId);
+    store.enqueueOutboundReply({
+      id: "visible-continuation", idempotencyKey: "visible-continuation", bindingId: "b1", promptId: "p1", viewVersion: 9, cardRole: "answer",
+      rootMessageId: "card-2", kind: "stream_content", payload: JSON.stringify({ pageIndex: 1, elementId, content: visibleContinuation, sequence: 9 })
+    });
+    store.markOutboundReplyDelivered("visible-continuation", "card-2");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "short final answer", answerSegments: ["short final answer"], viewVersion: 3 });
+    const workflow = new AnswerPageWorkflow(store, vi.fn());
+
+    await workflow.converge("p1");
+
+    const finalUpdate = store.listPendingOutboundReplies().find((reply) => reply.kind === "card_update")!;
+    expect(finalUpdate).toMatchObject({ rootMessageId: "answer-2", cardRole: "answer" });
+    expect(finalUpdate.payload).toContain(visibleContinuation);
+    expect(finalUpdate.payload).not.toContain('"elements":[]');
+    store.close();
+  });
+
   it("reopens a dead-lettered final folded-card update in place", async () => {
     const store = readyStore();
     const code = Array.from({ length: 81 }, (_, index) => `output line ${index}`).join("\n");

@@ -59,7 +59,9 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
     if (view.phase !== "completed") return;
     const finished = this.store.listAnswerPages(view.promptId).at(-1);
     if (!finished || finished.state !== "finished" || !finished.cardId || !finished.messageId) return;
-    const content = renderAnswerStreamPage(answerStreamContent(view), finished.sourceStart).page;
+    const rendered = renderAnswerStreamPage(answerStreamContent(view), finished.sourceStart).page;
+    const latestContent = this.store.getAnswerPageDeliveryFacts(view.promptId, finished.pageIndex).latestContent;
+    const content = rendered || (latestContent?.state === "delivered" ? latestContent.content : "");
     const card = renderFinalAnswerCard(view, { pageNumber: finished.pageIndex + 1, initialContent: content });
     if (card && this.store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: finished.pageIndex, cardId: finished.cardId, messageId: finished.messageId, card }) === "reserved") this.wakeOutbound();
   }
