@@ -292,7 +292,7 @@ function renderToolActivityResults(markdown: string): string {
       `… 已省略中间 ${detail.length - TOOL_RESULT_HEAD_LINES - TOOL_RESULT_TAIL_LINES} 行 …`,
       ...detail.slice(-TOOL_RESULT_TAIL_LINES)
     ];
-    rendered.push(...bounded.map((line, lineIndex) => `${lineIndex === bounded.length - 1 ? "└" : "│"} ${line}`));
+    rendered.push(...bounded);
     if (index < lines.length) rendered.push(lines[index++]!);
   }
   return rendered.join("\n");

@@ -133,9 +133,10 @@ describe("Answer stream pagination", () => {
     const detail = rendered.match(/```text\n([\s\S]*?)\n```$/)?.[1].split("\n") ?? [];
 
     expect(detail).toHaveLength(20);
-    expect(detail.slice(0, 10)).toEqual(canonicalLines.slice(0, 10).map((value) => `│ ${value}`));
-    expect(detail[10]).toBe("│ … 已省略中间 16 行 …");
-    expect(detail.at(-1)).toBe(`└ ${canonicalLines.at(-1)}`);
+    expect(detail.slice(0, 10)).toEqual(canonicalLines.slice(0, 10));
+    expect(detail[10]).toBe("… 已省略中间 16 行 …");
+    expect(detail.at(-1)).toBe(canonicalLines.at(-1));
+    expect(detail.every((value) => !/^[│└] /.test(value))).toBe(true);
     expect(canonical.split("\n")).toContain(canonicalLines[20]);
   });
 
@@ -149,7 +150,7 @@ describe("Answer stream pagination", () => {
 
     expect(first.page).not.toContain("◆ **Ran**");
     expect(second.page).toContain("◆ **Ran**");
-    expect(second.page.match(/^[│└] /gmu) ?? []).toHaveLength(20);
+    expect(second.page.match(/^[│└] /gmu) ?? []).toHaveLength(0);
     expect(second.page).toContain("已省略中间 16 行");
   });
 
