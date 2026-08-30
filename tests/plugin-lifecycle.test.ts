@@ -4,9 +4,25 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { runPluginLifecycle } from "../src/cli/plugin-lifecycle.js";
+import { createSetupLifecycleAdapter, inspectPluginLifecycle, runPluginLifecycle } from "../src/cli/plugin-lifecycle.js";
 
 describe("plugin lifecycle", () => {
+  it("inspects installation and activity without mutating lifecycle state", async () => {
+    const fixture = createFixture();
+
+    await expect(inspectPluginLifecycle(fixture.environment)).resolves.toMatchObject({
+      installed: false, active: true, summary: expect.stringContaining("test-bridge.service")
+    });
+    expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+  });
+
+  it("adapts setup lifecycle operations and rejects non-zero results", async () => {
+    const fixture = createFixture();
+    const lifecycle = createSetupLifecycleAdapter(fixture.environment);
+
+    await lifecycle.install({} as never);
+    await expect(lifecycle.inspect({} as never)).resolves.toMatchObject({ installed: true, active: true });
+  });
   it("supports standalone private config and state paths without Herdr plugin variables", async () => {
     const fixture = createFixture();
     const standaloneConfig = join(fixture.root, "standalone-config");
@@ -64,7 +80,9 @@ describe("plugin lifecycle", () => {
     for (const action of ["init", "migrate", "install", "start", "status", "restart", "stop", "logs"]) {
       expect(packageJson.scripts[`swarm:${action}`]).toBe(`bash scripts/swarm-service.sh ${action}`);
     }
-    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:migrate", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
+    expect(packageJson.scripts["swarm:setup"]).toBe("node dist/cli/setup.js");
+    expect(packageJson.scripts["swarm:doctor"]).toBe("node dist/cli/doctor.js");
+    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:setup", "swarm:doctor", "swarm:migrate", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
     expect(packageJson.scripts).toMatchObject({
       "herdr:traex:install": "bash scripts/install-herdr-traex-shim.sh install",
       "herdr:traex:status": "bash scripts/install-herdr-traex-shim.sh status",
@@ -72,6 +90,8 @@ describe("plugin lifecycle", () => {
     });
     const script = readFileSync(join(process.cwd(), "scripts/swarm-service.sh"), "utf8");
     expect(script.indexOf('export SWARM_ROOT="$ROOT"')).toBeLessThan(script.indexOf('migrate)'));
+    expect(script).toContain('setup) exec node "$ROOT/dist/cli/setup.js"');
+    expect(script).toContain('doctor) exec node "$ROOT/dist/cli/doctor.js"');
   });
 
   it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {
@@ -332,6 +352,23 @@ describe("plugin lifecycle", () => {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runPluginLifecycle("install", fixture.environment);
       await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("requires readiness when setup starts the service", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/ready") { response.statusCode = 503; response.end(JSON.stringify({ status: "not_ready" })); return; }
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runPluginLifecycle("install", fixture.environment);
+      await expect(runPluginLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" }, { requireReady: true }))
+        .rejects.toThrow(/readiness.*not_ready/i);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

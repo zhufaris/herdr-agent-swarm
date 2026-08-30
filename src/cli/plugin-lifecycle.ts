@@ -6,9 +6,16 @@ import { spawnSync } from "node:child_process";
 import { loadConfig, validateProjectDirectories } from "../config.js";
 import { readEnvironmentFile } from "../runtime/environment-file.js";
 import { BRIDGE_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
+import type { SetupLifecyclePort } from "../setup/setup-types.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
-interface LifecycleOptions { force?: boolean }
+export interface LifecycleOptions { force?: boolean; requireReady?: boolean }
+
+export interface LifecycleInspection {
+  installed: boolean;
+  active: boolean;
+  summary: string;
+}
 
 interface RuntimePaths {
   root: string;
@@ -47,7 +54,30 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
       : ["--user", action, paths.serviceName];
   const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
-  return waitForStartupCompletion(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment));
+  return waitForStartupCompletion(paths, environment, action, action === "restart" ? restartTimeoutMs(environment) : startTimeoutMs(environment), options.requireReady ?? false);
+}
+
+export async function inspectPluginLifecycle(environment: NodeJS.ProcessEnv = process.env): Promise<LifecycleInspection> {
+  const paths = runtimePaths(environment);
+  const installed = existsSync(paths.unitFile);
+  const active = isUnitActive(paths.serviceName, environment);
+  return {
+    installed, active,
+    summary: `${paths.serviceName} is ${installed ? "installed" : "not installed"} and ${active ? "active" : "inactive"}`
+  };
+}
+
+export function createSetupLifecycleAdapter(environment: NodeJS.ProcessEnv = process.env): SetupLifecyclePort {
+  const successful = async (action: "install" | "start" | "restart", options: LifecycleOptions = {}) => {
+    const result = await runPluginLifecycle(action, environment, options);
+    if (result !== 0) throw new Error(`Service ${action} failed with exit code ${result}`);
+  };
+  return {
+    inspect: async () => inspectPluginLifecycle(environment),
+    install: async () => successful("install"),
+    start: async () => successful("start", { requireReady: true }),
+    restart: async () => successful("restart", { requireReady: true })
+  };
 }
 
 async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<void> {
@@ -196,7 +226,7 @@ function requireInstalled(paths: RuntimePaths): void {
   if (!existsSync(paths.unitFile)) throw new Error(`service is not installed: ${paths.unitFile}; run the setup action first`);
 }
 
-async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number): Promise<number> {
+async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number, requireReady: boolean): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
   const deadline = Date.now() + timeoutMs;
@@ -217,6 +247,7 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
       const readiness = await probeStatus(config.http.host, config.http.port, "/ready");
       process.stdout.write(`bridge startup completed (${paths.serviceName}); readiness=${readiness.status}\n`);
       if (readiness.status !== "ready") process.stdout.write(`bridge dependencies are degraded: ${readiness.detail}\n`);
+      if (requireReady && readiness.status !== "ready") throw new Error(`bridge ${action} completed but readiness is ${readiness.status}; inspect swarm:status and swarm:logs`);
       return 0;
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));

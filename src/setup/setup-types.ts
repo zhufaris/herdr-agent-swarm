@@ -5,7 +5,7 @@ export interface SetupCheck { id: string; status: SetupCheckStatus; summary: str
 export interface SetupCheckPolicy { canSave: boolean; canStart: boolean; hasWarnings: boolean; hasSkipped: boolean }
 export interface SetupProjectRegistry { defaultProjectId: string; projects: ProjectConfig[] }
 export interface SetupDraft { environment: Record<string, string>; registry: SetupProjectRegistry }
-export interface SetupContext { root: string; configDirectory: string; stateDirectory: string; serviceName: string; cwd: string }
+export interface SetupContext { root: string; configDirectory: string; stateDirectory: string; serviceName: string; cwd: string; environmentFile?: string; projectsFile?: string }
 export interface SetupCommitResult { environmentFile: string; projectsFile: string; backupDirectory?: string }
 export interface SetupCheckReport { checks: SetupCheck[]; policy: SetupCheckPolicy }
 export interface SetupWorkspace { id: string; name: string; current: boolean }

@@ -163,7 +163,11 @@ export class FileSetupConfigRepository implements SetupConfigPort {
   }
 
   private paths(context: SetupContext, exists: boolean): ExistingPair {
-    return { environmentFile: join(context.configDirectory, ".env"), projectsFile: join(context.configDirectory, "projects.json"), exists };
+    return {
+      environmentFile: context.environmentFile ?? join(context.configDirectory, ".env"),
+      projectsFile: context.projectsFile ?? join(context.configDirectory, "projects.json"),
+      exists
+    };
   }
 
   private async inspectExistingPair(context: SetupContext): Promise<ExistingPair> {
@@ -178,8 +182,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
 
   private async incompleteTransactionCheck(context: SetupContext): Promise<SetupCheck | undefined> {
     const marker = join(context.configDirectory, ".setup-transaction.json");
-    const environmentFile = join(context.configDirectory, ".env");
-    const projectsFile = join(context.configDirectory, "projects.json");
+    const { environmentFile, projectsFile } = this.paths(context, false);
     const [markerExists, environmentExists, projectsExist] = await Promise.all([pathExists(marker), pathExists(environmentFile), pathExists(projectsFile)]);
     if (!markerExists && environmentExists === projectsExist) return undefined;
     let backupPath = context.configDirectory;

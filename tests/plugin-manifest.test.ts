@@ -43,16 +43,17 @@ describe("Herdr plugin manifest", () => {
     expect(manifest).not.toContain('on = "tab.focused"');
   });
 
-  it("restarts after setup so an already-running service loads the new configuration", () => {
-    expect(setupScript).toContain('"$SCRIPT_DIR/service.sh" install');
-    expect(setupScript).toContain('"$SCRIPT_DIR/service.sh" restart');
-    expect(setupScript).not.toContain('"$SCRIPT_DIR/service.sh" start\n');
+  it("delegates plugin setup to the shared setup CLI", () => {
+    expect(setupScript).toContain("dist/cli/setup.js");
+    expect(setupScript).toContain('export HERDR_PLUGIN_ROOT="$ROOT"');
+    expect(setupScript).toContain('export HERDR_PLUGIN_CONFIG_DIR="$(plugin_config_dir)"');
+    expect(setupScript).toContain('export HERDR_PLUGIN_STATE_DIR="$(plugin_state_dir)"');
+    expect(setupScript).not.toContain("$EDITOR_COMMAND");
+    expect(setupScript).not.toContain('"$SCRIPT_DIR/service.sh"');
   });
 
-  it("seeds private project configuration from the checked-in example", () => {
-    expect(setupScript).toContain('$ROOT/config/projects.example.json');
+  it("keeps configure-projects as the focused legacy registry editor", () => {
     expect(configureProjectsScript).toContain('$ROOT/config/projects.example.json');
-    expect(setupScript).not.toContain('$ROOT/config/projects.json');
     expect(configureProjectsScript).not.toContain('$ROOT/config/projects.json');
   });
 
