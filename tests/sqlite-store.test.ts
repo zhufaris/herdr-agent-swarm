@@ -19,6 +19,69 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("fences Primary capabilities to an attached binding generation with exactly one active ordinary prompt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3 });
+    const view = createQueuedRunCard({ promptId: "parent", bindingId: "b1", bindingGeneration: 3, title: "parent", workspaceId: "w1", paneId: "w1:p1", requestText: "coordinate", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "coordinate" }, view, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("parent", "running");
+
+    expect(store.setBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(true);
+    expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(true);
+    expect(store.getActiveOrdinaryPrompt("b1", 3)).toMatchObject({ id: "parent", dispatchKind: "turn", state: "running" });
+    expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 2, capabilityHash: "hash" })).toBe(false);
+    expect(store.setBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 4, capabilityHash: "next-hash" })).toBe(true);
+    expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(true);
+
+    store.updateBinding("b1", { attachment: "orphaned" });
+    expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(false);
+    expect(store.getActiveOrdinaryPrompt("b1", 3)).toBeNull();
+  });
+
+  it("does not treat a running prompt from an earlier binding generation as active", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 1 });
+    const view = createQueuedRunCard({ promptId: "generation-1", bindingId: "b1", bindingGeneration: 1, title: "parent", workspaceId: "w1", paneId: "w1:p1", requestText: "coordinate", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "generation-1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "coordinate" }, view, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("generation-1", "running");
+    store.updateBinding("b1", { generation: 2 });
+
+    expect(store.getActiveOrdinaryPrompt("b1", 2)).toBeNull();
+  });
+
+  it("atomically revokes the retained generation capability when attaching an unproven pane", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "orphaned", lifecycle: "active", attachment: "orphaned", paneId: "w1:old" });
+    store.setBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 1, capabilityHash: "hash" });
+
+    store.attachBindingPane("b1", { paneId: "w1:selected", terminalId: "term-selected", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, false);
+
+    expect(store.hasBindingPrimaryToolCapability("b1", 1)).toBe(false);
+  });
+
+  it("recreates only legacy instance-keyed Primary capabilities during schema convergence", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "primary-capability-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "preserved-binding", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Preserved" });
+    store.createAgentInstance({ id: "preserved-worker", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "preserved-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store.database.exec("DROP TABLE primary_tool_capabilities; CREATE TABLE primary_tool_capabilities(instance_id TEXT PRIMARY KEY REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL)");
+    store.database.prepare("INSERT INTO primary_tool_capabilities VALUES (?, ?, ?, ?)").run("preserved-worker", 1, "ephemeral-secret", "2026-08-30T00:00:00.000Z");
+    store.close(); store = undefined;
+
+    store = new SqliteBindingStore(path);
+    const columns = store.database.prepare("PRAGMA table_info(primary_tool_capabilities)").all() as Array<{ name: string; pk: number }>;
+    expect(columns.map(({ name }) => name)).toEqual(["binding_id", "binding_generation", "capability_hash", "created_at"]);
+    expect(columns.filter(({ pk }) => pk > 0).map(({ name }) => name)).toEqual(["binding_id", "binding_generation"]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM primary_tool_capabilities").get()).toEqual({ count: 0 });
+    expect(store.getBinding("preserved-binding")).not.toBeNull();
+    expect(store.getAgentInstance("preserved-worker")).not.toBeNull();
+    expect(store.getWorkspaceLease("preserved-workspace")).not.toBeNull();
+  });
+
   it("creates instance hot-path indexes and paginates equal-timestamp history without gaps", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

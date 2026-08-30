@@ -1,4 +1,9 @@
 import pino from "pino";
+import { createHash } from "node:crypto";
+import { createConnection } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
@@ -9,6 +14,7 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { SessionAdministrationWorkflow } from "../src/coordinator/session-administration-workflow.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -71,6 +77,8 @@ describe("pane/thread lifecycle integration", () => {
       agentSession: { source: "traex", agent: "traex", kind: "id" as const, value: "native-session-1" }
     };
     let started = false;
+    let createdOptions: Parameters<HerdrPort["createPane"]>[2];
+    let startedArgs: string[] | undefined;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
       async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {}
@@ -78,7 +86,7 @@ describe("pane/thread lifecycle integration", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async observeRuntime(id) { return { pane: id === startedPane.paneId && started ? startedPane : null, traexProcess: started, composerReady: started, evidenceSource: started ? "structured" : "none" }; },
-      async createPane() { return createdPane; }, async startTraex() { started = true; },
+      async createPane(_workspaceId, _cwd, options) { createdOptions = options; return createdPane; }, async startTraex(_paneId, _executable, args) { started = true; startedArgs = args; },
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
@@ -93,6 +101,9 @@ describe("pane/thread lifecycle integration", () => {
       paneId: "w1:new", traexSessionId: "new-terminal", generation: 2, attachment: "attached",
       agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native-session-1"
     });
+    expect(createdOptions).toMatchObject({ bindingId: "orphaned", generation: 2, projectId: "repo", environment: { SWARM_PRIMARY_CAPABILITY: "test-orphaned-2" } });
+    expect(startedArgs).toEqual(primaryToolArgs("orphaned", 2));
+    expect(store.hasBindingPrimaryToolCapability("orphaned", 2)).toBe(true);
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
@@ -102,6 +113,8 @@ describe("pane/thread lifecycle integration", () => {
     let oldClosed = false;
     const closePane = vi.fn(async () => { oldClosed = true; });
     const createdTitles: string[] = [];
+    let createdOptions: Parameters<HerdrPort["createPane"]>[2];
+    let startedArgs: string[] | undefined;
     let replacementCreated = false;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
@@ -110,7 +123,7 @@ describe("pane/thread lifecycle integration", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return replacementCreated ? [oldPane, newPane] : [oldPane]; }, async getPane(id) { return id === oldPane.paneId ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; },
       async observeRuntime(id) { const pane = id === oldPane.paneId && !oldClosed ? oldPane : replacementCreated && id === newPane.paneId ? newPane : null; return { pane, traexProcess: Boolean(pane), composerReady: pane?.agentState === "idle", evidenceSource: pane ? "structured" : "none" }; },
-      async createPane(_workspaceId, _cwd, options) { replacementCreated = true; createdTitles.push(options?.title ?? ""); return newPane; }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}, closePane
+      async createPane(_workspaceId, _cwd, options) { replacementCreated = true; createdTitles.push(options?.title ?? ""); createdOptions = options; return newPane; }, async startTraex(_paneId, _executable, args) { startedArgs = args; }, async runPrompt() { return "done"; }, async renamePane() {}, closePane
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
@@ -124,6 +137,10 @@ describe("pane/thread lifecycle integration", () => {
     await vi.waitFor(() => expect(store.getBinding("old")?.lifecycle).toBe("closed"));
     expect(closePane).toHaveBeenCalledWith(oldPane.paneId);
     expect(createdTitles).toEqual(["fresh"]);
+    const replacementId = store.findBindingByLarkScope("topic", "root")!.id;
+    expect(createdOptions).toMatchObject({ bindingId: replacementId, generation: 1, projectId: "repo", environment: { SWARM_PRIMARY_CAPABILITY: `test-${replacementId}-1` } });
+    expect(startedArgs).toEqual(primaryToolArgs(replacementId, 1));
+    expect(store.hasBindingPrimaryToolCapability(replacementId, 1)).toBe(true);
     expect(store.findBindingByLarkScope("topic", "root")?.title).toBe("repo / fresh");
     expect(store.getBinding("old")).toMatchObject({ lifecycle: "closed", attachment: "unattached" });
     expect(store.listRetiredPaneCleanupOperations(["succeeded"])).toMatchObject([{ oldBindingId: "old", replacementBindingId: expect.any(String), paneId: oldPane.paneId, state: "succeeded" }]);
@@ -236,7 +253,8 @@ describe("pane/thread lifecycle integration", () => {
     await activeRuntime.coordinator.stop(); await activeRuntime.projector.stop(); await activeRuntime.publisher.stop(); store.close();
   });
 
-  it("attaches a surviving failed reset pane back to its current topic", async () => {
+  it("keeps Primary tools unavailable when attaching a caller-selected failed-reset pane with a stale capability row", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "failed-reset-tools-"));
     const pane = { paneId: "w1:survived", terminalId: "term-reset", workspaceId: "w1", cwd: "/repo", label: "survived", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
     const herdr: HerdrPort = {
@@ -245,6 +263,8 @@ describe("pane/thread lifecycle integration", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "failed-reset", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / fresh" });
+    const staleCapability = "a".repeat(64);
+    store.setBindingPrimaryToolCapability({ bindingId: "failed-reset", expectedGeneration: 1, capabilityHash: createHash("sha256").update(staleCapability).digest("hex") });
     store.updateBinding("failed-reset", { paneId: pane.paneId, state: "failed" });
     const activeRuntime = runtime(store, herdr, lark);
     await activeRuntime.coordinator.start();
@@ -252,7 +272,14 @@ describe("pane/thread lifecycle integration", () => {
     await activeRuntime.coordinator.handleMessage({ ...message(4, "/swarm attach repo w1:survived"), mentionsBot: true });
 
     expect(store.getBinding("failed-reset")).toMatchObject({ state: "active", lifecycle: "active", attachment: "attached", paneId: pane.paneId, traexSessionId: pane.terminalId });
+    expect(store.loadTopicView("failed-reset")).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) });
+    const socketPath = join(directory, "primary-tools.sock");
+    const gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, {} as never, pino({ enabled: false }));
+    await gateway.start();
+    await expect(callGateway(socketPath, { bindingId: "failed-reset", generation: 1, capability: staleCapability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
+    await gateway.stop();
     await activeRuntime.coordinator.stop(); await activeRuntime.projector.stop(); await activeRuntime.publisher.stop(); store.close();
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("drains the active turn, cancels queued work, then archives without closing the pane", async () => {
@@ -475,6 +502,7 @@ describe("pane/thread lifecycle integration", () => {
 
     await coordinator.handleMessage({ ...message(10, "/swarm reattach w1:p1"), mentionsBot: true });
     expect(store.listBindings()[0]).toMatchObject({ lifecycle: "archived", attachment: "attached", generation: 1 });
+    expect(store.loadTopicView("b1")).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) });
     expect(submitted).toEqual([]);
 
     await coordinator.handleMessage({ ...message(11, "/swarm resume"), mentionsBot: true });
@@ -523,4 +551,20 @@ function config(): BridgeConfig {
     projects: [{ id: "repo", displayName: "Repo", spaceName: "repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
     databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
   };
+}
+
+function primaryToolArgs(bindingId: string, generation: number): string[] {
+  return [
+    "-c", 'mcp_servers.herdr_agent_swarm.command="node"',
+    "-c", `mcp_servers.herdr_agent_swarm.args=["primary-tools","--binding","${bindingId}","--generation","${generation}"]`,
+    "-c", 'mcp_servers.herdr_agent_swarm.env_vars=["SWARM_PRIMARY_CAPABILITY"]'
+  ];
+}
+
+function callGateway(socketPath: string, payload: object): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath); let output = "";
+    socket.setEncoding("utf8"); socket.once("connect", () => socket.write(`${JSON.stringify(payload)}\n`)); socket.on("data", (chunk) => { output += chunk; });
+    socket.once("end", () => resolve(JSON.parse(output))); socket.once("error", reject);
+  });
 }

@@ -2,12 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { BridgeEvent } from "../src/domain/events.js";
 import { initialTopicView, mirrorRunCardToTopic, reduceTopicView } from "../src/domain/topic-view.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
+import { renderProjectEntryCard } from "../src/cards/run-card.js";
 
 function event<T extends BridgeEvent["type"]>(type: T, payload: Extract<BridgeEvent, { type: T }>["payload"]): Extract<BridgeEvent, { type: T }> {
   return { eventId: type, bindingId: "b1", type, origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload } as Extract<BridgeEvent, { type: T }>;
 }
 
 describe("topic view reducer", () => {
+  it("persists Primary tool unavailability independently from binding health", () => {
+    const initial = initialTopicView("b1");
+    const unavailable = reduceTopicView(initial, { eventId: "e1", bindingId: "b1", type: "PrimaryToolAvailabilityChanged", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { available: false, reason: "Primary tools unavailable; use reset or replace" } });
+    expect(unavailable).toMatchObject({ phase: "provisioning", primaryToolsAvailable: false, primaryToolsNotice: "Primary tools unavailable; use reset or replace" });
+    expect(JSON.stringify(renderProjectEntryCard(unavailable))).toContain("Primary tools unavailable; use reset or replace");
+  });
   it("projects lifecycle and turn events deterministically", () => {
     const events: BridgeEvent[] = [
       event("BindingCreated", { title: "Fix tests", workspaceId: "w1", paneId: null }),

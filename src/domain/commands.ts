@@ -3,7 +3,7 @@ import type { AgentKind } from "./agent-instance.js";
 
 export type ControlActor =
   | { kind: "human"; userId: string; channel?: "feishu" | "local" }
-  | { kind: "primary-agent"; projectId: string; instanceId: string; generation: number; parentTurnId?: string };
+  | { kind: "thread-primary"; projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string };
 
 export interface CreateWorkerCommand {
   actor: ControlActor; projectId: string; name: string; agentKind: AgentKind; model: string | null; start: boolean;

@@ -12,7 +12,7 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CONNECTIONS = 64;
 const requestSchema = z.object({
-  instanceId: z.string().min(1).max(128), generation: z.number().int().positive(), capability: z.string().regex(/^[a-f0-9]{64}$/),
+  bindingId: z.string().min(1).max(128), generation: z.number().int().positive(), capability: z.string().regex(/^[a-f0-9]{64}$/),
   tool: z.enum(["listInstances", "promptInstance", "followUpInstance", "steerInstance", "inspectInstance", "waitInstance", "interruptInstance"]),
   arguments: z.record(z.unknown()).default({})
 }).strict();
@@ -26,15 +26,14 @@ export class PrimaryToolGateway {
 
   constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: InstanceMessagingWorkflow, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}) {}
 
-  issue(instanceId: string, expectedGeneration: number): PrimaryToolLaunch {
-    const runtimeGeneration = expectedGeneration + 1;
+  issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolLaunch {
     const capability = randomBytes(32).toString("hex");
-    if (!this.store.setPrimaryToolCapability({ instanceId, expectedGeneration, credentialGeneration: runtimeGeneration, capabilityHash: hash(capability) })) throw new Error("Primary instance generation changed before tool credential issue");
-    return { ...this.configuration(instanceId, runtimeGeneration), environment: { SWARM_PRIMARY_CAPABILITY: capability } };
+    if (!this.store.setBindingPrimaryToolCapability({ bindingId, expectedGeneration, capabilityHash: hash(capability) })) throw new Error("Primary binding generation changed before tool credential issue");
+    return { ...this.configurationForBinding(bindingId, expectedGeneration), environment: { SWARM_PRIMARY_CAPABILITY: capability } };
   }
 
-  configuration(instanceId: string, runtimeGeneration: number): PrimaryToolLaunch {
-    return { environment: {}, command: this.mcpCommand, args: [...this.mcpArgsPrefix, "--socket", this.socketPath, "--instance", instanceId, "--generation", String(runtimeGeneration)], ...(this.agentArgs.length ? { agentArgs: this.agentArgs } : {}) };
+  configurationForBinding(bindingId: string, generation: number): PrimaryToolLaunch {
+    return { environment: {}, command: this.mcpCommand, args: [...this.mcpArgsPrefix, "--socket", this.socketPath, "--binding", bindingId, "--generation", String(generation)], ...(this.agentArgs.length ? { agentArgs: this.agentArgs } : {}) };
   }
 
   async start(): Promise<void> {
@@ -86,11 +85,11 @@ export class PrimaryToolGateway {
 
   private async handle(raw: string): Promise<unknown> {
     const request = requestSchema.parse(JSON.parse(raw));
-    if (!this.store.verifyPrimaryToolCapability({ instanceId: request.instanceId, expectedGeneration: request.generation, capabilityHash: hash(request.capability) })) throw new Error("Primary tool credential is invalid or stale");
-    const instance = this.store.getAgentInstance(request.instanceId);
-    const turn = this.store.getActiveInstanceTurn(request.instanceId, request.generation);
-    if (!instance || instance.role !== "primary" || !turn) throw new Error("Primary tool calls require a current active primary turn");
-    const broker = new PrimaryToolBroker({ projectId: instance.projectId, instanceId: instance.id, generation: instance.generation, parentTurnId: turn.id }, this.messaging);
+    if (!this.store.verifyBindingPrimaryToolCapability({ bindingId: request.bindingId, expectedGeneration: request.generation, capabilityHash: hash(request.capability) })) throw new Error("Primary tool credential is invalid or stale");
+    const binding = this.store.getBinding(request.bindingId);
+    const prompt = this.store.getActiveOrdinaryPrompt(request.bindingId, request.generation);
+    if (!binding?.projectId || !prompt) throw new Error("Primary tool calls require a current active ordinary binding prompt");
+    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id }, this.messaging);
     return await (broker[request.tool] as (input: Record<string, unknown>) => unknown)(request.arguments);
   }
 }

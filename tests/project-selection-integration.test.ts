@@ -177,7 +177,7 @@ describe("project selection flow", () => {
   it("creates exactly one pane in the clicked project and does not submit an initial prompt", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<void>) | undefined;
     const created: Array<[string, string, unknown]> = [];
-    const started: string[] = [];
+    const started: Array<[string, string[] | undefined]> = [];
     const prompts: string[] = [];
     const cards: object[] = [];
     const groupCards: object[] = [];
@@ -194,7 +194,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
       async createPane(workspaceId, cwd, options) { created.push([workspaceId, cwd, options]); return { paneId: "wD:p9", workspaceId, cwd, label: null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "wD:p9", terminalId: "term-9", workspaceId: "wD", cwd: "/work/datasage", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-      async startTraex(paneId) { started.push(paneId); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async renamePane() {}
+      async startTraex(paneId, _executable, args) { started.push([paneId, args]); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
@@ -231,9 +231,15 @@ describe("project selection flow", () => {
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
     expect(created).toEqual([["wD", "/work/datasage", {
-      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: expect.stringMatching(/^task-[a-z0-9]{4}$/)
+      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: expect.stringMatching(/^task-[a-z0-9]{4}$/),
+      environment: { SWARM_PRIMARY_CAPABILITY: expect.stringMatching(/^test-.+-1$/) }
     }]]);
-    expect(started).toEqual(["wD:p9"]);
+    const bindingId = (created[0]![2] as { bindingId: string }).bindingId;
+    expect(started).toEqual([["wD:p9", [
+      "-c", 'mcp_servers.herdr_agent_swarm.command="node"',
+      "-c", `mcp_servers.herdr_agent_swarm.args=["primary-tools","--binding","${bindingId}","--generation","1"]`,
+      "-c", 'mcp_servers.herdr_agent_swarm.env_vars=["SWARM_PRIMARY_CAPABILITY"]'
+    ]]]);
     expect(prompts).toEqual([]);
     expect(groupCards).toHaveLength(1);
     expect(JSON.stringify(groupCards[0])).toContain("datasage_semantic_knowledge");

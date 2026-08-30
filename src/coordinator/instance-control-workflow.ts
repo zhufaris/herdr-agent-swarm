@@ -10,10 +10,6 @@ import type { WorktreeManager } from "../runtime/worktree-manager.js";
 
 interface Options {
   projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
-  primaryTools?: {
-    issue(instanceId: string, expectedGeneration: number): { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] };
-    configuration(instanceId: string, runtimeGeneration: number): { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] };
-  };
 }
 
 export class InstanceControlWorkflow {

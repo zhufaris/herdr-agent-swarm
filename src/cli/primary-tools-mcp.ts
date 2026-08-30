@@ -33,13 +33,13 @@ export async function handlePrimaryMcpRequest(request: JsonRpcRequest, invoke: (
 }
 
 async function main(): Promise<void> {
-  const socketPath = argument("--socket"); const instanceId = argument("--instance"); const generation = Number(argument("--generation"));
+  const socketPath = argument("--socket"); const bindingId = argument("--binding"); const generation = Number(argument("--generation"));
   const capability = process.env.SWARM_PRIMARY_CAPABILITY;
-  if (!socketPath || !instanceId || !Number.isInteger(generation) || generation <= 0 || !capability) throw new Error("Primary MCP runtime credential is incomplete");
+  if (!socketPath || !bindingId || !Number.isInteger(generation) || generation <= 0 || !capability) throw new Error("Primary MCP runtime credential is incomplete");
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {
     let response: object | null;
-    try { response = await handlePrimaryMcpRequest(JSON.parse(line) as JsonRpcRequest, (toolName, args) => callPrimaryToolGateway(socketPath, { instanceId, generation, capability, tool: toolName, arguments: args })); }
+    try { response = await handlePrimaryMcpRequest(JSON.parse(line) as JsonRpcRequest, (toolName, args) => callPrimaryToolGateway(socketPath, { bindingId, generation, capability, tool: toolName, arguments: args })); }
     catch (error) { response = failure(null, -32700, actionableError(error)); }
     if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
   }

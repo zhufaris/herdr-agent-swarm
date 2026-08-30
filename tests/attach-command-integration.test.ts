@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
@@ -35,6 +36,7 @@ describe("attach existing pane command", () => {
     await coordinator.handleMessage(command(1, "tidy"));
 
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active" });
+    expect(store.loadTopicView(store.findBindingByPane("w5:p3G")!.id)).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) });
     expect(createTopic).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
     expect(JSON.stringify(replyCards.at(-1))).toContain('\"action\":\"open_project_thread\"');
@@ -75,6 +77,7 @@ describe("attach existing pane command", () => {
 
     await coordinator.handleMessage(command(1));
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", topicId: "topic-attached", rootMessageId: "root-attached", state: "active" });
+    expect(store.loadTopicView(store.findBindingByPane("w5:p3G")!.id)).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) });
     expect(createTopic).toHaveBeenCalledTimes(1);
     expect(createPane).not.toHaveBeenCalled();
     expect(startTraex).not.toHaveBeenCalled();
@@ -96,6 +99,47 @@ describe("attach existing pane command", () => {
     const button = findActionButton(replyCards.at(-1)!, "open_project_thread");
     await onAction!({ messageId: "reply-2", chatId: "chat", operatorOpenId: "user-1", value: button.value });
     expect(shareThread).toHaveBeenCalledWith("topic-attached", { messageId: "reply-2", chatId: "chat" });
+
+    await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
+  });
+
+  it("preserves managed Primary tools when attaching the authoritative active pane again", async () => {
+    const capability = "managed-capability";
+    const createPane = vi.fn<HerdrPort["createPane"]>();
+    const startTraex = vi.fn<HerdrPort["startTraex"]>();
+    const runPrompt = vi.fn<HerdrPort["runPrompt"]>();
+    const renamePane = vi.fn<HerdrPort["renamePane"]>();
+    const pane = { paneId: "w5:p3G", workspaceId: "w5", cwd: "/repo", label: "Managed pane", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { throw new Error("unexpected createTopic"); },
+      async replyText() { return { messageId: "text-1" }; },
+      async replyCard() { return { messageId: "reply-1" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane]; },
+      async getPane() { return pane; }, createPane, startTraex, runPrompt, renamePane
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "managed", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "topic-managed", rootMessageId: "root-managed", title: "managed" });
+    store.updateBinding("managed", { paneId: pane.paneId, state: "active", lifecycle: "active", attachment: "attached" });
+    expect(store.setBindingPrimaryToolCapability({ bindingId: "managed", expectedGeneration: 1, capabilityHash: createHash("sha256").update(capability).digest("hex") })).toBe(true);
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage(command(1));
+
+    expect(store.getBinding("managed")).toMatchObject({ paneId: pane.paneId, generation: 1, state: "active" });
+    expect(store.hasBindingPrimaryToolCapability("managed", 1)).toBe(true);
+    expect(store.verifyBindingPrimaryToolCapability({ bindingId: "managed", expectedGeneration: 1, capabilityHash: createHash("sha256").update(capability).digest("hex") })).toBe(true);
+    expect(store.loadTopicView("managed")).toMatchObject({ primaryToolsAvailable: true, primaryToolsNotice: null });
+    expect(createPane).not.toHaveBeenCalled();
+    expect(startTraex).not.toHaveBeenCalled();
+    expect(runPrompt).not.toHaveBeenCalled();
+    expect(renamePane).not.toHaveBeenCalled();
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

@@ -10,13 +10,14 @@ export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
   liveStatus: MainCardLiveStatus | null;
+  primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
   activityAt: string | null;
   viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, liveStatus: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
@@ -35,6 +36,7 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
   switch (event.type) {
     case "BindingCreated": return { ...base, title: event.payload.title, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, phase: "provisioning" };
     case "BindingActivated": return { ...base, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, phase: "ready", notice: null };
+    case "PrimaryToolAvailabilityChanged": return { ...base, primaryToolsAvailable: event.payload.available, primaryToolsNotice: event.payload.reason };
     case "BindingRenamed": return { ...base, title: event.payload.title };
     case "BindingDraining": return { ...base, phase: "draining", notice: event.payload.reason };
     case "BindingArchived": return { ...base, phase: "archived", notice: event.payload.reason };
@@ -131,6 +133,7 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.phase === right.phase && left.agentState === right.agentState && left.queueDepth === right.queueDepth
     && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
     && left.model === right.model && left.context === right.context
+    && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice
     && sameLiveStatus(left.liveStatus, right.liveStatus)
     && sameVisibleProgress(left.recentProgress, right.recentProgress);
 }

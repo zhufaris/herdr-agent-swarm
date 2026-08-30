@@ -65,8 +65,11 @@ export interface InstanceStore {
   getInstanceTurn(id: string): InstanceTurn | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
-  setPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; credentialGeneration: number; capabilityHash: string }): boolean;
-  verifyPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; capabilityHash: string }): boolean;
+  setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
+  verifyBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
+  hasBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
+  revokeBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
+  getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null;
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] };
   listObservableInstanceTurns(): InstanceTurn[];
@@ -229,6 +232,8 @@ export interface BindingStorePort {
   recoverOrphanBindingWithProjection(input: RecoverOrphanBindingProjectionInput): RecoverOrphanBindingProjectionResult;
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
   attachBindingPane(id: string, pane: HerdrPane, replacement: boolean): Binding;
+  hasBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
+  revokeBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
   findBindingByTopic(topicId: string): Binding | null;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   findBindingByPane(paneId: string): Binding | null;
@@ -379,6 +384,7 @@ export type BindingProvisioningStore = Pick<BindingStorePort,
   | "attachBindingPane" | "audit" | "claimProjectSelection" | "completeProjectSelection"
   | "countPendingPrompts" | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
   | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindingsByState"
+  | "hasBindingPrimaryToolCapability" | "revokeBindingPrimaryToolCapability"
   | "listProcessingProjectSelections" | "loadTopicView" | "pauseProjectSelection" | "recordBridgeMessage"
   | "createResetCandidate" | "cutoverResetCandidate" | "replaceProvisioningPane" | "saveTopicView" | "transitionBinding" | "updateBindingMetadata"
 >;

@@ -387,15 +387,28 @@ export class SqliteBindingStore implements BindingStorePort {
     const row = this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked') ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as Record<string, unknown> | undefined;
     return this.mapInstanceTurn(row);
   }
-  setPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; credentialGeneration: number; capabilityHash: string }): boolean {
-    const instance = this.getAgentInstance(input.instanceId);
-    if (!instance || instance.role !== "primary" || instance.generation !== input.expectedGeneration) return false;
-    this.database.prepare("INSERT INTO primary_tool_capabilities(instance_id, instance_generation, capability_hash, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET instance_generation = excluded.instance_generation, capability_hash = excluded.capability_hash, created_at = excluded.created_at").run(input.instanceId, input.credentialGeneration, input.capabilityHash, now());
+  setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
+    const binding = this.getBinding(input.bindingId);
+    if (!binding || (binding.generation !== input.expectedGeneration && binding.generation + 1 !== input.expectedGeneration)) return false;
+    this.database.prepare("INSERT INTO primary_tool_capabilities(binding_id, binding_generation, capability_hash, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(binding_id, binding_generation) DO UPDATE SET capability_hash = excluded.capability_hash, created_at = excluded.created_at").run(input.bindingId, input.expectedGeneration, input.capabilityHash, now());
     return true;
   }
-  verifyPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; capabilityHash: string }): boolean {
-    const row = this.database.prepare("SELECT 1 FROM primary_tool_capabilities c JOIN agent_instances i ON i.id = c.instance_id WHERE c.instance_id = ? AND c.instance_generation = ? AND c.capability_hash = ? AND i.role = 'primary' AND i.generation = c.instance_generation").get(input.instanceId, input.expectedGeneration, input.capabilityHash);
+  verifyBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
+    const row = this.database.prepare("SELECT 1 FROM primary_tool_capabilities c JOIN bindings b ON b.id = c.binding_id WHERE c.binding_id = ? AND c.binding_generation = ? AND c.capability_hash = ? AND b.generation = c.binding_generation AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached'").get(input.bindingId, input.expectedGeneration, input.capabilityHash);
     return Boolean(row);
+  }
+  hasBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean {
+    return Boolean(this.database.prepare("SELECT 1 FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").get(bindingId, expectedGeneration));
+  }
+  revokeBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean {
+    return Number(this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(bindingId, expectedGeneration).changes) > 0;
+  }
+  getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
+    const rows = this.database.prepare(`SELECT p.* FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id JOIN run_cards r ON r.prompt_id = p.id
+      WHERE p.binding_id = ? AND p.state = 'running' AND p.dispatch_kind = 'turn'
+        AND b.generation = ? AND r.binding_generation = b.generation AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached'
+      ORDER BY p.created_at, p.rowid LIMIT 2`).all(bindingId, expectedGeneration) as PromptRow[];
+    return rows.length === 1 ? mapPrompt(rows[0]!) : null;
   }
 
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
@@ -1092,6 +1105,7 @@ export class SqliteBindingStore implements BindingStorePort {
     try {
       this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
         .run(pane.paneId, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
+      if (!replacement) this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(id, suspended.generation);
       this.database.exec("COMMIT");
       return this.requireBinding(id);
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
@@ -2637,7 +2651,7 @@ export class SqliteBindingStore implements BindingStorePort {
       );
       CREATE INDEX IF NOT EXISTS instance_events_instance_id ON instance_events(instance_id, id);
       CREATE TABLE IF NOT EXISTS primary_tool_capabilities(
-        instance_id TEXT PRIMARY KEY REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(binding_id, binding_generation)
       );
       CREATE TABLE IF NOT EXISTS approval_requests(
         id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL,
@@ -2750,6 +2764,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
+    this.ensureBindingPrimaryToolCapabilities();
     this.ensureBindingCreatorColumn();
     this.ensureFailedSteeringInteractionKind();
     this.ensureAgentSessionColumns();
@@ -3010,6 +3025,18 @@ export class SqliteBindingStore implements BindingStorePort {
         provisioning_checkpoint = CASE WHEN state IN ('active','archived','orphaned') THEN 'activated' WHEN pane_id IS NOT NULL THEN 'pane_created' ELSE provisioning_checkpoint END,
         archived_at = CASE WHEN state = 'archived' THEN COALESCE(archived_at, updated_at) ELSE archived_at END,
         last_activity_at = COALESCE(last_activity_at, updated_at);
+    `);
+  }
+
+  private ensureBindingPrimaryToolCapabilities(): void {
+    const columns = new Set((this.database.prepare("PRAGMA table_info(primary_tool_capabilities)").all() as Array<{ name: string }>).map(({ name }) => name));
+    const primaryKey = (this.database.prepare("PRAGMA table_info(primary_tool_capabilities)").all() as Array<{ name: string; pk: number }>).filter(({ pk }) => pk > 0).sort((left, right) => left.pk - right.pk).map(({ name }) => name);
+    if (columns.has("binding_id") && columns.has("binding_generation") && primaryKey.join(",") === "binding_id,binding_generation") return;
+    this.database.exec(`
+      DROP TABLE IF EXISTS primary_tool_capabilities;
+      CREATE TABLE primary_tool_capabilities(
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(binding_id, binding_generation)
+      );
     `);
   }
 

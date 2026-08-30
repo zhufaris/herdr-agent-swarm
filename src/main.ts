@@ -116,7 +116,7 @@ const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
 const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
 const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("./cli/primary-tools-mcp.js", import.meta.url))], store, instanceMessaging, logger);
-const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID, primaryTools: primaryToolGateway });
+const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
 const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, operatorOpenIds: config.lark.operatorOpenIds, store, control: instanceControl, messaging: instanceMessaging, drivers: agentDrivers, outbound });
 const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
 const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
@@ -129,7 +129,7 @@ const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork,
 channelPublisher.connectPromptScheduler(scheduler);
 const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
-const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
+const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
 const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
 const paneControl = new PaneControlWorkflow({ store, herdr, outbound, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
 const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound, logger });

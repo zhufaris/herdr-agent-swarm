@@ -54,8 +54,8 @@ export class InstanceMessagingWorkflow {
   }
 
   list(actor: ControlActor, projectId: string): AgentInstance[] {
-    if (actor.kind === "primary-agent") this.requireCurrentPrimary(actor, projectId);
-    return this.options.store.listAgentInstances(projectId);
+    if (actor.kind === "thread-primary") this.requireCurrentPrimary(actor, projectId);
+    return this.options.store.listAgentInstances(projectId).filter(({ role }) => role === "worker");
   }
 
   events(actor: ControlActor, instanceId: string, afterId = 0): InstanceEvent[] { const target = this.authorize(actor, undefined, instanceId); return this.options.store.listInstanceEvents(target.id, afterId); }
@@ -65,17 +65,17 @@ export class InstanceMessagingWorkflow {
     if (!target) throw new Error("Target instance not found");
     const projectId = requestedProjectId ?? target.projectId;
     if (target.projectId !== projectId) throw new Error("Target instance is not in the requested project");
-    if (actor.kind === "primary-agent") {
+    if (actor.kind === "thread-primary") {
       this.requireCurrentPrimary(actor, projectId);
       if (target.role !== "worker") throw new Error("Primary tools can target only same-project workers");
     }
     return target;
   }
 
-  private requireCurrentPrimary(actor: Extract<ControlActor, { kind: "primary-agent" }>, projectId: string): AgentInstance {
-    const caller = this.options.store.getAgentInstance(actor.instanceId);
-    if (!caller || caller.projectId !== actor.projectId || caller.projectId !== projectId || caller.role !== "primary" || caller.generation !== actor.generation) throw new Error("Caller is not the authorized current primary");
-    return caller;
+  private requireCurrentPrimary(actor: Extract<ControlActor, { kind: "thread-primary" }>, projectId: string): void {
+    const binding = this.options.store.getBinding(actor.bindingId);
+    const prompt = this.options.store.getActiveOrdinaryPrompt(actor.bindingId, actor.bindingGeneration);
+    if (!binding || binding.projectId !== actor.projectId || binding.projectId !== projectId || binding.generation !== actor.bindingGeneration || prompt?.id !== actor.parentPromptId) throw new Error("Caller is not the authorized current thread Primary");
   }
 }
 

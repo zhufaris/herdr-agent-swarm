@@ -50,6 +50,7 @@ export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObse
 export type BridgeEvent =
   | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; tabId?: string | null; paneId: string | null }>
   | EventBase<"BindingActivated", { paneId: string; tabId?: string | null; topicId: string }>
+  | EventBase<"PrimaryToolAvailabilityChanged", { available: boolean; reason: string | null }>
   | EventBase<"BindingRenamed", { title: string }>
   | EventBase<"BindingDraining", { reason: string }>
   | EventBase<"BindingArchived", { reason: string }>

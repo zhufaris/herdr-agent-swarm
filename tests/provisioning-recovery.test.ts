@@ -1,14 +1,47 @@
 import pino from "pino";
-import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { HerdrPane } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("project provisioning recovery", () => {
+  it("marks a pre-feature active binding unavailable without restarting its pane", async () => {
+    const harness = createHarness();
+    harness.store.createPendingBinding({ id: "legacy-active", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Alpha / legacy" });
+    harness.store.updateBinding("legacy-active", { paneId: "w1:p9", statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+
+    await harness.coordinator.start();
+
+    expect(harness.started).toBe(0);
+    expect(harness.created).toBe(0);
+    await vi.waitFor(() => expect(harness.store.loadTopicView("legacy-active")).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) }));
+    await harness.close();
+  });
+
+  it("does not start a legacy pane_created checkpoint without a persisted capability", async () => {
+    const harness = createHarness();
+    const selection = createProcessingSelection(harness.store);
+    let binding = harness.store.createPendingBinding({ id: "binding-1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Alpha / task" });
+    harness.store.linkProjectSelectionBinding(selection.id, binding.id);
+    binding = harness.store.updateBinding(binding.id, { paneId: "w1:p9", traexSessionId: "term-1" });
+    harness.store.transitionBinding(binding.id, { type: "pane_created" });
+
+    await harness.coordinator.start();
+
+    expect(harness.started).toBe(0);
+    expect(harness.created).toBe(0);
+    expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "processing", error: expect.stringMatching(/credential provenance.*reset.*replace/i) });
+    expect(harness.store.hasBindingPrimaryToolCapability(binding.id, 1)).toBe(false);
+    await vi.waitFor(() => expect(harness.store.loadTopicView(binding.id)).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) }));
+    await harness.close();
+  });
+
   it("pauses a linked selected checkpoint instead of risking a duplicate pane", async () => {
     const harness = createHarness();
     const selection = createProcessingSelection(harness.store);
@@ -36,6 +69,7 @@ describe("project provisioning recovery", () => {
     const selection = createProcessingSelection(harness.store);
     let binding = harness.store.createPendingBinding({ id: "binding-1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Alpha / task" });
     harness.store.linkProjectSelectionBinding(selection.id, binding.id);
+    harness.store.setBindingPrimaryToolCapability({ bindingId: binding.id, expectedGeneration: 1, capabilityHash: capabilityHash("test-binding-1-1") });
     binding = harness.store.updateBinding(binding.id, { paneId: "w1:p9", traexSessionId: "term-1" });
     binding = harness.store.transitionBinding(binding.id, { type: "pane_created" });
     if (checkpoint !== "pane_created") binding = harness.store.transitionBinding(binding.id, { type: "runtime_started" });
@@ -48,6 +82,10 @@ describe("project provisioning recovery", () => {
 
     expect(harness.created).toBe(0);
     expect(harness.started).toBe(expectedStarts);
+    if (checkpoint === "pane_created") {
+      expect(harness.startedCalls).toEqual([{ paneId: "w1:p9", args: primaryToolArgs("binding-1", 1) }]);
+      expect(harness.store.hasBindingPrimaryToolCapability("binding-1", 1)).toBe(true);
+    }
     expect(harness.topics).toBe(expectedTopics);
     if (expectedTopics) expect(harness.topicKeys).toEqual(["binding-1"]);
     expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "completed" });
@@ -60,13 +98,20 @@ describe("project provisioning recovery", () => {
     const selection = createProcessingSelection(harness.store);
     let binding = harness.store.createPendingBinding({ id: "binding-1", projectId: "alpha", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Alpha / task" });
     harness.store.linkProjectSelectionBinding(selection.id, binding.id);
+    harness.store.setBindingPrimaryToolCapability({ bindingId: binding.id, expectedGeneration: 1, capabilityHash: capabilityHash("test-binding-1-1") });
     binding = harness.store.updateBinding(binding.id, { paneId: "w1:p9", traexSessionId: "term-1" });
     harness.store.transitionBinding(binding.id, { type: "pane_created" });
 
     await harness.coordinator.start();
 
     expect(harness.created).toBe(1);
+    expect(harness.createdCalls).toEqual([expect.objectContaining({
+      bindingId: "binding-1", generation: 2, projectId: "alpha",
+      environment: { SWARM_PRIMARY_CAPABILITY: "test-binding-1-2" }
+    })]);
     expect(harness.startedPaneIds).toEqual(["w1:p10"]);
+    expect(harness.startedCalls).toEqual([{ paneId: "w1:p10", args: primaryToolArgs("binding-1", 2) }]);
+    expect(harness.store.hasBindingPrimaryToolCapability("binding-1", 2)).toBe(true);
     expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "completed" });
     expect(harness.store.getBinding(binding.id)).toMatchObject({
       state: "active", lifecycle: "active", provisioningCheckpoint: "activated",
@@ -131,6 +176,7 @@ function createProcessingSelection(store: SqliteBindingStore) {
 function createHarness(options: { terminalId?: string; paneMissing?: boolean; occupiedUnreadyPane?: boolean } = {}) {
   const store = new SqliteBindingStore(":memory:");
   let created = 0; let started = 0; let topics = 0; const topicKeys: Array<string | undefined> = []; const startedPaneIds: string[] = [];
+  const createdCalls: Array<Record<string, unknown>> = []; const startedCalls: Array<{ paneId: string; args: string[] | undefined }> = [];
   const pane: HerdrPane = { paneId: "w1:p9", terminalId: options.terminalId ?? "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const replacement: HerdrPane = { paneId: "w1:p10", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
@@ -140,8 +186,8 @@ function createHarness(options: { terminalId?: string; paneMissing?: boolean; oc
       if (paneId === replacement.paneId) return { pane: replacement, traexProcess: true, composerReady: true, evidenceSource: "structured" };
       return { pane, traexProcess: true, composerReady: !options.occupiedUnreadyPane, evidenceSource: options.occupiedUnreadyPane ? "process" : "structured" };
     },
-    async createPane() { created += 1; return options.occupiedUnreadyPane ? replacement : pane; },
-    async startTraex(paneId) { started += 1; startedPaneIds.push(paneId); }, async runPrompt() { return "done"; }, async renamePane() {}
+    async createPane(_workspaceId, _cwd, createOptions) { created += 1; createdCalls.push(createOptions ?? {}); return options.occupiedUnreadyPane ? replacement : pane; },
+    async startTraex(paneId, _executable, args) { started += 1; startedPaneIds.push(paneId); startedCalls.push({ paneId, args }); }, async runPrompt() { return "done"; }, async renamePane() {}
   };
   const lark: LarkPort = {
     async start() {}, async stop() {}, isReady: () => true,
@@ -150,9 +196,20 @@ function createHarness(options: { terminalId?: string; paneMissing?: boolean; oc
   };
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
-  return { store, coordinator, get created() { return created; }, get started() { return started; }, get startedPaneIds() { return startedPaneIds; }, get topics() { return topics; }, get topicKeys() { return topicKeys; }, async close() { await coordinator.stop(); await publisher.stop(); store.close(); } };
+  return { store, coordinator, get created() { return created; }, get createdCalls() { return createdCalls; }, get started() { return started; }, get startedPaneIds() { return startedPaneIds; }, get startedCalls() { return startedCalls; }, get topics() { return topics; }, get topicKeys() { return topicKeys; }, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }
+
+function primaryToolArgs(bindingId: string, generation: number): string[] {
+  return [
+    "-c", 'mcp_servers.herdr_agent_swarm.command="node"',
+    "-c", `mcp_servers.herdr_agent_swarm.args=["primary-tools","--binding","${bindingId}","--generation","${generation}"]`,
+    "-c", 'mcp_servers.herdr_agent_swarm.env_vars=["SWARM_PRIMARY_CAPABILITY"]'
+  ];
+}
+
+function capabilityHash(capability: string): string { return createHash("sha256").update(capability).digest("hex"); }
 
 function config(): BridgeConfig {
   return {
