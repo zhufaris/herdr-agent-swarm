@@ -255,13 +255,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           if (!this.isBindingActive(bindingId)) return;
           const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
           outputSource = typed.source;
-          const mainStatus = typed.observation.mainStatus ? toMainStatus(typed.observation.mainStatus, startedAt) : undefined;
-          if (typed.observation.answerDelta || mainStatus) await this.publish(bindingId, "TurnOutputObserved", "herdr", {
-            promptId: prompt.id, observation: {
-              answer: { snapshot: typed.observation.answerDelta, update: "append", toolActivities: [] },
-              main: { ...(mainStatus ? { status: mainStatus } : {}) }
-            }
-          });
+          await this.publishTypedObservation(bindingId, prompt.id, typed.observation, startedAt);
           const previousState = binding.lastAgentState;
           if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
           if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
@@ -279,11 +273,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
         const finalTyped = await this.readTypedDelta(outputSource, binding, prompt.id);
         outputSource = finalTyped.source;
-        const finalMainStatus = finalTyped.observation.mainStatus ? toMainStatus(finalTyped.observation.mainStatus, startedAt) : undefined;
-        if (finalTyped.observation.answerDelta || finalMainStatus) await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId: prompt.id, observation: {
-          answer: { snapshot: finalTyped.observation.answerDelta, update: "append", toolActivities: [] },
-          main: { ...(finalMainStatus ? { status: finalMainStatus } : {}) }
-        } });
+        await this.publishTypedObservation(bindingId, prompt.id, finalTyped.observation, startedAt);
         const sourceAnswer = outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "";
         const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
         binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: outputSource.mode === "unavailable" });
@@ -351,6 +341,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(binding.id, prompt.id, state);
         const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
         outputSource = typed.source;
+        await this.publishTypedObservation(binding.id, prompt.id, typed.observation, promptStartedAt);
         const lifecycle = typed.observation.turnLifecycle;
         const lifecycleBelongsToPrompt = lifecycle && Number.isFinite(promptStartedAt)
           ? Date.parse(lifecycle.startedAt) >= promptStartedAt - 1_000
@@ -438,6 +429,18 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, unavailableReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
       return { source: source.emitted ? source : { mode: "unavailable", reason: "transcript_read_failed" }, observation: { answerDelta: "" } };
     }
+  }
+
+  private async publishTypedObservation(bindingId: string, promptId: string, observation: TraexTranscriptObservation, startedAt: number): Promise<void> {
+    const mainStatus = observation.mainStatus && Number.isFinite(startedAt) ? toMainStatus(observation.mainStatus, startedAt) : undefined;
+    if (!observation.answerDelta && !mainStatus) return;
+    await this.publish(bindingId, "TurnOutputObserved", "herdr", {
+      promptId,
+      observation: {
+        answer: { snapshot: observation.answerDelta, update: "append", toolActivities: [] },
+        main: { ...(mainStatus ? { status: mainStatus } : {}) }
+      }
+    });
   }
 
   private async archiveDrainedBinding(binding: Binding): Promise<void> {

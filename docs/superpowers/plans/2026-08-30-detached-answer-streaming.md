@@ -29,11 +29,11 @@
 - Consumes: `TraexTranscriptObservation`, durable run-card `startedAt`, and the existing `TurnOutputObserved` lifecycle event.
 - Produces: a private `publishTypedObservation(bindingId, promptId, observation, startedAt)` helper shared by attached and detached observers.
 
-- [ ] Add an integration test whose recovered detached transcript first emits an answer delta with an active lifecycle, then emits a matching completed lifecycle.
-- [ ] Assert before completion that the prompt remains `running/detached`, the run-card answer contains the delta, and Herdr prompt submission occurred only once.
-- [ ] Run `npx vitest run tests/pane-thread-lifecycle-integration.test.ts` and confirm the new assertion fails because detached deltas are discarded.
-- [ ] Extract the existing answer/status publication into `publishTypedObservation` and call it from both the attached callback/final read and detached loop.
-- [ ] Re-run `npx vitest run tests/pane-thread-lifecycle-integration.test.ts tests/concurrency-controls.integration.test.ts`.
-- [ ] Run `npm run typecheck`, `npm run build`, and `git diff --check`.
+- [x] Add an integration test whose recovered detached transcript first emits an answer delta with an active lifecycle, then emits a matching completed lifecycle.
+- [x] Assert before completion that the prompt remains `running/detached`, the run-card answer contains the delta, and Herdr prompt submission occurred only once.
+- [x] Run `npx vitest run tests/pane-thread-lifecycle-integration.test.ts` and confirm the new assertion fails because detached deltas are discarded.
+- [x] Extract the existing answer/status publication into `publishTypedObservation` and call it from both the attached callback/final read and detached loop.
+- [x] Re-run `npx vitest run tests/pane-thread-lifecycle-integration.test.ts tests/concurrency-controls.integration.test.ts`.
+- [x] Run `npm run typecheck`, `npm run build`, and `git diff --check`.
 - [ ] Wait for live prompt/outbox work to drain, restart `herdr-agent-swarm.service`, and verify `/ready`, build identity, and zero replay.
 - [ ] Commit the source, regression test, and checked plan as `fix: stream detached TraeX answers`.

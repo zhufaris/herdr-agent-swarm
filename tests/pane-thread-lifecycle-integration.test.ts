@@ -375,12 +375,15 @@ describe("pane/thread lifecycle integration", () => {
     store.updateBinding("b1", { lastAgentState: "idle" });
     let lifecycleState: "active" | "completed" = "completed";
     let lifecycleStartedAt = new Date(Date.now() - 60_000).toISOString();
+    let answerDelta = "";
     const transcriptReader = {
       async open() {
         return { mode: "typed" as const, cursor: {
           async readDelta() { return ""; },
           async readObservation() {
-            return { answerDelta: "", turnLifecycle: {
+            const nextDelta = answerDelta;
+            answerDelta = "";
+            return { answerDelta: nextDelta, turnLifecycle: {
               turnId: "turn-1", state: lifecycleState, startedAt: lifecycleStartedAt,
               ...(lifecycleState === "completed" ? { finalAnswer: "Recovered answer" } : {})
             } };
@@ -396,7 +399,9 @@ describe("pane/thread lifecycle integration", () => {
 
     lifecycleState = "active";
     lifecycleStartedAt = new Date(Date.now() + 1_000).toISOString();
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    answerDelta = "Live detached JSONL update";
+    await vi.waitFor(() => expect(store.loadRunCard(firstPrompt.id)!.answer).toContain("Live detached JSONL update"), { timeout: 2_000 });
+    expect(store.listDetachedPrompts()).toMatchObject([{ id: firstPrompt.id, state: "running", observationState: "detached" }]);
     expect(submitted).toEqual(["first"]);
 
     lifecycleState = "completed";
