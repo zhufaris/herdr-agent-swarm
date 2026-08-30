@@ -52,7 +52,14 @@ describe("Primary to Worker product flow", () => {
       }
     } as never;
     const promptScheduler = new InProcessPromptWorkScheduler();
-    promptRun = new PromptRunWorkflow({ store, herdr: primaryHerdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, logger: pino({ enabled: false }), turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "typed" as const, cursor: { async readDelta() { const answer = primaryAnswer; primaryAnswer = ""; return answer; } } }; } } });
+    const primaryTurnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9"; let transcriptRead = false;
+    promptRun = new PromptRunWorkflow({ store, herdr: primaryHerdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, logger: pino({ enabled: false }), turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
+      async readDelta() { return ""; },
+      async readObservation() {
+        const answerDelta = transcriptRead ? "" : primaryAnswer; transcriptRead = true; primaryAnswer = "";
+        return { turnId: primaryTurnId, ...(answerDelta ? { freshTurnStart: true } : {}), answerDelta, turnLifecycle: { turnId: primaryTurnId, state: "completed" as const, startedAt: new Date().toISOString() } };
+      }
+    } }; } } });
     promptRun.start(); promptScheduler.wake({ kind: "prompt-ready", bindingId: "binding" });
     await vi.waitFor(() => expect(store!.getPrompt("primary-prompt")?.state).toBe("delivered"));
     expect(store.listInstanceTurns(worker.id).items).toEqual([expect.objectContaining({ state: "completed", result: "WORKER_OK", actor: { kind: "thread-primary", projectId: "project", bindingId: "binding", bindingGeneration: 1, parentPromptId: "primary-prompt" } })]);
