@@ -206,6 +206,9 @@ export interface PromptJob {
   steeringOrigin: SteeringOrigin | null;
   sourcePromptId: string | null;
   wasDetached: boolean;
+  dispatchedAt: string | null;
+  transcriptTurnId: string | null;
+  transcriptTurnStartedAt: string | null;
   observationState: PromptObservationState;
   state: PromptState;
   attemptCount: number;
@@ -213,6 +216,12 @@ export interface PromptJob {
   createdAt: string;
   updatedAt: string;
 }
+
+export type TranscriptTurnClaimOutcome =
+  | { state: "claimed"; prompt: PromptJob }
+  | { state: "matched"; prompt: PromptJob }
+  | { state: "conflict"; prompt: PromptJob }
+  | { state: "ineligible"; prompt: PromptJob | null };
 
 export interface PaneCloseOperation {
   id: string;

@@ -11,6 +11,70 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
 describe("coordinator concurrency controls", () => {
+  it("terminalizes a prompt when its durable dispatch checkpoint fails", async () => {
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await onDispatched?.();
+      return "done" as const;
+    });
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane() { throw new Error("not used"); }, async startTraex() {},
+      runPrompt,
+      async renamePane() {}
+    };
+    const { coordinator, publisher, store } = fixture(herdr);
+    try {
+      await coordinator.start();
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true });
+      store.markPromptDispatched = () => { throw new Error("dispatch checkpoint failed"); };
+      await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+
+      await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce(), { timeout: 4_000 });
+      await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "failed", notice: "dispatch checkpoint failed" }));
+      const promptId = store.listRunCards("b1")[0]!.promptId;
+      expect(store.getPrompt(promptId)).toMatchObject({ state: "failed", observationState: "completed", dispatchedAt: null, error: "dispatch checkpoint failed" });
+      expect(store.listDetachedPrompts()).toEqual([]);
+      expect(store.scanDurablePromptWork().hints).not.toContainEqual(expect.objectContaining({ kind: "detached-observer-ready", promptId }));
+    } finally {
+      await coordinator.stop(); await publisher.stop(); store.close();
+    }
+  });
+
+  it("persists the pre-call dispatch timestamp after delayed successful submission", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T12:00:00.000Z"));
+    let workflowStore!: SqliteBindingStore;
+    let dispatchResult: ReturnType<SqliteBindingStore["claimPromptTranscriptTurn"]> | undefined;
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
+      async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async runPrompt(_paneId, _text, _timeoutMs, _onObservation, _signal, onDispatched) {
+        vi.setSystemTime(new Date("2026-08-30T12:00:05.000Z"));
+        await onDispatched?.();
+        const prompt = workflowStore.listRunCards("b1")[0]!;
+        dispatchResult = workflowStore.claimPromptTranscriptTurn({
+          promptId: prompt.promptId, bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T12:00:00.250Z"
+        });
+        return "done";
+      },
+      async renamePane() {}
+    };
+    const { coordinator, publisher, store } = fixture(herdr);
+    workflowStore = store;
+    try {
+      await coordinator.start();
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true });
+      await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+
+      await vi.waitFor(() => expect(dispatchResult).toMatchObject({ state: "claimed" }));
+      expect(dispatchResult).toMatchObject({ prompt: { dispatchedAt: "2026-08-30T12:00:00.000Z", transcriptTurnStartedAt: "2026-08-30T12:00:00.250Z" } });
+    } finally {
+      await coordinator.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
+    }
+  });
+
   it("continues startup after a recoverable view convergence stage fails", async () => {
     const store = new SqliteBindingStore(":memory:");
     const originalListBindings = store.listBindings.bind(store);

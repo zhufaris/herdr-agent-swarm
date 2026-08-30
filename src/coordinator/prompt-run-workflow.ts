@@ -252,6 +252,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth,
           outputMode: outputSource.mode, ...(outputSource.mode === "unavailable" ? { unavailableReason: outputSource.reason } : {}), outcome: "running"
         }, "TraeX turn started");
+        const dispatchAttemptedAt = new Date().toISOString();
         const state = await this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource }) => {
           if (!this.isBindingActive(bindingId)) return;
           const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
@@ -265,7 +266,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
             await this.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: observedQueueDepth, promptId: prompt.id });
             if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: observedQueueDepth, outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
-        }, abortController.signal, () => { dispatched = true; this.options.store.markPromptDispatched(prompt.id); });
+        }, abortController.signal, () => { this.options.store.markPromptDispatched(prompt.id, dispatchAttemptedAt); dispatched = true; });
         await turnStartedPublication;
         if (!this.isBindingActive(bindingId)) return;
         const stateBeforeReturn = binding.lastAgentState;

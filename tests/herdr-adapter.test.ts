@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { herdrRetryDelay, HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("Herdr adapter structured control", () => {
   afterEach(() => vi.useRealTimers());
@@ -181,16 +183,74 @@ describe("Herdr adapter structured control", () => {
     expect(dispatched).toBe(1);
   });
 
+  it("reports dispatch only after successful prompt completion", async () => {
+    let releaseCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+    let runnerSettled = false;
+    let dispatched = 0;
+    const runner: CommandRunner = { async run(_executable, _args, _timeout, onStarted) {
+      await onStarted?.();
+      await completion;
+      runnerSettled = true;
+      return { stdout: JSON.stringify({ result: { prompt: { agent_status: "done" } } }), stderr: "" };
+    } };
+
+    const prompt = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { dispatched += 1; });
+    await Promise.resolve();
+    expect(dispatched).toBe(0);
+    expect(runnerSettled).toBe(false);
+    releaseCompletion();
+
+    await expect(prompt).resolves.toBe("done");
+    expect(dispatched).toBe(1);
+  });
+
+  it("propagates an asynchronous dispatch callback failure without reporting twice", async () => {
+    let dispatched = 0;
+    const runner: CommandRunner = { async run(_executable, _args, _timeout, onStarted) {
+      await onStarted?.();
+      return { stdout: JSON.stringify({ result: { prompt: { agent_status: "done" } } }), stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, async () => {
+      dispatched += 1;
+      throw new Error("dispatch checkpoint failed");
+    })).rejects.toThrow("dispatch checkpoint failed");
+    expect(dispatched).toBe(1);
+  });
+
   it("normalizes structured idle prompt completion to done", async () => {
     const runner: CommandRunner = { async run() { return { stdout: JSON.stringify({ result: { agent: { state: "idle" } } }), stderr: "" }; } };
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000)).resolves.toBe("done");
   });
 
-  it.each(["agent_not_found", "agent_not_ready", "agent_blocked"])("does not mark explicit pre-dispatch %s as dispatched", async (code) => {
+  it.each(["agent_not_found", "agent_not_ready", "agent_blocked"])("does not mark explicit pre-dispatch %s as dispatched after process spawn", async (code) => {
     let dispatched = 0;
-    const runner: CommandRunner = { async run() { throw new Error(JSON.stringify({ error: { code } })); } };
+    const runner: CommandRunner = { async run(_executable, _args, _timeout, onStarted) { await onStarted?.(); throw new Error(JSON.stringify({ error: { code } })); } };
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { dispatched += 1; })).rejects.toThrow(code);
     expect(dispatched).toBe(0);
+  });
+
+  it("leaves durable dispatch provenance empty after an explicit post-spawn rejection", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    try {
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+      store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+      const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+      store.claimNextDispatchablePrompt("b1");
+      const runner: CommandRunner = { async run(_executable, _args, _timeout, onStarted) {
+        await onStarted?.();
+        throw new Error('{"error":{"code":"agent_not_ready"}}');
+      } };
+
+      await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => {
+        store.markPromptDispatched("p1", "2026-08-30T00:00:01.000Z");
+      })).rejects.toThrow("agent_not_ready");
+      expect(store.getPrompt("p1")).toMatchObject({ state: "running", observationState: "not_started", dispatchedAt: null });
+    } finally {
+      store.close();
+    }
   });
 
   it("marks a stalled native prompt as possibly dispatched to prevent replay", async () => {

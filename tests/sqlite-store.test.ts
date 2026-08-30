@@ -19,6 +19,95 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("persists dispatch and exact transcript ownership provenance", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+
+    expect(store.getPrompt("p1")).toMatchObject({ dispatchedAt: null, transcriptTurnId: null, transcriptTurnStartedAt: null });
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "p1", observationState: "not_started" });
+    const dispatchedAt = "2026-08-30T00:00:01.000Z";
+    store.markPromptDispatched("p1", dispatchedAt);
+
+    const dispatched = store.getPrompt("p1")!;
+    expect(dispatched).toMatchObject({ observationState: "attached", transcriptTurnId: null, transcriptTurnStartedAt: null });
+    expect(dispatched.dispatchedAt).toBe(dispatchedAt);
+    expect(dispatched.updatedAt).not.toBe(dispatchedAt);
+    expect(() => store!.markPromptDispatched("p1", "not-an-iso-timestamp")).toThrow("Invalid prompt dispatch timestamp");
+  });
+
+  it("claims one eligible transcript turn without allowing replacement", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.claimNextDispatchablePrompt("b1");
+    store.markPromptDispatched("p1", new Date().toISOString());
+    const dispatched = store.getPrompt("p1")!;
+    const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    const startedAt = new Date(Date.parse(dispatched.dispatchedAt!) + 250).toISOString();
+    const claim = { promptId: "p1", bindingId: "b1", turnId, startedAt };
+
+    expect(store.claimPromptTranscriptTurn({ ...claim, startedAt: new Date(Date.parse(dispatched.dispatchedAt!) - 1_001).toISOString() })).toMatchObject({ state: "ineligible", prompt: { transcriptTurnId: null } });
+    expect(store.claimPromptTranscriptTurn(claim)).toMatchObject({ state: "claimed", prompt: { transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt } });
+    expect(store.claimPromptTranscriptTurn(claim)).toMatchObject({ state: "matched", prompt: { transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt } });
+    expect(store.claimPromptTranscriptTurn({ ...claim, turnId: "01a052d3-9c14-70e1-a375-397e2ecb55ea" })).toMatchObject({ state: "conflict", prompt: { transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt } });
+    store.markPromptObservationDetached("p1", "recovering");
+    expect(store.claimPromptTranscriptTurn(claim)).toMatchObject({ state: "matched", prompt: { observationState: "detached", transcriptTurnId: turnId } });
+    store.database.prepare("UPDATE prompt_jobs SET dispatched_at = 'unusable-dispatch-time', transcript_turn_started_at = 'unusable-stored-start' WHERE id = 'p1'").run();
+    expect(store.claimPromptTranscriptTurn({ ...claim, startedAt: "unusable-input-start" })).toMatchObject({ state: "matched", prompt: { observationState: "detached", transcriptTurnId: turnId } });
+    expect(store.claimPromptTranscriptTurn({ ...claim, turnId: "01a052d3-9c14-70e1-a375-397e2ecb55ea", startedAt: "unusable-input-start" })).toMatchObject({ state: "conflict", prompt: { observationState: "detached", transcriptTurnId: turnId } });
+  });
+
+  it.each([
+    ["queued", "turn", "not_started", 0],
+    ["running steering", "steering", "attached", 0],
+    ["completed", "turn", "completed", 0],
+    ["already detached", "turn", "detached", 1]
+  ] as const)("does not make a first transcript claim for a %s prompt", (_label, dispatchKind, observationState, wasDetached) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const state = observationState === "not_started" ? "queued" : observationState === "completed" ? "delivered" : "running";
+    store.database.prepare("UPDATE prompt_jobs SET dispatch_kind = ?, state = ?, observation_state = ?, was_detached = ?, dispatched_at = ? WHERE id = 'p1'").run(dispatchKind, state, observationState, wasDetached, "2026-08-30T00:00:00.000Z");
+
+    expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:00.250Z" })).toMatchObject({ state: "ineligible", prompt: { transcriptTurnId: null } });
+  });
+
+  it("adds nullable transcript provenance to legacy prompt rows without changing state", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-turn-provenance-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP INDEX prompt_jobs_source_prompt_once;
+      CREATE TABLE prompt_jobs_legacy(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs_legacy(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
+        state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO prompt_jobs_legacy(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at)
+        SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
+      DROP TABLE prompt_jobs;
+      ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
+      PRAGMA foreign_keys = ON;
+    `);
+    store.close();
+    store = undefined;
+
+    store = new SqliteBindingStore(path);
+    expect(store.getPrompt("legacy")).toMatchObject({ state: "queued", observationState: "not_started", dispatchedAt: null, transcriptTurnId: null, transcriptTurnStartedAt: null });
+  });
+
   it("fences Primary capabilities to an attached binding generation with exactly one active ordinary prompt", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
@@ -1257,6 +1346,8 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "m-source", actorOpenId: "u1", body: "source" }, view: source, rootMessageId: "root", answerCard: {} });
     const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: null, requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
     store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true }, view: converted, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ? WHERE id = 'converted'")
+      .run("2026-08-29T09:01:01.000Z", "01a052d3-9c14-70e1-a375-397e2ecb55e9", "2026-08-29T09:01:01.250Z");
     store.database.exec(`
       PRAGMA foreign_keys = OFF;
       DROP INDEX prompt_jobs_source_prompt_once;
@@ -1264,10 +1355,12 @@ describe("SQLite store", () => {
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
         actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
         steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs_legacy(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
+        dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT,
         state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO prompt_jobs_legacy SELECT * FROM prompt_jobs;
+      INSERT INTO prompt_jobs_legacy(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at)
+        SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
       DROP TABLE prompt_jobs;
       ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
       PRAGMA foreign_keys = ON;
@@ -1276,7 +1369,10 @@ describe("SQLite store", () => {
     store = undefined;
 
     store = new SqliteBindingStore(path);
-    expect(store.getPrompt("converted")).toMatchObject({ steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true });
+    expect(store.getPrompt("converted")).toMatchObject({
+      steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true,
+      dispatchedAt: "2026-08-29T09:01:01.000Z", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptTurnStartedAt: "2026-08-29T09:01:01.250Z"
+    });
   });
 
   it("atomically reserves Answer content, continuation, and terminal finish intents", () => {
