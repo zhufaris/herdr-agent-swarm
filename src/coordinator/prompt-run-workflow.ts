@@ -50,6 +50,7 @@ const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX �
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
 const TRANSCRIPT_IDENTITY_POLL_MS = 50;
 const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
+const FINAL_TRANSCRIPT_DRAIN_LIMIT = 8;
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -257,7 +258,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           if (!this.isBindingActive(bindingId)) return;
           const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
           outputSource = typed.source;
-          await this.publishTypedObservation(bindingId, prompt.id, typed.observation, startedAt);
+          const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
+          if (owned.owned) {
+            this.retainOwnedObservation(outputSource, owned.observation);
+            await this.publishTypedObservation(bindingId, prompt.id, owned.observation, startedAt);
+          }
           const previousState = binding.lastAgentState;
           if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
           if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
@@ -273,9 +278,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(bindingId, prompt.id, state);
         binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
-        const finalTyped = await this.readTypedDelta(outputSource, binding, prompt.id);
-        outputSource = finalTyped.source;
-        await this.publishTypedObservation(bindingId, prompt.id, finalTyped.observation, startedAt);
+        outputSource = await this.drainAvailableTranscript(outputSource, binding, prompt, startedAt);
         const sourceAnswer = outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "";
         const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
         binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: outputSource.mode === "unavailable" });
@@ -331,8 +334,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const paneId = binding.paneId;
     const abortController = this.turns.attach(binding.id, prompt.id, paneId, binding.lastAgentState);
     let outputSource = await this.openTranscript(binding);
-    const runCardStartedAt = this.options.store.loadRunCard(prompt.id)?.startedAt;
-    const promptStartedAt = runCardStartedAt ? Date.parse(runCardStartedAt) : Number.NaN;
     try {
       while (!this.stopping) {
         if (!this.isBindingActive(binding.id)) return;
@@ -343,12 +344,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(binding.id, prompt.id, state);
         const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
         outputSource = typed.source;
-        await this.publishTypedObservation(binding.id, prompt.id, typed.observation, promptStartedAt);
-        const lifecycle = typed.observation.turnLifecycle;
-        const lifecycleBelongsToPrompt = lifecycle && Number.isFinite(promptStartedAt)
-          ? Date.parse(lifecycle.startedAt) >= promptStartedAt - 1_000
-          : false;
-        if (observation.traexProcess && lifecycle?.state === "completed" && lifecycleBelongsToPrompt) {
+        const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
+        if (owned.owned) {
+          this.retainOwnedObservation(outputSource, owned.observation);
+          const startedAt = prompt.transcriptTurnStartedAt ? Date.parse(prompt.transcriptTurnStartedAt) : Number.NaN;
+          await this.publishTypedObservation(binding.id, prompt.id, owned.observation, startedAt);
+        }
+        const lifecycle = owned.owned ? owned.observation.turnLifecycle : undefined;
+        if (observation.traexProcess && lifecycle?.state === "completed") {
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
           const sourceAnswer = lifecycle.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
           const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
@@ -423,16 +426,64 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       const observation = source.cursor.readObservation
         ? await source.cursor.readObservation()
         : { answerDelta: await source.cursor.readDelta() };
-      if (observation.answerDelta) {
-        source.chunks.push(observation.answerDelta);
-        source.emitted = true;
-      }
       return { source, observation };
     } catch (error) {
       const outcome = source.emitted ? "typed_output_preserved" : "structured_output_unavailable";
       this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, unavailableReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
       return { source: source.emitted ? source : { mode: "unavailable", reason: "transcript_read_failed" }, observation: { answerDelta: "" } };
     }
+  }
+
+  private async drainAvailableTranscript(source: TurnOutputSource, binding: Binding, prompt: PromptJob, startedAt: number): Promise<TurnOutputSource> {
+    let current = source;
+    let previousSignature = "";
+    for (let iteration = 0; iteration < FINAL_TRANSCRIPT_DRAIN_LIMIT && current.mode === "typed"; iteration += 1) {
+      const typed = await this.readTypedDelta(current, binding, prompt.id);
+      current = typed.source;
+      const signature = JSON.stringify(typed.observation);
+      if (signature === previousSignature || signature === JSON.stringify({ answerDelta: "" })) break;
+      previousSignature = signature;
+      const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
+      if (owned.owned) {
+        this.retainOwnedObservation(current, owned.observation);
+        await this.publishTypedObservation(binding.id, prompt.id, owned.observation, startedAt);
+        if (owned.observation.turnLifecycle?.state === "completed") break;
+      }
+    }
+    return current;
+  }
+
+  private ownTranscriptObservation(
+    binding: Binding,
+    prompt: PromptJob,
+    observation: TraexTranscriptObservation
+  ): { owned: boolean; prompt: PromptJob; observation: TraexTranscriptObservation } {
+    const current = this.options.store.getPrompt(prompt.id) ?? prompt;
+    if (!observation.turnId) return { owned: false, prompt: current, observation };
+    let ownedPrompt = current;
+    if (!current.transcriptTurnId && observation.freshTurnStart === true && observation.turnLifecycle && current.observationState === "attached") {
+      const outcome = this.options.store.claimPromptTranscriptTurn({
+        promptId: current.id,
+        bindingId: binding.id,
+        turnId: observation.turnLifecycle.turnId,
+        startedAt: observation.turnLifecycle.startedAt
+      });
+      if (outcome.prompt) ownedPrompt = outcome.prompt;
+      if (outcome.state === "claimed") {
+        this.options.logger.info({ event: "transcript-turn-owned", bindingId: binding.id, promptId: current.id, paneId: binding.paneId, turnId: observation.turnId, outcome: "claimed" }, "claimed exact TraeX transcript turn ownership");
+      }
+    }
+    const owned = ownedPrompt.transcriptTurnId !== null && observation.turnId === ownedPrompt.transcriptTurnId;
+    if (!owned && ownedPrompt.transcriptTurnId && observation.turnId !== ownedPrompt.transcriptTurnId) {
+      this.options.logger.warn({ event: "transcript-turn-conflict", bindingId: binding.id, promptId: current.id, paneId: binding.paneId, acceptedTurnId: ownedPrompt.transcriptTurnId, observedTurnId: observation.turnId, outcome: "ignored" }, "ignored output from a conflicting TraeX transcript turn");
+    }
+    return { owned, prompt: ownedPrompt, observation };
+  }
+
+  private retainOwnedObservation(source: TurnOutputSource, observation: TraexTranscriptObservation): void {
+    if (source.mode !== "typed" || !observation.answerDelta) return;
+    source.chunks.push(observation.answerDelta);
+    source.emitted = true;
   }
 
   private async publishTypedObservation(bindingId: string, promptId: string, observation: TraexTranscriptObservation, startedAt: number): Promise<void> {

@@ -177,6 +177,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
 class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   private readonly emittedItemIds = new Set<string>();
   private readonly callsById = new Map<string, ToolActivityDescriptor>();
+  private pendingLines: string[] = [];
 
   constructor(
     private readonly path: string,
@@ -192,36 +193,53 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   }
 
   async readObservation(): Promise<TraexTranscriptObservation> {
-    const file = await stat(this.path);
-    if (file.size < this.offset) throw new Error("TraeX transcript was truncated");
-    const available = file.size - this.offset;
-    if (available === 0) return { answerDelta: "", ...(this.turnLifecycle ? { turnLifecycle: this.turnLifecycle } : {}) };
-    const length = Math.min(available, this.maxReadBytes);
-    const handle = await open(this.path, "r");
-    let bytesRead = 0;
-    const buffer = Buffer.alloc(length);
-    try {
-      ({ bytesRead } = await handle.read(buffer, 0, length, this.offset));
-    } finally {
-      await handle.close();
+    if (this.pendingLines.length === 0) {
+      const file = await stat(this.path);
+      if (file.size < this.offset) throw new Error("TraeX transcript was truncated");
+      const available = file.size - this.offset;
+      if (available === 0) return {
+        ...(this.turnLifecycle ? { turnId: this.turnLifecycle.turnId } : {}),
+        answerDelta: "",
+        ...(this.turnLifecycle ? { turnLifecycle: this.turnLifecycle } : {})
+      };
+      const length = Math.min(available, this.maxReadBytes);
+      const handle = await open(this.path, "r");
+      let bytesRead = 0;
+      const buffer = Buffer.alloc(length);
+      try {
+        ({ bytesRead } = await handle.read(buffer, 0, length, this.offset));
+      } finally {
+        await handle.close();
+      }
+      const chunk = buffer.subarray(0, bytesRead);
+      const lastNewline = chunk.lastIndexOf(0x0a);
+      if (lastNewline < 0) {
+        if (available > this.maxReadBytes) throw new Error("TraeX transcript record exceeds the read limit");
+        return { answerDelta: "" };
+      }
+      const complete = chunk.subarray(0, lastNewline + 1);
+      this.offset += complete.length;
+      this.pendingLines = complete.toString("utf8").split("\n").filter((line) => line.trim());
     }
-    const chunk = buffer.subarray(0, bytesRead);
-    const lastNewline = chunk.lastIndexOf(0x0a);
-    if (lastNewline < 0) {
-      if (available > this.maxReadBytes) throw new Error("TraeX transcript record exceeds the read limit");
-      return { answerDelta: "" };
-    }
-    const complete = chunk.subarray(0, lastNewline + 1);
-    this.offset += complete.length;
+    const batchLength = this.nextBatchLength();
+    const lines = this.pendingLines.splice(0, batchLength);
     const blocks: string[] = [];
     const toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]> = [];
     let statusTitle: string | undefined;
     let planSteps: TraexTranscriptPlanStep[] | undefined;
     let tokenCount: number | undefined;
-    for (const line of complete.toString("utf8").split("\n")) {
-      if (!line.trim()) continue;
-      const envelope = envelopeSchema.parse(JSON.parse(line));
+    let observationTurnId = this.turnLifecycle?.state === "active" ? this.turnLifecycle.turnId : undefined;
+    let freshTurnStart = false;
+    for (const line of lines) {
+      const envelope = parseEnvelope(line);
+      if (!envelope) continue;
       if (envelope.type === "event_msg") {
+        const started = taskStartedEventSchema.safeParse(envelope.payload);
+        if (started.success) {
+          observationTurnId = started.data.turn_id;
+          freshTurnStart = true;
+          this.callsById.clear();
+        }
         this.turnLifecycle = reduceTurnLifecycle(this.turnLifecycle, envelope, this.maxRenderedDeltaChars);
         const reasoning = reasoningEventSchema.safeParse(envelope.payload);
         if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
@@ -251,12 +269,36 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       ...(planSteps ? { planSteps } : {}),
       ...(tokenCount !== undefined ? { tokenCount } : {})
     };
-    return {
+    const observation = {
+      ...(observationTurnId ? { turnId: observationTurnId } : {}),
+      ...(freshTurnStart ? { freshTurnStart: true } : {}),
       answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars),
       ...(toolActivities.length ? { toolActivities } : {}),
       ...(Object.keys(mainStatus).length ? { mainStatus } : {}),
-      ...(this.turnLifecycle ? { turnLifecycle: this.turnLifecycle } : {})
+      ...(observationTurnId && this.turnLifecycle?.turnId === observationTurnId ? { turnLifecycle: this.turnLifecycle } : {})
     };
+    if (this.turnLifecycle?.state === "completed") this.callsById.clear();
+    return observation;
+  }
+
+  private nextBatchLength(): number {
+    let scopedTurnId = this.turnLifecycle?.state === "active" ? this.turnLifecycle.turnId : undefined;
+    for (let index = 0; index < this.pendingLines.length; index += 1) {
+      const line = this.pendingLines[index]!;
+      const envelope = parseEnvelope(line);
+      if (!envelope) continue;
+      const started = envelope.type === "event_msg" ? taskStartedEventSchema.safeParse(envelope.payload) : null;
+      const completed = envelope.type === "event_msg" ? taskCompleteEventSchema.safeParse(envelope.payload) : null;
+      if (started?.success) {
+        if (index === 0) {
+          scopedTurnId = started.data.turn_id;
+          continue;
+        }
+        if (!scopedTurnId || started.data.turn_id !== scopedTurnId) return index;
+      }
+      if (completed?.success && scopedTurnId && completed.data.turn_id === scopedTurnId) return index + 1;
+    }
+    return this.pendingLines.length;
   }
 
   private renderItem(item: unknown, toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]>): string {
@@ -288,6 +330,15 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const descriptor = this.callsById.get(result.data.call_id)!;
     toolActivities.push(projectActivity(result.data.call_id, descriptor, projectToolResultState(result.data.output)));
     return projectToolResult(descriptor, result.data.output);
+  }
+}
+
+function parseEnvelope(line: string): z.infer<typeof envelopeSchema> | null {
+  try {
+    const parsed = envelopeSchema.safeParse(JSON.parse(line));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
   }
 }
 

@@ -114,6 +114,84 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("emits adjacent transcript turns as separate lifecycle-scoped observations", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnA = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const turnB = "01a04f35-9d2f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      mutation([{ type: "message", id: "before-turn", role: "assistant", content: [{ type: "output_text", text: "Unscoped baseline" }] }]),
+      eventMessage({ type: "task_started", turn_id: turnA, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "answer-a", role: "assistant", content: [{ type: "output_text", text: "Answer A" }] }]),
+      eventMessage({ type: "task_complete", turn_id: turnA, started_at: 1_788_035_304, completed_at: 1_788_035_318 }),
+      eventMessage({ type: "task_started", turn_id: turnB, started_at: 1_788_035_320 }),
+      mutation([{ type: "message", id: "answer-b", role: "assistant", content: [{ type: "output_text", text: "Answer B" }] }])
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({ answerDelta: "Unscoped baseline" });
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: turnA,
+      answerDelta: "Answer A",
+      turnLifecycle: { turnId: turnA, state: "completed" }
+    });
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: turnB,
+      answerDelta: "Answer B",
+      turnLifecycle: { turnId: turnB, state: "active" }
+    });
+  });
+
+  it("ends turn scope at completion and keeps later output unscoped", async () => {
+    const { root, path } = await createTranscript();
+    await appendFile(path, eventMessage({ type: "token_count", info: { total_token_usage: { total_tokens: 100 } } }));
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnA = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const turnB = "01a04f35-9d2f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnA, started_at: 1_788_035_304 }),
+      mutation([{ type: "function_call", id: "call-a", call_id: "shared-call", name: "exec_command", arguments: JSON.stringify({ cmd: "npm test" }) }]),
+      eventMessage({ type: "task_complete", turn_id: turnA, started_at: 1_788_035_304, completed_at: 1_788_035_318 }),
+      mutation([
+        { type: "message", id: "after-a", role: "assistant", content: [{ type: "output_text", text: "Between turns" }] },
+        { type: "function_call_output", id: "late-result-a", call_id: "shared-call", output: "must not pair with A" },
+        { type: "function_call", id: "between-call", call_id: "between-call", name: "exec_command", arguments: JSON.stringify({ cmd: "pwd" }) }
+      ]),
+      eventMessage({ type: "agent_reasoning_raw_content", text: "**Between status**\nprivate" }),
+      eventMessage({ type: "token_count", info: { total_token_usage: { total_tokens: 110 } } }),
+      eventMessage({ type: "task_started", turn_id: turnB, started_at: 1_788_035_320 }),
+      mutation([
+        { type: "function_call_output", id: "result-between", call_id: "between-call", output: "must not pair into B" },
+        { type: "message", id: "answer-b", role: "assistant", content: [{ type: "output_text", text: "Answer B" }] }
+      ])
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: turnA, freshTurnStart: true, turnLifecycle: { turnId: turnA, state: "completed" }
+    });
+    const between = await cursor.readObservation?.();
+    expect(between).toMatchObject({
+      answerDelta: expect.stringContaining("Between turns"),
+      mainStatus: { statusTitle: "Between status", tokenCount: 10 }
+    });
+    expect(between).not.toHaveProperty("turnId");
+    expect(between?.answerDelta).not.toContain("must not pair with A");
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: turnB, freshTurnStart: true, answerDelta: "Answer B", turnLifecycle: { turnId: turnB, state: "active" }
+    });
+  });
+
+  it("does not expose inherited lifecycle as a fresh turn start", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }));
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, answerDelta: "", turnLifecycle: { turnId, state: "active" }
+    });
+    expect(await cursor.readObservation?.()).not.toHaveProperty("freshTurnStart");
+  });
+
   it("exposes the latest bounded lifecycle snapshot when reopened after completion", async () => {
     const { root, path } = await createTranscript();
     const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
@@ -216,6 +294,22 @@ describe("TraexTranscriptReader", () => {
     await appendFile(path, "\n");
     await expect(cursor.readDelta()).resolves.toBe("second");
     await expect(cursor.readDelta()).resolves.toBe("");
+  });
+
+  it("quarantines one malformed complete record and reaches a later owned completion", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "valid-before-malformed", role: "assistant", content: [{ type: "output_text", text: "Owned output" }] }])
+    ].join(""));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnId, freshTurnStart: true, answerDelta: "Owned output" });
+
+    await appendFile(path, `{"type":"event_msg",BROKEN}\n` + eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_318 }));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, answerDelta: "", turnLifecycle: { turnId, state: "completed" }
+    });
   });
 
   it("pairs cross-record tool results and suppresses duplicate or invalid identities", async () => {

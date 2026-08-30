@@ -144,6 +144,8 @@ export interface TraexTranscriptMainStatus {
 }
 
 export interface TraexTranscriptObservation {
+  turnId?: string;
+  freshTurnStart?: boolean;
   answerDelta: string;
   toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
   mainStatus?: TraexTranscriptMainStatus;
