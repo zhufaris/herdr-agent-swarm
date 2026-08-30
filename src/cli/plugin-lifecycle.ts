@@ -35,8 +35,8 @@ export async function runPluginLifecycle(action: Action, environment: NodeJS.Pro
   requireInstalled(paths);
   if (action === "restart" && !options.force) await assertRestartSafe(paths, environment);
   if (action === "start" || action === "restart") {
-    loadRuntimeEnvironment(paths, environment);
-    atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), environment), 0o600);
+    const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
+    atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), runtimeEnvironment), 0o600);
     const reload = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (reload !== 0) return reload;
   }
@@ -125,9 +125,9 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
 function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
   if (!existsSync(paths.entrypoint)) throw new Error(`compiled bridge entrypoint not found: ${paths.entrypoint}; run the plugin build first`);
   const identity = loadBuildIdentity(paths.buildInfo);
-  loadRuntimeEnvironment(paths, environment);
+  const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
-  atomicWrite(paths.unitFile, renderUnit(paths, identity, environment), 0o600);
+  atomicWrite(paths.unitFile, renderUnit(paths, identity, runtimeEnvironment), 0o600);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) result = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
   if (result === 0) process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}\n`);
@@ -156,7 +156,7 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     `EnvironmentFile=${systemdEscape(paths.environmentFile)}`,
     ...(standalone ? [
       `Environment=PROJECTS_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "projects.json"))}`,
-      `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(paths.stateDirectory, "bridge.db"))}`
+      `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(environment.BRIDGE_DATABASE_PATH || resolve(paths.stateDirectory, "bridge.db")))}`
     ] : [
       `Environment=HERDR_PLUGIN_ROOT=${systemdEscape(paths.root)}`,
       `Environment=HERDR_PLUGIN_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,

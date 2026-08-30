@@ -24,6 +24,24 @@ describe("plugin lifecycle", () => {
     expect(unit).not.toContain("HERDR_PLUGIN_ROOT");
   });
 
+  it("preserves an explicit standalone database path in the rendered unit", async () => {
+    const fixture = createFixture();
+    const standaloneConfig = join(fixture.root, "standalone-config");
+    const standaloneState = join(fixture.root, "standalone-state");
+    const legacyDatabase = join(fixture.root, "legacy", "bridge.db");
+    mkdirSync(standaloneConfig);
+    mkdirSync(join(fixture.root, "legacy"));
+    writeFileSync(legacyDatabase, "fixture");
+    writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
+    writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "BRIDGE_DATABASE_PATH=" + legacyDatabase].join("\n") + "\n");
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState, BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-agent-swarm.service" };
+
+    await runPluginLifecycle("install", environment);
+    const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
+    expect(unit).toContain("Environment=BRIDGE_DATABASE_PATH=" + legacyDatabase);
+    expect(unit).not.toContain("Environment=BRIDGE_DATABASE_PATH=" + standaloneState + "/bridge.db");
+  });
+
   it("uses Herdr Agent Swarm standalone defaults", async () => {
     const fixture = createFixture();
     const xdgConfig = join(fixture.root, "xdg-config");
