@@ -7,6 +7,10 @@ FORCE="${2:-}"
 CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
 STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
 SERVICE_NAME="${BRIDGE_SYSTEMD_SERVICE_NAME:-herdr-agent-swarm.service}"
+export SWARM_ROOT="$ROOT"
+export SWARM_CONFIG_DIR="$CONFIG_DIR"
+export SWARM_STATE_DIR="$STATE_DIR"
+export BRIDGE_SYSTEMD_SERVICE_NAME="$SERVICE_NAME"
 
 case "$ACTION" in
   init)
@@ -28,10 +32,6 @@ if { [ -n "$FORCE" ] && { [ "$ACTION" != "restart" ] || [ "$FORCE" != "--force" 
   exit 2
 fi
 
-export SWARM_ROOT="$ROOT"
-export SWARM_CONFIG_DIR="$CONFIG_DIR"
-export SWARM_STATE_DIR="$STATE_DIR"
-export BRIDGE_SYSTEMD_SERVICE_NAME="$SERVICE_NAME"
 args=("$ROOT/dist/cli/plugin-lifecycle.js" "$ACTION")
 if [ -n "$FORCE" ]; then args+=("$FORCE"); fi
 exec node "${args[@]}"

@@ -70,6 +70,8 @@ describe("plugin lifecycle", () => {
       "herdr:traex:status": "bash scripts/install-herdr-traex-shim.sh status",
       "herdr:traex:uninstall": "bash scripts/install-herdr-traex-shim.sh uninstall"
     });
+    const script = readFileSync(join(process.cwd(), "scripts/swarm-service.sh"), "utf8");
+    expect(script.indexOf('export SWARM_ROOT="$ROOT"')).toBeLessThan(script.indexOf('migrate)'));
   });
 
   it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {
