@@ -60,7 +60,7 @@ export class LarkSdkAdapter implements LarkPort {
         try {
           const result = await onCardAction(normalized);
           this.logger?.info({ event: "lark-card-action-completed", action, messageId: normalized.messageId, outcome: "responded", responseKind: cardActionResponseKind(result), durationMs: Date.now() - startedAt }, "Lark card action completed");
-          return result;
+          return normalizeCardActionResponse(result);
         } catch (error) {
           this.logger?.error({ event: "lark-card-action-failed", action, messageId: normalized.messageId, outcome: "failed", durationMs: Date.now() - startedAt, err: safeLogError(error) }, "Lark card action failed");
           return { toast: { type: "error", content: "操作失败，请稍后重试。" } };
@@ -326,6 +326,11 @@ function cardActionResponseKind(result: LarkCardActionResult | void): "none" | "
   if (result.toast && result.card) return "toast_and_card";
   if (result.card) return "card";
   return result.toast ? "toast" : "none";
+}
+
+function normalizeCardActionResponse(result: LarkCardActionResult | void): object | void {
+  if (!result?.card) return result;
+  return { ...result, card: { type: "raw", data: normalizeLarkCardElementIds(result.card) } };
 }
 
 function requireMessageId(value: string | undefined): string {
