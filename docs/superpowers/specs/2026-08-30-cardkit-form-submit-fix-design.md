@@ -8,6 +8,12 @@ The instance creation and steering cards render their submit buttons with
 from producing the expected `card.action.trigger`, so clicking `创建实例` can
 fail before the bridge persists an instance or operation.
 
+After correcting the button field, live callbacks reached the bridge and the
+handler returned in 0-2 ms, but Lark still reported `200672`. The remaining
+protocol defect is the callback response: a replacement CardKit card must use
+`card: { type: "raw", data: <card JSON> }`; returning the raw schema directly
+as `card` is rejected as an invalid callback response body.
+
 ## Design
 
 Change the shared `formSubmitButton()` helper to emit the canonical CardKit 2.0
@@ -22,6 +28,11 @@ submit buttons contain `action_type: "form_submit"` and do not contain
 `card.action.trigger` form payload through normalization and the instance
 interaction workflow, proving that the normalized values reach instance
 creation.
+
+At the Lark adapter boundary, normalize every internal callback result before
+returning it to the SDK. Preserve `toast` unchanged and wrap only a present
+replacement card as `{ type: "raw", data: normalizeLarkCardElementIds(card) }`.
+Keep the internal workflow contract transport-neutral.
 
 ## Safety and rollout
 
