@@ -45,7 +45,7 @@ describe("standalone service cutover", () => {
     await expect(runStandaloneCutover(fixture.environment, dependencies)).rejects.toThrow(/standalone startup failed/);
     expect(events).toEqual([
       "stop:herdr-lark-bridge.service", "lifecycle:install", "lifecycle:start",
-      "stop:herdr-agent-swarm.service", "enable:herdr-lark-bridge.service", "start:herdr-lark-bridge.service"
+      "stop:herdr-agent-swarm.service", "enable:herdr-lark-bridge.service", "compatibility:start"
     ]);
   });
 
@@ -56,7 +56,7 @@ describe("standalone service cutover", () => {
     await expect(runStandaloneCutover(fixture.environment, dependencies)).rejects.toThrow(/standalone install failed/);
     expect(events).toEqual([
       "stop:herdr-lark-bridge.service", "lifecycle:install",
-      "enable:herdr-lark-bridge.service", "start:herdr-lark-bridge.service"
+      "enable:herdr-lark-bridge.service", "compatibility:start"
     ]);
   });
 
@@ -128,6 +128,7 @@ function createDependencies(_fixture: ReturnType<typeof createFixture>, options:
       }
       return 0;
     }),
+    startCompatibility: vi.fn(async () => { events.push("compatibility:start"); oldActive = true; }),
     stopService: vi.fn(async (name: string) => {
       if (name === "herdr-agent-swarm.service" && !newActive && options.rejectInactiveStop) throw new Error("unit not loaded");
       events.push("stop:" + name);

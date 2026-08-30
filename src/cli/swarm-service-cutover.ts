@@ -25,6 +25,7 @@ export interface CutoverDependencies {
   readStatus(environment: NodeJS.ProcessEnv): Promise<CutoverStatus>;
   serviceState(name: string): Promise<{ active: boolean; enabled: boolean }>;
   runLifecycle(action: "install" | "start", environment: NodeJS.ProcessEnv): Promise<number>;
+  startCompatibility(environment: NodeJS.ProcessEnv): Promise<void>;
   stopService(name: string): Promise<void>;
   startService(name: string): Promise<void>;
   enableService(name: string): Promise<void>;
@@ -129,7 +130,7 @@ async function rollback(paths: ReturnType<typeof cutoverPaths>, previous: { acti
   if ((await dependencies.serviceState(paths.standaloneService)).active) throw new Error("rollback failed: standalone service remained active");
   if (previous.enabled) await dependencies.enableService(paths.compatibilityService);
   if (previous.active) {
-    await dependencies.startService(paths.compatibilityService);
+    await dependencies.startCompatibility(environment);
     requireHealthy(await dependencies.readStatus(environment));
   }
 }
@@ -151,6 +152,17 @@ const systemDependencies: CutoverDependencies = {
     return { active: systemctl(["--user", "is-active", name], true) === 0, enabled: systemctl(["--user", "is-enabled", name], true) === 0 };
   },
   runLifecycle,
+  async startCompatibility(environment) {
+    const compatibilityEnvironment = {
+      ...environment,
+      SWARM_ROOT: undefined, SWARM_CONFIG_DIR: undefined, SWARM_STATE_DIR: undefined,
+      BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-lark-bridge.service",
+      HERDR_PLUGIN_ROOT: environment.SWARM_ROOT,
+      HERDR_PLUGIN_CONFIG_DIR: environment.SWARM_COMPAT_CONFIG_DIR || join(environment.XDG_CONFIG_HOME || join(homedir(), ".config"), "herdr/plugins/config/herdr-lark-bridge"),
+      HERDR_PLUGIN_STATE_DIR: environment.SWARM_COMPAT_STATE_DIR || join(environment.XDG_STATE_HOME || join(homedir(), ".local/state"), "herdr/plugins/state/herdr-lark-bridge")
+    };
+    await runPluginLifecycle("start", compatibilityEnvironment);
+  },
   async stopService(name) { requireSystemctl(["--user", "stop", name]); },
   async startService(name) { requireSystemctl(["--user", "start", name]); },
   async enableService(name) { requireSystemctl(["--user", "enable", name]); },
