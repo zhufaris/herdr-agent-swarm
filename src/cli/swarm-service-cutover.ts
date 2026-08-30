@@ -125,7 +125,7 @@ function requireHealthy(status: CutoverStatus): void {
 }
 
 async function rollback(paths: ReturnType<typeof cutoverPaths>, previous: { active: boolean; enabled: boolean }, environment: NodeJS.ProcessEnv, dependencies: CutoverDependencies): Promise<void> {
-  await dependencies.stopService(paths.standaloneService);
+  if ((await dependencies.serviceState(paths.standaloneService)).active) await dependencies.stopService(paths.standaloneService);
   if ((await dependencies.serviceState(paths.standaloneService)).active) throw new Error("rollback failed: standalone service remained active");
   if (previous.enabled) await dependencies.enableService(paths.compatibilityService);
   if (previous.active) {

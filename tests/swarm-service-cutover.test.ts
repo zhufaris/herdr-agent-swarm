@@ -49,6 +49,17 @@ describe("standalone service cutover", () => {
     ]);
   });
 
+  it("restores compatibility without stopping an inactive standalone unit after failed install", async () => {
+    const fixture = createFixture();
+    const events: string[] = [];
+    const dependencies = createDependencies(fixture, { events, failStandaloneInstall: true, rejectInactiveStop: true });
+    await expect(runStandaloneCutover(fixture.environment, dependencies)).rejects.toThrow(/standalone install failed/);
+    expect(events).toEqual([
+      "stop:herdr-lark-bridge.service", "lifecycle:install",
+      "enable:herdr-lark-bridge.service", "start:herdr-lark-bridge.service"
+    ]);
+  });
+
   it("is idempotent when standalone already owns the endpoint", async () => {
     const fixture = createFixture();
     const events: string[] = [];
@@ -96,6 +107,7 @@ function createFixture() {
 
 function createDependencies(_fixture: ReturnType<typeof createFixture>, options: {
   events?: string[]; currentStatus?: CutoverStatus; failStandaloneStart?: boolean;
+  failStandaloneInstall?: boolean; rejectInactiveStop?: boolean;
   oldActive?: boolean; oldEnabled?: boolean; newActive?: boolean;
 } = {}): CutoverDependencies & Record<string, ReturnType<typeof vi.fn>> {
   const events = options.events ?? [];
@@ -109,13 +121,18 @@ function createDependencies(_fixture: ReturnType<typeof createFixture>, options:
       : { active: newActive, enabled: true }),
     runLifecycle: vi.fn(async (action: string) => {
       events.push("lifecycle:" + action);
+      if (action === "install" && options.failStandaloneInstall) throw new Error("standalone install failed");
       if (action === "start") {
-        if (options.failStandaloneStart) throw new Error("standalone startup failed");
         newActive = true;
+        if (options.failStandaloneStart) throw new Error("standalone startup failed");
       }
       return 0;
     }),
-    stopService: vi.fn(async (name: string) => { events.push("stop:" + name); if (name === "herdr-lark-bridge.service") oldActive = false; else newActive = false; }),
+    stopService: vi.fn(async (name: string) => {
+      if (name === "herdr-agent-swarm.service" && !newActive && options.rejectInactiveStop) throw new Error("unit not loaded");
+      events.push("stop:" + name);
+      if (name === "herdr-lark-bridge.service") oldActive = false; else newActive = false;
+    }),
     startService: vi.fn(async (name: string) => { events.push("start:" + name); if (name === "herdr-lark-bridge.service") oldActive = true; }),
     enableService: vi.fn(async (name: string) => { events.push("enable:" + name); }),
     disableService: vi.fn(async (name: string) => { events.push("disable:" + name); })
