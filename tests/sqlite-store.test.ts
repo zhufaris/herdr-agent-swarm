@@ -62,6 +62,22 @@ describe("SQLite store", () => {
     expect(store.claimPromptTranscriptTurn({ ...claim, turnId: "01a052d3-9c14-70e1-a375-397e2ecb55ea", startedAt: "unusable-input-start" })).toMatchObject({ state: "conflict", prompt: { observationState: "detached", transcriptTurnId: turnId } });
   });
 
+  it("preserves transcript provenance when recovering attached prompts as detached", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    for (const id of ["owned", "legacy"]) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', dispatched_at = ? WHERE id = ?").run("2026-08-30T00:00:01.000Z", id);
+    }
+    expect(store.claimPromptTranscriptTurn({ promptId: "owned", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
+
+    expect(store.recoverRunningPrompts()).toBe(2);
+    expect(store.getPrompt("owned")).toMatchObject({ observationState: "detached", dispatchedAt: "2026-08-30T00:00:01.000Z", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptTurnStartedAt: "2026-08-30T00:00:01.250Z" });
+    expect(store.getPrompt("legacy")).toMatchObject({ observationState: "detached", dispatchedAt: "2026-08-30T00:00:01.000Z", transcriptTurnId: null, transcriptTurnStartedAt: null });
+  });
+
   it.each([
     ["queued", "turn", "not_started", 0],
     ["running steering", "steering", "attached", 0],

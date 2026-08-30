@@ -394,17 +394,19 @@ describe("pane/thread lifecycle integration", () => {
     await firstRuntime.coordinator.start();
     await firstRuntime.coordinator.handleMessage(message(30, "first"));
     await vi.waitFor(() => expect(firstController).toBeDefined());
+    const firstPrompt = store.database.prepare("SELECT id FROM prompt_jobs WHERE lark_message_id = 'm30'").get() as { id: string };
+    const turnStartedAt = new Date(Date.parse(store.getPrompt(firstPrompt.id)!.dispatchedAt!) + 250).toISOString();
+    expect(store.claimPromptTranscriptTurn({ promptId: firstPrompt.id, bindingId: "b1", turnId: "turn-1", startedAt: turnStartedAt })).toMatchObject({ state: "claimed" });
     await firstRuntime.coordinator.handleMessage(message(31, "second"));
     await firstRuntime.coordinator.stop();
     await firstRuntime.projector.stop(); await firstRuntime.publisher.stop();
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1 });
-    const firstPrompt = store.database.prepare("SELECT id FROM prompt_jobs WHERE lark_message_id = 'm30'").get() as { id: string };
     store.saveRunCard({ ...store.loadRunCard(firstPrompt.id)!, answer: "LEGACY_UNPROVEN_ANSWER_SENTINEL", answerSegments: ["LEGACY_UNPROVEN_ANSWER_SENTINEL"], answerDraft: "", answerDraftTransient: false });
 
     restarted = true;
     store.updateBinding("b1", { lastAgentState: "idle" });
-    let lifecycleState: "active" | "completed" = "completed";
-    let lifecycleStartedAt = new Date(Date.now() - 60_000).toISOString();
+    let lifecycleState: "active" | "completed" = "active";
+    const lifecycleStartedAt = turnStartedAt;
     let answerDelta = "";
     let toolActivities: Array<{ key: string; kind: "read"; label: string; state: "active" | "done" }> = [];
     const transcriptReader = {
@@ -416,7 +418,7 @@ describe("pane/thread lifecycle integration", () => {
             answerDelta = "";
             const nextToolActivities = toolActivities;
             toolActivities = [];
-            return { answerDelta: nextDelta, ...(nextToolActivities.length ? { toolActivities: nextToolActivities } : {}), turnLifecycle: {
+            return { turnId: "turn-1", answerDelta: nextDelta, ...(nextToolActivities.length ? { toolActivities: nextToolActivities } : {}), turnLifecycle: {
               turnId: "turn-1", state: lifecycleState, startedAt: lifecycleStartedAt,
               ...(lifecycleState === "completed" ? { finalAnswer: "Recovered answer" } : {})
             } };
@@ -430,8 +432,6 @@ describe("pane/thread lifecycle integration", () => {
     expect(submitted).toEqual(["first"]);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: firstPrompt.id, state: "running", observationState: "detached" }]);
 
-    lifecycleState = "active";
-    lifecycleStartedAt = new Date(Date.now() + 1_000).toISOString();
     answerDelta = "Live detached JSONL update";
     toolActivities = [{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }];
     await vi.waitFor(() => expect(store.loadRunCard(firstPrompt.id)!.answer).toContain("Live detached JSONL update"), { timeout: 2_000 });
@@ -465,15 +465,68 @@ describe("pane/thread lifecycle integration", () => {
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "user", body: "already sent" });
+    store.enqueuePrompt({ id: "p2", bindingId: "b1", larkMessageId: "m2", actorOpenId: "user", body: "queued" });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
     store.markPromptDispatched("p1");
     expect(store.recoverRunningPrompts()).toBe(1);
 
-    const active = runtime(store, herdr, lark, 10);
+    const transcriptOpen = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return "forbidden"; } } }));
+    const warnings: Array<Record<string, unknown>> = [];
+    const logger = pino({ level: "warn" }, { write(chunk: string) { warnings.push(JSON.parse(chunk) as Record<string, unknown>); } });
+    const active = runtime(store, herdr, lark, 10, { open: transcriptOpen }, logger);
     await active.coordinator.start();
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(transcriptOpen).not.toHaveBeenCalled();
+    expect(store.getPrompt("p2")).toMatchObject({ state: "queued", observationState: "not_started" });
+    const diagnostics = warnings.filter((record) => record.event === "detached-turn-identity-missing");
+    expect(diagnostics).toHaveLength(1);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/already sent|forbidden|Live detached|Recovered answer/i);
 
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
+  it("ignores a completed manual turn for a detached prompt owned by another turn", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const runPrompt = vi.fn(async () => "done" as const);
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+      async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
+      async waitForRuntimeChange() { await new Promise((resolve) => setTimeout(resolve, 1)); },
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, runPrompt, async renamePane() {}
+    };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    for (const [id, position] of [["p1", 1], ["p2", 2]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: position, occurredAt: "2026-08-30T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "user", body: id }, view, rootMessageId: "root", answerCard: {} });
+    }
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
+    store.markPromptDispatched("p1", "2026-08-30T00:00:01.000Z");
+    expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
+    store.markPromptObservationDetached("p1", "recovering");
+    let releaseRead!: () => void; let reads = 0;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const transcriptReader = { async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() {
+      await readGate; reads += 1;
+      const observedTurnId = reads < 4 ? "01a052d3-9c14-70e1-a375-397e2ecb55e9" : "01a052d3-9c14-70e1-a375-397e2ecb55ea";
+      return { turnId: observedTurnId, answerDelta: "manual output", mainStatus: { statusTitle: "manual" }, turnLifecycle: { turnId: observedTurnId, state: "completed" as const, startedAt: "2026-08-30T00:00:02.000Z" } };
+    } } }; } };
+    const warnings: Array<Record<string, unknown>> = [];
+    const logger = pino({ level: "warn" }, { write(chunk: string) { warnings.push(JSON.parse(chunk) as Record<string, unknown>); } });
+    const active = runtime(store, herdr, lark, 10, transcriptReader, logger);
+    await active.coordinator.start(); await new Promise((resolve) => setTimeout(resolve, 30));
+    const before = store.loadRunCard("p1")!;
+    releaseRead(); await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(5));
+    const after = store.loadRunCard("p1")!;
+    expect({ answer: after.answer, progressEvents: after.progressEvents, statusTitle: after.statusTitle, viewVersion: after.viewVersion, activityAt: after.activityAt }).toEqual({ answer: before.answer, progressEvents: before.progressEvents, statusTitle: before.statusTitle, viewVersion: before.viewVersion, activityAt: before.activityAt });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "running", observationState: "detached", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9" });
+    expect(store.getPrompt("p2")).toMatchObject({ state: "queued" });
+    expect(runPrompt).not.toHaveBeenCalled();
+    expect(warnings.filter((record) => record.event === "transcript-turn-conflict")).toHaveLength(2);
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
@@ -536,11 +589,11 @@ function message(index: number, text: string) {
   return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
 }
 
-function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort) {
+function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort, logger = pino({ enabled: false })) {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), shutdownGraceMs, undefined, undefined, transcriptReader);
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, shutdownGraceMs, undefined, undefined, transcriptReader);
   return { coordinator, projector, publisher };
 }
 

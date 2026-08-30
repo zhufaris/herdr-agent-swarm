@@ -51,6 +51,8 @@ const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
 const TRANSCRIPT_IDENTITY_POLL_MS = 50;
 const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
 const FINAL_TRANSCRIPT_DRAIN_LIMIT = 8;
+const MAX_TRANSCRIPT_CONFLICT_PROMPTS = 256;
+const MAX_TRANSCRIPT_CONFLICT_TURNS_PER_PROMPT = 16;
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -69,6 +71,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
   private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 };
   private lastScanFailureAt: string | null = null;
+  private readonly legacyDetachedWithoutIdentity = new Set<string>();
+  private readonly transcriptConflictTurns = new Map<string, Set<string>>();
 
   constructor(private readonly options: PromptRunWorkflowOptions) {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
@@ -96,6 +100,14 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.nextSafetyScanAt = null;
     try {
       const result = this.options.store.scanDurablePromptWork();
+      for (const promptId of this.legacyDetachedWithoutIdentity) {
+        const prompt = this.options.store.getPrompt(promptId);
+        if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.legacyDetachedWithoutIdentity.delete(promptId);
+      }
+      for (const promptId of this.transcriptConflictTurns.keys()) {
+        const prompt = this.options.store.getPrompt(promptId);
+        if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.transcriptConflictTurns.delete(promptId);
+      }
       const discovered = { turns: 0, steering: 0, detached: 0, cancelled: result.cancelled, failedDetached: result.failedDetached };
       for (const hint of result.hints) {
         if (hint.kind === "prompt-ready") discovered.turns += 1;
@@ -168,6 +180,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   async stop(context?: ShutdownContext): Promise<void> {
     this.stopping = true;
+    this.legacyDetachedWithoutIdentity.clear();
+    this.transcriptConflictTurns.clear();
     if (this.safetyTimer) clearTimeout(this.safetyTimer);
     this.safetyTimer = null;
     this.currentSafetyScanDelayMs = null;
@@ -317,6 +331,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private scheduleDetachedObserver(prompt: PromptJob): void {
+    if (this.legacyDetachedWithoutIdentity.has(prompt.id)) return;
     if (this.workers.has(prompt.bindingId)) return;
     const worker = this.observeDetachedTurn(prompt).finally(() => {
       if (this.workers.get(prompt.bindingId) === worker) this.workers.delete(prompt.bindingId);
@@ -329,6 +344,16 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private async observeDetachedTurn(prompt: PromptJob): Promise<void> {
+    const currentPrompt = this.options.store.getPrompt(prompt.id);
+    if (!currentPrompt || currentPrompt.state !== "running" || currentPrompt.observationState !== "detached") return;
+    if (!currentPrompt.transcriptTurnId || !currentPrompt.transcriptTurnStartedAt) {
+      if (!this.legacyDetachedWithoutIdentity.has(currentPrompt.id)) {
+        this.legacyDetachedWithoutIdentity.add(currentPrompt.id);
+        this.options.logger.warn({ event: "detached-turn-identity-missing", bindingId: currentPrompt.bindingId, promptId: currentPrompt.id, outcome: "uncertain" }, "detached prompt has no exact transcript turn identity; observation remains uncertain");
+      }
+      return;
+    }
+    prompt = currentPrompt;
     const binding = this.options.store.getBinding(prompt.bindingId);
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
@@ -351,7 +376,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           await this.publishTypedObservation(binding.id, prompt.id, owned.observation, startedAt);
         }
         const lifecycle = owned.owned ? owned.observation.turnLifecycle : undefined;
-        if (observation.traexProcess && lifecycle?.state === "completed") {
+        const lifecycleCompletesOwnedTurn = lifecycle?.state === "completed"
+          && lifecycle.turnId === prompt.transcriptTurnId
+          && lifecycle.startedAt === prompt.transcriptTurnStartedAt;
+        if (observation.traexProcess && lifecycleCompletesOwnedTurn) {
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
           const sourceAnswer = lifecycle.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
           const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
@@ -473,11 +501,27 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.options.logger.info({ event: "transcript-turn-owned", bindingId: binding.id, promptId: current.id, paneId: binding.paneId, turnId: observation.turnId, outcome: "claimed" }, "claimed exact TraeX transcript turn ownership");
       }
     }
-    const owned = ownedPrompt.transcriptTurnId !== null && observation.turnId === ownedPrompt.transcriptTurnId;
-    if (!owned && ownedPrompt.transcriptTurnId && observation.turnId !== ownedPrompt.transcriptTurnId) {
-      this.options.logger.warn({ event: "transcript-turn-conflict", bindingId: binding.id, promptId: current.id, paneId: binding.paneId, acceptedTurnId: ownedPrompt.transcriptTurnId, observedTurnId: observation.turnId, outcome: "ignored" }, "ignored output from a conflicting TraeX transcript turn");
+    const detachedIdentityMatches = ownedPrompt.observationState !== "detached" || (
+      observation.turnLifecycle?.startedAt === ownedPrompt.transcriptTurnStartedAt
+    );
+    const owned = ownedPrompt.transcriptTurnId !== null && observation.turnId === ownedPrompt.transcriptTurnId && detachedIdentityMatches;
+    if (!owned && ownedPrompt.transcriptTurnId) {
+      this.logTranscriptConflictOnce(binding, current.id, ownedPrompt.transcriptTurnId, observation.turnId);
     }
     return { owned, prompt: ownedPrompt, observation };
+  }
+
+  private logTranscriptConflictOnce(binding: Binding, promptId: string, acceptedTurnId: string, observedTurnId: string): void {
+    let observed = this.transcriptConflictTurns.get(promptId);
+    if (!observed) {
+      if (this.transcriptConflictTurns.size >= MAX_TRANSCRIPT_CONFLICT_PROMPTS) this.transcriptConflictTurns.delete(this.transcriptConflictTurns.keys().next().value!);
+      observed = new Set<string>();
+      this.transcriptConflictTurns.set(promptId, observed);
+    }
+    if (observed.has(observedTurnId)) return;
+    if (observed.size >= MAX_TRANSCRIPT_CONFLICT_TURNS_PER_PROMPT) observed.delete(observed.values().next().value!);
+    observed.add(observedTurnId);
+    this.options.logger.warn({ event: "transcript-turn-conflict", bindingId: binding.id, promptId, paneId: binding.paneId, acceptedTurnId, observedTurnId, outcome: "ignored" }, "ignored output from a conflicting TraeX transcript turn");
   }
 
   private retainOwnedObservation(source: TurnOutputSource, observation: TraexTranscriptObservation): void {

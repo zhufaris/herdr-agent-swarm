@@ -294,11 +294,16 @@ projected. A finished Answer page receives one final non-streaming green card
 update and is not subsequently patched.
 
 Interrupted running prompts are detached instead of replayed. On restart the
-bridge observes the surviving pane and canonical transcript, then resumes
-delivery only after a matching typed `task_complete` record proves that the
-detached turn finished. Herdr `idle` or composer readiness alone cannot settle a
-detached turn. If completion cannot be proven, the prompt remains explicitly
-uncertain and is never replayed. If its binding later becomes archived, closed,
+bridge observes the surviving pane and canonical transcript. Answer and Main Card
+projection resumes only for observations whose turn ID matches the prompt's exact
+persisted transcript identity. Completing the detached prompt and waking the next
+FIFO item requires stronger evidence: the matching turn ID, the exact persisted
+canonical start time, a canonical `task_complete`, and a surviving TraeX process.
+Dispatch time admits only the first fresh `task_started` ownership claim. Herdr
+`idle` or composer readiness alone cannot settle a detached turn.
+Legacy detached prompts without an exact persisted turn identity remain uncertain,
+cannot consume later pane turns, and are never replayed. If completion cannot be
+proven, the prompt remains explicitly uncertain. If its binding later becomes archived, closed,
 failed, or orphaned, the durable work scan atomically fails both the detached
 prompt and its Run Card with an explicit no-replay notice; this retains audit
 history while preventing an unobservable turn from remaining operationally
