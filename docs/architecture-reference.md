@@ -15,9 +15,8 @@
 ## 1. 系统本质
 
 Herdr Agent Swarm 不是简单的消息转发器，而是一个持久化、多项目、多 Agent
-工作流协调器。它管理项目级 Primary 和 Worker 实例。原有的一话题一 TraeX
-Herdr Lark Bridge 是兼容工作流：它把 Lark 话题绑定到真实 Herdr Pane 中的
-TraeX 进程，同时保留 Herdr 作为本地观察、接管和高风险审批入口。
+工作流协调器。它管理项目级 Primary 和 Worker 实例，把 Lark 话题绑定到真实
+Herdr Pane 中的 Agent 进程，同时保留 Herdr 作为本地观察、接管和高风险审批入口。
 
 ```text
 Lark message
@@ -53,9 +52,9 @@ durable inbound → application workflow → durable prompt/control intent
 由此得到四条规则：
 
 1. 不根据 Lark 卡片内容修复 SQLite。
-2. 不根据插件事件 payload 直接修改 Binding；事件只触发一次新的 Herdr 对账。
+2. 不根据 Herdr 事件 payload 直接修改 Binding；事件只触发一次新的 Herdr 对账。
 3. Lark 投递失败只重试 outbox，不能重新执行 TraeX prompt。
-4. 应用不自行管理服务进程；服务生命周期由 systemd 和 Herdr 插件负责。
+4. 应用不自行管理服务进程；生命周期由 user systemd 与 `npm run swarm:*` 负责。
 
 ## 3. 分层与依赖方向
 
@@ -70,7 +69,7 @@ durable inbound → application workflow → durable prompt/control intent
               ▼                    ▼                        ▼
 ┌──────────────────── Infrastructure and adapters ─────────────────┐
 │ Lark adapter · Herdr adapter · SQLite store · command runner      │
-│ Socket subscriber · UDP inbox · cache · health · lease · shutdown │
+│ Socket subscriber · cache · health · lease · shutdown             │
 └────────────────────────────┬──────────────────────────────────────┘
                              │ implements ports
                              ▼
@@ -212,7 +211,7 @@ checkpoint 实现 saga 式恢复。每一步都必须可判定“已经完成”
 6. 原子更新 Binding observation 和 output checkpoint；
 7. 发布 lifecycle event，并在确有 durable work 时发出 wake-up。
 
-Socket event、UDP plugin event 和周期任务都只请求 reconciliation。丢失一个事件会
+Socket event 和周期任务都只请求 reconciliation。丢失一个事件会
 增加延迟，但不会改变最终状态。
 
 ### 5.5 控制、管理和查询
@@ -260,7 +259,7 @@ SQLite transaction。它负责的不是简单 CRUD，而是业务原子转换，
 - `HerdrCliAdapter` 隔离 CLI/Socket、数据校验、运行时观察和兼容 fallback。
 - `LarkSdkAdapter` 隔离 SDK、事件标准化和 CardKit transport。
 - `WorkspaceSnapshotCache` 合并短时间内重复的 snapshot 请求。
-- `HerdrSocketSubscriber` 和 `HerdrEventInbox` 提供低延迟 wake-up。
+- `HerdrSocketSubscriber` 通过原生 Socket event 提供低延迟 wake-up；周期对账负责兜底。
 - `InstanceLeaseController` 保证只有一个实例可写同一数据库。
 - `BridgeRuntimeShutdown` 按依赖顺序停止 ingress、workflow、projection、delivery 和 store。
 - health server 区分进程存活、依赖就绪和脱敏后的运行状态。
@@ -288,7 +287,7 @@ Lark event
 ### 6.2 Herdr 状态变化
 
 ```text
-Socket event / UDP hint / periodic timer
+native Socket event / periodic timer
   → invalidate relevant snapshot cache
   → request reconciliation
   → fresh Herdr snapshot and targeted observation

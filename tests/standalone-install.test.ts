@@ -12,6 +12,31 @@ describe("standalone installer", () => {
     engines: { node: string };
     scripts: Record<string, string>;
   };
+  const documentationAuthority = [
+    "AGENTS.md",
+    "README.md",
+    "docs/architecture.md",
+    "docs/architecture-reference.md"
+  ];
+
+  it("documents only the standalone service operator surface", () => {
+    for (const path of documentationAuthority) {
+      const text = readFileSync(path, "utf8");
+      expect(text, path).not.toMatch(/herdr plugin action|--plugin herdr-lark-bridge|herdr-lark-bridge\.service/);
+      expect(text, path).not.toMatch(/HERDR_BRIDGE_EVENT_PORT|HERDR_EVENT_DEBOUNCE_MS|\bUDP\b/i);
+    }
+
+    expect(readFileSync("AGENTS.md", "utf8")).not.toContain("remains available as a compatibility workflow");
+
+    const readme = readFileSync("README.md", "utf8");
+    expect(readme).toMatch(/npm run build\nnpm run swarm:setup\n\.\/install\.sh\nnpm run swarm:start/);
+    expect(readme).toContain("decline setup's optional install and start or restart prompts");
+    expect(readme).toMatch(/Setup may separately offer to\s+install and then start or restart the service/);
+    expect(readme).toContain("Installation enables the unit but deliberately does not start it");
+    for (const action of ["start", "status", "restart", "stop", "logs"]) {
+      expect(readme).toContain(`npm run swarm:${action}`);
+    }
+  });
 
   it("has no repository-owned compatibility plugin surface", () => {
     expect(existsSync("herdr-plugin.toml")).toBe(false);

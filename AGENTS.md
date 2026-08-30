@@ -5,8 +5,8 @@
 Herdr Agent Swarm is a durable, human-controlled multi-agent workflow
 coordinator. It manages project-scoped Primary and Worker instances in real
 Herdr panes and projects their work into Lark CardKit cards through a retryable
-outbox. The original one-topic/one-TraeX Herdr Lark Bridge remains available as
-a compatibility workflow; it is not the identity of this repository.
+outbox. The repository supports only the standalone `herdr-agent-swarm` service;
+the former compatibility plugin is not an operator or deployment surface.
 
 The source of truth is deliberately split:
 
@@ -18,14 +18,14 @@ The source of truth is deliberately split:
   instance lease.
 - Lark owns only the visible cards and messages. Do not infer workflow state
   from a card, and do not repair SQLite based on Lark output.
-- User systemd owns the service process. The Herdr plugin is the supported
-  operator surface.
+- User systemd owns the service process. The `npm run swarm:*` commands are the
+  supported operator surface.
 
 The request path is: normalized Lark message or card action -> durable inbound
 record -> `SyncCoordinator` -> one prompt worker per binding -> Herdr/TraeX ->
 bridge events -> SQLite card projections and outbox -> Lark CardKit delivery.
-Herdr plugin events are bounded loopback wake-up hints; reconciliation against a
-fresh Herdr snapshot is the convergence path.
+Herdr socket events are bounded wake-up hints; reconciliation against a fresh
+Herdr snapshot is the convergence path.
 
 ### Invariants that changes must preserve
 
@@ -64,7 +64,7 @@ fresh Herdr snapshot is the convergence path.
   lease, shutdown, build identity, and cache mechanics.
 - `src/cards/` contains pure Lark CardKit rendering. Keep presentation logic out
   of coordinators.
-- `src/cli/` and `plugin/` implement validation and Herdr plugin/systemd
+- `src/cli/` and `scripts/` implement validation and standalone user-systemd
   lifecycle actions.
 
 Read `docs/architecture.md` before changing durability, recovery, reconciliation,
@@ -75,7 +75,7 @@ Historical designs are not the current behavioral authority.
 
 Requirements: Linux, Node.js >= 22.12 (Node 24 LTS recommended), npm, a running
 Herdr workspace, `herdr`, `traex`, and a Lark bot configured for long
-connections. The Herdr plugin requires Herdr >= 0.7.5.
+connections. Herdr >= 0.7.5 is required for the CLI/socket runtime contract.
 
 | Purpose | Command |
 | --- | --- |
@@ -87,15 +87,17 @@ connections. The Herdr plugin requires Herdr >= 0.7.5.
 | Start compiled service in foreground | `npm start` |
 | Validate an environment file and project registry | `npm run config:validate -- <env-file> <projects-file>` |
 | Observe a real configured bridge without sending Lark messages | `npm run smoke:real-user` |
-| Build, link, and enable the compatibility Herdr plugin | `./install.sh` |
-| Configure, install, and start the compatibility Herdr plugin service | `./install.sh --setup` |
-| Restart a linked, rebuilt compatibility Herdr plugin service | `herdr plugin action invoke restart --plugin herdr-lark-bridge` |
-| Inspect compatibility Herdr plugin service health and recent failures | `herdr plugin action invoke status --plugin herdr-lark-bridge` |
-| Inspect bounded compatibility Herdr plugin logs | `herdr plugin action invoke logs --plugin herdr-lark-bridge` |
+| Configure the standalone service on first run | `npm run build && npm run swarm:setup` |
+| Build, stage, install, and enable the configured service | `./install.sh` |
+| Start the installed service | `npm run swarm:start` |
+| Inspect service health and recent failures | `npm run swarm:status` |
+| Restart or stop the service | `npm run swarm:restart` / `npm run swarm:stop` |
+| Inspect bounded service logs | `npm run swarm:logs` |
 
-Run `npm run build` after source changes before using the plugin restart action;
-the managed unit verifies the expected generated build identity. Do not manually
-edit generated `dist/` output.
+Run `./install.sh` after source changes to build and stage an immutable release;
+then use `npm run swarm:restart` when the active-work safety gate permits it. The
+managed unit verifies the expected generated build identity. Do not manually edit
+generated `dist/` output. Installation enables the unit but does not start it.
 
 For foreground development, load the same environment used by the service before
 starting the process. The service exposes `/health`, `/ready`, and `/status` on
@@ -148,7 +150,7 @@ change, run at least the affected test file(s), `npm run typecheck`, and
 shared runtime behavior. Use `npm run smoke:real-user` only against a configured
 bridge for non-mutating operational observation.
 
-For production diagnosis, start with the status plugin action and correlate
+For production diagnosis, start with `npm run swarm:status` and correlate
 structured Pino records by `eventId`, `bindingId`, `promptId`, `paneId`, or
 `replyId`. Reconcile state against Herdr rather than trusting stale card text.
 Inspect the durable prompt and outbox state before altering or restarting a live
@@ -156,7 +158,7 @@ service; shutdown detaches in-flight observers by design.
 
 ## Security and data handling
 
-- Keep `LARK_APP_SECRET` and all plugin `.env` files private. Do not commit
+- Keep `LARK_APP_SECRET` and the standalone `.env` file private. Do not commit
   credentials, live project registries, SQLite databases, WAL/SHM files, logs,
   or generated runtime state. `var/` is service-owned runtime data.
 - The Lark adapter accepts only configured-chat, user-originated text messages
@@ -175,11 +177,11 @@ service; shutdown detaches in-flight observers by design.
 
 ## Configuration
 
-The plugin setup action manages private configuration under
-`HERDR_PLUGIN_CONFIG_DIR` and state under `HERDR_PLUGIN_STATE_DIR`. With those
-variables present, defaults resolve to `projects.json` in the config directory
-and `bridge.db` in the state directory. Explicit `PROJECTS_CONFIG_PATH` and
-`BRIDGE_DATABASE_PATH` override those defaults.
+Standalone setup manages private configuration under
+`${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm` and state under
+`${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm`. `SWARM_CONFIG_DIR`
+and `SWARM_STATE_DIR` override those roots. Explicit `PROJECTS_CONFIG_PATH` and
+`BRIDGE_DATABASE_PATH` override the derived files.
 
 Required environment variables:
 

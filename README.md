@@ -4,9 +4,8 @@ Herdr Agent Swarm is a standalone, human-controlled multi-agent service built on
 Herdr headless runtime. One Feishu gateway can manage multiple projects; each
 project may have one Primary and several explicitly created Workers using
 TraeX, Codex, Claude Code, or Pi. Herdr owns live panes and processes, while its
-TUI and this repository's Herdr plugin are optional operator interfaces.
-
-The original one-topic/one-TraeX bridge remains available during migration.
+CLI and socket API remain the required runtime control plane. The standalone
+user-systemd service is the repository's only supported deployment identity.
 
 Each ordinary Lark message gets an Answer CardKit entity. The bridge streams safe
 structured TraeX transcript output into its fixed Markdown element as the request moves from queued
@@ -26,7 +25,7 @@ Lark message -> durable turn or steering job -> Herdr pane -> TraeX
 
 SQLite stores topic-to-pane bindings, FIFO prompt jobs, run-card projections,
 deduplication keys, a durable Lark outbox, and audit records. Herdr snapshots
-are authoritative for pane and agent state; plugin events only wake the bridge
+are authoritative for pane and agent state; Herdr events only wake the bridge
 for reconciliation. An interrupted running prompt is not replayed after a
 restart; it remains detached while the bridge observes the existing Herdr turn.
 Prompts that have not started remain queued.
@@ -120,17 +119,22 @@ management; leaving it empty preserves the existing configured-chat behavior.
 ## Install as a standalone service
 
 The standalone service needs a running Herdr server, but it does not need the
-Herdr TUI or plugin. The recommended first run is the guided setup wizard:
+Herdr TUI. On a fresh checkout, build before running the guided setup wizard:
 
 ```bash
 npm ci
 npm run build
 npm run swarm:setup
+./install.sh
+npm run swarm:start
 ```
 
 The wizard collects the Lark application and project route, discovers live
 Herdr workspaces, validates the complete draft, shows a redacted review, and
-asks separately before saving, installing, and starting the user service.
+asks before saving the private configuration. Setup may separately offer to
+install and then start or restart the service. When following the explicit
+sequence above, decline setup's optional install and start or restart prompts;
+the following `./install.sh` and `npm run swarm:start` commands own those steps.
 Secret input is hidden. When rerunning setup, the existing secret can be kept
 without displaying or re-entering it. Cancelling before save leaves the current
 configuration unchanged; replacing a valid configuration creates a private
@@ -180,9 +184,18 @@ Useful recovery commands are `npm run swarm:doctor`, `npm run swarm:status`, and
 restore a matching `.env` and `projects.json` pair from the named private backup
 before rerunning it.
 
-`./install.sh --standalone` combines dependency installation, build, immutable
-runtime staging, and service installation for an already configured machine. It
-is deliberately non-interactive: missing files or the exact shipped template
+After setup has saved valid configuration, `./install.sh` installs locked
+dependencies, builds, stages an immutable runtime, and installs the user unit:
+
+```bash
+./install.sh
+npm run swarm:start
+npm run swarm:status
+```
+
+Installation enables the unit but deliberately does not start it; use
+`npm run swarm:start` explicitly. The installer is for an already configured
+machine. It is deliberately non-interactive: missing files or the exact shipped template
 placeholders stop before service installation and direct the operator to
 `npm run swarm:setup`. The installer never enters the wizard implicitly. It
 stages only production dependencies under the state directory, then atomically
@@ -191,14 +204,11 @@ build dependencies. The checked-in service file is an explanatory template;
 the installer renders the production unit and enables source maps for actionable
 stack traces.
 
-`npm run swarm:migrate` is a guarded one-to-one migration from the compatibility
-plugin service into an unused standalone service identity. It copies private
-configuration, preserves an explicit `BRIDGE_DATABASE_PATH`, rejects active or
-uncertain work, and performs a stop-before-start handoff with rollback. It
-refuses an existing standalone deployment whose Lark route, project registry,
-port, or database represents a different service; consolidating two such
-deployments requires an explicit multi-instance design rather than overwriting
-either configuration.
+The former repository plugin registration and legacy unit are unsupported. A
+one-time live cleanup must remove them only after resolving the current listener
+to its owning unit and confirming that no prompt or outbox work is active. Keep
+the configured absolute `BRIDGE_DATABASE_PATH`; never copy a live SQLite database
+without its WAL and SHM companions.
 
 `npm run swarm:restart` refuses to interrupt active TraeX turns and reports the
 running and queued prompt counts. Wait for the active work to drain whenever
@@ -206,31 +216,6 @@ possible. For an intentional observer handoff,
 `npm run swarm:restart -- --force` preserves the existing detached/no-replay
 recovery behavior. `/status` exposes bounded `operational.promptLatency`
 aggregates for queue, execution, and final Lark delivery time.
-
-## Install the compatibility Herdr plugin
-
-Clone or copy the repository, install the locked dependencies, build it, then
-link and enable the checkout. Local `plugin link` intentionally skips the
-manifest build step; packaged `plugin install` runs it.
-
-```bash
-cd /absolute/path/to/herdr-agent-swarm
-./install.sh
-```
-
-The installer checks the required commands, installs locked dependencies,
-builds the plugin, links the absolute checkout path, enables it, and verifies
-the registered plugin state. It is safe to run again after source updates. It
-does not modify bridge configuration or service state by default.
-
-To continue directly into interactive configuration and systemd service setup:
-
-```bash
-./install.sh --setup
-```
-
-The plugin requires Herdr 0.7.5 or newer on Linux and a working user systemd
-session. Action IDs are local to the plugin namespace.
 
 ### Install the local TraeX agent kind
 
@@ -294,21 +279,16 @@ This is local compatibility, not upstream Herdr support. Interactive start,
 prompt, wait, read, focus, send-keys, rename, and attach are supported; native
 automatic restore across a Herdr server restart is not claimed.
 
-## Configure the bridge
+## Configure the service
 
-Invoke the same guided setup workflow from the compatibility plugin:
-
-```bash
-herdr plugin action invoke setup --plugin herdr-lark-bridge
-```
-
-The setup pane collects and validates values, shows a redacted review, and asks
-separately before saving and changing the service. It writes private files under
-the Herdr plugin config directory:
+Run `npm run build && npm run swarm:setup`. The setup wizard collects and
+validates values, shows a redacted review, and asks separately before saving and
+changing the service. It writes private files under the standalone config
+directory:
 
 ```text
-$HERDR_PLUGIN_CONFIG_DIR/.env
-$HERDR_PLUGIN_CONFIG_DIR/projects.json
+${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}/.env
+${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}/projects.json
 ```
 
 Set at least these values in `.env`:
@@ -325,7 +305,6 @@ The remaining settings have defaults:
 ```dotenv
 BRIDGE_HTTP_HOST=127.0.0.1
 BRIDGE_HTTP_PORT=8787
-HERDR_BRIDGE_EVENT_PORT=18787
 HERDR_BIN=herdr
 TRAEX_BIN=traex
 CODEX_BIN=codex
@@ -341,7 +320,6 @@ RECONCILE_INTERVAL_MS=30000
 HERDR_SNAPSHOT_CACHE_TTL_MS=2000
 OUTBOX_SAFETY_SCAN_INTERVAL_MS=30000
 CARD_UPDATE_DEBOUNCE_MS=500
-HERDR_EVENT_DEBOUNCE_MS=100
 HERDR_CIRCUIT_FAILURE_THRESHOLD=3
 HERDR_CIRCUIT_OPEN_MS=15000
 SQLITE_INTEGRITY_AUDIT_INTERVAL_MS=900000
@@ -356,18 +334,18 @@ entry contains a stable `id`, display name, description, Herdr `workspaceId`,
 absolute `cwd`, optional `maxInstances`, and optional desired instance
 descriptors; `defaultProjectId` must reference one entry. Workers may not use
 the main checkout. The registry is
-required; a missing or invalid file prevents startup. Copy
-`config/projects.example.json` to `config/projects.json` (or to the plugin
-config directory) and replace the workspace ID and cwd with your own values.
+required; a missing or invalid file prevents startup. `npm run swarm:init` can
+write templates into the standalone config directory for non-interactive setup.
 
-The plugin defaults `PROJECTS_CONFIG_PATH` to its config directory and
-`BRIDGE_DATABASE_PATH` to `$HERDR_PLUGIN_STATE_DIR/bridge.db`. Explicit absolute
-values still override those locations. When managed TraeX starts are enabled,
+The service defaults `PROJECTS_CONFIG_PATH` to its config directory and
+`BRIDGE_DATABASE_PATH` to the `bridge.db` file under
+`${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}`.
+Explicit absolute values still override those locations. When managed TraeX starts are enabled,
 use the absolute shim symlink for `HERDR_BIN` and the installer's recorded real
 TraeX path for `TRAEX_BIN`; otherwise use the official Herdr path. Absolute paths
-paths because plugin commands do not depend on an interactive shell's `PATH`.
+paths ensure the user service does not depend on an interactive shell's `PATH`.
 Every project `cwd` must be absolute and accessible. Keep `.env` private because
-it contains the Lark app secret. The plugin parses it as data and never evaluates
+it contains the Lark app secret. Setup parses it as data and never evaluates
 it as shell code.
 
 ## Start in the foreground
@@ -407,47 +385,41 @@ It also reports the cached result of a read-only SQLite integrity audit that run
 at startup and every 15 minutes. Integrity findings degrade `/status` without
 making `/ready` fail and are never repaired automatically.
 
-## Operate through Herdr
+## Operate the standalone service
 
-The compatibility setup action installs `herdr-lark-bridge.service` as a user
-systemd service.
-Herdr remains the operator entry point while systemd owns the long-running
-process:
+User systemd owns the long-running process. Use the repository lifecycle
+commands as the supported operator surface:
 
 ```bash
-herdr plugin action invoke start --plugin herdr-lark-bridge
-herdr plugin action invoke status --plugin herdr-lark-bridge
-herdr plugin action invoke logs --plugin herdr-lark-bridge
-herdr plugin action invoke restart --plugin herdr-lark-bridge
-herdr plugin action invoke stop --plugin herdr-lark-bridge
-herdr plugin action invoke uninstall-service --plugin herdr-lark-bridge
+npm run swarm:start
+npm run swarm:status
+npm run swarm:logs
+npm run swarm:restart
+npm run swarm:stop
 ```
 
-`start` waits for process-local `/health`; dependency failures remain visible as
+`swarm:start` waits for process-local `/health`; dependency failures remain visible as
 degraded `/ready` state without killing the service. systemd applies restart and
 bounded stop policy. Structured logs are available from the logs action and the
-user journal. Durable bridge state remains under `$HERDR_PLUGIN_STATE_DIR`.
+user journal. Durable state remains under the standalone state directory.
 
 Supported native Herdr Pane and Agent events wake the bridge through the Unix
 Socket API. The managed unit receives the invocation-time `HERDR_SOCKET_PATH`;
 if it is absent or disconnected, periodic snapshot reconciliation continues.
-Herdr 0.7.5 does not permit `pane.output_changed` as a Socket subscription, so
-that plugin hook can continue through the bounded loopback UDP path as a wake-up hint. Both event
-paths only request reconciliation. One fresh `herdr api snapshot` is
+Socket events only request reconciliation. One fresh `herdr api snapshot` is
 authoritative for Pane identity, terminal identity, optional native Agent
 session reference, and Agent state. Answer content comes only from an exactly
 identified structured TraeX transcript; `unknown` remains fail-closed and runtime
 Model/Mode selection is unsupported.
-`RECONCILE_INTERVAL_MS` is the full-scan recovery fallback and defaults to five
-minutes in the plugin template.
-`HERDR_SNAPSHOT_CACHE_TTL_MS`, `OUTBOX_SAFETY_SCAN_INTERVAL_MS`,
-`CARD_UPDATE_DEBOUNCE_MS`, and `HERDR_EVENT_DEBOUNCE_MS` tune cache freshness
-and background coalescing. Their defaults preserve the built-in behavior; they
+`RECONCILE_INTERVAL_MS` is the full-scan recovery fallback.
+`HERDR_SNAPSHOT_CACHE_TTL_MS`, `OUTBOX_SAFETY_SCAN_INTERVAL_MS`, and
+`CARD_UPDATE_DEBOUNCE_MS` tune cache freshness and background coalescing. Their
+defaults preserve the built-in behavior; they
 do not change durable ordering, replay, or recovery semantics.
 
-Disabling or exiting Herdr does not stop the user service. Invoke
-`uninstall-service` before unlinking the plugin so the unit never points at a
-removed checkout. Configuration and SQLite state are preserved.
+Exiting the Herdr TUI does not stop the user service; the Herdr server must remain
+available for pane orchestration. `npm run swarm:stop` preserves configuration
+and SQLite state.
 
 For final acceptance, start the read-only observer and follow its checklist from
 a genuine Feishu user account:
@@ -460,45 +432,39 @@ The script never sends a Lark message and never bypasses the bot-message filter.
 Set `SMOKE_TIMEOUT_MS` or `BRIDGE_STATUS_URL` only when a different observation
 window or local endpoint is needed.
 
-Logs are newline-delimited Pino JSON with a stable `event` field. The logs action
+Logs are newline-delimited Pino JSON with a stable `event` field. `npm run swarm:logs`
 prints the most recent bounded tail. Correlate a
 request using `eventId`, `bindingId`, `promptId`, `paneId`, or `replyId`. The
 bridge deliberately excludes Lark message bodies, terminal output, card payloads,
 and credentials from operational logs. For example:
 
-After source changes, rebuild and restart the linked checkout:
+After source changes, install a fresh immutable release and restart after the
+active-work gate permits it:
 
 ```bash
-npm ci
-npm run build
-herdr plugin action invoke restart --plugin herdr-lark-bridge
+./install.sh
+npm run swarm:restart
 ```
 
-The restart action completes only after the replacement service reports the
+The restart command completes only after the replacement service reports the
 expected build identity. This lets systemd finish an in-flight graceful shutdown
 without treating the handover as a failed restart.
-It also refuses to restart while active turns are reported. If an operator has
-explicitly chosen to detach the bridge observer, run
-`bash plugin/service.sh restart --force` from the linked checkout; the prompt is
-never replayed automatically.
-
-To edit the project registry later, invoke
-`configure-projects`. It edits a temporary copy and atomically replaces the
-registry only after validation succeeds.
-The stop action terminates the process while preserving credentials, project
-configuration, SQLite state, and logs. Stop it before `herdr plugin unlink
-herdr-lark-bridge` when removing the linked plugin.
+It also refuses to restart while active turns are reported.
+To edit the project registry later, rerun `npm run swarm:setup`; it replaces the
+validated configuration pair atomically. `npm run swarm:stop` terminates the
+process while preserving credentials, project configuration, SQLite state, and
+logs.
 
 ### Migrate an existing PM2 deployment
 
 Wait until `/status` reports no running or queued prompts and `pendingOutbox` is
-zero. Copy the old `.env` and `config/projects.json` into the plugin config
+zero. Copy the old `.env` and `config/projects.json` into the standalone config
 directory with mode `600`. Before switching, replace repository-relative values
 such as `./var/bridge.db` or `./config/projects.json` with absolute paths to the
 existing files. This preserves the current SQLite database and avoids creating
-an empty plugin-local database. Then stop and remove the PM2 app, invoke the
-plugin setup action to install the user service, and verify `/health`, `/ready`,
-and the status action. Never copy a live SQLite database without its WAL/SHM
+an empty standalone database. Then stop and remove the PM2 app, run
+`./install.sh`, start with `npm run swarm:start`, and verify `/health`, `/ready`,
+and `npm run swarm:status`. Never copy a live SQLite database without its WAL/SHM
 files; prefer an absolute `BRIDGE_DATABASE_PATH` during migration.
 
 ## Use the bridge
@@ -656,14 +622,14 @@ Then perform a Lark smoke test:
   long-connection subscription, app publication, and bot installation.
 - Herdr workspace errors: run `herdr workspace get <workspace-id>` as the same
   account that runs the service.
-- `herdr` or `traex` is not found from the plugin: set absolute `HERDR_BIN` and
+- `herdr` or `traex` is not found from the service: set absolute `HERDR_BIN` and
   `TRAEX_BIN` paths in `.env`.
-- The service cannot write SQLite: verify that `$HERDR_PLUGIN_STATE_DIR` exists
-  and is writable by the Herdr account.
+- The service cannot write SQLite: verify that
+  `${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}`
+  exists and is writable by the service account.
 - A standalone service action fails: inspect `systemctl --user status
   herdr-agent-swarm.service` and `journalctl --user -u
-  herdr-agent-swarm.service -n 100 --no-pager`. Compatibility plugin installs
-  continue to use `herdr-lark-bridge.service`.
+  herdr-agent-swarm.service -n 100 --no-pager`.
 - A running card becomes detached after restart. The bridge observes the existing
   Herdr turn and does not replay the prompt because doing so could repeat side
   effects. If completion cannot be observed reliably, inspect the pane before

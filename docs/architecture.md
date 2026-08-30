@@ -10,13 +10,13 @@ and back to a durable Lark delivery.
 ## System purpose
 
 Herdr Agent Swarm manages human-controlled Primary and Worker instances across
-multiple projects on the Herdr headless runtime. Its compatibility bridge also
-connects a Lark topic to one TraeX process in a real Herdr pane, letting a person
+multiple projects on the Herdr headless runtime. It connects each managed Lark
+topic to an agent process in a real Herdr pane, letting a person
 start work, queue later requests, and see safe structured TraeX output in Lark while
 preserving Herdr as the place for local observation and high-risk approval.
 
 The bridge is a durable workflow coordinator, not a message relay. It does not
-assume that a Lark API call, a Herdr snapshot, or a plugin event is a complete
+assume that a Lark API call, a Herdr snapshot, or a runtime event is a complete
 transaction by itself.
 
 ## Ownership and authority
@@ -27,8 +27,8 @@ transaction by itself.
 | Typed turn output, live status heading, structured plan, and token counters for an active turn | Exactly identified TraeX JSONL transcript | The transcript is parsed once into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
-| Process lifecycle | user systemd service | Standalone CLI or the optional plugin controls the service; the application does not manage PID files. |
-| Plugin events | bounded wake-up hints | Events improve latency but do not create a second event log. |
+| Process lifecycle | user systemd service | The standalone `npm run swarm:*` commands control the service; the application does not manage PID files. |
+| Herdr socket events | bounded wake-up hints | Events improve latency but do not create a second event log. |
 
 When these sources disagree, do not repair SQLite from a Lark card or infer a
 pane state from a card. Reconcile against Herdr, then let the normal projection
@@ -50,7 +50,7 @@ the source of workflow policy.
                v                      v                           v
 ┌──────────────────────── Infrastructure and adapters ─────────────────────┐
 │ Lark adapter · Herdr adapter · command runner · Socket RPC/event client   │
-│ UDP event inbox · SQLite store · health server · lease runtime            │
+│ SQLite store · health server · lease runtime · shutdown                    │
 └───────────────────────┬──────────────────────────────────────────────────┘
                         │ implements ports
                         v
@@ -72,7 +72,7 @@ the source of workflow policy.
 
 The composition root creates the concrete infrastructure adapters and injects
 capability-focused ports into the application workflows. Runtime modules do not
-read plugin paths or process-manager state directly.
+read deployment paths or process-manager state directly.
 
 ### Current implementation map
 
@@ -198,7 +198,7 @@ remain best effort because workers always reload durable state.
 ### Target runtime shape
 
 ```text
-Lark message or card action            Herdr Socket / plugin event
+Lark message or card action                 Herdr Socket event
              |                                |
              v                                v
    InboundRouter and durable acceptance   bounded wake-up hint
@@ -330,10 +330,9 @@ or move events. It validates newline-delimited frames, reconnects with bounded
 backoff, and requests convergence after reconnect. Socket health is not a
 readiness gate.
 
-Herdr 0.7.5 does not allow `pane.output_changed` in a Socket subscription. The
-plugin hook continues to send that event as a small loopback UDP datagram. Both
-inputs carry only bounded identity metadata and request the same reconciler;
-neither mutates bindings from event payloads.
+Herdr Socket events carry only bounded identity metadata and request the same
+reconciler; they never mutate bindings from event payloads. Periodic
+reconciliation remains the convergence path when an event is unavailable.
 
 Native Pane events also wake active and detached turn observers. The wait is
 bounded and always falls back to polling, so a missing event cannot stall a turn.
@@ -372,8 +371,8 @@ Event-driven reconciliation is scoped to affected workspaces. It emits targeted
 durable queue eligibility require work; periodic durable scans remain the safety
 net for lost hints.
 
-Periodic reconciliation remains required. A missed Socket event or UDP datagram
-may delay an update, but must not change the final converged state.
+Periodic reconciliation remains required. A missed native Socket event may
+delay an update, but must not change the final converged state.
 
 ## Answer streaming and pagination
 
@@ -435,7 +434,7 @@ bounded structured fields; displayed targets are single-line, redacted, and at
 most 160 characters. Command targets are rendered as Markdown inline code;
 other activity targets remain plain text.
 
-Absolute `SKILL.md` reads under configured TraeX, agent, or plugin skill roots
+Absolute `SKILL.md` reads under configured TraeX or agent skill roots
 are deferred until their exact result arrives. A successful load emits only
 `✓ Skill · <name>` and discards the skill document output completely; a
 failed load follows the same bounded diagnostic policy as other failures.
@@ -585,16 +584,21 @@ head update are committed in one SQLite transaction.
 
 ## Process lifecycle and diagnostics
 
-The supported production owner is a user systemd service installed through the
-standalone CLI or operated through optional Herdr plugin actions. Herdr remains
-a mandatory headless pane/process authority, but the TUI and plugin are not
-runtime dependencies. The application also holds a fenced SQLite lease,
+The supported production owner is `herdr-agent-swarm.service`, installed and
+operated through `./install.sh` and `npm run swarm:*`. Herdr remains the
+mandatory headless pane/process authority through its CLI and socket API; its
+TUI is not a runtime dependency. The application also holds a fenced SQLite lease,
 which protects against accidental duplicate processes sharing one database.
+First-run setup requires a build followed by `npm run swarm:setup`. Once private
+configuration is valid, `./install.sh` builds and stages the immutable release
+and enables the unit without starting it; `npm run swarm:start` performs the
+explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
+`npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
 
 ### First-run setup boundary
 
-The standalone `swarm:setup` command and compatibility plugin setup action use
-one deterministic workflow. That workflow depends on explicit ports for terminal
+The standalone `swarm:setup` command uses one deterministic workflow. That
+workflow depends on explicit ports for terminal
 prompts, configuration persistence, local/Herdr/Lark probes, and service
 lifecycle operations. Terminal handling, atomic private-file replacement,
 external commands, bounded HTTP calls, and systemd remain behind their adapters;
@@ -667,7 +671,7 @@ and credentials.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and
   terminal identity before changing a binding.
-- Plugin events and Lark cards are not trusted business-state sources.
+- Herdr event hints and Lark cards are not trusted business-state sources.
 - Runtime SQLite files are service-owned data and are never version-controlled.
 
 ## Multi-agent ownership and recovery
@@ -698,7 +702,7 @@ boundary change to fix.
 
 - **Polling intervals and size limits**: several timeouts, poll intervals, and
   payload size limits (25 ms, 50 ms, 250 ms runtime polls, 2 s cache TTL, 500 ms
-  card debounce, 100 ms UDP debounce, 12000/28000 character CardKit limits,
+  card debounce, 12000/28000 character CardKit limits,
   60 s close-code TTL) are hardcoded in their respective modules. These should
   move to the validated configuration surface.
 
