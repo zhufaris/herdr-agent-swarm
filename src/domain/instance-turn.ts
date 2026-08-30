@@ -6,6 +6,8 @@ export interface InstanceTurn {
   actor: ControlActor; kind: "turn" | "followup"; text: string; state: InstanceTurnState; result: string | null; error: string | null;
   createdAt: string; updatedAt: string;
 }
+export interface InstanceTurnCursor { createdAt: string; id: string }
+export interface InstanceTurnPage { items: InstanceTurn[]; nextCursor: InstanceTurnCursor | null }
 export interface InstanceEvent { id: number; projectId: string; instanceId: string; turnId: string | null; kind: string; payload: Record<string, unknown>; createdAt: string }
 export interface InstanceOperation {
   id: string; idempotencyKey: string; projectId: string; instanceId: string; instanceGeneration: number; actor: ControlActor;

@@ -353,7 +353,15 @@ export class SqliteBindingStore implements BindingStorePort {
 
   getInstanceTurn(id: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE id = ?").get(id) as Record<string, unknown> | undefined); }
   private getInstanceTurnByKey(key: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
-  listInstanceTurns(instanceId: string): InstanceTurn[] { return (this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? ORDER BY created_at, rowid").all(instanceId) as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!); }
+  listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
+    const rows = (options.after
+      ? this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at, id LIMIT ?").all(instanceId, options.after.createdAt, options.after.createdAt, options.after.id, limit + 1)
+      : this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? ORDER BY created_at, id LIMIT ?").all(instanceId, limit + 1)) as Array<Record<string, unknown>>;
+    const items = rows.slice(0, limit).map((row) => this.mapInstanceTurn(row)!);
+    const last = items.at(-1);
+    return { items, nextCursor: rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : null };
+  }
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
     const row = this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked') ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as Record<string, unknown> | undefined;
     return this.mapInstanceTurn(row);
@@ -2023,6 +2031,7 @@ export class SqliteBindingStore implements BindingStorePort {
         ORDER BY q.created_at, o.delivery_order
       `).all() as Array<{ id: string; prompt_id: string; lane_key: string }>;
       const retriedAnswerPromptIds: string[] = [];
+      const retriedAnswerPromptIdSet = new Set<string>();
       for (const row of answerRows) {
         const failed = this.getOutboundReply(row.id);
         if (!failed) continue;
@@ -2035,7 +2044,7 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ?
           WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
         this.refreshOutboxLaneHead(row.lane_key);
-        if (!retriedAnswerPromptIds.includes(row.prompt_id)) retriedAnswerPromptIds.push(row.prompt_id);
+        if (!retriedAnswerPromptIdSet.has(row.prompt_id)) { retriedAnswerPromptIdSet.add(row.prompt_id); retriedAnswerPromptIds.push(row.prompt_id); }
       }
       const invalidRebuildRows = this.database.prepare(`
         SELECT rebuild.id, rebuild.prompt_id, rebuild.lane_key, current.page_index AS current_page_index, next.page_index AS next_page_index
@@ -2065,6 +2074,7 @@ export class SqliteBindingStore implements BindingStorePort {
         ORDER BY q.created_at, rebuild.delivery_order
       `).all() as Array<{ id: string; prompt_id: string; lane_key: string; current_page_index: number; next_page_index: number }>;
       const rolledBackAnswerPromptIds: string[] = [];
+      const rolledBackAnswerPromptIdSet = new Set<string>();
       for (const row of invalidRebuildRows) {
         const removed = this.database.prepare(`DELETE FROM answer_pages
           WHERE prompt_id = ? AND page_index = ? AND state = 'creating' AND message_id IS NULL AND card_id IS NULL`).run(row.prompt_id, row.next_page_index);
@@ -2076,7 +2086,7 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rollback', released_at = ?, updated_at = ?
           WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
         this.refreshOutboxLaneHead(row.lane_key);
-        if (!rolledBackAnswerPromptIds.includes(row.prompt_id)) rolledBackAnswerPromptIds.push(row.prompt_id);
+        if (!rolledBackAnswerPromptIdSet.has(row.prompt_id)) { rolledBackAnswerPromptIdSet.add(row.prompt_id); rolledBackAnswerPromptIds.push(row.prompt_id); }
       }
       const failedContentRows = this.database.prepare(`
         SELECT content.id, content.prompt_id, content.lane_key
@@ -2116,7 +2126,7 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ?
           WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, failedContent.lane_key, failedContent.id);
         this.refreshOutboxLaneHead(failedContent.lane_key);
-        if (!retriedAnswerPromptIds.includes(promptId)) retriedAnswerPromptIds.push(promptId);
+        if (!retriedAnswerPromptIdSet.has(promptId)) { retriedAnswerPromptIdSet.add(promptId); retriedAnswerPromptIds.push(promptId); }
       }
       const notices = this.database.prepare(`
         SELECT o.id, o.lane_key
@@ -2595,6 +2605,8 @@ export class SqliteBindingStore implements BindingStorePort {
         kind TEXT NOT NULL CHECK(kind IN ('turn','followup')), text TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued','claimed','dispatching','running','blocked','completed','failed','cancelled','dispatch-uncertain')), result TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS instance_turns_queue ON instance_turns(instance_id, state, created_at);
+      CREATE INDEX IF NOT EXISTS instance_turns_observable ON instance_turns(created_at, id) WHERE state IN ('dispatching','running','blocked','dispatch-uncertain');
+      CREATE INDEX IF NOT EXISTS instance_turns_instance_history ON instance_turns(instance_id, created_at, id);
       CREATE TABLE IF NOT EXISTS instance_operations(
         id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, actor_json TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('steer','interrupt')), payload TEXT, state TEXT NOT NULL CHECK(state IN ('accepted','running','succeeded','rejected','failed')), result TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -2602,6 +2614,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE TABLE IF NOT EXISTS instance_events(
         id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, turn_id TEXT REFERENCES instance_turns(id) ON DELETE SET NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS instance_events_instance_id ON instance_events(instance_id, id);
       CREATE TABLE IF NOT EXISTS primary_tool_capabilities(
         instance_id TEXT PRIMARY KEY REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL
       );

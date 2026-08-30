@@ -19,6 +19,29 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("creates instance hot-path indexes and paginates equal-timestamp history without gaps", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    for (let index = 0; index < 7; index += 1) store.acceptInstanceTurn({ id: `turn-${index}`, idempotencyKey: `turn-${index}`, actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: "i1", instanceGeneration: 1, kind: "turn", text: `work ${index}` });
+    store.database.prepare("UPDATE instance_turns SET created_at = '2026-08-30T00:00:00.000Z'").run();
+
+    const first = store.listInstanceTurns("i1", { limit: 3 });
+    const second = store.listInstanceTurns("i1", { limit: 3, after: first.nextCursor! });
+    const third = store.listInstanceTurns("i1", { limit: 3, after: second.nextCursor! });
+    expect([...first.items, ...second.items, ...third.items].map(({ id }) => id)).toEqual(Array.from({ length: 7 }, (_, index) => `turn-${index}`));
+    expect(first.nextCursor).toEqual({ createdAt: "2026-08-30T00:00:00.000Z", id: "turn-2" });
+    expect(third.nextCursor).toBeNull();
+
+    const indexNames = (store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'instance_%'").all() as Array<{ name: string }>).map(({ name }) => name);
+    expect(indexNames).toEqual(expect.arrayContaining(["instance_turns_observable", "instance_turns_instance_history", "instance_events_instance_id"]));
+    const historyPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT * FROM instance_turns INDEXED BY instance_turns_instance_history WHERE instance_id = ? ORDER BY created_at, id LIMIT 10").all("i1") as Array<{ detail: string }>;
+    const observablePlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT * FROM instance_turns INDEXED BY instance_turns_observable WHERE state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY created_at, id").all() as Array<{ detail: string }>;
+    const eventPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT * FROM instance_events INDEXED BY instance_events_instance_id WHERE instance_id = ? AND id > ? ORDER BY id LIMIT 100").all("i1", 0) as Array<{ detail: string }>;
+    expect(historyPlan.some(({ detail }) => detail.includes("instance_turns_instance_history"))).toBe(true);
+    expect(observablePlan.some(({ detail }) => detail.includes("instance_turns_observable"))).toBe(true);
+    expect(eventPlan.some(({ detail }) => detail.includes("instance_events_instance_id"))).toBe(true);
+  });
+
   it("persists exact approval identity and consumes a matching grant once", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

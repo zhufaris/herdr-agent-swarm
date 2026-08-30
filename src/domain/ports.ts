@@ -6,7 +6,7 @@ import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "./agent-instance.js";
 import type { ControlActor } from "./commands.js";
-import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "./instance-turn.js";
+import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState } from "./instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
 
 export interface ClassifiedPromptInput {
@@ -62,7 +62,7 @@ export interface InstanceStore {
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean };
   getInstanceTurn(id: string): InstanceTurn | null;
-  listInstanceTurns(instanceId: string): InstanceTurn[];
+  listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   setPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; credentialGeneration: number; capabilityHash: string }): boolean;
   verifyPrimaryToolCapability(input: { instanceId: string; expectedGeneration: number; capabilityHash: string }): boolean;

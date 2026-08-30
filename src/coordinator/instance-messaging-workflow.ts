@@ -50,7 +50,7 @@ export class InstanceMessagingWorkflow {
 
   inspect(actor: ControlActor, instanceId: string): InstanceConversationView {
     const target = this.authorize(actor, undefined, instanceId);
-    return { instance: target, turns: this.options.store.listInstanceTurns(target.id), events: this.options.store.listInstanceEvents(target.id) };
+    return { instance: target, turns: this.options.store.listInstanceTurns(target.id, { limit: 50 }).items, events: this.options.store.listInstanceEvents(target.id) };
   }
 
   list(actor: ControlActor, projectId: string): AgentInstance[] {

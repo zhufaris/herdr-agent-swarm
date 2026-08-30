@@ -86,10 +86,10 @@ describe("Primary to Worker product flow", () => {
     };
 
     await messaging.submit({ idempotencyKey: "human-to-primary", actor: { kind: "human", userId: "operator", channel: "feishu" }, projectId: "project", targetInstanceId: primary.id, content: { kind: "turn", text: "Ask Worker and summarize the result" } });
-    await vi.waitFor(() => expect(store!.listInstanceTurns(primary.id)[0]?.state).toBe("completed"));
+    await vi.waitFor(() => expect(store!.listInstanceTurns(primary.id).items[0]?.state).toBe("completed"));
 
-    const primaryTurns = store.listInstanceTurns(primary.id);
-    const workerTurns = store.listInstanceTurns(worker.id);
+    const primaryTurns = store.listInstanceTurns(primary.id).items;
+    const workerTurns = store.listInstanceTurns(worker.id).items;
     expect(toolCalls.slice(0, 2)).toEqual(["list_instances", "prompt_instance"]);
     expect(toolCalls.filter((name) => name === "wait_instance").length).toBeGreaterThanOrEqual(1);
     expect(toolCalls.slice(-2)).toEqual(["inspect_instance", "prompt_instance"]);

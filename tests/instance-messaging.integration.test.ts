@@ -58,18 +58,18 @@ describe("instance messaging", () => {
     const { create, workflow } = setup({ steering: "unsupported" });
     const worker = create("worker");
     await expect(workflow.steer({ idempotencyKey: "s1", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "unsupported" });
-    expect(store!.listInstanceTurns(worker.id)).toEqual([]);
+    expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
   });
 
   it("steers only an active runtime and never falls back to a queued turn", async () => {
     const { create, workflow, driver } = setup();
     const worker = create("worker");
     await expect(workflow.steer({ idempotencyKey: "s1", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "not-active" });
-    expect(store!.listInstanceTurns(worker.id)).toEqual([]);
+    expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
     store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "working" });
     await expect(workflow.steer({ idempotencyKey: "s2", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "delivered" });
     expect(driver.steer).toHaveBeenCalledWith(worker.runtimeRef, "change");
-    expect(store!.listInstanceTurns(worker.id)).toEqual([]);
+    expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
   });
 
   it("deduplicates accepted turns and fences claims by instance generation", async () => {
@@ -116,9 +116,9 @@ describe("instance messaging", () => {
     vi.mocked(driver.submit).mockResolvedValueOnce({ status: "delivery-uncertain", reason: "lost observer" });
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
     await scheduler.drain(worker.id);
-    expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "dispatch-uncertain", error: "lost observer" });
+    expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "dispatch-uncertain", error: "lost observer" });
     expect(store!.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
-    expect(store!.listInstanceTurns(primary.id)).toEqual([]);
+    expect(store!.listInstanceTurns(primary.id).items).toEqual([]);
     expect(store!.listInstanceEvents(worker.id).map(({ kind }) => kind)).toContain("turn.dispatch-uncertain");
   });
 
@@ -129,7 +129,7 @@ describe("instance messaging", () => {
     await workflow.submit({ idempotencyKey: "m1", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "one" } });
     await workflow.submit({ idempotencyKey: "m2", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "two" } });
     await scheduler.drain(worker.id);
-    expect(store!.listInstanceTurns(worker.id).map(({ state }) => state)).toEqual(["completed", "completed"]);
+    expect(store!.listInstanceTurns(worker.id).items.map(({ state }) => state)).toEqual(["completed", "completed"]);
     expect(store!.getAgentInstance(worker.id)).toMatchObject({ observedState: "idle" });
     expect(submit).toHaveBeenCalledTimes(2);
   });
@@ -145,10 +145,10 @@ describe("instance messaging", () => {
     });
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
     const draining = scheduler.drain(worker.id);
-    await vi.waitFor(() => expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "running" }));
+    await vi.waitFor(() => expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "running" }));
     release();
     await draining;
-    expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "completed" });
+    expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "completed" });
   });
 
   it("fences a thrown driver call as uncertain without rejecting the drain", async () => {
@@ -157,7 +157,7 @@ describe("instance messaging", () => {
     vi.mocked(driver.submit).mockRejectedValueOnce(new Error("driver crashed"));
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
     await expect(scheduler.drain(worker.id)).resolves.toBeUndefined();
-    expect(store!.listInstanceTurns(worker.id)[0]).toMatchObject({ state: "dispatch-uncertain", error: "driver crashed" });
+    expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "dispatch-uncertain", error: "driver crashed" });
     expect(scheduler.snapshot()).toMatchObject({ activeDispatchWorkers: 0, lastFailure: "driver crashed" });
   });
 

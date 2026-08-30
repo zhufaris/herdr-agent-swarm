@@ -152,7 +152,7 @@ export class InstanceInteractionWorkflow {
     await this.reply(message, renderInstanceDirectoryCard({ project, entries, target, conversationKey }));
   }
   private async showDetail(message: IncomingLarkMessage, instance: AgentInstance, conversationKey: string): Promise<void> { await this.reply(message, this.detailCard(instance, conversationKey)); }
-  private detailCard(instance: AgentInstance, conversationKey: string): object { const view = this.options.control.inspect(instance.id); return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listInstanceTurns(instance.id), queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey }); }
+  private detailCard(instance: AgentInstance, conversationKey: string): object { const view = this.options.control.inspect(instance.id); return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listInstanceTurns(instance.id, { limit: 25 }).items, queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey }); }
   private resolveConversationContext(message: IncomingLarkMessage): { bindingPresent: boolean; boundProjectId: string | null; conversationKey: string } {
     const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
     if (binding) return { bindingPresent: true, boundProjectId: binding.projectId, conversationKey: `binding:${binding.id}` };
