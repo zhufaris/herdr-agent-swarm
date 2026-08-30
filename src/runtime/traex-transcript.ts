@@ -4,7 +4,7 @@ import { basename, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HerdrAgentSession } from "../domain/types.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort } from "../domain/ports.js";
-import { projectToolCall, projectToolResult, type ToolActivityDescriptor } from "./tool-activity-projector.js";
+import { projectToolCall, projectToolResult, projectToolResultState, type ToolActivityDescriptor } from "./tool-activity-projector.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
@@ -176,6 +176,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const complete = chunk.subarray(0, lastNewline + 1);
     this.offset += complete.length;
     const blocks: string[] = [];
+    const toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]> = [];
     let statusTitle: string | undefined;
     let planSteps: TraexTranscriptPlanStep[] | undefined;
     let tokenCount: number | undefined;
@@ -203,7 +204,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
           if (call.success) this.emittedItemIds.add(call.data.id);
           continue;
         }
-        const rendered = this.renderItem(item);
+        const rendered = this.renderItem(item, toolActivities);
         if (rendered) blocks.push(rendered);
       }
     }
@@ -214,12 +215,13 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     };
     return {
       answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars),
+      ...(toolActivities.length ? { toolActivities } : {}),
       ...(Object.keys(mainStatus).length ? { mainStatus } : {}),
       ...(this.turnLifecycle ? { turnLifecycle: this.turnLifecycle } : {})
     };
   }
 
-  private renderItem(item: unknown): string {
+  private renderItem(item: unknown, toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]>): string {
     const message = messageItemSchema.safeParse(item);
     if (message.success) {
       if (message.data.role !== "assistant" || this.emittedItemIds.has(message.data.id)) return "";
@@ -239,13 +241,30 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       this.emittedItemIds.add(call.data.id);
       if (call.data.name === "update_plan") return "";
       this.callsById.set(call.data.call_id, projected.descriptor);
+      toolActivities.push(projectActivity(call.data.call_id, projected.descriptor, "active"));
       return projected.entry;
     }
     const result = functionOutputSchema.safeParse(item);
     if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
     this.emittedItemIds.add(result.data.id);
-    return projectToolResult(this.callsById.get(result.data.call_id)!, result.data.output);
+    const descriptor = this.callsById.get(result.data.call_id)!;
+    toolActivities.push(projectActivity(result.data.call_id, descriptor, projectToolResultState(result.data.output)));
+    return projectToolResult(descriptor, result.data.output);
   }
+}
+
+function projectActivity(
+  callId: string,
+  descriptor: ToolActivityDescriptor,
+  state: "active" | "done" | "failed"
+): NonNullable<TraexTranscriptObservation["toolActivities"]>[number] {
+  const kind = descriptor.category === "Read" ? "read"
+    : descriptor.category === "Search" ? "search"
+      : descriptor.category === "Edit" ? "edit"
+        : descriptor.category === "Command" && /(?:^|\s)(?:npm|npx|pnpm|yarn|bun|uv|pytest|cargo|go)\b.*\btest(?:s|ing)?\b|\b(?:vitest|jest|pytest)\b/i.test(descriptor.target) ? "test"
+          : "step";
+  const target = descriptor.target || "未提供目标";
+  return { key: `tool:${callId}`, kind, label: `${descriptor.category} · ${target}`, state };
 }
 
 function reduceTurnLifecycle(

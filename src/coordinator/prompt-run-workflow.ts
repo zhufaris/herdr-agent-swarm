@@ -433,11 +433,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   private async publishTypedObservation(bindingId: string, promptId: string, observation: TraexTranscriptObservation, startedAt: number): Promise<void> {
     const mainStatus = observation.mainStatus && Number.isFinite(startedAt) ? toMainStatus(observation.mainStatus, startedAt) : undefined;
-    if (!observation.answerDelta && !mainStatus) return;
+    if (!observation.answerDelta && !observation.toolActivities?.length && !mainStatus) return;
     await this.publish(bindingId, "TurnOutputObserved", "herdr", {
       promptId,
       observation: {
-        answer: { snapshot: observation.answerDelta, update: "append", toolActivities: [] },
+        answer: { snapshot: observation.answerDelta, update: "append", toolActivities: observation.toolActivities ?? [] },
         main: { ...(mainStatus ? { status: mainStatus } : {}) }
       }
     });

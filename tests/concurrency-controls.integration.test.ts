@@ -285,6 +285,7 @@ describe("coordinator concurrency controls", () => {
           reads += 1;
           return reads === 1 ? {
             answerDelta: "Visible answer",
+            toolActivities: [{ key: "tool:call-test", kind: "test" as const, label: "Command · npm test", state: "done" as const }],
             mainStatus: { statusTitle: "Verifying deployment", tokenCount: 1_234, planSteps: [
               { key: "plan:0", label: "Run checks", state: "active" as const }
             ] }
@@ -310,7 +311,7 @@ describe("coordinator concurrency controls", () => {
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "split-e1", messageId: "split-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "split output", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
-    expect(observed[0]?.payload.observation.answer).toMatchObject({ snapshot: "Visible answer", toolActivities: [] });
+    expect(observed[0]?.payload.observation.answer).toMatchObject({ snapshot: "Visible answer", toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "done" }] });
     expect(observed[0]?.payload.observation.main.status).toMatchObject({ statusTitle: "Verifying deployment", tokenCount: 1_234, planSteps: [{ key: "plan:0", kind: "step", state: "active" }] });
     expect(store.listRunCards("b1")[0]!.answer).toBe("Visible answer");
 

@@ -47,6 +47,12 @@ export function projectToolResult(descriptor: ToolActivityDescriptor, output: un
   return "✓ " + descriptor.category + " · " + target + (summary ? " · " + summary : "");
 }
 
+export function projectToolResultState(output: unknown): "active" | "done" | "failed" {
+  const normalized = normalizeOutput(output);
+  const status = explicitStatus(output, normalized);
+  return status.kind === "success" ? "done" : status.kind === "running" ? "active" : "failed";
+}
+
 function renderFailure(heading: string, output: string): string {
   const detail = failureTail(output);
   if (!detail) return heading;

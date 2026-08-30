@@ -249,6 +249,30 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readDelta()).resolves.toBe("");
   });
 
+  it("emits structured tool activity as a call moves from active to done", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await appendFile(path, mutation([{
+      type: "function_call", id: "fc-test", call_id: "call-test", name: "exec_command",
+      arguments: JSON.stringify({ cmd: "npm test" })
+    }]));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({
+      answerDelta: "",
+      toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "active" }]
+    });
+
+    await appendFile(path, mutation([{
+      type: "function_call_output", id: "fco-test", call_id: "call-test",
+      output: JSON.stringify({ exit_code: 0, output: "Test Files 2 passed\nTests 8 passed" })
+    }]));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({
+      answerDelta: "◆ **Ran**\n\n```bash\nnpm test\n```\n\n```text\nTest Files 2 passed\nTests 8 passed\n```",
+      toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "done" }]
+    });
+  });
+
   it("uses the sanitized task-jz33 history_mutation records as typed input", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

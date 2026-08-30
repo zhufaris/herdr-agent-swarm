@@ -376,6 +376,7 @@ describe("pane/thread lifecycle integration", () => {
     let lifecycleState: "active" | "completed" = "completed";
     let lifecycleStartedAt = new Date(Date.now() - 60_000).toISOString();
     let answerDelta = "";
+    let toolActivities: Array<{ key: string; kind: "read"; label: string; state: "active" | "done" }> = [];
     const transcriptReader = {
       async open() {
         return { mode: "typed" as const, cursor: {
@@ -383,7 +384,9 @@ describe("pane/thread lifecycle integration", () => {
           async readObservation() {
             const nextDelta = answerDelta;
             answerDelta = "";
-            return { answerDelta: nextDelta, turnLifecycle: {
+            const nextToolActivities = toolActivities;
+            toolActivities = [];
+            return { answerDelta: nextDelta, ...(nextToolActivities.length ? { toolActivities: nextToolActivities } : {}), turnLifecycle: {
               turnId: "turn-1", state: lifecycleState, startedAt: lifecycleStartedAt,
               ...(lifecycleState === "completed" ? { finalAnswer: "Recovered answer" } : {})
             } };
@@ -400,14 +403,18 @@ describe("pane/thread lifecycle integration", () => {
     lifecycleState = "active";
     lifecycleStartedAt = new Date(Date.now() + 1_000).toISOString();
     answerDelta = "Live detached JSONL update";
+    toolActivities = [{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }];
     await vi.waitFor(() => expect(store.loadRunCard(firstPrompt.id)!.answer).toContain("Live detached JSONL update"), { timeout: 2_000 });
+    expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }]);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: firstPrompt.id, state: "running", observationState: "detached" }]);
     expect(submitted).toEqual(["first"]);
 
     lifecycleState = "completed";
+    toolActivities = [{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "done" }];
     await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
     expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: "Recovered answer" });
+    expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "done" }]);
     expect(store.loadRunCard(firstPrompt.id)!.answer).not.toMatch(/SECRET_DETACHED_TERMINAL_SENTINEL|LEGACY_UNPROVEN_ANSWER_SENTINEL/);
 
     await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();

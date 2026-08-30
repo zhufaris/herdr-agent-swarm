@@ -1,6 +1,6 @@
 import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
-import type { RunCardView } from "./run-card-view.js";
+import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
 import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
@@ -140,6 +140,7 @@ export interface TraexTranscriptMainStatus {
 
 export interface TraexTranscriptObservation {
   answerDelta: string;
+  toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
   mainStatus?: TraexTranscriptMainStatus;
   turnLifecycle?: {
     turnId: string;
