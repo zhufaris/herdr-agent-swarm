@@ -2,8 +2,9 @@
 
 Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目和多个 Agent 实例；Herdr UI
 不是必需组件。每个项目最多一个 Primary，并可有多个由用户显式创建的 Worker，底层
-可以是 TraeX、Codex、Claude Code 或 Pi。原有 Herdr Lark Bridge 仍可将飞书话题
-绑定到 Herdr pane 中运行的 TraeX。用户可以在
+可以是 TraeX、Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以
+Herdr Lark Bridge 模式提供，可将飞书话题绑定到 Herdr pane 中运行的 TraeX；
+该名称不代表当前多 Agent 产品或项目。用户可以在
 飞书中创建任务、查看状态、修改名称和发送后续要求；开发者仍可在 Herdr 中
 观察或接管同一个终端会话。
 

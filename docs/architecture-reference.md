@@ -1,8 +1,8 @@
-# Herdr Lark Bridge 架构参考
+# Herdr Agent Swarm 架构参考
 
 ## 文档目标
 
-本文面向第一次维护 Herdr Lark Bridge 的工程师。读完后，你应该能够：
+本文面向第一次维护 Herdr Agent Swarm 的工程师。读完后，你应该能够：
 
 - 判断一项状态由 Herdr、SQLite、Lark 还是 systemd 负责；
 - 从飞书输入追踪到 TraeX 执行和 CardKit 投递；
@@ -14,9 +14,10 @@
 
 ## 1. 系统本质
 
-Herdr Lark Bridge 不是消息转发器，而是一个持久化工作流协调器。它把一个
-Lark 话题绑定到真实 Herdr Pane 中的 TraeX 进程，使用户可以从飞书提交任务，
-同时保留 Herdr 作为本地观察、接管和高风险审批入口。
+Herdr Agent Swarm 不是简单的消息转发器，而是一个持久化、多项目、多 Agent
+工作流协调器。它管理项目级 Primary 和 Worker 实例。原有的一话题一 TraeX
+Herdr Lark Bridge 是兼容工作流：它把 Lark 话题绑定到真实 Herdr Pane 中的
+TraeX 进程，同时保留 Herdr 作为本地观察、接管和高风险审批入口。
 
 ```text
 Lark message
