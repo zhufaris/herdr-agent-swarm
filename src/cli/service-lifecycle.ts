@@ -9,6 +9,7 @@ import { AGENT_SWARM_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from ".
 import type { SetupLifecyclePort } from "../setup/setup-types.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
+const SERVICE_NAME = "herdr-agent-swarm.service";
 export interface LifecycleOptions { force?: boolean; requireReady?: boolean }
 
 export interface LifecycleInspection {
@@ -103,8 +104,20 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv): 
   const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers);
   const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns);
   const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns);
-  if (running! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
-  if ([running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns].some((value) => value === null)) throw new Error("restart blocked: active service status has incomplete work metrics; verify the running unit or retry with --force");
+  const pendingOutbox = nonNegativeInteger(operational?.pendingOutbox);
+  const outboxDispatcher = asRecord(record?.outboxDispatcher);
+  const activeDeliveries = nonNegativeInteger(outboxDispatcher?.activeDeliveries);
+  const startupRecovery = asRecord(record?.startupRecovery);
+  const startupRecoveryState = typeof startupRecovery?.state === "string" ? startupRecovery.state : null;
+  const sqliteIntegrity = asRecord(record?.sqliteIntegrity);
+  const sqliteIntegrityState = typeof sqliteIntegrity?.state === "string" ? sqliteIntegrity.state : null;
+  const sqliteQuickCheck = typeof sqliteIntegrity?.quickCheck === "string" ? sqliteIntegrity.quickCheck : null;
+  if (running! > 0 || queued! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
+  if (pendingOutbox! > 0) throw new Error(`restart blocked: ${pendingOutbox} pending outbox items; wait for delivery to drain or retry with --force`);
+  if (activeDeliveries! > 0) throw new Error(`restart blocked: ${activeDeliveries} active deliveries; wait for delivery to drain or retry with --force`);
+  if (startupRecoveryState !== null && startupRecoveryState !== "completed") throw new Error(`restart blocked: startup recovery is ${startupRecoveryState}, expected completed; wait for recovery or retry with --force`);
+  if (sqliteIntegrityState !== null && sqliteIntegrityState !== "healthy" || sqliteQuickCheck !== null && sqliteQuickCheck !== "ok") throw new Error(`restart blocked: SQLite integrity is ${sqliteIntegrityState ?? "missing"} with quickCheck ${sqliteQuickCheck ?? "missing"}; repair integrity or retry with --force`);
+  if ([running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, pendingOutbox, activeDeliveries].some((value) => value === null) || startupRecoveryState === null || sqliteIntegrityState === null || sqliteQuickCheck === null) throw new Error("restart blocked: active service status has incomplete restart safety metrics; verify the running unit or retry with --force");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -121,14 +134,12 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const root = requiredDirectory(environment.SWARM_ROOT, "SWARM_ROOT");
   const configDirectory = requiredDirectory(environment.SWARM_CONFIG_DIR || `${environment.XDG_CONFIG_HOME || `${homedir()}/.config`}/herdr-agent-swarm`, "SWARM_CONFIG_DIR", false);
   const stateDirectory = requiredDirectory(environment.SWARM_STATE_DIR || `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm`, "SWARM_STATE_DIR", false);
-  const serviceName = environment.BRIDGE_SYSTEMD_SERVICE_NAME || "herdr-agent-swarm.service";
-  if (!/^[A-Za-z0-9_.@-]+\.service$/.test(serviceName)) throw new Error(`invalid systemd service name: ${serviceName}`);
   const unitDirectory = resolve(environment.BRIDGE_SYSTEMD_UNIT_DIR || `${homedir()}/.config/systemd/user`);
   return {
-    root, configDirectory, stateDirectory, serviceName,
+    root, configDirectory, stateDirectory, serviceName: SERVICE_NAME,
     environmentFile: resolve(configDirectory, ".env"),
     entrypoint: resolve(root, "dist/main.js"), buildInfo: resolve(root, "dist/build-info.json"),
-    unitFile: resolve(unitDirectory, serviceName),
+    unitFile: resolve(unitDirectory, SERVICE_NAME),
     nodeExecutable: resolve(environment.NODE_BIN || process.execPath)
   };
 }
@@ -219,15 +230,18 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
   let consecutiveHealthyChecks = 0;
   let observedBuildId = "unavailable";
   let observedStartupState = "unavailable";
+  let observedOwnership = "unavailable";
   let unitState = "inactive";
   do {
     const active = isUnitActive(paths.serviceName, base);
     unitState = active ? "active" : "inactive";
     const startup = active ? await probeStartupStatus(config.http.host, config.http.port) : null;
+    const ownership = active && startup?.connectedAddress ? probeListenerOwnership(paths.serviceName, startup.connectedAddress, config.http.port, base) : null;
     observedBuildId = startup?.buildId ?? "unavailable";
     observedStartupState = startup?.startupRecoveryState ?? "unavailable";
+    observedOwnership = ownership?.detail ?? "unavailable";
     const healthy = startup?.status === "ok" && startup.serviceId === AGENT_SWARM_SERVICE_ID
-      && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed";
+      && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed" && ownership?.matches === true;
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
       const readiness = await probeStatus(config.http.host, config.http.port, "/ready");
@@ -238,24 +252,73 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   } while (Date.now() < deadline);
-  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; observed build ${observedBuildId}; startup ${observedStartupState}; inspect systemctl --user status ${paths.serviceName}`);
+  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; observed build ${observedBuildId}; startup ${observedStartupState}; listener ownership ${observedOwnership}; configured listener PID must belong to canonical unit MainPID; inspect systemctl --user status ${paths.serviceName}`);
 }
 
-function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.BRIDGE_PLUGIN_START_TIMEOUT_MS, 15_000); }
+function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.SWARM_SERVICE_START_TIMEOUT_MS, 15_000); }
 
-function restartTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.BRIDGE_PLUGIN_RESTART_TIMEOUT_MS, 90_000); }
+function restartTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.SWARM_SERVICE_RESTART_TIMEOUT_MS, 90_000); }
 
 async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
   const active = isUnitActive(paths.serviceName, base);
   let bridge: unknown = null;
+  let ownership: ListenerOwnership | null = null;
   try {
     const config = loadConfig(loadRuntimeEnvironment(paths, base));
-    bridge = await getJson(config.http.host, config.http.port, "/status");
+    const response = await getJsonResponse(config.http.host, config.http.port, "/status");
+    bridge = response.body;
+    ownership = probeListenerOwnership(paths.serviceName, response.connectedAddress, config.http.port, base);
   } catch (error) { bridge = { status: "unreachable", error: safeMessage(error) }; }
   const observed = bridge && typeof bridge === "object" && "identity" in bridge ? (bridge as { identity: unknown }).identity : null;
-  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitFile: paths.unitFile, expectedIdentity: expected, observedIdentity: observed, bridge }) + "\n");
-  return active ? 0 : 1;
+  const observedIdentity = asRecord(observed);
+  const identityMatches = observedIdentity?.serviceId === expected.serviceId && observedIdentity?.buildId === expected.buildId;
+  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitFile: paths.unitFile, expectedIdentity: expected, observedIdentity: observed, ownership, bridge }) + "\n");
+  return active && identityMatches && ownership?.matches === true ? 0 : 1;
+}
+
+interface ListenerOwnership {
+  matches: boolean;
+  mainPid: number | null;
+  listenerPids: number[];
+  detail: string;
+}
+
+function probeListenerOwnership(serviceName: string, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
+  const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "MainPID", "--value"], { env: environment, encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024 });
+  const parsedMainPid = Number(unit.stdout.trim());
+  const mainPid = unit.status === 0 && Number.isSafeInteger(parsedMainPid) && parsedMainPid > 0 ? parsedMainPid : null;
+  const sockets = spawnSync("ss", ["-H", "-ltnp"], { env: environment, encoding: "utf8", timeout: 5_000, maxBuffer: 1024 * 1024 });
+  const listenerPids = sockets.status === 0 ? listenerPidsForEndpoint(sockets.stdout, host, port) : [];
+  const matches = mainPid !== null && listenerPids.includes(mainPid);
+  const detail = `MainPID=${mainPid ?? "unavailable"}, listenerPIDs=${listenerPids.length > 0 ? listenerPids.join(",") : "unavailable"}`;
+  return { matches, mainPid, listenerPids, detail };
+}
+
+function listenerPidsForEndpoint(output: string, host: string, port: number): number[] {
+  const pids = new Set<number>();
+  const expected = normalizeIpAddress(host);
+  for (const line of output.split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    const localAddress = fields[3];
+    const endpoint = localAddress ? parseLocalEndpoint(localAddress) : null;
+    if (!endpoint || endpoint.port !== port || normalizeIpAddress(endpoint.host) !== expected) continue;
+    for (const match of line.matchAll(/pid=(\d+)/g)) pids.add(Number(match[1]));
+  }
+  return [...pids];
+}
+
+function parseLocalEndpoint(value: string): { host: string; port: number } | null {
+  const bracketed = /^\[([^\]]+)]:(\d+)$/.exec(value);
+  const plain = /^([^:]+):(\d+)$/.exec(value);
+  const match = bracketed ?? plain;
+  if (!match?.[1] || !match[2]) return null;
+  const port = Number(match[2]);
+  return Number.isSafeInteger(port) && port > 0 ? { host: match[1], port } : null;
+}
+
+function normalizeIpAddress(value: string): string {
+  return value.startsWith("::ffff:") ? value.slice(7) : value;
 }
 
 function isUnitActive(serviceName: string, environment: NodeJS.ProcessEnv): boolean {
@@ -269,9 +332,10 @@ function delegate(command: string, args: string[], environment: NodeJS.ProcessEn
   return result.status ?? 1;
 }
 
-async function probeStartupStatus(host: string, port: number): Promise<{ status?: string; serviceId?: string; buildId?: string; startupRecoveryState?: string } | null> {
+async function probeStartupStatus(host: string, port: number): Promise<{ status?: string; serviceId?: string; buildId?: string; startupRecoveryState?: string; connectedAddress?: string } | null> {
   try {
-    const record = asRecord(await getJson(host, port, "/status"));
+    const response = await getJsonResponse(host, port, "/status");
+    const record = asRecord(response.body);
     if (!record) return null;
     const identity = asRecord(record.identity);
     const startupRecovery = asRecord(record.startupRecovery);
@@ -279,7 +343,8 @@ async function probeStartupStatus(host: string, port: number): Promise<{ status?
       ...(typeof record.status === "string" ? { status: record.status } : {}),
       ...(typeof identity?.serviceId === "string" ? { serviceId: identity.serviceId } : {}),
       ...(typeof identity?.buildId === "string" ? { buildId: identity.buildId } : {}),
-      ...(typeof startupRecovery?.state === "string" ? { startupRecoveryState: startupRecovery.state } : {})
+      ...(typeof startupRecovery?.state === "string" ? { startupRecoveryState: startupRecovery.state } : {}),
+      connectedAddress: response.connectedAddress
     };
   } catch { return null; }
 }
@@ -301,12 +366,18 @@ async function probeStatus(host: string, port: number, path: string): Promise<{ 
 }
 
 function getJson(host: string, port: number, path: string, acceptErrorStatus = false): Promise<unknown> {
+  return getJsonResponse(host, port, path, acceptErrorStatus).then((response) => response.body);
+}
+
+function getJsonResponse(host: string, port: number, path: string, acceptErrorStatus = false): Promise<{ body: unknown; connectedAddress: string }> {
   return new Promise((resolvePromise, reject) => {
     const outgoing = request({ host, port, path, method: "GET", timeout: 1_500 }, (response) => {
+      const connectedAddress = response.socket.remoteAddress;
       let body = ""; response.setEncoding("utf8"); response.on("data", (chunk: string) => { if (body.length < 1_000_000) body += chunk; });
       response.on("end", () => {
         if (!response.statusCode || response.statusCode >= 400 && !acceptErrorStatus) { reject(new Error(`HTTP ${response.statusCode ?? "unknown"}`)); return; }
-        try { resolvePromise(JSON.parse(body)); } catch { reject(new Error("invalid JSON response")); }
+        if (!connectedAddress) { reject(new Error("connected address unavailable")); return; }
+        try { resolvePromise({ body: JSON.parse(body), connectedAddress: normalizeIpAddress(connectedAddress) }); } catch { reject(new Error("invalid JSON response")); }
       });
     });
     outgoing.on("timeout", () => outgoing.destroy(new Error("request timed out"))); outgoing.on("error", reject); outgoing.end();

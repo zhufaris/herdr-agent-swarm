@@ -6,13 +6,11 @@ ACTION="${1:-}"
 FORCE="${2:-}"
 CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
 STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
-SERVICE_NAME="${BRIDGE_SYSTEMD_SERVICE_NAME:-herdr-agent-swarm.service}"
 ROOT="$SOURCE_ROOT"
 if [ -L "$STATE_DIR/current" ]; then ROOT="$(readlink -f "$STATE_DIR/current")"; fi
 export SWARM_ROOT="$ROOT"
 export SWARM_CONFIG_DIR="$CONFIG_DIR"
 export SWARM_STATE_DIR="$STATE_DIR"
-export BRIDGE_SYSTEMD_SERVICE_NAME="$SERVICE_NAME"
 
 case "$ACTION" in
   setup) exec node "$ROOT/dist/cli/setup.js" "${@:2}" ;;

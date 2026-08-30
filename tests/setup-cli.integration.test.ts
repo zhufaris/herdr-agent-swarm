@@ -7,11 +7,11 @@ import { resolveSetupContext, runSetupCli } from "../src/cli/setup.js";
 import { SetupCancelledError } from "../src/setup/setup-prompts.js";
 import type { SetupCheck, SetupContext, SetupDraft } from "../src/setup/setup-types.js";
 
-const context: SetupContext = { root: "/repo", configDirectory: "/config", stateDirectory: "/state", serviceName: "swarm.service", cwd: "/project" };
+const context: SetupContext = { root: "/repo", configDirectory: "/config", stateDirectory: "/state", serviceName: "herdr-agent-swarm.service", cwd: "/project" };
 
 describe("setup CLI", () => {
   it("resolves only standalone runtime paths", () => {
-    expect(resolveSetupContext({ SWARM_ROOT: "/repo", SWARM_CONFIG_DIR: "/config", SWARM_STATE_DIR: "/state", BRIDGE_SYSTEMD_SERVICE_NAME: "swarm.service" }, "/project")).toEqual(context);
+    expect(resolveSetupContext({ SWARM_ROOT: "/repo", SWARM_CONFIG_DIR: "/config", SWARM_STATE_DIR: "/state", BRIDGE_SYSTEMD_SERVICE_NAME: "alternate.service" }, "/project")).toEqual(context);
     expect(resolveSetupContext({
       HERDR_PLUGIN_ROOT: "/plugin", HERDR_PLUGIN_CONFIG_DIR: "/plugin-config", HERDR_PLUGIN_STATE_DIR: "/plugin-state",
       XDG_CONFIG_HOME: "/xdg-config", XDG_STATE_HOME: "/xdg-state"

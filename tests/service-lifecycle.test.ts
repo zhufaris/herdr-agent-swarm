@@ -11,9 +11,19 @@ describe("service lifecycle", () => {
     const fixture = createFixture();
 
     await expect(inspectServiceLifecycle(fixture.environment)).resolves.toMatchObject({
-      installed: false, active: true, summary: expect.stringContaining("test-bridge.service")
+      installed: false, active: true, summary: expect.stringContaining("herdr-agent-swarm.service")
     });
-    expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+    expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
+  });
+
+  it("does not allow an environment override to retarget lifecycle operations", async () => {
+    const fixture = createFixture();
+
+    await runServiceLifecycle("install", { ...fixture.environment, BRIDGE_SYSTEMD_SERVICE_NAME: "alternate.service" });
+
+    expect(readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8")).toContain("Description=Herdr Agent Swarm");
+    expect(() => readFileSync(join(fixture.units, "alternate.service"), "utf8")).toThrow();
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user enable herdr-agent-swarm.service");
   });
 
   it("rejects compatibility plugin variables as lifecycle context", async () => {
@@ -45,7 +55,7 @@ describe("service lifecycle", () => {
     mkdirSync(standaloneConfig);
     writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
     writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
-    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState, BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-agent-swarm.service" };
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState };
 
     await expect(runServiceLifecycle("install", environment)).resolves.toBe(0);
     const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
@@ -65,7 +75,7 @@ describe("service lifecycle", () => {
     writeFileSync(legacyDatabase, "fixture");
     writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
     writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "BRIDGE_DATABASE_PATH=" + legacyDatabase].join("\n") + "\n");
-    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState, BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-agent-swarm.service" };
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState };
 
     await runServiceLifecycle("install", environment);
     const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
@@ -81,7 +91,7 @@ describe("service lifecycle", () => {
     mkdirSync(config, { recursive: true });
     writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
     writeFileSync(join(config, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
-    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: undefined, SWARM_STATE_DIR: undefined, BRIDGE_SYSTEMD_SERVICE_NAME: undefined, XDG_CONFIG_HOME: xdgConfig, XDG_STATE_HOME: xdgState };
+    const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: undefined, SWARM_STATE_DIR: undefined, XDG_CONFIG_HOME: xdgConfig, XDG_STATE_HOME: xdgState };
 
     await expect(runServiceLifecycle("install", environment)).resolves.toBe(0);
     const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
@@ -117,7 +127,7 @@ describe("service lifecycle", () => {
   it("installs an absolute systemd user unit and delegates lifecycle commands", async () => {
     const fixture = createFixture();
     await expect(runServiceLifecycle("install", fixture.environment)).resolves.toBe(0);
-    const unit = readFileSync(join(fixture.units, "test-bridge.service"), "utf8");
+    const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
     expect(unit).toContain(`WorkingDirectory=${fixture.root}`);
     expect(unit).toContain(`EnvironmentFile=${fixture.config}/.env`);
     expect(unit).toContain(`ExecStart=${process.execPath} --enable-source-maps ${fixture.root}/dist/main.js`);
@@ -126,7 +136,7 @@ describe("service lifecycle", () => {
     expect(unit).toContain("Restart=on-failure");
     await expect(runServiceLifecycle("stop", fixture.environment)).resolves.toBe(0);
     expect(readFileSync(fixture.calls, "utf8").trim().split(/\n/)).toEqual([
-      "--user daemon-reload", "--user enable test-bridge.service", "--user stop test-bridge.service"
+      "--user daemon-reload", "--user enable herdr-agent-swarm.service", "--user stop herdr-agent-swarm.service"
     ]);
   });
 
@@ -134,18 +144,18 @@ describe("service lifecycle", () => {
     const fixture = createFixture();
     await runServiceLifecycle("install", fixture.environment);
     await expect(runServiceLifecycle("uninstall", fixture.environment)).resolves.toBe(0);
-    expect(() => readFileSync(join(fixture.units, "test-bridge.service"))).toThrow();
+    expect(() => readFileSync(join(fixture.units, "herdr-agent-swarm.service"))).toThrow();
     expect(readFileSync(join(fixture.config, ".env"), "utf8")).toContain("LARK_APP_ID");
-    expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable --now test-bridge.service");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable --now herdr-agent-swarm.service");
   });
 
   it("refreshes the unit identity before restarting a rebuilt service", async () => {
     const fixture = createFixture();
     await runServiceLifecycle("install", fixture.environment);
     writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
-    await expect(runServiceLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" }, { force: true })).rejects.toThrow();
-    expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
-    expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block test-bridge.service");
+    await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }, { force: true })).rejects.toThrow();
+    expect(readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user restart --no-block herdr-agent-swarm.service");
   });
 
   it("refuses an unforced restart while the running service reports active turns", async () => {
@@ -163,7 +173,7 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("install", fixture.environment);
       writeFileSync(fixture.calls, "");
       await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/2 running.*3 queued.*unknown active.*--force/);
-      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -219,7 +229,7 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("install", fixture.environment);
       writeFileSync(fixture.calls, "");
       await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/identity.*another-service.*--force/i);
-      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -228,7 +238,7 @@ describe("service lifecycle", () => {
     await runServiceLifecycle("install", unavailable.environment);
     writeFileSync(unavailable.calls, "");
     await expect(runServiceLifecycle("restart", unavailable.environment)).rejects.toThrow(/status.*unreachable.*--force/i);
-    expect(readFileSync(unavailable.calls, "utf8")).toBe("--user is-active test-bridge.service\n");
+    expect(readFileSync(unavailable.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
   });
 
   it("refuses an unforced restart when active-unit work metrics are incomplete", async () => {
@@ -245,6 +255,45 @@ describe("service lifecycle", () => {
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
+  it.each([
+    ["queued prompts", { operational: { prompts: { running: 0, queued: 1 }, pendingOutbox: 0 } }, /queued prompts/i],
+    ["pending outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1 } }, /pending outbox/i],
+    ["active deliveries", { outboxDispatcher: { activeDeliveries: 1 } }, /active deliveries/i],
+    ["incomplete startup recovery", { startupRecovery: { state: "running" } }, /startup recovery/i],
+    ["unhealthy SQLite integrity state", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /sqlite integrity/i],
+    ["failed SQLite quick check", { sqliteIntegrity: { state: "healthy", quickCheck: "failed" } }, /sqlite integrity/i]
+  ])("refuses restart with %s", async (_name, override, expected) => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus(override)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(expected);
+      expect(readFileSync(fixture.calls, "utf8")).not.toContain("restart --no-block");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it.each([
+    ["pendingOutbox", { operational: { prompts: { running: 0, queued: 0 } } }],
+    ["activeDeliveries", { outboxDispatcher: {} }],
+    ["startupRecovery", { startupRecovery: {} }],
+    ["sqliteIntegrity", { sqliteIntegrity: {} }]
+  ])("fails closed when restart safety field %s is missing", async (_name, override) => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus(override)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/incomplete.*--force/i);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it("uses the installed environment file instead of shell config values", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
@@ -254,7 +303,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", { ...fixture.environment, BRIDGE_HTTP_PORT: "1" });
-      await expect(runServiceLifecycle("restart", { ...fixture.environment, BRIDGE_HTTP_PORT: "1", BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, BRIDGE_HTTP_PORT: "1", SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -275,9 +324,9 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" }, { force: true })).resolves.toBe(0);
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" }, { force: true })).resolves.toBe(0);
       expect(statusRequests).toBeGreaterThanOrEqual(2);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block herdr-agent-swarm.service");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -293,9 +342,9 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
       expect(statusRequests).toBeGreaterThanOrEqual(2);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block test-bridge.service");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block herdr-agent-swarm.service");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -317,7 +366,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
         .rejects.toThrow(/startup running/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -334,7 +383,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
         .rejects.toThrow(new RegExp(`startup ${state}`));
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -354,7 +403,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1500" })).resolves.toBe(0);
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1500" })).resolves.toBe(0);
       expect(statusRequests).toBe(4);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -371,7 +420,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -387,7 +436,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" }, { requireReady: true }))
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1000" }, { requireReady: true }))
         .rejects.toThrow(/readiness.*not_ready/i);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -405,9 +454,9 @@ describe("service lifecycle", () => {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
       writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
-      expect(readFileSync(join(fixture.units, "test-bridge.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user enable --now test-bridge.service");
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      expect(readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user enable --now herdr-agent-swarm.service");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -430,8 +479,7 @@ describe("service lifecycle", () => {
         SWARM_ROOT: fixture.root,
         SWARM_CONFIG_DIR: fixture.config,
         SWARM_STATE_DIR: fixture.state,
-        BRIDGE_SYSTEMD_SERVICE_NAME: "herdr-agent-swarm.service",
-        BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000"
+        SWARM_SERVICE_START_TIMEOUT_MS: "1000"
       };
       await runServiceLifecycle("install", environment);
       writeFileSync(fixture.calls, "");
@@ -447,10 +495,150 @@ describe("service lifecycle", () => {
     await expect(runServiceLifecycle("start", fixture.environment)).rejects.toThrow(/service is not installed/);
   });
 
+  it("returns nonzero status when the configured listener is not owned by the canonical unit", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const fixture = createFixture({ port, mainPid: 4100, listenerPid: 4200 });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user show herdr-agent-swarm.service --property MainPID --value");
+      expect(readFileSync(fixture.ssCalls, "utf8")).toContain("-H -ltnp");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("rejects canonical IPv6 ownership when the configured IPv4 endpoint is foreign", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const fixture = createFixture({ port, mainPid: 4100, ssOutput: [
+        `LISTEN 0 511 127.0.0.1:${port} 0.0.0.0:* users:(("node",pid=4200,fd=20))`,
+        `LISTEN 0 511 [::1]:${port} [::]:* users:(("node",pid=4100,fd=21))`
+      ].join("\n") });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("rejects canonical IPv4 ownership when the configured IPv6 endpoint is foreign", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "::1", resolve));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const fixture = createFixture({ host: "::1", port, mainPid: 4100, ssOutput: [
+        `LISTEN 0 511 127.0.0.1:${port} 0.0.0.0:* users:(("node",pid=4100,fd=20))`,
+        `LISTEN 0 511 [::1]:${port} [::]:* users:(("node",pid=4200,fd=21))`
+      ].join("\n") });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("uses the actual connected loopback address for localhost ownership", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "localhost", resolve));
+    try {
+      const address = server.address() as AddressInfo;
+      const actualEndpoint = address.family === "IPv6" ? `[::1]:${address.port}` : `127.0.0.1:${address.port}`;
+      const otherEndpoint = address.family === "IPv6" ? `127.0.0.1:${address.port}` : `[::1]:${address.port}`;
+      const fixture = createFixture({ host: "localhost", port: address.port, mainPid: 4100, ssOutput: [
+        `LISTEN 0 511 ${actualEndpoint} 0.0.0.0:* users:(("node",pid=4100,fd=20))`,
+        `LISTEN 0 511 ${otherEndpoint} 0.0.0.0:* users:(("node",pid=4200,fd=21))`
+      ].join("\n") });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(0);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it.each([
+    ["malformed", "this is not socket output", 0],
+    ["truncated", "LISTEN 0 511 127.0.0.1:39001", 0],
+    ["failed", "", 1]
+  ])("fails closed when ss output is %s", async (_name, ssOutput, ssExit) => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const output = ssOutput.replace("39001", String(port));
+      const fixture = createFixture({ port, ssOutput: output, ssExit });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it.each([
+    ["missing", { identity: undefined }],
+    ["foreign", { identity: { serviceId: "another-service", buildId: "sha256:test-build" } }]
+  ])("returns nonzero status for %s service identity", async (_name, override) => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus(override)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("does not accept startup from a foreign process on the configured listener", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port, mainPid: 4100, listenerPid: 4200 });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
+        .rejects.toThrow(/listener.*PID.*canonical unit.*MainPID/i);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("does not let forced restart bypass foreign listener ownership", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port, mainPid: 4100, listenerPid: 4200 });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }, { force: true }))
+        .rejects.toThrow(/listener.*PID.*canonical unit.*MainPID/i);
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user restart --no-block herdr-agent-swarm.service");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it("does not accept a healthy port unless the managed unit is active", async () => {
     const fixture = createFixture({ active: false });
     await runServiceLifecycle("install", fixture.environment);
-    await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
+    await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
       .rejects.toThrow(/did not complete startup with expected build/);
   });
 
@@ -464,7 +652,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -480,7 +668,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, BRIDGE_PLUGIN_START_TIMEOUT_MS: "300" }))
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
         .rejects.toThrow(/expected build sha256:test-build.*observed build sha256:stale-build.*startup completed/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -497,7 +685,7 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("restart", { ...fixture.environment, BRIDGE_PLUGIN_RESTART_TIMEOUT_MS: "300" }))
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }))
         .rejects.toThrow(/restart did not complete startup with expected build sha256:test-build.*unit active.*observed build sha256:stale-build.*startup completed/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -508,13 +696,14 @@ describe("service lifecycle", () => {
 function completedStartupStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: "ok", identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" },
-    startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 } },
+    startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 0 },
     promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 },
+    outboxDispatcher: { activeDeliveries: 0 }, sqliteIntegrity: { state: "healthy", quickCheck: "ok" },
     ...overrides
   };
 }
 
-function createFixture(options: { active?: boolean; port?: number } = {}) {
+function createFixture(options: { active?: boolean; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "agent-swarm-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -522,22 +711,26 @@ function createFixture(options: { active?: boolean; port?: number } = {}) {
   const units = join(root, "units");
   const bin = join(root, "bin");
   const calls = join(root, "systemctl.calls");
+  const ssCalls = join(root, "ss.calls");
   for (const directory of [config, state, dist, units, bin]) mkdirSync(directory);
   writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: root }] }));
   writeFileSync(join(config, ".env"), [
     "LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot",
-    `BRIDGE_HTTP_PORT=${options.port ?? 39001}`, "BRIDGE_HTTP_HOST=127.0.0.1"
+    `BRIDGE_HTTP_PORT=${options.port ?? 39001}`, `BRIDGE_HTTP_HOST=${options.host ?? "127.0.0.1"}`
   ].join("\n") + "\n");
   writeFileSync(join(dist, "main.js"), "// fixture\n");
   writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${active ? 'echo active; exit 0' : 'echo inactive; exit 3'}; fi\nexit 0\n`);
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${active ? 'echo active; exit 0' : 'echo inactive; exit 3'}; fi\nif [ "$2" = "show" ]; then echo ${options.mainPid ?? process.pid}; exit 0; fi\nexit 0\n`);
+  const ssOutput = options.ssOutput ?? `LISTEN 0 511 127.0.0.1:${options.port ?? 39001} 0.0.0.0:* users:(("node",pid=${options.listenerPid ?? process.pid},fd=20))`;
+  writeFileSync(join(bin, "ss"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(ssCalls)}\nprintf '%b\n' ${JSON.stringify(ssOutput)}\nexit ${options.ssExit ?? 0}\n`);
   writeFileSync(join(bin, "journalctl"), "#!/bin/sh\nexit 0\n");
   chmodSync(join(bin, "systemctl"), 0o755);
   chmodSync(join(bin, "journalctl"), 0o755);
-  return { root, config, state, units, calls, environment: {
+  chmodSync(join(bin, "ss"), 0o755);
+  return { root, config, state, units, calls, ssCalls, environment: {
     PATH: `${bin}:${process.env.PATH}`,
     SWARM_ROOT: root, SWARM_CONFIG_DIR: config, SWARM_STATE_DIR: state,
-    BRIDGE_SYSTEMD_UNIT_DIR: units, BRIDGE_SYSTEMD_SERVICE_NAME: "test-bridge.service", HERDR_SOCKET_PATH: "/tmp/test-herdr.sock"
+    BRIDGE_SYSTEMD_UNIT_DIR: units, HERDR_SOCKET_PATH: "/tmp/test-herdr.sock"
   } };
 }

@@ -173,8 +173,8 @@ npm run swarm:status
 The defaults are `~/.config/herdr-agent-swarm` for configuration,
 `~/.local/state/herdr-agent-swarm` for SQLite state, and
 `herdr-agent-swarm.service` for the
-user systemd unit. Override them with `SWARM_CONFIG_DIR`,
-`SWARM_STATE_DIR`, and `BRIDGE_SYSTEMD_SERVICE_NAME`. The installer writes
+user systemd unit. Override the directories with `SWARM_CONFIG_DIR` and
+`SWARM_STATE_DIR`. The installer writes
 absolute paths and the expected build identity into the unit; secrets remain in
 the mode-600 environment file.
 

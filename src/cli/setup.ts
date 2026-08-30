@@ -23,7 +23,7 @@ export function resolveSetupContext(environment: NodeJS.ProcessEnv = process.env
   const stateDirectory = resolve(environment.SWARM_STATE_DIR || `${environment.XDG_STATE_HOME || `${homedir()}/.local/state`}/herdr-agent-swarm`);
   return {
     root, configDirectory, stateDirectory, cwd: resolve(cwd),
-    serviceName: environment.BRIDGE_SYSTEMD_SERVICE_NAME || "herdr-agent-swarm.service"
+    serviceName: "herdr-agent-swarm.service"
   };
 }
 
@@ -41,7 +41,7 @@ export function createSetupCheckDependencies(environment: NodeJS.ProcessEnv) {
 export function createSetupDependencies(environment: NodeJS.ProcessEnv, skipNetwork: boolean, context = resolveSetupContext(environment)): SetupWorkflowDependencies {
   const lifecycleEnvironment = {
     ...environment, SWARM_ROOT: context.root, SWARM_CONFIG_DIR: context.configDirectory,
-    SWARM_STATE_DIR: context.stateDirectory, BRIDGE_SYSTEMD_SERVICE_NAME: context.serviceName
+    SWARM_STATE_DIR: context.stateDirectory
   };
   return {
     prompts: new TerminalSetupPrompts(),
