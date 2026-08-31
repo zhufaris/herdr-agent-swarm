@@ -4,6 +4,7 @@ import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../dom
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 
 interface Options { projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void }
+interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
 
 export class InstanceRuntimeReconciler {
   private running: Promise<void> | null = null;
@@ -31,7 +32,16 @@ export class InstanceRuntimeReconciler {
     return run.finally(() => { if (this.running === run) this.running = null; });
   }
 
-  requestReconciliation(): void { void this.reconcile().catch(() => undefined); }
+  async requestReconciliation(scope?: ReconciliationScope): Promise<void> {
+    if (!scope) return this.reconcile();
+    if (this.stopping) return;
+    if (this.running) { this.coalescedRequestCount += 1; await this.running; }
+    if (this.stopping) return;
+    const run = this.runMeasured(scope);
+    this.running = run;
+    try { await run; }
+    finally { if (this.running === run) this.running = null; }
+  }
   start(intervalMs: number): void {
     if (this.stopping || this.timer) return;
     this.timer = setInterval(() => this.requestReconciliation(), intervalMs);
@@ -47,12 +57,12 @@ export class InstanceRuntimeReconciler {
     };
   }
 
-  private async runMeasured(): Promise<void> {
+  private async runMeasured(scope?: ReconciliationScope): Promise<void> {
     const started = performance.now();
     this.runCount += 1;
     this.lastStartedAt = new Date().toISOString();
     try {
-      await this.reconcileOnce();
+      await this.reconcileOnce(scope);
       this.successCount += 1;
       this.lastOutcome = "succeeded";
     } catch (error) {
@@ -67,9 +77,23 @@ export class InstanceRuntimeReconciler {
     }
   }
 
-  private async reconcileOnce(): Promise<void> {
+  private async reconcileOnce(scope?: ReconciliationScope): Promise<void> {
     try {
+      if (scope?.paneIds) {
+        for (const paneId of [...new Set(scope.paneIds)]) {
+          const instance = this.options.store.findAgentInstanceByPane(paneId);
+          if (!instance) continue;
+          const project = this.options.projects.find((candidate) => candidate.id === instance.projectId);
+          if (!project) continue;
+          const pane = await this.options.paneHost.inspectPane(paneId);
+          await this.reconcileInstance(instance, project, new Map(pane ? [[paneId, pane]] : []));
+        }
+        this.completed = true; this.lastError = null;
+        return;
+      }
+      const workspaceIds = scope?.workspaceIds ? new Set(scope.workspaceIds) : null;
       for (const project of this.options.projects) {
+        if (workspaceIds && !workspaceIds.has(project.workspaceId)) continue;
         const panes = await this.options.paneHost.listPanes(project.workspaceId);
         const panesById = new Map(panes.map((pane) => [pane.paneId, pane]));
         for (const instance of this.options.store.listAgentInstances(project.id)) await this.reconcileInstance(instance, project, panesById);

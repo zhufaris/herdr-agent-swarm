@@ -45,6 +45,7 @@ export interface InstanceStore {
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
   createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" };
   getAgentInstance(id: string): AgentInstance | null;
+  findAgentInstanceByPane(paneId: string): AgentInstance | null;
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
@@ -73,6 +74,7 @@ export interface InstanceStore {
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] };
   listObservableInstanceTurns(): InstanceTurn[];
+  listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[];
   getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number };
   updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;

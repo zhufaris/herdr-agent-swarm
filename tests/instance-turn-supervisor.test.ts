@@ -109,4 +109,14 @@ describe("InstanceTurnSupervisor", () => {
     expect(store.getInstanceTurn("turn-one")).toMatchObject({ state: "completed" });
     expect(store.getInstanceTurn("turn-two")).toMatchObject({ state: "completed" });
   });
+
+  it("observes only turns attached to a targeted Pane", async () => {
+    const { supervisor, inspectPane } = setup("running");
+
+    await supervisor.requestObservationByPane(["w1:p1"]);
+
+    expect(inspectPane).toHaveBeenCalledOnce();
+    expect(inspectPane).toHaveBeenCalledWith("w1:p1");
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed" });
+  });
 });

@@ -229,6 +229,11 @@ export class SqliteBindingStore implements BindingStorePort {
     return row ? mapAgentInstance(row) : null;
   }
 
+  findAgentInstanceByPane(paneId: string): AgentInstance | null {
+    const row = this.database.prepare("SELECT * FROM agent_instances WHERE pane_id = ? ORDER BY created_at, id LIMIT 1").get(paneId) as AgentInstanceRow | undefined;
+    return row ? mapAgentInstance(row) : null;
+  }
+
   listAgentInstances(projectId: string): AgentInstance[] {
     return (this.database.prepare("SELECT * FROM agent_instances WHERE project_id = ? ORDER BY created_at, id").all(projectId) as AgentInstanceRow[]).map(mapAgentInstance);
   }
@@ -443,6 +448,13 @@ export class SqliteBindingStore implements BindingStorePort {
 
   listObservableInstanceTurns(): InstanceTurn[] {
     return (this.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!);
+  }
+
+  listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[] {
+    const uniquePaneIds = [...new Set(paneIds)];
+    if (uniquePaneIds.length === 0) return [];
+    const placeholders = uniquePaneIds.map(() => "?").join(",");
+    return (this.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') AND i.pane_id IN (${placeholders}) ORDER BY t.created_at, t.rowid`).all(...uniquePaneIds) as Array<Record<string, unknown>>).map((row) => this.mapInstanceTurn(row)!);
   }
 
   getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number } {

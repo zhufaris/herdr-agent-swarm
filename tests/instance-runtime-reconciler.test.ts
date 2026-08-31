@@ -13,7 +13,7 @@ function setup(snapshot: HerdrPane[]) {
   store = new SqliteBindingStore(":memory:");
   store.createAgentInstance({ id: "i1", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
   const instance = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: null })!;
-  const paneHost = { listPanes: vi.fn(async () => snapshot) } as unknown as PaneHost;
+  const paneHost = { listPanes: vi.fn(async () => snapshot), inspectPane: vi.fn(async (paneId: string) => snapshot.find((candidate) => candidate.paneId === paneId) ?? null) } as unknown as PaneHost;
   const wake = vi.fn();
   const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake });
   return { instance, reconciler, wake, paneHost };
@@ -111,5 +111,16 @@ describe("instance runtime reconciliation", () => {
     const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake: vi.fn() });
     await reconciler.reconcile();
     expect(store.listAgentInstances("p1")).toEqual([]);
+  });
+
+  it("reconciles only the instance attached to a targeted Pane", async () => {
+    const target = pane({ agentState: "working" });
+    const { instance, reconciler, paneHost } = setup([target]);
+
+    await reconciler.requestReconciliation({ paneIds: [target.paneId] });
+
+    expect(paneHost.inspectPane).toHaveBeenCalledWith(target.paneId);
+    expect(paneHost.listPanes).not.toHaveBeenCalled();
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
   });
 });

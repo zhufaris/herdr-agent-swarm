@@ -33,6 +33,16 @@ export class InstanceTurnSupervisor {
     return run.finally(() => { if (this.running === run) this.running = null; });
   }
 
+  async requestObservationByPane(paneIds: readonly string[]): Promise<void> {
+    if (this.stopping || paneIds.length === 0) return;
+    if (this.running) await this.running;
+    if (this.stopping) return;
+    const run = this.observeTurns(this.options.store.listObservableInstanceTurnsByPaneIds(paneIds), null);
+    this.running = run;
+    try { await run; }
+    finally { if (this.running === run) this.running = null; }
+  }
+
   start(intervalMs: number): void {
     if (this.stopping || this.timer) return;
     this.timer = setInterval(() => { void this.reconcile().catch(() => undefined); }, intervalMs); this.timer.unref();
@@ -51,6 +61,11 @@ export class InstanceTurnSupervisor {
       try { panesById = new Map((await this.options.paneHost.snapshotPanes()).map((pane) => [pane.paneId, pane])); }
       catch { /* Older or degraded Herdr paths retain targeted observation. */ }
     }
+    await this.observeTurns(turns, panesById);
+    this.lastScanAt = new Date().toISOString();
+  }
+
+  private async observeTurns(turns: ReturnType<InstanceStore["listObservableInstanceTurns"]>, panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null): Promise<void> {
     for (const turn of turns) {
       try {
         await this.observe(turn.id, panesById);
@@ -64,7 +79,6 @@ export class InstanceTurnSupervisor {
         if (decision.kind !== "suppressed") this.options.logger?.warn({ event: decision.kind === "summary" ? "instance-turn-observation-failure-summary" : "instance-turn-observation-failed", err: safe, instanceId: turn.instanceId, turnId: turn.id, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "retry_later" }, "instance turn observation failed");
       }
     }
-    this.lastScanAt = new Date().toISOString();
   }
 
   private async observe(turnId: string, panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null): Promise<void> {
