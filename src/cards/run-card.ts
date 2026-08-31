@@ -4,8 +4,8 @@ import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
-import { callbackButton } from "./cardkit-button.js";
 import { appendWithinCardLimit } from "./card-payload.js";
+import { callbackButton } from "./cardkit-button.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 
 const RUN_STATE_VIEW = {
@@ -147,7 +147,6 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
-  elements.push(...mainCardActions(input));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
@@ -159,16 +158,6 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     },
     body: { elements }
   };
-}
-
-function mainCardActions(input: TopicViewState): object[] {
-  const button = (content: string, action: string, type?: "primary") => callbackButton(content, { action, bindingId: input.bindingId }, type);
-  if (input.phase === "provisioning" || input.phase === "draining") return [];
-  if (input.phase === "archived") return [button("新建任务", "create_new_task", "primary")];
-  if (input.phase === "blocked") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
-  if (input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned") return [button("恢复指引", "view_recovery", "primary"), button("更多操作", "open_more_actions")];
-  if (input.phase === "running") return [...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
-  return [button("发送新任务", "create_new_task", "primary"), ...(input.queueDepth > 0 ? [button("查看队列", "view_queue")] : []), button("更多操作", "open_more_actions")];
 }
 
 export function renderRequestRunCard(input: RunCardView): object {

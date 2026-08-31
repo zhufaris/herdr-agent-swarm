@@ -96,11 +96,7 @@ describe("run card", () => {
 
     const mainButtons = findTaggedNodes(main, "button");
     const moreButtons = findTaggedNodes(more, "button");
-    expect(mainButtons.map(callbackValue)).toEqual(expect.arrayContaining([
-      { action: "view_queue", bindingId: "b1" },
-      { action: "open_more_actions", bindingId: "b1" }
-    ]));
-    expect(mainButtons.map(callbackValue)).not.toContainEqual({ action: "open_supplement", bindingId: "b1" });
+    expect(mainButtons).toEqual([]);
     expect(moreButtons.map(callbackValue)).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "session_status", bindingId: "b1" }),
       expect.objectContaining({ action: "session_stop", bindingId: "b1" })
@@ -388,7 +384,7 @@ describe("run card", () => {
     expect(serialized).not.toContain("终端审批");
   });
 
-  it("gives blocked and orphaned topic cards a safe local recovery path", () => {
+  it("keeps blocked and orphaned topic-card recovery guidance read-only", () => {
     for (const phase of ["blocked", "orphaned"] as const) {
       const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase, activePromptId: phase === "blocked" ? "p1" : null, notice: "Inspect this state" });
       const serialized = JSON.stringify(card);
@@ -398,25 +394,23 @@ describe("run card", () => {
       expect(serialized).toContain("Herdr Pane");
       expect(serialized).toContain("自动重新同步");
       expect(serialized).not.toContain("重新发送");
-      expect(actions).toContain("view_recovery");
-      expect(actions).toContain("open_more_actions");
-      expect(actions).not.toContain("open_supplement");
+      expect(actions).toEqual([]);
     }
   });
 
-  it("renders the complete state-driven Main Card action matrix", () => {
+  it("renders no Main Card actions for every state", () => {
     const cases = [
       { phase: "provisioning", queueDepth: 0, actions: [] },
       { phase: "draining", queueDepth: 0, actions: [] },
-      { phase: "ready", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
-      { phase: "queued", queueDepth: 2, actions: ["create_new_task", "view_queue", "open_more_actions"] },
-      { phase: "done", queueDepth: 0, actions: ["create_new_task", "open_more_actions"] },
-      { phase: "running", activePromptId: "p1", queueDepth: 0, actions: ["open_more_actions"] },
-      { phase: "running", activePromptId: "p1", queueDepth: 2, actions: ["view_queue", "open_more_actions"] },
-      { phase: "blocked", activePromptId: "p1", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
-      { phase: "error", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
-      { phase: "orphaned", queueDepth: 0, actions: ["view_recovery", "open_more_actions"] },
-      { phase: "archived", queueDepth: 0, actions: ["create_new_task"] }
+      { phase: "ready", queueDepth: 0, actions: [] },
+      { phase: "queued", queueDepth: 2, actions: [] },
+      { phase: "done", queueDepth: 0, actions: [] },
+      { phase: "running", activePromptId: "p1", queueDepth: 0, actions: [] },
+      { phase: "running", activePromptId: "p1", queueDepth: 2, actions: [] },
+      { phase: "blocked", activePromptId: "p1", queueDepth: 0, actions: [] },
+      { phase: "error", queueDepth: 0, actions: [] },
+      { phase: "orphaned", queueDepth: 0, actions: [] },
+      { phase: "archived", queueDepth: 0, actions: [] }
     ] as const;
 
     for (const entry of cases) {
@@ -425,12 +419,12 @@ describe("run card", () => {
     }
   });
 
-  it("does not advertise supplement when an interactive phase has no active prompt", () => {
+  it("keeps Main Cards read-only when an interactive phase has no active prompt", () => {
     const running = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", activePromptId: null });
     const blocked = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "blocked", activePromptId: null, notice: "Turn ended" });
 
-    expect(mainCardCallbackActions(running)).toEqual(["open_more_actions"]);
-    expect(mainCardCallbackActions(blocked)).toEqual(["view_recovery", "open_more_actions"]);
+    expect(mainCardCallbackActions(running)).toEqual([]);
+    expect(mainCardCallbackActions(blocked)).toEqual([]);
   });
 
   it("limits orphaned More Actions to recovery-safe controls", () => {
@@ -447,7 +441,7 @@ describe("run card", () => {
     const memberCard = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: false, lifecycle: "active", attachment: "degraded" });
 
     expect(JSON.stringify(mainCard)).toContain("TraeX 正在运行，但未注册为 Herdr Agent。");
-    expect(mainCardCallbackActions(mainCard)).toEqual(["view_recovery", "open_more_actions"]);
+    expect(mainCardCallbackActions(mainCard)).toEqual([]);
     expect(findTaggedNodes(creatorCard, "button").map(callbackValue).map((value) => value.action)).toContain("session_reset");
     expect(findTaggedNodes(memberCard, "button").map(callbackValue).map((value) => value.action)).not.toContain("session_reset");
   });
