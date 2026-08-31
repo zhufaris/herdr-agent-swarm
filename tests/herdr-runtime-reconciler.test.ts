@@ -9,6 +9,23 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("HerdrRuntimeReconciler", () => {
+  it("reconciles an existing binding from one authoritative Pane observation", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle" });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const, foregroundExecutables: ["traex"] };
+    const listPanes = vi.fn(async () => [pane]);
+    const observeRuntime = vi.fn(async () => ({ pane, traexProcess: true, composerReady: false, evidenceSource: "structured" as const }));
+    const reconciler = fixture(store, { listPanes, observeRuntime } as unknown as HerdrPort);
+
+    await reconciler.requestPaneReconciliation(["w1:p1"]);
+
+    expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
+    expect(listPanes).not.toHaveBeenCalled();
+    expect(store.getBinding("b1")?.lastAgentState).toBe("working");
+    store.close();
+  });
+
   it("captures structured Agent sequence baselines without terminal access", async () => {
     const store = new SqliteBindingStore(":memory:");
     const listPanes = vi.fn(async () => [{

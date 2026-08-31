@@ -35,6 +35,7 @@ export interface HerdrRuntimeReconcilerPort {
   captureBaselines(): Promise<void>;
   reconcile(workspaceIds?: readonly string[]): Promise<void>;
   requestReconciliation(workspaceIds?: readonly string[]): Promise<void>;
+  requestPaneReconciliation(paneIds: readonly string[]): Promise<void>;
   snapshot(): ReconciliationDiagnostics;
   start(intervalMs: number): void;
   stop(): Promise<void>;
@@ -116,6 +117,22 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     this.reconciliation = work;
     try { await work; }
     finally { if (this.reconciliation === work) this.reconciliation = null; }
+  }
+
+  async requestPaneReconciliation(paneIds: readonly string[]): Promise<void> {
+    if (this.stopping) return;
+    if (this.reconciliation) await this.reconciliation;
+    for (const paneId of [...new Set(paneIds)]) {
+      const existing = this.options.store.findBindingByPane(paneId);
+      if (!existing || (existing.state !== "active" && existing.state !== "orphaned")) continue;
+      try {
+        const observation = await this.options.herdr.observeRuntime(paneId);
+        if (!observation.pane) { await this.orphanMissingPane(existing); continue; }
+        await this.convergeExistingBinding(existing, observation.pane);
+      } catch (error) {
+        this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: existing.workspaceId, paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
+      }
+    }
   }
 
   private enqueueReconciliation(workspaceIds?: readonly string[]): void {
@@ -288,54 +305,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         bindingByPaneId.set(pane.paneId, existing);
         continue;
       }
-      if (!isTraexCompatiblePane(pane)) continue;
-      if (!existing.projectId) {
-        const projects = this.projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? [];
-        if (projects.length === 1) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: projects[0]!.id });
-      }
-      if (existing.lifecycle === "provisioning") continue;
-      const previous = existing.lastAgentState;
-      if (existing.attachment === "orphaned") {
-        const recovered = await this.recoverOrphanedBinding(existing, pane);
-        if (!recovered) continue;
-        existing = recovered;
-      }
-      if (isConfirmedUnregisteredTraexAgent(pane)) {
-        await this.degradeUnregisteredAgent(existing, pane);
-        continue;
-      }
-      pane = this.withMonotonicAgentState(pane);
-      const observation = this.options.store.applyRuntimeObservation({ bindingId: existing.id, expectedPaneId: pane.paneId, expectedGeneration: existing.generation, pane });
-      if (observation.outcome === "stale_binding") continue;
-      if (observation.outcome === "terminal_identity_changed") {
-        await this.orphanMissingPane(existing, `Herdr pane ${pane.paneId} terminal identity changed`);
-        continue;
-      }
-      existing = observation.binding;
-      existing = await this.convergeBindingTitle(existing, pane);
-      if (observation.terminalIdentityRefreshed) this.options.logger.info({ event: "binding-terminal-identity-refreshed", bindingId: existing.id, paneId: pane.paneId, outcome: "native_session_matched" }, "accepted new terminal identity for restored native Agent session");
-      if (observation.nativeSessionMismatch) {
-        this.options.logger.warn({
-          event: "binding-agent-session-mismatch", bindingId: existing.id, paneId: pane.paneId, outcome: "preserved_persisted_identity"
-        }, "Herdr reported a different native Agent session for the existing terminal identity");
-      }
-      if (existing.state !== "active") continue;
-      const tabId = pane.tabId ?? null;
-      const priorTabId = this.observedTabIds.get(pane.paneId);
-      const worktreeName = await this.options.worktreeNameFor?.(pane.foregroundCwd ?? pane.cwd) ?? null;
-      const priorWorktreeName = this.observedWorktreeNames.get(pane.paneId);
-      const tabChanged = (tabId !== null && priorTabId !== tabId) || (tabId === null && priorTabId !== undefined && priorTabId !== null);
-      const worktreeChanged = (worktreeName !== null && priorWorktreeName !== worktreeName) || (worktreeName === null && priorWorktreeName !== undefined && priorWorktreeName !== null);
-      this.observedTabIds.set(pane.paneId, tabId);
-      this.observedWorktreeNames.set(pane.paneId, worktreeName);
-      if (tabChanged || worktreeChanged) await this.publish(existing.id, "PaneOutputObserved", { ...(tabChanged ? { tabId } : {}), ...(worktreeChanged ? { worktreeName } : {}) });
-      if (this.options.isBindingBusy(existing.id)) continue;
-      if (previous !== pane.agentState) {
-        const queueDepth = this.options.store.countPendingPrompts(existing.id);
-        await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth });
-        this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
-        if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
-      }
+      await this.convergeExistingBinding(existing, pane);
       } catch (error) {
         this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
       }
@@ -348,6 +318,49 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
     return new Set(workspaceIds);
+  }
+
+  private async convergeExistingBinding(initial: Binding, initialPane: HerdrPane): Promise<void> {
+    let existing = initial;
+    let pane = initialPane;
+    if (!isTraexCompatiblePane(pane)) return;
+    if (!existing.projectId) {
+      const projects = this.projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? [];
+      if (projects.length === 1) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: projects[0]!.id });
+    }
+    if (existing.lifecycle === "provisioning") return;
+    const previous = existing.lastAgentState;
+    if (existing.attachment === "orphaned") {
+      const recovered = await this.recoverOrphanedBinding(existing, pane);
+      if (!recovered) return;
+      existing = recovered;
+    }
+    if (isConfirmedUnregisteredTraexAgent(pane)) { await this.degradeUnregisteredAgent(existing, pane); return; }
+    pane = this.withMonotonicAgentState(pane);
+    const observation = this.options.store.applyRuntimeObservation({ bindingId: existing.id, expectedPaneId: pane.paneId, expectedGeneration: existing.generation, pane });
+    if (observation.outcome === "stale_binding") return;
+    if (observation.outcome === "terminal_identity_changed") { await this.orphanMissingPane(existing, `Herdr pane ${pane.paneId} terminal identity changed`); return; }
+    existing = observation.binding;
+    existing = await this.convergeBindingTitle(existing, pane);
+    if (observation.terminalIdentityRefreshed) this.options.logger.info({ event: "binding-terminal-identity-refreshed", bindingId: existing.id, paneId: pane.paneId, outcome: "native_session_matched" }, "accepted new terminal identity for restored native Agent session");
+    if (observation.nativeSessionMismatch) this.options.logger.warn({ event: "binding-agent-session-mismatch", bindingId: existing.id, paneId: pane.paneId, outcome: "preserved_persisted_identity" }, "Herdr reported a different native Agent session for the existing terminal identity");
+    if (existing.state !== "active") return;
+    const tabId = pane.tabId ?? null;
+    const priorTabId = this.observedTabIds.get(pane.paneId);
+    const worktreeName = await this.options.worktreeNameFor?.(pane.foregroundCwd ?? pane.cwd) ?? null;
+    const priorWorktreeName = this.observedWorktreeNames.get(pane.paneId);
+    const tabChanged = (tabId !== null && priorTabId !== tabId) || (tabId === null && priorTabId !== undefined && priorTabId !== null);
+    const worktreeChanged = (worktreeName !== null && priorWorktreeName !== worktreeName) || (worktreeName === null && priorWorktreeName !== undefined && priorWorktreeName !== null);
+    this.observedTabIds.set(pane.paneId, tabId);
+    this.observedWorktreeNames.set(pane.paneId, worktreeName);
+    if (tabChanged || worktreeChanged) await this.publish(existing.id, "PaneOutputObserved", { ...(tabChanged ? { tabId } : {}), ...(worktreeChanged ? { worktreeName } : {}) });
+    if (this.options.isBindingBusy(existing.id)) return;
+    if (previous !== pane.agentState) {
+      const queueDepth = this.options.store.countPendingPrompts(existing.id);
+      await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth });
+      this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id });
+      if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id });
+    }
   }
 
   private withMonotonicAgentState(pane: HerdrPane): HerdrPane {

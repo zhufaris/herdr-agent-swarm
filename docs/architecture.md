@@ -332,12 +332,19 @@ them. Domain errors do not count as transport failures.
 Herdr 0.7.5 requires `pane.agent_status_changed` subscriptions to name
 each Pane, so the subscriber reconnects and refreshes that set after Pane create
 or move events. It validates newline-delimited frames, reconnects with bounded
-backoff, and requests convergence after reconnect. Socket health is not a
-readiness gate.
+backoff, and reports the event stream connected only after Herdr acknowledges
+the `events.subscribe` request. A rejected or timed-out subscription reconnects
+without claiming event health. Successful subscription recovery requests full
+convergence. Socket health is not a readiness gate.
 
-Herdr Socket events carry only bounded identity metadata and request the same
-reconciler; they never mutate bindings from event payloads. Periodic
-reconciliation remains the convergence path when an event is unavailable.
+Herdr Socket events carry only bounded identity metadata. The subscriber
+normalizes dotted and underscore protocol spellings and assigns an explicit
+Pane, workspace, or full scope. The event router uses that scope to request the
+smallest applicable binding, instance, observable-turn, external-turn, and
+retired-Pane reconciliation path; it never mutates SQLite from event payloads.
+Each target performs a fresh authoritative read before applying existing
+identity and generation fences. Periodic reconciliation remains the convergence
+path when an event is unavailable.
 
 Native Pane events also wake active and detached turn observers. The wait is
 bounded and always falls back to polling, so a missing event cannot stall a turn.
@@ -371,10 +378,12 @@ view and runtime batches, one binding or pane failure does not stop later items.
    rejects the observation without advancing its fingerprint or lifecycle state,
    so a later reconciliation can recompute from current SQLite state.
 
-Event-driven reconciliation is scoped to affected workspaces. It emits targeted
-`binding-runtime-changed` and `prompt-ready` hints only when observed state and
-durable queue eligibility require work; periodic durable scans remain the safety
-net for lost hints.
+Agent-status events are scoped to affected Panes. Topology events are scoped to
+affected workspaces and may additionally wake Pane-specific observers. Reconnect,
+malformed, unknown, or identity-free events request full convergence. Binding
+reconciliation emits `binding-runtime-changed` and `prompt-ready` hints only when
+freshly observed state and durable queue eligibility require work; periodic
+durable scans remain the safety net for lost hints.
 
 Periodic reconciliation remains required. A missed native Socket event may
 delay an update, but must not change the final converged state.
