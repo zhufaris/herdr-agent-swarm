@@ -4,9 +4,112 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { mergeHerdrRuntimeHints, normalizeHerdrEvent } from "../src/runtime/herdr-event-hint.js";
 import { HerdrSocketSubscriber } from "../src/runtime/herdr-socket-subscriber.js";
 
+describe("Herdr event hints", () => {
+  it("normalizes protocol spellings and preserves Pane identity while widening scope", () => {
+    const dotted = normalizeHerdrEvent("pane.agent_status_changed", { workspaceIds: [], paneIds: ["w1:p1"] });
+    const underscored = normalizeHerdrEvent("pane_agent_status_changed", { workspaceIds: [], paneIds: ["w1:p1"] });
+
+    expect(dotted).toEqual({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
+    expect(underscored).toEqual(dotted);
+    expect(mergeHerdrRuntimeHints(dotted, normalizeHerdrEvent("pane.updated", { workspaceIds: ["w1"], paneIds: [] }))).toEqual({
+      kind: "unknown", scope: "workspaces", workspaceIds: ["w1"], paneIds: ["w1:p1"]
+    });
+  });
+
+  it("falls back to full scope when event semantics or identity are insufficient", () => {
+    expect(normalizeHerdrEvent("future.event", { workspaceIds: ["w1"], paneIds: ["w1:p1"] })).toEqual({
+      kind: "unknown", scope: "all", workspaceIds: ["w1"], paneIds: ["w1:p1"]
+    });
+    expect(normalizeHerdrEvent("pane.created", { workspaceIds: [], paneIds: [] })).toEqual({
+      kind: "pane-created", scope: "all", workspaceIds: [], paneIds: []
+    });
+  });
+});
+
 describe("Herdr socket subscriber", () => {
+  it("reports event health only after the subscription is acknowledged", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-subscribe-ack-")), "herdr.sock");
+    let client!: Socket;
+    let subscriptionId = "";
+    const server = createServer((socket) => {
+      client = socket;
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string; method: string };
+        if (request.method === "events.subscribe") subscriptionId = request.id;
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const received = vi.fn();
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], received, pino({ enabled: false }), 5, 20);
+
+    subscriber.start();
+    await vi.waitFor(() => expect(subscriptionId).not.toBe(""));
+    expect(subscriber.status().eventsConnected).toBe(false);
+
+    client.write(`${JSON.stringify({ id: subscriptionId, result: { subscribed: true } })}\n`);
+    await vi.waitFor(() => expect(subscriber.status().eventsConnected).toBe(true));
+    expect(received).toHaveBeenCalledWith({ kind: "socket-recovered", scope: "all", workspaceIds: [], paneIds: [] });
+
+    await subscriber.stop();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it("rejects subscription errors and reconnects without reporting event health", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-subscribe-error-")), "herdr.sock");
+    let attempts = 0;
+    const clients = new Set<Socket>();
+    const server = createServer((socket) => {
+      clients.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string; method: string };
+        if (request.method !== "events.subscribe") return;
+        attempts += 1;
+        socket.write(`${JSON.stringify({ id: request.id, error: { code: "invalid_subscription", message: "rejected" } })}\n`);
+      });
+      socket.once("close", () => clients.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], () => {}, pino({ enabled: false }), 5, 20);
+
+    subscriber.start();
+    await vi.waitFor(() => expect(attempts).toBeGreaterThan(1));
+    expect(subscriber.status().eventsConnected).toBe(false);
+
+    await subscriber.stop();
+    for (const client of clients) client.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it("times out an unacknowledged subscription and reconnects", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-subscribe-timeout-")), "herdr.sock");
+    let attempts = 0;
+    const clients = new Set<Socket>();
+    const server = createServer((socket) => {
+      clients.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { method: string };
+        if (request.method === "events.subscribe") attempts += 1;
+      });
+      socket.once("close", () => clients.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], () => {}, pino({ enabled: false }), 5, 20, 256 * 1024, 10);
+
+    subscriber.start();
+    await vi.waitFor(() => expect(attempts).toBeGreaterThan(1));
+    expect(subscriber.status().eventsConnected).toBe(false);
+
+    await subscriber.stop();
+    for (const client of clients) client.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
   it("correlates concurrent native requests on the RPC connection", async () => {
     const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-rpc-")), "herdr.sock");
     let buffer = "";
@@ -22,6 +125,7 @@ describe("Herdr socket subscriber", () => {
           buffer = buffer.slice(newline + 1);
           requests.push(request);
           requestClients.set(request.id, socket);
+          if (request.method === "events.subscribe") socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
         }
       });
     });
@@ -37,7 +141,7 @@ describe("Herdr socket subscriber", () => {
     const agentRequest = requests.find(({ method }) => method === "agent.get")!;
     expect(snapshotRequest.id).toBe("herdr-agent-swarm:1");
     expect(agentRequest.id).toBe("herdr-agent-swarm:2");
-    expect(requests.find(({ method }) => method === "events.subscribe")?.id).toBe("herdr-agent-swarm-events");
+    expect(requests.find(({ method }) => method === "events.subscribe")?.id).toMatch(/^herdr-agent-swarm-events:/);
     requestClients.get(agentRequest.id)!.write(`${JSON.stringify({ id: agentRequest.id, result: { type: "agent_info", pane_id: "w1:p1" } })}\n`);
     requestClients.get(snapshotRequest.id)!.write(`${JSON.stringify({ id: snapshotRequest.id, result: { type: "session_snapshot", snapshot: { panes: [], agents: [] } } })}\n`);
 
@@ -147,12 +251,14 @@ describe("Herdr socket subscriber", () => {
     subscriber.start();
     await vi.waitFor(() => expect(request).toContain("events.subscribe"));
     const subscription = JSON.parse(request.trim()) as { id: string; params: { subscriptions: Array<Record<string, string>> } };
-    expect(subscription.id).toBe("herdr-agent-swarm-events");
+    expect(subscription.id).toMatch(/^herdr-agent-swarm-events:/);
     expect(subscription.params.subscriptions).toContainEqual({ type: "pane.agent_status_changed", pane_id: "w1:p1" });
+    client.write(`${JSON.stringify({ id: subscription.id, result: { subscribed: true } })}\n`);
+    await vi.waitFor(() => expect(subscriber.status().eventsConnected).toBe(true));
 
     client.write('{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed",');
     client.write('"pane_id":"w1:p1","workspace_id":"w1","agent_status":"working"}}\n');
-    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ event: "pane_agent_status_changed", workspaceIds: ["w1"], paneIds: ["w1:p1"] }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] }));
 
     await subscriber.stop();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -168,10 +274,10 @@ describe("Herdr socket subscriber", () => {
       '{"event":"pane_exited","data":{"workspace_id":"w2","pane_id":"w2:p2"}}\n' +
       'not-json\n'
     );
-    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ event: "socket.batch", workspaceIds: [], paneIds: [] }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ kind: "unknown", scope: "all", workspaceIds: ["w2"], paneIds: ["w2:p2"] }));
 
     receive("x".repeat(513));
-    await vi.waitFor(() => expect(received.mock.calls.some(([hint]) => hint.event === "socket.invalid" || hint.event === "socket.batch")).toBe(true));
+    await vi.waitFor(() => expect(received.mock.calls.some(([hint]) => hint.kind === "invalid" || hint.kind === "unknown")).toBe(true));
   });
 
   it("contains rejected event handlers and leaves periodic reconciliation as fallback", async () => {
@@ -203,7 +309,7 @@ describe("Herdr socket subscriber", () => {
     release();
 
     await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(2));
-    expect(received.mock.calls[1]?.[0]).toEqual({ event: "socket.batch", workspaceIds: ["w2", "w3"], paneIds: ["w2:p2", "w3:p3"] });
+    expect(received.mock.calls[1]?.[0]).toEqual({ kind: "unknown", scope: "workspaces", workspaceIds: ["w2", "w3"], paneIds: ["w2:p2", "w3:p3"] });
   });
 
   it("refreshes per-Pane Agent subscriptions after a Pane is created", async () => {
@@ -216,7 +322,11 @@ describe("Herdr socket subscriber", () => {
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
         requests.push(chunk);
-        if (chunk.includes('"method":"events.subscribe"')) eventClient = socket;
+        if (chunk.includes('"method":"events.subscribe"')) {
+          eventClient = socket;
+          const request = JSON.parse(chunk.trim()) as { id: string };
+          socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
+        }
       });
       socket.once("close", () => clients.delete(socket));
     });
@@ -247,7 +357,11 @@ describe("Herdr socket subscriber", () => {
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
         requests.push(chunk);
-        if (chunk.includes('"method":"events.subscribe"')) eventClient = socket;
+        if (chunk.includes('"method":"events.subscribe"')) {
+          eventClient = socket;
+          const request = JSON.parse(chunk.trim()) as { id: string };
+          socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
+        }
       });
       socket.once("close", () => clients.delete(socket));
     });
@@ -273,9 +387,17 @@ describe("Herdr socket subscriber", () => {
     subscriber.start();
     await new Promise((resolve) => setTimeout(resolve, 15));
     const clients = new Set<Socket>();
-    const server = createServer((socket) => { clients.add(socket); socket.once("close", () => clients.delete(socket)); });
+    const server = createServer((socket) => {
+      clients.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string; method: string };
+        if (request.method === "events.subscribe") socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
+      });
+      socket.once("close", () => clients.delete(socket));
+    });
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ event: "socket.connected", workspaceIds: [], paneIds: [] }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ kind: "socket-recovered", scope: "all", workspaceIds: [], paneIds: [] }));
     await subscriber.stop();
     for (const client of clients) client.destroy();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
