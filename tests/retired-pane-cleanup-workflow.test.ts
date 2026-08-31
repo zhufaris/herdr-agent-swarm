@@ -5,6 +5,20 @@ import type { HerdrPane, RuntimeObservation } from "../src/domain/types.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 describe("RetiredPaneCleanupWorkflow", () => {
+  it("retries only cleanup operations for targeted Panes", async () => {
+    const operations = [cleanupOperation("one", "w1:p1"), cleanupOperation("two", "w1:p2")];
+    const getBinding = vi.fn(() => null);
+    const workflow = new RetiredPaneCleanupWorkflow({
+      store: { listRetiredPaneCleanupOperations: () => operations, getBinding } as never,
+      herdr: { observeRuntime: vi.fn(), closePane: vi.fn() },
+      logger: pino({ enabled: false })
+    });
+
+    await workflow.requestPanes(["w1:p2"]);
+
+    expect(getBinding.mock.calls.map(([bindingId]) => bindingId)).toEqual(["old-two", "new-two"]);
+  });
+
   it("waits while durable work or the runtime is busy", async () => {
     const { store, pane } = resetStore();
     store.enqueuePrompt({ id: "running", bindingId: "old", larkMessageId: "message", actorOpenId: "user", body: "work" });
@@ -60,6 +74,13 @@ describe("RetiredPaneCleanupWorkflow", () => {
     store.close();
   });
 });
+
+function cleanupOperation(id: string, paneId: string) {
+  return {
+    id, oldBindingId: `old-${id}`, replacementBindingId: `new-${id}`, paneId, expectedWorkspaceId: "w1", expectedProjectId: "repo",
+    expectedCwd: "/repo", expectedTerminalId: `term-${id}`, actorOpenId: "user", state: "waiting_busy" as const, attemptCount: 0, detail: null, createdAt: "now", updatedAt: "now"
+  };
+}
 
 function resetStore() {
   const store = new SqliteBindingStore(":memory:");

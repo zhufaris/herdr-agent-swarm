@@ -6,6 +6,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 export interface RetiredPaneCleanupWorkflowPort {
   recover(): Promise<void>;
   requestScan(): Promise<void>;
+  requestPanes(paneIds: readonly string[]): Promise<void>;
   start(intervalMs: number): void;
   stop(): Promise<void>;
 }
@@ -18,7 +19,7 @@ interface Options {
 
 export class RetiredPaneCleanupWorkflow implements RetiredPaneCleanupWorkflowPort {
   private scan: Promise<void> | null = null;
-  private scanAgain = false;
+  private pendingPaneIds: Set<string> | null | undefined;
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
 
@@ -26,9 +27,17 @@ export class RetiredPaneCleanupWorkflow implements RetiredPaneCleanupWorkflowPor
 
   recover(): Promise<void> { return this.requestScan(); }
 
-  requestScan(): Promise<void> {
+  requestScan(): Promise<void> { return this.request(); }
+
+  requestPanes(paneIds: readonly string[]): Promise<void> {
+    if (paneIds.length === 0) return Promise.resolve();
+    return this.request(paneIds);
+  }
+
+  private request(paneIds?: readonly string[]): Promise<void> {
     if (this.stopping) return Promise.resolve();
-    if (this.scan) { this.scanAgain = true; return this.scan; }
+    this.enqueue(paneIds);
+    if (this.scan) return this.scan;
     const scan = this.drain();
     this.scan = scan;
     return scan.finally(() => { if (this.scan === scan) this.scan = null; });
@@ -48,14 +57,22 @@ export class RetiredPaneCleanupWorkflow implements RetiredPaneCleanupWorkflowPor
   }
 
   private async drain(): Promise<void> {
-    do {
-      this.scanAgain = false;
-      for (const operation of this.options.store.listRetiredPaneCleanupOperations()) {
+    while (this.pendingPaneIds !== undefined && !this.stopping) {
+      const requestedPaneIds = this.pendingPaneIds;
+      this.pendingPaneIds = undefined;
+      const operations = this.options.store.listRetiredPaneCleanupOperations();
+      for (const operation of requestedPaneIds === null ? operations : operations.filter(({ paneId }) => requestedPaneIds.has(paneId))) {
         if (this.stopping) return;
         try { await this.process(operation); }
         catch (error) { this.logFailure(error, operation); }
       }
-    } while (this.scanAgain && !this.stopping);
+    }
+  }
+
+  private enqueue(paneIds?: readonly string[]): void {
+    if (paneIds === undefined || this.pendingPaneIds === null) { this.pendingPaneIds = null; return; }
+    this.pendingPaneIds ??= new Set<string>();
+    for (const paneId of paneIds) this.pendingPaneIds.add(paneId);
   }
 
   private async process(operation: RetiredPaneCleanupOperation): Promise<void> {
