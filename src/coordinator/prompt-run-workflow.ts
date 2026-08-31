@@ -40,16 +40,18 @@ interface PromptRunWorkflowOptions {
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
   transcriptReader?: TraexTranscriptReaderPort;
+  handoffExternalTurns?: (bindingId: string) => Promise<void>;
 }
 
 type TurnOutputSource =
   | { mode: "unavailable"; reason: string }
-  | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[] };
+  | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[]; lastObservationSignature: string };
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
 const TRANSCRIPT_IDENTITY_POLL_MS = 50;
 const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
+const ATTACHED_TRANSCRIPT_POLL_MS = 250;
 const FINAL_TRANSCRIPT_DRAIN_LIMIT = 8;
 const MAX_TRANSCRIPT_CONFLICT_PROMPTS = 256;
 const MAX_TRANSCRIPT_CONFLICT_TURNS_PER_PROMPT = 16;
@@ -250,7 +252,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private async drain(bindingId: string): Promise<void> {
-    for (let claimed = this.stopping ? null : this.options.store.claimNextDispatchablePrompt(bindingId); claimed; claimed = this.stopping ? null : this.options.store.claimNextDispatchablePrompt(bindingId)) {
+    while (!this.stopping) {
+      if (this.options.handoffExternalTurns) await this.options.handoffExternalTurns(bindingId);
+      const claimed = this.options.store.claimNextDispatchablePrompt(bindingId);
+      if (!claimed) return;
       let { binding, prompt } = claimed;
       const paneId = binding.paneId!;
       const queueDepth = this.options.store.countPendingPrompts(bindingId);
@@ -260,6 +265,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       let dispatched = false;
       let outputSource: TurnOutputSource = { mode: "unavailable", reason: "transcript_not_opened" };
       let turnStartedPublication: Promise<void> = Promise.resolve();
+      let stopAttachedTranscript: AbortController | null = null;
+      let attachedTranscriptObserver: Promise<void> | null = null;
       try {
         turnStartedPublication = this.publish(bindingId, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth }).catch((error) => {
           this.options.logger.error({ event: "turn-started-publication-failed", err: safeLogError(error), bindingId, promptId: prompt.id, outcome: "workflow_continued" }, "TurnStarted lifecycle publication failed; prompt dispatch continued");
@@ -270,15 +277,13 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           outputMode: outputSource.mode, ...(outputSource.mode === "unavailable" ? { unavailableReason: outputSource.reason } : {}), outcome: "running"
         }, "TraeX turn started");
         const dispatchAttemptedAt = new Date().toISOString();
-        const state = await this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource }) => {
+        const confirmDispatched = (): void => {
+          if (dispatched) return;
+          this.options.store.markPromptDispatched(prompt.id, dispatchAttemptedAt);
+          dispatched = true;
+        };
+        const promptWaiter = this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource }) => {
           if (!this.isBindingActive(bindingId)) return;
-          const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
-          outputSource = typed.source;
-          const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
-          if (owned.owned) {
-            this.retainOwnedObservation(outputSource, owned.observation);
-            await this.publishTypedObservation(bindingId, prompt.id, owned.observation, startedAt);
-          }
           const previousState = binding.lastAgentState;
           if (observedState !== "unknown") this.turns.updateState(bindingId, prompt.id, observedState);
           if (stateSource !== "unknown" && observedState !== "unknown" && previousState !== observedState) {
@@ -287,7 +292,16 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
             await this.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: observedQueueDepth, promptId: prompt.id });
             if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: observedQueueDepth, outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
-        }, abortController.signal, () => { this.options.store.markPromptDispatched(prompt.id, dispatchAttemptedAt); dispatched = true; });
+        }, abortController.signal, confirmDispatched);
+        stopAttachedTranscript = new AbortController();
+        attachedTranscriptObserver = this.observeAttachedTranscript(
+          outputSource, binding, prompt, startedAt, stopAttachedTranscript.signal, confirmDispatched,
+          (source) => { outputSource = source; }
+        );
+        const state = await promptWaiter;
+        stopAttachedTranscript.abort();
+        await attachedTranscriptObserver;
+        attachedTranscriptObserver = null;
         await turnStartedPublication;
         if (!this.isBindingActive(bindingId)) return;
         const stateBeforeReturn = binding.lastAgentState;
@@ -301,6 +315,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         await this.publish(bindingId, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.info({ event: "turn-completed", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "completed" }, "TraeX turn completed");
       } catch (error) {
+        stopAttachedTranscript?.abort();
+        if (attachedTranscriptObserver) await attachedTranscriptObserver;
+        attachedTranscriptObserver = null;
         if (!this.isBindingActive(bindingId)) { observerDetached = true; return; }
         if (dispatched) {
           await turnStartedPublication;
@@ -309,6 +326,10 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           observerDetached = true;
           this.options.store.markPromptObservationDetached(prompt.id, notice);
           this.options.logger.warn({ event: "turn-observer-detached", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "detached_without_replay" }, "detached Bridge waiter from possibly in-flight TraeX turn");
+          const detachedPrompt = this.options.store.getPrompt(prompt.id);
+          if (!this.stopping && detachedPrompt?.transcriptTurnId && detachedPrompt.transcriptTurnStartedAt) {
+            await this.observeDetachedTurnWithSource(detachedPrompt, binding, outputSource, abortController);
+          }
           return;
         }
         if (abortController.signal.aborted && this.stopping) { observerDetached = true; return; }
@@ -317,6 +338,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.options.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
         if (binding.lastAgentState === "blocked") return;
       } finally {
+        stopAttachedTranscript?.abort();
+        if (attachedTranscriptObserver) await attachedTranscriptObserver;
         const steeringWorker = this.steeringWorkers.get(bindingId);
         if (steeringWorker) await steeringWorker;
         const notice = "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。";
@@ -362,7 +385,22 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
     const abortController = this.turns.attach(binding.id, prompt.id, paneId, binding.lastAgentState);
-    let outputSource = await this.openTranscript(binding);
+    const outputSource = await this.openTranscript(binding);
+    try {
+      await this.observeDetachedTurnWithSource(prompt, binding, outputSource, abortController);
+    } finally {
+      this.turns.detach(binding.id, prompt.id);
+    }
+  }
+
+  private async observeDetachedTurnWithSource(
+    prompt: PromptJob,
+    binding: Binding,
+    initialSource: TurnOutputSource,
+    abortController: AbortController
+  ): Promise<void> {
+    const paneId = binding.paneId!;
+    let outputSource = initialSource;
     try {
       while (!this.stopping) {
         if (!this.isBindingActive(binding.id)) return;
@@ -399,8 +437,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       if (abortController.signal.aborted || this.stopping) return;
       this.options.store.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
       this.options.logger.warn({ event: "detached-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId, outcome: "uncertain" }, "could not observe existing TraeX turn");
-    } finally {
-      this.turns.detach(binding.id, prompt.id);
     }
   }
 
@@ -417,7 +453,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     try {
       const result = await this.options.transcriptReader.open(session);
       return result.mode === "typed"
-        ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [] }
+        ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [], lastObservationSignature: "" }
         : { mode: "unavailable", reason: result.reason };
     } catch (error) {
       this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, unavailableReason: "transcript_validation_failed", outcome: "structured_output_unavailable" }, "could not open typed TraeX transcript");
@@ -466,15 +502,47 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     }
   }
 
+  private async observeAttachedTranscript(
+    initialSource: TurnOutputSource,
+    binding: Binding,
+    prompt: PromptJob,
+    startedAt: number,
+    signal: AbortSignal,
+    confirmDispatched: () => void,
+    updateSource: (source: TurnOutputSource) => void
+  ): Promise<void> {
+    let source = initialSource;
+    await abortableWait(ATTACHED_TRANSCRIPT_POLL_MS, signal).catch(() => undefined);
+    while (!this.stopping && !signal.aborted && this.isBindingActive(binding.id)) {
+      const typed = await this.readTypedDelta(source, binding, prompt.id);
+      source = typed.source;
+      updateSource(source);
+      const signature = JSON.stringify(typed.observation);
+      if (source.mode === "typed" && signature === source.lastObservationSignature) {
+        await abortableWait(ATTACHED_TRANSCRIPT_POLL_MS, signal).catch(() => undefined);
+        continue;
+      }
+      if (source.mode === "typed") source.lastObservationSignature = signature;
+      if (typed.observation.freshTurnStart === true && typed.observation.turnLifecycle) confirmDispatched();
+      const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
+      if (owned.owned) {
+        this.retainOwnedObservation(source, owned.observation);
+        await this.publishTypedObservation(binding.id, prompt.id, owned.observation, startedAt);
+      }
+      await abortableWait(ATTACHED_TRANSCRIPT_POLL_MS, signal).catch(() => undefined);
+    }
+  }
+
   private async drainAvailableTranscript(source: TurnOutputSource, binding: Binding, prompt: PromptJob, startedAt: number): Promise<TurnOutputSource> {
     let current = source;
-    let previousSignature = "";
+    let previousSignature = current.mode === "typed" ? current.lastObservationSignature : "";
     for (let iteration = 0; iteration < FINAL_TRANSCRIPT_DRAIN_LIMIT && current.mode === "typed"; iteration += 1) {
       const typed = await this.readTypedDelta(current, binding, prompt.id);
       current = typed.source;
       const signature = JSON.stringify(typed.observation);
       if (signature === previousSignature || signature === JSON.stringify({ answerDelta: "" })) break;
       previousSignature = signature;
+      if (current.mode === "typed") current.lastObservationSignature = signature;
       const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
       if (owned.owned) {
         this.retainOwnedObservation(current, owned.observation);

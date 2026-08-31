@@ -201,6 +201,7 @@ export interface PromptJob {
   larkMessageId: string;
   actorOpenId: string;
   body: string;
+  executionOrigin: "bridge" | "herdr";
   dispatchKind: PromptDispatchKind;
   parentPromptId: string | null;
   steeringOrigin: SteeringOrigin | null;
@@ -215,6 +216,13 @@ export interface PromptJob {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ExternalTurnAdoption {
+  outcome: "adopted_queued" | "created_external" | "already_owned" | "stale_binding" | "conflict";
+  prompt: PromptJob | null;
+  supersededPromptIds: string[];
+  outboxReserved: boolean;
 }
 
 export type TranscriptTurnClaimOutcome =

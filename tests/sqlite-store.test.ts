@@ -19,6 +19,59 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("atomically adopts the unique queued prompt matching an external Herdr turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 3, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const queued = createQueuedRunCard({ promptId: "queued", bindingId: "b1", bindingGeneration: 3, title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "line 1\r\nline 2", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "line 1\r\nline 2" }, view: queued, rootMessageId: "root", answerCard: {} });
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 3, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt: "2026-08-31T10:00:01.000Z", requestText: "line 1\nline 2", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
+      externalView: { ...queued, promptId: "external" }, answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "adopted_queued", prompt: { id: "queued", executionOrigin: "herdr", state: "running", observationState: "attached", transcriptTurnId: "turn-1" }, supersededPromptIds: [], outboxReserved: true });
+    expect(store.getPrompt("external")).toBeNull();
+  });
+
+  it("updates an already delivered queued Answer Card after external adoption", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const queued = createQueuedRunCard({ promptId: "queued", bindingId: "b1", title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "answer-1", "card-1");
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt: "2026-08-31T10:00:01.000Z", requestText: "work", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
+      externalView: { ...queued, promptId: "external" }, answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "adopted_queued", outboxReserved: false });
+    expect(store.loadRunCard("queued")).toMatchObject({ phase: "queued", answerMessageId: "answer-1", answerCardId: "card-1" });
+  });
+
+  it("creates an independently rendered Answer Card when no queued prompt uniquely matches", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 2, title: "Direct work", workspaceId: "w1", paneId: "w1:p1", requestText: "direct work", queuePosition: 0, occurredAt: "2026-08-31T10:00:01.000Z" });
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-2", startedAt: "2026-08-31T10:00:01.000Z", requestText: "direct work", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-2",
+      externalView, answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: "external", executionOrigin: "herdr", state: "running", observationState: "attached", transcriptTurnId: "turn-2" }, outboxReserved: true });
+    expect(store.loadRunCard("external")).toMatchObject({ phase: "queued", queuePosition: 0, startedAt: null });
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: "external", kind: "stream_card_create", cardRole: "answer" })]));
+  });
+
   it("persists dispatch and exact transcript ownership provenance", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

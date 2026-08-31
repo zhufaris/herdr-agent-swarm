@@ -114,6 +114,27 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("reports the user request scoped to a fresh transcript turn", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "user_message", message: "run directly from Herdr" }),
+      mutation([
+        { type: "message", id: "system-1", role: "system", content: [{ type: "input_text", text: "hidden system context" }] },
+        { type: "message", id: "developer-1", role: "developer", content: [{ type: "input_text", text: "hidden developer context" }] }
+      ])
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId,
+      freshTurnStart: true,
+      requestText: "run directly from Herdr",
+      answerDelta: ""
+    });
+  });
+
   it("emits adjacent transcript turns as separate lifecycle-scoped observations", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

@@ -441,6 +441,119 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
+  it("publishes attached transcript output while the Herdr prompt waiter is still running", async () => {
+    const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    const startedAt = new Date(Date.now() + 100).toISOString();
+    let reads = 0;
+    let releasePrompt!: () => void;
+    const promptCompletion = new Promise<void>((resolve) => { releasePrompt = resolve; });
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "typed", cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          reads += 1;
+          if (reads === 1) return { answerDelta: "" };
+          return {
+            turnId, freshTurnStart: reads === 2, answerDelta: reads === 2 ? "Visible before completion" : "",
+            turnLifecycle: { turnId, state: reads >= 4 ? "completed" as const : "active" as const, startedAt, ...(reads >= 4 ? { finalAnswer: "Visible before completion" } : {}) }
+          };
+        }
+      } }; }
+    };
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await promptCompletion;
+      await onDispatched?.();
+      return "done" as const;
+    });
+    const herdr: HerdrPort = {
+      ...emptyHerdr(), runPrompt,
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const observed: Extract<BridgeEvent, { type: "TurnOutputObserved" }>[] = [];
+    bus.onBridgeEvent("live-attached-output-test", (event) => { if (event.type === "TurnOutputObserved") observed.push(event); });
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "live-e1", messageId: "live-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "stream while waiting", mentionsBot: false, isRootMessage: false });
+
+    await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce(), { timeout: 2_000 });
+    await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
+    expect({ observed: observed.map((event) => event.payload.observation.answer.snapshot), prompt: store.getPrompt(store.listRunCards("b1")[0]!.promptId) }).toMatchObject({ observed: expect.arrayContaining(["Visible before completion"]) });
+    expect(runPrompt).toHaveBeenCalledOnce();
+    expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)).toMatchObject({ state: "running", observationState: "attached", transcriptTurnId: turnId });
+
+    releasePrompt();
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Visible before completion" }));
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("preserves the live transcript cursor when an attached waiter becomes detached", async () => {
+    const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    const startedAt = new Date(Date.now() + 100).toISOString();
+    let reads = 0;
+    let emittedAfterDetach = false;
+    let finishTurn = false;
+    let store!: SqliteBindingStore;
+    const open = vi.fn(async () => ({ mode: "typed" as const, cursor: {
+      async readDelta() { return ""; },
+      async readObservation() {
+        reads += 1;
+        const prompt = store.listRunCards("b1")[0];
+        const detached = prompt ? store.getPrompt(prompt.promptId)?.observationState === "detached" : false;
+        if (!detached) return { turnId, freshTurnStart: reads === 1, answerDelta: "", turnLifecycle: { turnId, state: "active" as const, startedAt } };
+        if (!emittedAfterDetach) {
+          emittedAfterDetach = true;
+          return { turnId, answerDelta: "First commentary after stall", turnLifecycle: { turnId, state: "active" as const, startedAt } };
+        }
+        if (!finishTurn) return { turnId, answerDelta: "", turnLifecycle: { turnId, state: "active" as const, startedAt } };
+        return { turnId, answerDelta: "", turnLifecycle: { turnId, state: "completed" as const, startedAt, finalAnswer: "First commentary after stall" } };
+      }
+    } }));
+    const transcriptReader: TraexTranscriptReaderPort = { open };
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await onDispatched?.();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      throw new Error("agent_prompt_stalled");
+    });
+    const herdr: HerdrPort = {
+      ...emptyHerdr(), runPrompt,
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async observeRuntime() { return { pane: { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "working" }, traexProcess: true, composerReady: false, evidenceSource: "structured" }; }
+    };
+    store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const observed: Extract<BridgeEvent, { type: "TurnOutputObserved" }>[] = [];
+    bus.onBridgeEvent("detached-cursor-handoff-test", (event) => { if (event.type === "TurnOutputObserved") observed.push(event); });
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "handoff-e1", messageId: "handoff-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "handoff cursor", mentionsBot: false, isRootMessage: false });
+    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "handoff cursor")!;
+    await vi.waitFor(() => expect(observed.map((event) => event.payload.observation.answer.snapshot)).toEqual(["First commentary after stall"]), { timeout: 2_000 });
+    expect(store.getPrompt(target().promptId)).toMatchObject({ state: "running", observationState: "detached", wasDetached: true, transcriptTurnId: turnId });
+    finishTurn = true;
+    await vi.waitFor(() => expect(target()).toMatchObject({ phase: "completed", answer: "First commentary after stall" }), { timeout: 2_000 });
+    expect({
+      observed: observed.map((event) => event.payload.observation.answer.snapshot), reads, opens: open.mock.calls.length, dispatches: runPrompt.mock.calls.length,
+      prompt: store.getPrompt(target().promptId)
+    }).toMatchObject({
+      observed: ["First commentary after stall"], reads: expect.any(Number), opens: 1, dispatches: 1,
+      prompt: { observationState: "completed", wasDetached: true, transcriptTurnId: turnId }
+    });
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("recovers a dispatched turn when Herdr reports stalled before observing it", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let startedAt = "";

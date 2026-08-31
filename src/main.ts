@@ -15,6 +15,7 @@ import { SessionAdministrationWorkflow } from "./coordinator/session-administrat
 import { DeliveryRecoveryWorkflow } from "./coordinator/delivery-recovery-workflow.js";
 import { PaneClosureWorkflow } from "./coordinator/pane-closure-workflow.js";
 import { PromptRunWorkflow } from "./coordinator/prompt-run-workflow.js";
+import { ExternalTurnObserver } from "./coordinator/external-turn-observer.js";
 import { RetiredPaneCleanupWorkflow } from "./coordinator/retired-pane-cleanup-workflow.js";
 import { StartupViewConverger } from "./coordinator/startup-view-converger.js";
 import { BridgeEventBus } from "./events/bridge-event-bus.js";
@@ -33,6 +34,8 @@ import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
 import { HerdrCircuitBreaker } from "./runtime/herdr-circuit-breaker.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
+import { HerdrEventRouter } from "./runtime/herdr-event-router.js";
+import type { HerdrRuntimeHint } from "./runtime/herdr-event-hint.js";
 import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
 import { SqliteIntegrityAuditor } from "./runtime/sqlite-integrity-auditor.js";
 import { WorkerDatabaseIntegrityStore } from "./runtime/sqlite-integrity-worker.js";
@@ -75,6 +78,7 @@ let rawHerdr!: HerdrCliAdapter;
 let herdrCircuitBreaker!: HerdrCircuitBreaker;
 let herdr!: WorkspaceSnapshotCache;
 let instanceRuntime!: InstanceRuntimeReconciler;
+let herdrEventRouter!: HerdrEventRouter;
 const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
   ? new HerdrSocketSubscriber(
       process.env.HERDR_SOCKET_PATH,
@@ -82,10 +86,7 @@ const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
         const configuredWorkspaceIds = new Set(config.projects.map((project) => project.workspaceId));
         return (await herdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
       },
-      async ({ workspaceIds }) => {
-        for (const workspaceId of workspaceIds) herdr.invalidate(workspaceId);
-        await Promise.all([coordinator.reconcileHerdrWorkspaces(workspaceIds.length > 0 ? workspaceIds : undefined), instanceRuntime.reconcile()]);
-      },
+      async (hint: HerdrRuntimeHint) => herdrEventRouter.handle(hint),
       logger
     )
   : null;
@@ -127,7 +128,16 @@ const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.
 const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cardUpdateDebounceMs });
 const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork, logger });
 channelPublisher.connectPromptScheduler(scheduler);
-const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader });
+let promptRun!: PromptRunWorkflow;
+const externalTurns = new ExternalTurnObserver({
+  store, transcriptReader, bus, outboundWork, logger,
+  isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
+  wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
+});
+promptRun = new PromptRunWorkflow({
+  store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader,
+  handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId)
+});
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
 const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
 const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
@@ -143,7 +153,20 @@ const reconciler = new HerdrRuntimeReconciler({
   convergeAnswer: (promptId) => answerPages.converge(promptId),
   discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
   isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
+  externalTurnObserver: externalTurns,
   worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
+});
+herdrEventRouter = new HerdrEventRouter({
+  invalidateWorkspace: (workspaceId) => herdr.invalidate(workspaceId),
+  reconcileBindings: async (scope) => {
+    if (scope?.paneIds) await reconciler.requestPaneReconciliation(scope.paneIds);
+    else await reconciler.requestReconciliation(scope?.workspaceIds);
+  },
+  reconcileInstances: (scope) => instanceRuntime.requestReconciliation(scope),
+  observeInstanceTurns: (paneIds) => paneIds ? instanceTurns.requestObservationByPane(paneIds) : instanceTurns.reconcile(),
+  observeExternalTurns: (paneIds) => paneIds ? externalTurns.observeByPane(paneIds) : externalTurns.scanActiveBindings(),
+  retryRetiredPanes: (paneIds) => paneIds ? retiredPaneCleanup.requestPanes(paneIds) : retiredPaneCleanup.requestScan(),
+  logger
 });
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
 const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
@@ -184,6 +207,7 @@ try {
   process.once("SIGTERM", () => { void stopRuntime("SIGTERM"); });
   logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
+  externalTurns.start();
   instanceRuntime.start(config.reconcileIntervalMs);
   instanceTurns.start(config.reconcileIntervalMs);
   herdrSocketSubscriber?.startEvents();

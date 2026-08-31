@@ -429,7 +429,19 @@ session-report socket or fallback identity.
 `PromptRunWorkflow` opens the corresponding
 transcript at EOF before dispatch, but only when exactly one filename matches
 the UUID and its `session_meta` record carries the same ID. It reads complete
-newline-terminated records from a byte cursor. `history_mutation.payload.items`
+newline-terminated records from a byte cursor. While `agent prompt --wait` owns
+submission and settlement, one attached
+observer polls that cursor every 250 ms so exact-turn Answer deltas do not wait
+for the Herdr command to return. A fresh `task_started` record first establishes
+the durable dispatch and transcript-turn fence; inherited or unscoped output is
+never published. Command settlement stops the observer before the bounded final
+drain, and their shared observation signature suppresses duplicate publication.
+If the Herdr waiter becomes uncertain after dispatch, the same binding worker
+hands its live cursor and accumulated Answer state directly to detached
+observation. This closes the EOF reopen gap without replaying the prompt. A
+process restart still opens a new cursor and fences output with the durable turn
+ID and start timestamp because cursor internals are deliberately process-local.
+`history_mutation.payload.items`
 in append mutations is the canonical typed Answer-content source. Assistant
 `message` items contribute only their ordered `output_text` parts. A
 `function_call` stores a compact descriptor but emits no Answer content. Its
@@ -479,6 +491,27 @@ turn remains typed and finalizes from its accumulated typed chunks. When no type
 content exists, completion uses the fixed safe notice
 `⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
 A transcript failure does not fail or replay the prompt.
+
+For a bound pane, reconciliation also keeps an independent EOF cursor as an
+event-woken observer with a lightweight two-second transcript poll between full
+Herdr reconciliations. Background polling pauses while the binding worker owns
+the turn boundary. Before that worker claims each queued Lark prompt, it performs
+one serialized handoff scan so external transcript work is adopted before the
+next bridge dispatch; external completion wakes the binding worker to resume its
+FIFO. The scan reads only durable active bindings and their transcript files; it
+does not perform a Herdr snapshot or treat socket payloads as authoritative state. A new
+`task_started` plus its scoped `user_message` may adopt exactly one queued
+ordinary prompt only when binding generation, pane, native session, request
+body (apart from line-ending normalization), and creation time all match. An
+ambiguous or absent match creates a separate durable prompt and Answer Card.
+The atomic SQLite transition records `execution_origin = 'herdr'`, claims the
+full transcript turn ID, and reserves any initial card delivery before events
+enter the normal `BridgeEventBus` projection path; it never submits the request
+to TraeX again. A newer external turn may terminalize only an identity-less
+detached prompt as uncertain. Turns already owned by bridge dispatch are skipped
+by this observer, and an identified detached turn remains the responsibility of
+`PromptRunWorkflow`. Periodic scans and explicit handoffs are serialized per
+binding so two external cursor reads cannot race.
 
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;

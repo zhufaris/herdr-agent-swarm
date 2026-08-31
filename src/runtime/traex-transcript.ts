@@ -64,6 +64,10 @@ const taskCompleteEventSchema = z.object({
   started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS),
   last_agent_message: z.string().optional()
 }).passthrough();
+const userMessageEventSchema = z.object({
+  type: z.literal("user_message"),
+  message: z.string()
+}).passthrough();
 const planArgumentsSchema = z.object({
   plan: z.array(z.object({
     step: z.string(),
@@ -230,6 +234,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     let tokenCount: number | undefined;
     let observationTurnId = this.turnLifecycle?.state === "active" ? this.turnLifecycle.turnId : undefined;
     let freshTurnStart = false;
+    let requestText: string | undefined;
     for (const line of lines) {
       const envelope = parseEnvelope(line);
       if (!envelope) continue;
@@ -241,6 +246,10 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
           this.callsById.clear();
         }
         this.turnLifecycle = reduceTurnLifecycle(this.turnLifecycle, envelope, this.maxRenderedDeltaChars);
+        const userMessage = userMessageEventSchema.safeParse(envelope.payload);
+        if (userMessage.success && observationTurnId && this.turnLifecycle?.turnId === observationTurnId) {
+          requestText = boundMarkdown(redactSecrets(userMessage.data.message), this.maxRenderedDeltaChars);
+        }
         const reasoning = reasoningEventSchema.safeParse(envelope.payload);
         if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
         const tokens = tokenCountEventSchema.safeParse(envelope.payload);
@@ -272,6 +281,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     const observation = {
       ...(observationTurnId ? { turnId: observationTurnId } : {}),
       ...(freshTurnStart ? { freshTurnStart: true } : {}),
+      ...(requestText !== undefined ? { requestText } : {}),
       answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars),
       ...(toolActivities.length ? { toolActivities } : {}),
       ...(Object.keys(mainStatus).length ? { mainStatus } : {}),

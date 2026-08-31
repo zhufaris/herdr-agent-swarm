@@ -1,4 +1,4 @@
-import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery, TranscriptTurnClaimOutcome } from "./types.js";
+import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery, TranscriptTurnClaimOutcome } from "./types.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -10,7 +10,7 @@ import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnCursor
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
 
 export interface ClassifiedPromptInput {
-  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt">;
+  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin">;
   ordinaryView: RunCardView;
   steeringView: RunCardView;
   rootMessageId: string;
@@ -148,6 +148,7 @@ export interface TraexTranscriptMainStatus {
 export interface TraexTranscriptObservation {
   turnId?: string;
   freshTurnStart?: boolean;
+  requestText?: string;
   answerDelta: string;
   toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
   mainStatus?: TraexTranscriptMainStatus;
@@ -277,8 +278,13 @@ export interface BindingStorePort {
   markPromptDispatched(id: string, dispatchedAt: string): void;
   claimPromptTranscriptTurn(input: { promptId: string; bindingId: string; turnId: string; startedAt: string }): TranscriptTurnClaimOutcome;
   recoverLegacyElementIdDeadLetters(): number;
-  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">>): { prompt: PromptJob; inserted: boolean };
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean };
+  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  adoptExternalTurn(input: {
+    bindingId: string; expectedGeneration: number; expectedPaneId: string; expectedSession: HerdrAgentSession;
+    turnId: string; startedAt: string; requestText: string; externalPromptId: string; externalMessageId: string;
+    externalView: RunCardView; answerCardFor(view: RunCardView): object;
+  }): ExternalTurnAdoption;
   acceptClassifiedPrompt(input: ClassifiedPromptInput): ClassifiedPromptAcceptance;
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
   getActiveAnswerPage(promptId: string): AnswerPage | null;

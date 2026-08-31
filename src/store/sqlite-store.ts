@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, SqliteIntegrityInspection, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, SqliteIntegrityInspection, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -30,6 +30,7 @@ const FENCED_TABLES = [
   "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
+const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
@@ -1544,6 +1545,69 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
+  adoptExternalTurn(input: Parameters<BindingStorePort["adoptExternalTurn"]>[0]): ExternalTurnAdoption {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const binding = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(input.bindingId) as BindingRow | undefined;
+      if (!binding || !binding.root_message_id || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || Number(binding.generation) !== input.expectedGeneration || binding.pane_id !== input.expectedPaneId
+        || binding.agent_session_source !== input.expectedSession.source || binding.agent_session_agent !== input.expectedSession.agent || binding.agent_session_kind !== input.expectedSession.kind || binding.agent_session_value !== input.expectedSession.value) {
+        this.database.exec("COMMIT");
+        return { outcome: "stale_binding", prompt: null, supersededPromptIds: [], outboxReserved: false };
+      }
+      const owners = this.database.prepare("SELECT * FROM prompt_jobs WHERE transcript_turn_id = ? ORDER BY id LIMIT 2").all(input.turnId) as PromptRow[];
+      const owned = owners[0];
+      if (owned) {
+        this.database.exec("COMMIT");
+        return { outcome: owners.length === 1 && owned.binding_id === input.bindingId ? "already_owned" : "conflict", prompt: mapPrompt(owned), supersededPromptIds: [], outboxReserved: false };
+      }
+      const active = this.database.prepare("SELECT * FROM prompt_jobs WHERE binding_id = ? AND dispatch_kind = 'turn' AND state = 'running' ORDER BY created_at, id").all(input.bindingId) as PromptRow[];
+      if (active.some((row) => row.observation_state !== "detached" || row.transcript_turn_id !== null)) {
+        this.database.exec("COMMIT");
+        return { outcome: "conflict", prompt: null, supersededPromptIds: [], outboxReserved: false };
+      }
+      const timestamp = now();
+      const supersededPromptIds = active.map((row) => row.id);
+      for (const row of active) {
+        this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run("Superseded by a newer external Herdr turn; prior outcome is uncertain", timestamp, row.id);
+        this.database.prepare("UPDATE run_cards SET phase = 'failed', finished_at = ?, notice = ?, queue_position = 0, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ? AND phase IN ('running','blocked')").run(input.startedAt, "A newer Herdr turn started while this detached turn had an uncertain outcome.", timestamp, row.id);
+      }
+      const normalizedRequest = normalizeExternalRequest(input.requestText);
+      const candidates = (this.database.prepare(`
+        SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+        WHERE p.binding_id = ? AND p.dispatch_kind = 'turn' AND p.state = 'queued' AND p.observation_state = 'not_started'
+          AND c.binding_generation = ? AND c.pane_id = ? AND p.created_at <= ?
+        ORDER BY p.created_at, p.id
+      `).all(input.bindingId, input.expectedGeneration, input.expectedPaneId, input.startedAt) as PromptRow[])
+        .filter((row) => normalizeExternalRequest(row.body) === normalizedRequest);
+      let promptId: string;
+      let outcome: ExternalTurnAdoption["outcome"];
+      let outboxReserved = false;
+      if (candidates.length === 1) {
+        promptId = candidates[0]!.id;
+        outcome = "adopted_queued";
+        this.database.prepare(`UPDATE prompt_jobs SET execution_origin = 'herdr', state = 'running', observation_state = 'attached', dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ?, error = NULL, updated_at = ? WHERE id = ?`)
+          .run(input.startedAt, input.turnId, input.startedAt, timestamp, promptId);
+        const queuedView = this.loadRunCard(promptId)!;
+        const runningView = reduceRunCard(queuedView, { type: "started", occurredAt: input.startedAt });
+        outboxReserved = Number(this.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE prompt_id = ? AND kind = 'stream_card_create' AND card_role = 'answer' AND state = 'pending'").run(JSON.stringify(input.answerCardFor(runningView)), runningView.viewVersion, timestamp, promptId).changes) > 0;
+      } else {
+        promptId = input.externalPromptId;
+        outcome = "created_external";
+        this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, execution_origin, dispatch_kind, state, observation_state, dispatched_at, transcript_turn_id, transcript_turn_started_at, attempt_count, created_at, updated_at) VALUES (?, ?, ?, 'herdr', ?, 'herdr', 'turn', 'running', 'attached', ?, ?, ?, 1, ?, ?)`)
+          .run(promptId, input.bindingId, input.externalMessageId, input.requestText, input.startedAt, input.turnId, input.startedAt, input.startedAt, timestamp);
+        const view = { ...input.externalView, promptId, bindingId: input.bindingId, bindingGeneration: input.expectedGeneration, paneId: input.expectedPaneId, requestText: input.requestText, queuePosition: 0 };
+        const runningView = reduceRunCard(view, { type: "started", occurredAt: input.startedAt });
+        this.insertRunCard(view);
+        this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`)
+          .run(randomUUID(), `run-card:create:${promptId}:answer`, input.bindingId, promptId, runningView.viewVersion, binding.root_message_id, JSON.stringify(input.answerCardFor(runningView)), `answer:${promptId}`, timestamp, timestamp, timestamp);
+        outboxReserved = true;
+      }
+      const prompt = this.requirePrompt(promptId);
+      this.database.exec("COMMIT");
+      return { outcome, prompt, supersededPromptIds, outboxReserved };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   recoverLegacyElementIdDeadLetters(): number {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
@@ -1564,7 +1628,7 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">>): { prompt: PromptJob; inserted: boolean } {
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
     const timestamp = now();
     const result = this.database.prepare(`
       INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at)
@@ -1578,7 +1642,7 @@ export class SqliteBindingStore implements BindingStorePort {
     return { prompt: mapPrompt(row), inserted };
   }
 
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
+  acceptPrompt(input: Parameters<BindingStorePort["acceptPrompt"]>[0]): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.prompt.larkMessageId) as PromptRow | undefined;
@@ -2739,7 +2803,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS card_interactions_expiry ON card_interactions(state, expires_at);
       CREATE TABLE IF NOT EXISTS prompt_jobs(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
         steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
         dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT,
         state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
@@ -2834,6 +2898,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensurePromptObservationColumn();
     this.ensurePromptProvenanceColumns();
     this.ensurePromptTranscriptProvenanceColumns();
+    this.ensurePromptExecutionOriginColumn();
     this.ensureRunCardActivityColumn();
     this.ensureRunCardSteeringColumns();
     this.ensureOutboundDeliveryOrder();
@@ -3046,19 +3111,20 @@ export class SqliteBindingStore implements BindingStorePort {
     const dispatchedAt = columns.has("dispatched_at") ? "dispatched_at" : "NULL";
     const transcriptTurnId = columns.has("transcript_turn_id") ? "transcript_turn_id" : "NULL";
     const transcriptTurnStartedAt = columns.has("transcript_turn_started_at") ? "transcript_turn_started_at" : "NULL";
+    const executionOrigin = columns.has("execution_origin") ? "execution_origin" : "'bridge'";
     const observationState = columns.has("observation_state") ? "observation_state" : "CASE WHEN state = 'running' THEN 'attached' WHEN state = 'queued' THEN 'not_started' ELSE 'completed' END";
     this.database.exec(`
       PRAGMA foreign_keys = OFF;
       BEGIN IMMEDIATE;
       CREATE TABLE prompt_jobs_next(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
         steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs_next(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
         dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT,
         state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO prompt_jobs_next(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at) SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, ${steeringOrigin}, ${sourcePromptId}, ${wasDetached}, ${dispatchedAt}, ${transcriptTurnId}, ${transcriptTurnStartedAt}, state, ${observationState}, attempt_count, error, created_at, updated_at FROM prompt_jobs;
+      INSERT INTO prompt_jobs_next(id, binding_id, lark_message_id, actor_open_id, body, execution_origin, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at) SELECT id, binding_id, lark_message_id, actor_open_id, body, ${executionOrigin}, dispatch_kind, parent_prompt_id, ${steeringOrigin}, ${sourcePromptId}, ${wasDetached}, ${dispatchedAt}, ${transcriptTurnId}, ${transcriptTurnStartedAt}, state, ${observationState}, attempt_count, error, created_at, updated_at FROM prompt_jobs;
       DROP TABLE prompt_jobs;
       ALTER TABLE prompt_jobs_next RENAME TO prompt_jobs;
       CREATE INDEX prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
@@ -3199,6 +3265,12 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!names.has("dispatched_at")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN dispatched_at TEXT");
     if (!names.has("transcript_turn_id")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN transcript_turn_id TEXT");
     if (!names.has("transcript_turn_started_at")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN transcript_turn_started_at TEXT");
+  }
+
+  private ensurePromptExecutionOriginColumn(): void {
+    const names = new Set((this.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!names.has("execution_origin")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr'))");
+    this.database.exec("CREATE INDEX IF NOT EXISTS prompt_jobs_transcript_turn ON prompt_jobs(transcript_turn_id) WHERE transcript_turn_id IS NOT NULL");
   }
 
   private ensureRunCardActivityColumn(): void {

@@ -130,6 +130,25 @@ describe("PromptRunWorkflow durable safety scan", () => {
     await workflow.stop();
   });
 
+  it("hands transcript ownership to external observation before claiming queued bridge work", async () => {
+    const order: string[] = [];
+    const handoff = vi.fn(async () => { order.push("handoff"); });
+    const claim = vi.fn(() => { order.push("claim"); return null; });
+    const workflow = new PromptRunWorkflow({
+      store: { scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }), claimNextDispatchablePrompt: claim } as never,
+      scheduler: new InProcessPromptWorkScheduler(), safetyScanIntervalMs: 100, turnTimeoutMs: 1_000,
+      herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never, handoffExternalTurns: handoff
+    });
+
+    workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
+    await vi.waitFor(() => expect(claim).toHaveBeenCalledOnce());
+
+    expect(handoff).toHaveBeenCalledWith("b1");
+    expect(order).toEqual(["handoff", "claim"]);
+    await workflow.stop();
+  });
+
   it("keeps one timer across repeated starts and wakes and never rearms after stop", async () => {
     vi.useFakeTimers();
     const scan = vi.fn(() => ({ cancelled: 0, failedDetached: 0, hints: [] }));
