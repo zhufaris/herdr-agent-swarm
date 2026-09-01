@@ -167,6 +167,43 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("reports a matching turn_aborted record as a terminal lifecycle", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "turn_aborted", turn_id: turnId, reason: "interrupted" })
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId,
+      answerDelta: "",
+      turnLifecycle: {
+        turnId,
+        state: "aborted",
+        startedAt: "2026-08-29T20:28:24.000Z",
+        reason: "interrupted"
+      }
+    });
+  });
+
+  it("restores an aborted lifecycle when the transcript is opened after restart", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "turn_aborted", turn_id: turnId, reason: "interrupted" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId,
+      answerDelta: "",
+      turnLifecycle: { turnId, state: "aborted", startedAt: "2026-08-29T20:28:24.000Z", reason: "interrupted" }
+    });
+  });
+
   it("reports the user request scoped to a fresh transcript turn", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

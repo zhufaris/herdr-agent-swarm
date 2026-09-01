@@ -54,6 +54,38 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
+  it("fails an adopted external turn when TraeX records a human interruption and wakes the FIFO", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const turnId = "turn-aborted";
+    const observations: TraexTranscriptObservation[] = [
+      { turnId, freshTurnStart: true, requestText: "direct task", answerDelta: "", turnLifecycle: { turnId, state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
+      { turnId, answerDelta: "", turnLifecycle: { turnId, state: "aborted", startedAt: "2026-08-31T10:00:00.000Z", reason: "interrupted" } },
+      { answerDelta: "" }
+    ];
+    const events: string[] = [];
+    const bus = new BridgeEventBus();
+    bus.onBridgeEvent("capture", (event) => events.push(event.type));
+    const wakePrompt = vi.fn();
+    const observer = new ExternalTurnObserver({
+      store,
+      transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }) },
+      bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt, idFactory: () => "external-aborted"
+    });
+
+    const binding = store.getBinding("b1")!;
+    await observer.observe(binding);
+    await observer.observe(binding);
+    await observer.observe(binding);
+
+    expect(store.getPrompt("external-aborted")).toMatchObject({ state: "failed", observationState: "completed" });
+    expect(events).toEqual(["TurnStarted", "TurnFailed"]);
+    expect(wakePrompt).toHaveBeenCalledWith("b1");
+    await observer.stop();
+    store.close();
+  });
+
   it("does not poll transcript data while a binding worker is busy but permits an explicit handoff", async () => {
     const readObservation = vi.fn(async () => ({ answerDelta: "" }));
     const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: async () => "", readObservation } }));

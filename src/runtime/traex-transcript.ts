@@ -65,6 +65,11 @@ const taskCompleteEventSchema = z.object({
   started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS),
   last_agent_message: z.string().optional()
 }).passthrough();
+const turnAbortedEventSchema = z.object({
+  type: z.literal("turn_aborted"),
+  turn_id: z.string().regex(SESSION_ID),
+  reason: z.string().min(1).optional()
+}).passthrough();
 const userMessageEventSchema = z.object({
   type: z.literal("user_message"),
   message: z.string()
@@ -324,7 +329,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       ...(Object.keys(mainStatus).length ? { mainStatus } : {}),
       ...(observationTurnId && this.turnLifecycle?.turnId === observationTurnId ? { turnLifecycle: this.turnLifecycle } : {})
     };
-    if (this.turnLifecycle?.state === "completed") this.callsById.clear();
+    if (this.turnLifecycle?.state === "completed" || this.turnLifecycle?.state === "aborted") this.callsById.clear();
     return observation;
   }
 
@@ -336,6 +341,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       if (!envelope) continue;
       const started = envelope.type === "event_msg" ? taskStartedEventSchema.safeParse(envelope.payload) : null;
       const completed = envelope.type === "event_msg" ? taskCompleteEventSchema.safeParse(envelope.payload) : null;
+      const aborted = envelope.type === "event_msg" ? turnAbortedEventSchema.safeParse(envelope.payload) : null;
       if (started?.success) {
         if (index === 0) {
           scopedTurnId = started.data.turn_id;
@@ -344,6 +350,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
         if (!scopedTurnId || started.data.turn_id !== scopedTurnId) return index;
       }
       if (completed?.success && scopedTurnId && completed.data.turn_id === scopedTurnId) return index + 1;
+      if (aborted?.success && scopedTurnId && aborted.data.turn_id === scopedTurnId) return index + 1;
     }
     return this.pendingLines.length;
   }
@@ -416,16 +423,25 @@ function reduceTurnLifecycle(
     startedAt: eventTime(started.data.started_at)
   };
   const completed = taskCompleteEventSchema.safeParse(envelope.payload);
-  if (!completed.success) return current;
-  if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current;
-  const finalAnswer = completed.data.last_agent_message
-    ? boundMarkdown(redactSecrets(completed.data.last_agent_message.trim()), maxRenderedDeltaChars)
-    : "";
+  if (completed.success) {
+    if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current;
+    const finalAnswer = completed.data.last_agent_message
+      ? boundMarkdown(redactSecrets(completed.data.last_agent_message.trim()), maxRenderedDeltaChars)
+      : "";
+    return {
+      turnId: completed.data.turn_id,
+      state: "completed",
+      startedAt: current.startedAt,
+      ...(finalAnswer ? { finalAnswer } : {})
+    };
+  }
+  const aborted = turnAbortedEventSchema.safeParse(envelope.payload);
+  if (!aborted.success || current?.state !== "active" || current.turnId !== aborted.data.turn_id) return current;
   return {
-    turnId: completed.data.turn_id,
-    state: "completed",
+    turnId: aborted.data.turn_id,
+    state: "aborted",
     startedAt: current.startedAt,
-    ...(finalAnswer ? { finalAnswer } : {})
+    ...(aborted.data.reason ? { reason: boundMarkdown(redactSecrets(aborted.data.reason), maxRenderedDeltaChars) } : {})
   };
 }
 
@@ -530,6 +546,8 @@ async function findCompletedTurnBoundary(path: string, end: number, turnId: stri
         }
         const completed = taskCompleteEventSchema.safeParse(envelope.payload);
         if (matchedStart && completed.success && completed.data.turn_id === turnId && eventTime(completed.data.started_at) === startedAt) return nextOffset;
+        const aborted = turnAbortedEventSchema.safeParse(envelope.payload);
+        if (matchedStart && aborted.success && aborted.data.turn_id === turnId) return nextOffset;
       }
       offset = nextOffset;
     }

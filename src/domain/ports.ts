@@ -154,9 +154,10 @@ export interface TraexTranscriptObservation {
   mainStatus?: TraexTranscriptMainStatus;
   turnLifecycle?: {
     turnId: string;
-    state: "active" | "completed";
+    state: "active" | "completed" | "aborted";
     startedAt: string;
     finalAnswer?: string;
+    reason?: string;
   };
 }
 

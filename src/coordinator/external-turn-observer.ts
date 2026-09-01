@@ -10,7 +10,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-type ExternalTurnStore = Pick<BindingStorePort, "adoptExternalTurn" | "completeTurn" | "countPendingPrompts" | "findBindingByPane" | "getBinding" | "getPrompt" | "listBindingsByState">;
+type ExternalTurnStore = Pick<BindingStorePort, "adoptExternalTurn" | "completeTurn" | "countPendingPrompts" | "failPrompt" | "findBindingByPane" | "getBinding" | "getPrompt" | "listBindingsByState">;
 
 interface ExternalTurnObserverOptions {
   store: ExternalTurnStore;
@@ -228,6 +228,20 @@ export class ExternalTurnObserver {
       this.options.wakePrompt(binding.id);
       return "completed";
     }
+    if (lifecycle?.state === "aborted") {
+      const current = this.options.store.getPrompt(owned.promptId);
+      if (current?.state === "running") {
+        const reason = lifecycle.reason === "interrupted"
+          ? "TraeX turn was interrupted by a human operator"
+          : `TraeX turn was aborted${lifecycle.reason ? `: ${lifecycle.reason}` : ""}`;
+        this.options.store.failPrompt({ promptId: owned.promptId, error: reason, occurredAt: new Date().toISOString() });
+        await this.publish(binding.id, "TurnFailed", "herdr", { promptId: owned.promptId, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+      }
+      observed.promptsByTurn.delete(turnId);
+      observed.pendingStarts.delete(turnId);
+      this.options.wakePrompt(binding.id);
+      return "completed";
+    }
     return "observing";
   }
 
@@ -243,7 +257,7 @@ function sessionFor(binding: Binding) {
 }
 
 function hasObservation(value: TraexTranscriptObservation): boolean {
-  return Boolean(value.freshTurnStart || value.requestText !== undefined || value.answerDelta || value.toolActivities?.length || value.mainStatus || value.turnLifecycle?.state === "completed");
+  return Boolean(value.freshTurnStart || value.requestText !== undefined || value.answerDelta || value.toolActivities?.length || value.mainStatus || value.turnLifecycle?.state === "completed" || value.turnLifecycle?.state === "aborted");
 }
 
 function requestTitle(body: string): string { const normalized = body.replace(/\s+/g, " " ).trim(); return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request"; }

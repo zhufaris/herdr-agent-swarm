@@ -48,7 +48,7 @@ interface PromptRunWorkflowOptions {
 
 type TurnOutputSource =
   | { mode: "unavailable"; reason: string }
-  | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[]; lastObservationSignature: string };
+  | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[]; lastObservationSignature: string; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
@@ -335,6 +335,13 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
         outputSource = await this.drainAvailableTranscript(outputSource, binding, prompt, startedAt);
+        if (outputSource.mode === "typed" && outputSource.terminalLifecycle?.state === "aborted") {
+          const reason = abortedTurnNotice(outputSource.terminalLifecycle.reason);
+          this.options.store.failPrompt({ promptId: prompt.id, error: reason, occurredAt: new Date().toISOString() });
+          await this.publish(bindingId, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(bindingId) });
+          this.options.logger.info({ event: "turn-aborted", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed_without_replay" }, "TraeX turn was explicitly aborted");
+          return;
+        }
         const sourceAnswer = outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "";
         const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
         binding = this.options.store.completeTurn({ promptId: prompt.id, bindingId, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: outputSource.mode === "unavailable" });
@@ -463,6 +470,17 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: true });
           await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
+          return;
+        }
+        const lifecycleAbortsOwnedTurn = lifecycle?.state === "aborted"
+          && lifecycle.turnId === prompt.transcriptTurnId
+          && lifecycle.startedAt === prompt.transcriptTurnStartedAt;
+        if (observation.traexProcess && lifecycleAbortsOwnedTurn) {
+          this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
+          const reason = abortedTurnNotice(lifecycle.reason);
+          this.options.store.failPrompt({ promptId: prompt.id, error: reason, occurredAt: new Date().toISOString() });
+          await this.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+          this.options.logger.info({ event: "detached-turn-aborted", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "failed_without_replay" }, "observed explicit abort of an existing TraeX turn");
           return;
         }
         if (this.options.herdr.waitForRuntimeChange) await this.options.herdr.waitForRuntimeChange(paneId, 500, abortController.signal);
@@ -641,9 +659,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private retainOwnedObservation(source: TurnOutputSource, observation: TraexTranscriptObservation): void {
-    if (source.mode !== "typed" || !observation.answerDelta) return;
-    source.chunks.push(observation.answerDelta);
-    source.emitted = true;
+    if (source.mode !== "typed") return;
+    if (observation.turnLifecycle?.state === "completed" || observation.turnLifecycle?.state === "aborted") source.terminalLifecycle = observation.turnLifecycle;
+    if (observation.answerDelta) {
+      source.chunks.push(observation.answerDelta);
+      source.emitted = true;
+    }
   }
 
   private async publishTypedObservation(bindingId: string, promptId: string, observation: TraexTranscriptObservation, startedAt: number): Promise<void> {
@@ -715,3 +736,4 @@ function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void>
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function abortedTurnNotice(reason?: string): string { return reason === "interrupted" ? "TraeX turn was interrupted by a human operator" : `TraeX turn was aborted${reason ? `: ${reason}` : ""}`; }
