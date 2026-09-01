@@ -2128,9 +2128,9 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
-    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "message:root" });
+    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "reply:o1" });
     store.enqueueOutboundReply({ id: "o2", idempotencyKey: "key-2", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
-    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "message:root-2" });
+    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "reply:o2" });
   });
 
   it("adds streaming run-card columns before rebuilding a legacy outbox", () => {
@@ -2312,19 +2312,60 @@ describe("SQLite store", () => {
     });
   });
 
-  it("keeps immutable successors quarantined until an operator retries the failed head", () => {
+  it("keeps an immutable failed reply quarantined without blocking independent successors", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
 
     expect(store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked", laneClass: "immutable" });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["later"]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0 } });
 
     expect(store.retryDeadLetter("create", "c1", "u1")).toBe("retried");
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["create"]);
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["create", "later"]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, latest: { action: "manual_retry" } } });
+  });
+
+  it("isolates independent replies to the same root message", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.enqueueOutboundReply({ id: "second", idempotencyKey: "second", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+
+    expect(store.markOutboundReplyFailedWithQuarantine("first", "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099" }))
+      .toMatchObject({ action: "blocked", laneClass: "immutable" });
+    expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
+      { id: "first", lane_key: "reply:first" },
+      { id: "second", lane_key: "reply:second" }
+    ]);
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["second"]);
+  });
+
+  it("migrates legacy shared reply lanes without losing quarantine audit history", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-independent-reply-lanes-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.database.exec(`
+      DELETE FROM schema_migrations WHERE version = 7;
+      UPDATE outbound_replies SET lane_key = 'message:root-1' WHERE id IN ('failed', 'later');
+    `);
+    store.markOutboundReplyFailedWithQuarantine("failed", "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099" });
+    store.close();
+    store = undefined;
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT id, lane_key, state FROM outbound_replies WHERE id IN ('failed', 'later') ORDER BY delivery_order").all()).toEqual([
+      { id: "failed", lane_key: "reply:failed", state: "dead_letter" },
+      { id: "later", lane_key: "reply:later", state: "pending" }
+    ]);
+    expect(store.database.prepare("SELECT lane_key, failed_reply_id, state FROM outbox_lane_quarantines WHERE failed_reply_id = 'failed'").get()).toEqual({
+      lane_key: "reply:failed", failed_reply_id: "failed", state: "active"
+    });
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toContain("later");
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 7").get()).toEqual({ version: 7 });
   });
 
   it.each([
@@ -2554,7 +2595,7 @@ describe("SQLite store", () => {
     expect(store.dismissDeadLetter("create", "c1", "u1")).toBe("stale");
   });
 
-  it("preserves one immutable quarantine and its blocked lane across reopen", () => {
+  it("preserves one isolated immutable quarantine across reopen", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-outbox-quarantine-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
@@ -2567,7 +2608,7 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 5").all()).toEqual([{ version: 5 }]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0 } });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["later"]);
   });
 
   it("coalesces pending binding status-card snapshots behind the in-flight-safe lane head", () => {

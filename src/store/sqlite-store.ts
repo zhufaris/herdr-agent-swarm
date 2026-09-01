@@ -3134,6 +3134,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
+    this.ensureIndependentReplyLanes();
     this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
     this.ensurePaneControlOperationState();
@@ -3699,6 +3700,40 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS outbox_lane_quarantines_state ON outbox_lane_quarantines(state, created_at);
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
     `);
+  }
+
+  private ensureIndependentReplyLanes(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 7").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        UPDATE outbox_lane_quarantines
+        SET lane_key = 'reply:' || failed_reply_id, updated_at = datetime('now')
+        WHERE failed_reply_id IN (
+          SELECT id FROM outbound_replies WHERE kind IN ('card_reply','text')
+        );
+        UPDATE outbound_replies
+        SET lane_key = 'reply:' || id
+        WHERE kind IN ('card_reply','text');
+        DELETE FROM outbox_lane_heads;
+        INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+          SELECT pending.lane_key, pending.id, pending.delivery_order, pending.next_attempt_at, pending.created_at
+          FROM outbound_replies pending
+          WHERE pending.state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = pending.lane_key AND q.state = 'active')
+            AND pending.delivery_order = (
+              SELECT MIN(candidate.delivery_order)
+              FROM outbound_replies candidate
+              WHERE candidate.state = 'pending' AND candidate.lane_key = pending.lane_key
+            );
+        INSERT INTO schema_migrations(version) VALUES (7);
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private ensureOutboundFailureMetadata(): void {

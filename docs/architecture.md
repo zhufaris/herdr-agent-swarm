@@ -659,11 +659,17 @@ dead letters that an operator can retry or dismiss.
 
 Order is important inside one CardKit element because sequences must increase.
 The publisher assigns every outbox row a durable delivery order and drains only
-the head of each target lane. Work is serial within a lane, including retries,
-while up to four independent lanes may make progress concurrently. A failed or
-future-due head blocks only its own lane. Lark requests use a dedicated bounded
-timeout; HTTP 429 responses honor a bounded `Retry-After`, and other transient
-failures use jittered exponential backoff.
+the head of each target lane. Updates to one card and operations in one Answer
+stream are serial within their target lane, including retries. Independent
+`card_reply` and `text` rows each use their own durable reply lane because they
+create separate Lark messages and have no cross-reply ordering dependency. Up to
+four independent lanes may make progress concurrently, so a failed reply cannot
+block later replies to the same topic. A failed or future-due head blocks only
+its own lane. Lark requests use a dedicated bounded timeout; HTTP 429 responses
+honor a bounded `Retry-After`, and other transient failures use jittered
+exponential backoff. Existing shared reply lanes are migrated transactionally;
+dead-letter audit and quarantine state remain attached to the failed reply, and
+the migration never replays TraeX or Worker work.
 
 Permanent failures and transient failures that exhaust their single cooled
 recovery round are handled by a durable lane quarantine. Answer stream failures
