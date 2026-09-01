@@ -57,6 +57,7 @@ import { InstanceWorkScheduler } from "./events/instance-work-scheduler.js";
 import { InstanceInteractionWorkflow } from "./coordinator/instance-interaction-workflow.js";
 import { InstanceRuntimeReconciler } from "./coordinator/instance-runtime-reconciler.js";
 import { InstanceTurnSupervisor } from "./coordinator/instance-turn-supervisor.js";
+import { WorkerTurnObserver } from "./coordinator/worker-turn-observer.js";
 import { randomUUID } from "node:crypto";
 import { safeLogError } from "./runtime/safe-error.js";
 import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
@@ -107,15 +108,18 @@ const agentDrivers = new AgentDriverRegistry([
   new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, piAvailable)
 ]);
 const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
-const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, wakeOutbound: () => outboundWork.wake(), logger });
-const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), logger });
-instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);
 const inboundWork = new InProcessInboundWorkNotifier();
 const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
+const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot });
+let instanceWork!: InstanceWorkScheduler;
+const workerTurns = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake() });
+instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), logger });
+const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), logger });
+instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
 const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
 const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("./cli/primary-tools-mcp.js", import.meta.url))], store, instanceMessaging, logger);
 const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
@@ -125,7 +129,6 @@ const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }
 const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
 const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
 const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
-const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot });
 const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cardUpdateDebounceMs });
 const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork, logger });
 channelPublisher.connectPromptScheduler(scheduler);

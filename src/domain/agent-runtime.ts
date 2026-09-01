@@ -1,4 +1,5 @@
 import type { AgentKind, AgentRuntimeRef } from "./agent-instance.js";
+import type { RuntimeTurnObservation } from "./types.js";
 
 export interface AgentCapabilities {
   available: boolean;
@@ -18,12 +19,16 @@ export type DispatchReceipt =
   | { status: "delivery-uncertain"; reason: string };
 export type SteerReceipt = { status: "delivered" } | { status: "unsupported" } | { status: "not-active" } | { status: "failed"; reason: string };
 export type InterruptReceipt = { status: "interrupted" } | { status: "not-active" } | { status: "failed"; reason: string };
+export interface AgentDispatchHooks {
+  onDispatched?(): void | Promise<void>;
+  onObservation?(observation: RuntimeTurnObservation): void | Promise<void>;
+}
 
 export interface AgentRuntimeDriver {
   readonly kind: AgentKind;
   describe(): AgentCapabilities;
   start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void>;
-  submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt>;
+  submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks): Promise<DispatchReceipt>;
   steer?(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt>;
   interrupt?(runtime: AgentRuntimeRef): Promise<InterruptReceipt>;
 }

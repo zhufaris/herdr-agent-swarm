@@ -410,6 +410,26 @@ export class SqliteBindingStore implements BindingStorePort {
   }
 
   getInstanceTurn(id: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE id = ?").get(id) as Record<string, unknown> | undefined); }
+  claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null {
+    if (!input.runtimeTurnId || !Number.isFinite(Date.parse(input.startedAt))) return null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getInstanceTurn(input.turnId);
+      if (!current || current.instanceGeneration !== input.expectedGeneration || !["dispatching", "running", "blocked", "dispatch-uncertain"].includes(current.state)) { this.database.exec("COMMIT"); return null; }
+      if (current.runtimeTurnId !== null || current.runtimeTurnStartedAt !== null) {
+        this.database.exec("COMMIT");
+        return current.runtimeTurnId === input.runtimeTurnId && current.runtimeTurnStartedAt === input.startedAt ? current : null;
+      }
+      const changed = this.database.prepare(`UPDATE instance_turns SET runtime_turn_id = ?, runtime_turn_started_at = ?, updated_at = ?
+        WHERE id = ? AND instance_generation = ? AND runtime_turn_id IS NULL AND runtime_turn_started_at IS NULL
+          AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ? AND i.pane_id IS NOT NULL)`)
+        .run(input.runtimeTurnId, input.startedAt, now(), input.turnId, input.expectedGeneration, input.expectedGeneration);
+      if (changed.changes === 1) this.insertInstanceEvent(current.projectId, current.instanceId, current.id, "turn.transcript-owned", { runtimeTurnId: input.runtimeTurnId, startedAt: input.startedAt });
+      const claimed = changed.changes === 1 ? this.getInstanceTurn(input.turnId) : null;
+      this.database.exec("COMMIT");
+      return claimed;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null {
     return mapWorkerTurnCard(this.database.prepare("SELECT * FROM worker_turn_cards WHERE turn_id = ?").get(turnId) as Record<string, unknown> | undefined);
   }
@@ -485,11 +505,11 @@ export class SqliteBindingStore implements BindingStorePort {
       return outcome;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
-  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null {
+  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const turn = this.getInstanceTurn(input.turnId); const current = this.loadWorkerTurnCard(input.turnId);
-      if (!turn || !current || turn.instanceGeneration !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      if (!turn || !current || turn.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(turn, input)) { this.database.exec("COMMIT"); return null; }
       const next = reduceWorkerTurnCard(current, input.change);
       if (next !== current) {
         this.saveWorkerTurnCard(next);
@@ -498,13 +518,13 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.exec("COMMIT"); return next;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
+  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const current = this.getInstanceTurn(input.turnId);
       const currentView = this.loadWorkerTurnCard(input.turnId);
-      if (!current || !currentView || current.instanceGeneration !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      if (!current || !currentView || current.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(current, input)) { this.database.exec("COMMIT"); return null; }
       const changed = this.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)")
         .run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
       if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
@@ -621,12 +641,12 @@ export class SqliteBindingStore implements BindingStorePort {
     return { queuedTurns: row.queued_turns ?? 0, activeTurns: row.active_turns ?? 0, uncertainTurns: row.uncertain_turns ?? 0 };
   }
 
-  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null {
+  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const current = this.getInstanceTurn(input.turnId);
-      if (!current || current.instanceGeneration !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      if (!current || current.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(current, input)) { this.database.exec("COMMIT"); return null; }
       const changed = this.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)").run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
       if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
       this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state });
@@ -4185,6 +4205,10 @@ function mapWorkerTurnCardPage(row: Record<string, unknown>): WorkerTurnCardPage
     messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id),
     state: String(row.state) as WorkerTurnCardPage["state"], sequence: Number(row.sequence), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
   };
+}
+function matchesExpectedRuntimeTurn(turn: InstanceTurn, input: { expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string }): boolean {
+  return (input.expectedRuntimeTurnId === undefined || turn.runtimeTurnId === input.expectedRuntimeTurnId)
+    && (input.expectedRuntimeTurnStartedAt === undefined || turn.runtimeTurnStartedAt === input.expectedRuntimeTurnStartedAt);
 }
 
 function lightweightAnswerCardPayload(payload: string): string {

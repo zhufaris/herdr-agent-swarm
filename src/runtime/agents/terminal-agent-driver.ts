@@ -1,5 +1,5 @@
 import type { AgentKind, AgentRuntimeRef } from "../../domain/agent-instance.js";
-import type { AgentCapabilities, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
+import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
 import type { HerdrPort } from "../../domain/ports.js";
 import { safeLogError } from "../safe-error.js";
 
@@ -18,11 +18,11 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
     await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: this.herdrKind, executable: this.executable, args });
   }
 
-  async submit(runtime: AgentRuntimeRef, text: string, onDispatched?: () => void): Promise<DispatchReceipt> {
+  async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks): Promise<DispatchReceipt> {
     if (!this.available) return { status: "not-delivered", reason: `Agent adapter is unavailable: ${this.kind}` };
     let dispatched = false;
     try {
-      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, undefined, undefined, () => { dispatched = true; onDispatched?.(); });
+      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, hooks?.onObservation, undefined, async () => { dispatched = true; await hooks?.onDispatched?.(); });
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;

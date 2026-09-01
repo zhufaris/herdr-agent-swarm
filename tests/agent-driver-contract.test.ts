@@ -58,6 +58,22 @@ describe("agent driver contract", () => {
     expect(runPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, undefined, undefined, expect.any(Function));
   });
 
+  it("forwards structured dispatch hooks without changing receipt semantics", async () => {
+    const onDispatched = vi.fn();
+    const onObservation = vi.fn();
+    const observation = { state: "working" as const, stateSource: "structured" as const };
+    const runPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, observe: (value: typeof observation) => Promise<void>, _signal: unknown, dispatched: () => Promise<void>) => {
+      await dispatched();
+      await observe(observation);
+      return "done" as const;
+    });
+    const driver = new TraexDriver({ runPrompt } as unknown as HerdrPort, "traex", 1_000);
+
+    await expect(driver.submit(runtime, "do work", { onDispatched, onObservation })).resolves.toEqual({ status: "confirmed-delivered" });
+    expect(onDispatched).toHaveBeenCalledOnce();
+    expect(onObservation).toHaveBeenCalledWith(observation);
+  });
+
   it("reports TraeX steering as unsupported without touching Herdr", async () => {
     const steerPrompt = vi.fn();
     const driver = new TraexDriver({ steerPrompt } as unknown as HerdrPort, "traex", 1_000);

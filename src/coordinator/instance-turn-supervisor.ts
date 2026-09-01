@@ -6,8 +6,9 @@ import { safeLogError } from "../runtime/safe-error.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
+import type { WorkerTurnObserver } from "./worker-turn-observer.js";
 
-interface Options { store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; wakeOutbound?: () => void; logger?: Pick<Logger, "info" | "warn"> }
+interface Options { store: InstanceStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; logger?: Pick<Logger, "info" | "warn"> }
 
 export class InstanceTurnSupervisor {
   private timer: NodeJS.Timeout | null = null;
@@ -101,6 +102,16 @@ export class InstanceTurnSupervisor {
     if (!pane || pane.workspaceId !== instance.runtimeRef.herdrWorkspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
       this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${instance.runtimeRef.paneId} is missing or mismatched during turn recovery` });
       return;
+    }
+    if (turn.runtimeTurnId && turn.runtimeTurnStartedAt && this.options.observer) {
+      await this.options.observer.recover(turn.id);
+      const recovered = this.options.store.getInstanceTurn(turn.id);
+      if (!recovered || ["completed", "failed", "cancelled"].includes(recovered.state)) {
+        this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState: "idle" });
+        this.options.wake(instance.id);
+        return;
+      }
+      if (pane.agentState === "idle" || pane.agentState === "done") return;
     }
     if (pane.agentState === "working") {
       this.transition(turnId, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() }); return;

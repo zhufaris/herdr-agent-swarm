@@ -5,16 +5,18 @@ import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js"
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
+import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
+import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 
-function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}) {
+function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}, options: { nativeSessionId?: string | null; transcriptReader?: TraexTranscriptReaderPort } = {}) {
   store = new SqliteBindingStore(":memory:");
   const runtime = { herdrWorkspaceId: "w", paneId: "w:p1", nativeSessionId: null, generation: 2 };
   const create = (id: string, projectId = "p1", role: "primary" | "worker" = "worker") => {
     store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null, desiredState: "running", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, ...runtime, paneId: `${id}:pane` })!;
+    return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, ...runtime, paneId: `${id}:pane`, nativeSessionId: options.nativeSessionId ?? null })!;
   };
   const submit = vi.fn(async () => ({ status: "confirmed-delivered" as const }));
   const driver: AgentRuntimeDriver = {
@@ -25,7 +27,9 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
   const workflow = new InstanceMessagingWorkflow({ store, drivers, paneHost: { interruptPane: vi.fn(async () => undefined) } as unknown as PaneHost, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
-  const scheduler = new InstanceWorkScheduler({ store, drivers, wakeOutbound });
+  let scheduler!: InstanceWorkScheduler;
+  const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound }) : undefined;
+  scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound });
   return { create, workflow, scheduler, wake, wakeOutbound, submit, driver };
 }
 
@@ -160,8 +164,8 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, driver, wakeOutbound } = setup();
     const worker = create("worker");
     let release!: () => void;
-    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, onDispatched) => {
-      onDispatched?.();
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      await hooks?.onDispatched?.();
       await new Promise<void>((resolve) => { release = resolve; });
       return { status: "confirmed-delivered", runtimeCursor: "not-an-answer" };
     });
@@ -179,6 +183,54 @@ describe("instance messaging", () => {
     expect(wakeOutbound).toHaveBeenCalled();
   });
 
+  it("completes a structured Worker turn from its exact transcript lifecycle", async () => {
+    const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
+    const startedAt = "2026-09-01T00:00:01.000Z";
+    let read = false;
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "typed" as const, cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          if (read) return { answerDelta: "" };
+          read = true;
+          return { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "review finding", turnLifecycle: { turnId: runtimeTurnId, state: "completed" as const, startedAt } };
+        }
+      } }; }
+    };
+    const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
+    const worker = create("worker");
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => { await hooks?.onDispatched?.(); return { status: "confirmed-delivered" }; });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root-1" } });
+
+    await scheduler.drain(worker.id);
+
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "review finding", runtimeTurnId });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "review finding", resultCapture: "captured" });
+  });
+
+  it("does not overwrite an exact transcript completion when the driver observer disconnects", async () => {
+    const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { let read = false; return { mode: "typed" as const, cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          if (read) return { answerDelta: "" };
+          read = true;
+          return { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "trusted", turnLifecycle: { turnId: runtimeTurnId, state: "completed" as const, startedAt: "2026-09-01T00:00:01.000Z" } };
+        }
+      } }; }
+    };
+    const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
+    const worker = create("worker");
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => { await hooks?.onDispatched?.(); throw new Error("observer disconnected"); });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root-1" } });
+
+    await scheduler.drain(worker.id);
+
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted" });
+  });
+
   it("fences a thrown driver call as uncertain without rejecting the drain", async () => {
     const { create, workflow, scheduler, driver } = setup();
     const worker = create("worker");
@@ -194,8 +246,8 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, driver } = setup();
     const worker = create("worker");
     let release!: () => void;
-    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, onDispatched) => {
-      onDispatched?.();
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      await hooks?.onDispatched?.();
       await new Promise<void>((resolve) => { release = resolve; });
       return { status: "confirmed-delivered" };
     });

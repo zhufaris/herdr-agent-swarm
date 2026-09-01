@@ -5,6 +5,7 @@ import type { Logger } from "pino";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
+import type { WorkerTurnObserver, WorkerTurnWatch } from "../coordinator/worker-turn-observer.js";
 
 export class InstanceWorkScheduler {
   private readonly active = new Set<string>();
@@ -14,7 +15,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry; wakeOutbound?: () => void; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry; observer?: WorkerTurnObserver; wakeOutbound?: () => void; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;
@@ -40,13 +41,22 @@ export class InstanceWorkScheduler {
         this.transition(turn.id, turn.instanceGeneration, "dispatching", "turn.dispatching", { type: "preparing", occurredAt: new Date().toISOString() });
         this.inFlight.set(instanceId, { turnId: turn.id, generation: turn.instanceGeneration });
         let receipt;
+        let watch: WorkerTurnWatch | null = null;
         try {
-          receipt = await driver.submit(instance.runtimeRef, turn.text, () => {
-            if (this.detachedTurns.has(turn.id)) return;
-            this.transition(turn.id, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() });
+          if (driver.describe().structuredEvents) watch = await this.options.observer?.watch(turn.id) ?? null;
+          receipt = await driver.submit(instance.runtimeRef, turn.text, {
+            onDispatched: () => {
+              if (this.detachedTurns.has(turn.id)) return;
+              this.transition(turn.id, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() });
+            },
+            onObservation: async () => { /* Runtime state is reconciled separately; trusted output comes from the exact transcript. */ }
           });
+          await watch?.stop();
         } catch (error) {
+          await watch?.stop();
           if (this.detachedTurns.has(turn.id)) return;
+          const observed = this.options.store.getInstanceTurn(turn.id);
+          if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) continue;
           const message = safeLogError(error).message;
           this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: message }, message);
           this.recordFailure(error, instanceId, turn.id);
@@ -82,6 +92,8 @@ export class InstanceWorkScheduler {
     if (context.remainingMs() > 0 && !context.signal.aborted && await settlesWithin(settled, context.remainingMs(), context.signal)) return;
     for (const { turnId, generation } of this.inFlight.values()) {
       this.detachedTurns.add(turnId);
+      const current = this.options.store.getInstanceTurn(turnId);
+      if (!current || ["completed", "failed", "cancelled"].includes(current.state)) continue;
       const notice = "Bridge stopped observing an in-flight instance turn; prompt was not replayed";
       this.transition(turnId, generation, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, notice);
     }

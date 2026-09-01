@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { handlePrimaryMcpRequest } from "../src/cli/primary-tools-mcp.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
 import { PromptRunWorkflow } from "../src/coordinator/prompt-run-workflow.js";
+import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
@@ -27,9 +28,21 @@ describe("Primary to Worker product flow", () => {
     const view = createQueuedRunCard({ promptId: "primary-prompt", bindingId: "binding", title: "coordinate", workspaceId: "herdr", paneId: "primary:pane", requestText: "ask Worker", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "primary-prompt", bindingId: "binding", larkMessageId: "message", actorOpenId: "operator", body: "ask Worker" }, view, rootMessageId: "root", answerCard: {} });
     store.createAgentInstance({ id: "worker", projectId: "project", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    const worker = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "herdr", paneId: "worker:pane", nativeSessionId: null })!;
-    let workerSubmitCount = 0; const driver: AgentRuntimeDriver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: vi.fn(async (_runtime, _text, onDispatched) => { workerSubmitCount += 1; onDispatched?.(); return { status: "confirmed-delivered", runtimeCursor: "WORKER_OK" }; }) };
-    const drivers = new AgentDriverRegistry([driver]); scheduler = new InstanceWorkScheduler({ store, drivers });
+    const workerSessionId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "herdr", paneId: "worker:pane", nativeSessionId: workerSessionId })!;
+    let workerSubmitCount = 0; const driver: AgentRuntimeDriver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: vi.fn(async (_runtime, _text, hooks) => { workerSubmitCount += 1; await hooks?.onDispatched?.(); return { status: "confirmed-delivered" }; }) };
+    const drivers = new AgentDriverRegistry([driver]);
+    const workerRuntimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
+    let workerTranscriptRead = false;
+    const workerTurns = new WorkerTurnObserver({ store, transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
+      async readDelta() { return ""; },
+      async readObservation() {
+        if (workerTranscriptRead) return { answerDelta: "" };
+        workerTranscriptRead = true;
+        return { turnId: workerRuntimeTurnId, freshTurnStart: true, answerDelta: "WORKER_OK", turnLifecycle: { turnId: workerRuntimeTurnId, state: "completed" as const, startedAt: "2026-08-30T00:00:01.000Z" } };
+      }
+    } }; } }, wakeInstance: (instanceId) => scheduler?.wake(instanceId), wakeOutbound: () => {} });
+    scheduler = new InstanceWorkScheduler({ store, drivers, observer: workerTurns });
     const messaging = new InstanceMessagingWorkflow({ store, drivers, paneHost: {} as never, wake: (id) => scheduler!.wake(id), idFactory: () => "worker-turn" });
     const socketPath = join(directory, "primary-tools.sock"); gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
     const launch = gateway.issueBinding("binding", 1); await gateway.start();

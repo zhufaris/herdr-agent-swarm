@@ -71,6 +71,7 @@ export interface InstanceStore {
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean };
   acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
   getInstanceTurn(id: string): InstanceTurn | null;
+  claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
@@ -78,8 +79,8 @@ export interface InstanceStore {
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
-  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
+  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
+  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
@@ -92,7 +93,7 @@ export interface InstanceStore {
   listObservableInstanceTurns(): InstanceTurn[];
   listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[];
   getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number };
-  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
+  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
   listInstanceEvents(instanceId: string, afterId?: number): InstanceEvent[];
   countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number;
