@@ -244,6 +244,18 @@ describe("instance routing", () => {
     await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: worker.id, generation: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "实例状态已变化，请刷新后重试。" } });
     expect(store!.getConversationTarget("chat")).toBeNull();
   });
+  it("opens only an owned durable Worker task view behind the current binding fence", async () => {
+    const { create, workflow } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "completed", "turn-history");
+    store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "Project / task" });
+    store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached" });
+    const value = { action: "instance_turn_open", instanceId: worker.id, generation: worker.generation, turnId: task.turnId, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 };
+
+    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "reviewer · Task turn-his" } } } });
+    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, turnId: "missing" } })).resolves.toEqual({ toast: { type: "warning", content: "任务不存在或不属于当前 Worker。" } });
+    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, bindingGeneration: 0 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
+  });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
     const { workflow, control } = setup();
     const form = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1" } });

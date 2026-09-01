@@ -6,7 +6,7 @@ import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "./agent-instance.js";
 import type { ControlActor } from "./commands.js";
-import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState } from "./instance-turn.js";
+import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "./instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "./worker-turn-card-view.js";
 
@@ -82,6 +82,7 @@ export interface InstanceStore {
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
   transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
+  listRecentInstanceTurnSummaries(instanceId: string, limit?: number): InstanceTurnSummary[];
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
   verifyBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;

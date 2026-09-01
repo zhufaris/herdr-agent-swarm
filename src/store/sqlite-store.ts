@@ -20,7 +20,7 @@ import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOut
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 import type { ControlActor } from "../domain/commands.js";
-import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "../domain/instance-turn.js";
+import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
@@ -562,6 +562,15 @@ export class SqliteBindingStore implements BindingStorePort {
     const items = rows.slice(0, limit).map((row) => this.mapInstanceTurn(row)!);
     const last = items.at(-1);
     return { items, nextCursor: rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : null };
+  }
+  listRecentInstanceTurnSummaries(instanceId: string, requestedLimit = 5): InstanceTurnSummary[] {
+    const limit = Math.max(1, Math.min(requestedLimit, 5));
+    const rows = this.database.prepare(`
+      SELECT t.*, COALESCE(c.result_capture, CASE WHEN t.result IS NOT NULL THEN 'captured' ELSE 'pending' END) AS result_capture
+      FROM instance_turns t LEFT JOIN worker_turn_cards c ON c.turn_id = t.id
+      WHERE t.instance_id = ? ORDER BY t.created_at DESC, t.id DESC LIMIT ?
+    `).all(instanceId, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({ ...this.mapInstanceTurn(row)!, resultCapture: String(row.result_capture) as InstanceTurnSummary["resultCapture"] }));
   }
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
     const row = this.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked') ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as Record<string, unknown> | undefined;

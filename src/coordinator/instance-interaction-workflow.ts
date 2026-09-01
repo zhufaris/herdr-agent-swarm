@@ -8,6 +8,7 @@ import { renderInstanceDirectoryCard } from "../cards/instance-directory-card.js
 import { renderInstanceDetailCard } from "../cards/instance-detail-card.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../cards/instance-control-card.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
+import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 interface Options { projects: readonly ProjectConfig[]; operatorOpenIds?: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort }
@@ -126,6 +127,13 @@ export class InstanceInteractionWorkflow {
     if (instance.role !== "worker") return warning("仅支持管理 Worker；当前 Thread 是唯一 Primary。");
     if (bindingContext && bindingContext !== instance.projectId) return warning("实例不属于当前话题项目。");
     if (value.action === "instance_open") return { card: this.detailCard(instance, conversationKey) };
+    if (value.action === "instance_turn_open") {
+      const turnId = typeof value.turnId === "string" ? value.turnId : "";
+      const turn = this.options.store.getInstanceTurn(turnId);
+      const view = this.options.store.loadWorkerTurnCard(turnId);
+      if (!turn || !view || turn.instanceId !== instance.id || turn.instanceGeneration !== instance.generation || view.instanceId !== instance.id || view.instanceGeneration !== instance.generation) return warning("任务不存在或不属于当前 Worker。");
+      return { card: renderWorkerTurnCard(view) };
+    }
     if (value.action === "instance_set_target") {
       this.options.store.setConversationTarget({ chatId: conversationKey, projectId: instance.projectId, target: { kind: "instance", instanceId: instance.id, expectedGeneration: instance.generation } });
       return { toast: { type: "success", content: `当前目标已设为 ${instance.name}` } };
@@ -185,7 +193,7 @@ export class InstanceInteractionWorkflow {
   private detailCard(instance: AgentInstance, conversationKey: string): object {
     const view = this.options.control.inspect(instance.id);
     const binding = conversationKey.startsWith("binding:") ? this.options.store.getBinding(conversationKey.slice("binding:".length)) : null;
-    return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listInstanceTurns(instance.id, { limit: 25 }).items, queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey, ...(binding ? { bindingId: binding.id, bindingGeneration: binding.generation } : {}) });
+    return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listRecentInstanceTurnSummaries(instance.id), activeTurnId: this.options.store.getActiveInstanceTurn(instance.id, instance.generation)?.id ?? null, queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey, ...(binding ? { bindingId: binding.id, bindingGeneration: binding.generation } : {}) });
   }
   private resolveConversationContext(message: IncomingLarkMessage): { bindingPresent: boolean; boundProjectId: string | null; conversationKey: string } {
     const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);

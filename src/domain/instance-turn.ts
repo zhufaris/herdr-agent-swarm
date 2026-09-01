@@ -9,6 +9,7 @@ export interface InstanceTurn {
 }
 export interface InstanceTurnCursor { createdAt: string; id: string }
 export interface InstanceTurnPage { items: InstanceTurn[]; nextCursor: InstanceTurnCursor | null }
+export interface InstanceTurnSummary extends InstanceTurn { resultCapture: "pending" | "captured" | "unavailable" }
 export interface InstanceEvent { id: number; projectId: string; instanceId: string; turnId: string | null; kind: string; payload: Record<string, unknown>; createdAt: string }
 export interface InstanceOperation {
   id: string; idempotencyKey: string; projectId: string; instanceId: string; instanceGeneration: number; actor: ControlActor;

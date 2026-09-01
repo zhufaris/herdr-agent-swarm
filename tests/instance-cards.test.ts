@@ -61,6 +61,30 @@ describe("instance cards", () => {
     expect(text).toContain('\"tag\":\"column_set\"');
   });
 
+  it("renders at most five newest Worker turns with bounded summaries and navigation", () => {
+    const turns = Array.from({ length: 8 }, (_, index) => ({
+      id: `turn-${index}-abcdefgh`, idempotencyKey: `key-${index}`, projectId: "p1", instanceId: "i1", instanceGeneration: 2,
+      actor: { kind: "human" as const, userId: "u1" }, kind: "turn" as const, text: `request-${index}-${"x".repeat(2_000)}`,
+      state: index === 7 ? "completed" as const : "failed" as const, result: index === 7 ? `result-${index}-${"y".repeat(3_000)}` : null,
+      resultCapture: index === 7 ? "captured" as const : "unavailable" as const,
+      error: index === 7 ? null : "failed", parentTurnId: null, sourceMessageId: `message-${index}`, runtimeTurnId: null, runtimeTurnStartedAt: null,
+      createdAt: `2026-09-01T00:0${index}:00.000Z`, updatedAt: `2026-09-01T00:0${index}:30.000Z`
+    }));
+    const text = JSON.stringify(renderInstanceDetailCard({ instance, workspace, capabilities, turns, queueDepth: 0, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 }));
+
+    expect(text).toContain("RECENT TASKS");
+    expect(text).not.toContain("RECENT RESULT");
+    expect(text.indexOf("turn-7-a")).toBeLessThan(text.indexOf("turn-6-a"));
+    expect(text).toContain("request-7");
+    expect(text).toContain("result-7");
+    expect(text).toContain("captured");
+    expect(text).not.toContain("turn-2-a");
+    expect(text).toContain('\"action\":\"instance_turn_open\"');
+    expect(text).toContain('\"turnId\":\"turn-7-abcdefgh\"');
+    expect(text).toContain('\"bindingGeneration\":3');
+    expect(text.length).toBeLessThan(12_000);
+  });
+
   it("shows durable provisioning diagnostics for a failed Worker", () => {
     const failed = { ...instance, observedState: "failed" as const, provisioningCheckpoint: "pane-allocated" as const, lastError: "launch failed Bearer live-secret" };
     const text = JSON.stringify(renderInstanceDetailCard({ instance: failed, workspace, capabilities, turns: [], queueDepth: 0 }));

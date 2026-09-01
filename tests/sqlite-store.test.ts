@@ -48,6 +48,26 @@ describe("SQLite store", () => {
     expect(() => store!.acceptInstanceTurnWithCard({ ...followup, id: "ordinary", idempotencyKey: "ordinary", kind: "turn", parentTurnId: "parent", view: { ...view, turnId: "ordinary" } })).toThrow(/Ordinary/);
   });
 
+  it("returns at most five newest Worker turn summaries with durable capture status", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    for (let index = 0; index < 7; index += 1) {
+      const turnId = `turn-${index}`;
+      const occurredAt = `2026-09-01T00:0${index}:00.000Z`;
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: `work ${index}`, queuePosition: index + 1, occurredAt });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: `work ${index}`, parentTurnId: null, sourceMessageId: `message-${index}`, view, card: {} });
+      store.database.prepare("UPDATE instance_turns SET created_at = ?, updated_at = ? WHERE id = ?").run(occurredAt, occurredAt, turnId);
+    }
+    store.transitionInstanceTurnWithProjection({ turnId: "turn-6", expectedGeneration: worker.generation, state: "completed", result: "finding", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-01T00:07:00.000Z", answer: "finding" }, render: renderWorkerTurnCard });
+
+    const summaries = store.listRecentInstanceTurnSummaries(worker.id, 99);
+
+    expect(summaries.map(({ id }) => id)).toEqual(["turn-6", "turn-5", "turn-4", "turn-3", "turn-2"]);
+    expect(summaries[0]).toMatchObject({ result: "finding", resultCapture: "captured" });
+    expect(summaries[1]).toMatchObject({ resultCapture: "pending" });
+  });
+
   it("adds Worker card schema without backfilling historical turns", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-card-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
