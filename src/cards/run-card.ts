@@ -228,8 +228,9 @@ function effectiveProgressSummary(summary: RunProgressSummary, events: readonly 
   return summary.total === 0 && events.length > 0 ? summarizeProgress(events) : summary;
 }
 
-export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string }): object | null {
+export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string }): object | null {
   const elements = foldFinalAnswerContent(options.initialContent);
+  if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const pageNumber = options.pageNumber ?? 1;
   return {
     schema: "2.0",
@@ -244,6 +245,18 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
       ...elements
     ] }
   };
+}
+
+function attachElementIdToFirstMarkdown(elements: FinalAnswerElement[], elementId: string): boolean {
+  for (const element of elements) {
+    if (element.tag === "markdown") {
+      element.element_id = elementId;
+      return true;
+    }
+    const nested = element.elements;
+    if (Array.isArray(nested) && attachElementIdToFirstMarkdown(nested as FinalAnswerElement[], elementId)) return true;
+  }
+  return false;
 }
 
 function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, phase: TopicViewPhase): object[] {

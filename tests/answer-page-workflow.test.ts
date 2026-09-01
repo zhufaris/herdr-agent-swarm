@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { answerStreamContent } from "../src/runtime/answer-stream.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
@@ -118,6 +118,23 @@ describe("AnswerPageWorkflow", () => {
     expect(update?.payload).toContain('\"template\":\"green\"');
     await workflow.converge("p1");
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    store.close();
+  });
+
+  it("keeps the continuation element id when rebuilding a completed closed stream as a static card", async () => {
+    const store = readyStore();
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "final answer", answerSegments: ["final answer"], viewVersion: 2 });
+    store.database.prepare("UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
+    const workflow = new AnswerPageWorkflow(store, vi.fn());
+
+    await workflow.converge("p1");
+
+    const [replacement] = store.listPendingOutboundReplies();
+    const payload = JSON.parse(replacement!.payload) as { card: { body: { elements: Array<Record<string, unknown>> } }; stream: { elementId: string } };
+    const expectedElementId = answerElementId("p1", 1);
+    expect(replacement).toMatchObject({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" });
+    expect(payload.stream.elementId).toBe(expectedElementId);
+    expect(payload.card.body.elements).toEqual(expect.arrayContaining([expect.objectContaining({ tag: "markdown", element_id: expectedElementId })]));
     store.close();
   });
 

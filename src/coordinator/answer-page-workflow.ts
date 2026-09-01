@@ -103,7 +103,7 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
     const nextElementId = answerElementId(view.promptId, nextPageIndex);
     const content = renderAnswerStreamPage(answerStreamContent(view), previous.sourceStart).page;
     const card = view.phase === "completed"
-      ? renderFinalAnswerCard(view, { pageNumber: nextPageIndex + 1, initialContent: content })
+      ? renderFinalAnswerCard(view, { pageNumber: nextPageIndex + 1, initialContent: content, answerElementId: nextElementId })
       : renderRequestAnswerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, initialContent: content, streaming: false });
     if (card && this.store.reserveStaticAnswerReplacement({ promptId: view.promptId, previousPageIndex: previous.pageIndex, nextPageIndex, sourceStart: previous.sourceStart, nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, card }) === "reserved") this.wakeOutbound();
   }
