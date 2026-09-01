@@ -63,6 +63,47 @@ describe("SQLite store", () => {
     expect(store.loadWorkerTurnCard("historical")).toBeNull();
     expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
+
+  it("migrates Worker page states and preserves delivered checkpoints across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-page-state-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, card: {} });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "worker-message-1", "worker-card-1");
+    store.reserveWorkerTurnContent({ turnId: "turn-1", pageIndex: 0, cardId: "worker-card-1", elementId: view.elementId, content: "finding", sourceEnd: 7 });
+    const content = store.listPendingOutboundReplies().find(({ kind }) => kind === "stream_content")!;
+    store.markOutboundReplyDelivered(content.id, "worker-card-1");
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 9");
+    store.close(); store = undefined;
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ messageId: "worker-message-1", cardId: "worker-card-1" });
+    expect(store.listWorkerTurnCardPages("turn-1")).toEqual([expect.objectContaining({ state: "active", sequence: 1, messageId: "worker-message-1", cardId: "worker-card-1" })]);
+    expect(store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_turn_card_pages'").get()).toMatchObject({ sql: expect.stringContaining("'frozen'") });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("isolates a failed Worker turn lane from another Worker turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    for (const turnId of ["turn-a", "turn-b"]) {
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, card: {} });
+    }
+    const failed = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-a")!;
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failed.id, "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked" });
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ workerTurnId: "turn-b" })]);
+    expect(store.database.prepare("SELECT DISTINCT lane_key FROM outbound_replies ORDER BY lane_key").all()).toEqual([
+      { lane_key: "worker-turn:turn-a" }, { lane_key: "worker-turn:turn-b" }
+    ]);
+  });
   it("adds the Session operation inbox to an existing database", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-session-operation-migration-"));
     const path = join(temporaryDirectory, "bridge.db");

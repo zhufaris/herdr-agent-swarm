@@ -74,6 +74,10 @@ export interface InstanceStore {
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
+  getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;
+  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
+  reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
+  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
@@ -443,6 +447,7 @@ export type OperationsStore = Pick<BindingStorePort,
 >;
 
 export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "listAnswerPages" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish" | "reserveAnswerRebuild" | "reserveFinalAnswerCardUpdate" | "reserveClosedAnswerCardUpdate" | "reserveStaticAnswerCardUpdate" | "reserveStaticAnswerReplacement">;
+export type WorkerTurnCardStore = Pick<BindingStorePort, "listPendingOutboundReplies"> & Pick<InstanceStore, "getWorkerTurnCardDeliveryFacts" | "listWorkerTurnCardPages" | "loadWorkerTurnCard" | "reserveWorkerTurnContent" | "reserveWorkerTurnContinuation" | "reserveWorkerTurnFinish">;
 export type MainCardStore = Pick<BindingStorePort, "getBinding" | "loadTopicView" | "reserveMainCard" | "saveTopicView">;
 
 export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
@@ -452,7 +457,7 @@ export type OutboxStore = Pick<BindingStorePort,
   | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
   | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDelivered" | "markOutboundReplyFailedWithQuarantine"
   | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream"
->;
+> & Pick<InstanceStore, "findWorkerTurnByCardMessage" | "listWorkerTurnCardPages" | "loadWorkerTurnCard">;
 export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "loadRunCard">;
 
 export interface OutboundIntentPort {
@@ -466,6 +471,7 @@ export interface OutboundIntentPort {
 
 export interface OutboundCheckpointSubscriber {
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void;
+  onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void;
   onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void;
   requestScan(force?: boolean): Promise<void>;
 }

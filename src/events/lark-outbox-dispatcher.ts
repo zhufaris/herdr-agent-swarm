@@ -5,7 +5,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { classifyDeliveryError } from "./delivery-error-classifier.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget } from "./outbound-target-validation.js";
+import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMessageTarget } from "./outbound-target-validation.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
@@ -23,6 +23,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private scanRequested = false;
   private forceRequested = false;
   private readonly answerCheckpointListeners = new Set<(promptId: string, viewVersion: number) => void>();
+  private readonly workerTurnCheckpointListeners = new Set<(turnId: string, viewVersion: number) => void>();
   private readonly mainCardCheckpointListeners = new Set<(bindingId: string, viewVersion: number) => void>();
   private scheduler: PromptWorkScheduler | null = null;
   private lastScanAt: string | null = null;
@@ -55,6 +56,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void {
     this.answerCheckpointListeners.add(listener);
     return () => this.answerCheckpointListeners.delete(listener);
+  }
+
+  onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void {
+    this.workerTurnCheckpointListeners.add(listener);
+    return () => this.workerTurnCheckpointListeners.delete(listener);
   }
 
   onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void {
@@ -214,15 +220,18 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       }
       if (reply.kind === "card_update") {
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
+        if (reply.workerTurnId) assertWorkerMessageTarget(this.store, reply.workerTurnId, reply.rootMessageId);
         const card = JSON.parse(reply.payload) as object;
         if (reply.targetRole === "session_status" && this.lark.updateCardKit) {
           await this.lark.updateCardKit(reply.rootMessageId, card, reply.cardSequence ?? 1);
         } else await this.lark.updateCard(reply.rootMessageId, card);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+        if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
         if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_card_create") {
         const decoded = decodeStreamingCardPayload(reply.payload);
-        assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.card, decoded.stream);
+        if (reply.workerTurnId) assertWorkerCardCreateTarget(this.store, reply.workerTurnId, reply.rootMessageId, decoded.card, decoded.stream);
+        else assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.card, decoded.stream);
         const card = decoded.card;
         let sent: { messageId: string; cardId?: string };
         if (this.lark.createStreamingCard && this.lark.replyStreamingCardReference) {
@@ -239,21 +248,26 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           else this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
         if (reply.promptId && decoded.stream) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
+        if (reply.workerTurnId && decoded.stream) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, (reply.viewVersion ?? 0) + 1);
       } else if (reply.kind === "stream_content") {
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
         const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
-        assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
+        if (reply.workerTurnId) assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId);
+        else assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
         if (payload.content) await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
         else this.logger.info({ event: "lark-outbox-empty-answer-content-skipped", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: payload.sequence, outcome: "checkpointed" }, "checkpointed an empty legacy Answer update without sending it to Lark");
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
+        if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_finish") {
         if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
         const payload = JSON.parse(reply.payload) as { summary: string; sequence: number };
-        assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
+        if (reply.workerTurnId) assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId);
+        else assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
+        if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
       } else {
         const sent = reply.kind === "text"
           ? await this.lark.replyText(reply.rootMessageId, reply.payload, reply.idempotencyKey)
@@ -291,6 +305,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 }
 
 function deliveryTargetKey(reply: OutboundReply): string {
+  if (reply.workerTurnId) return `worker-turn:${reply.workerTurnId}`;
   if (reply.cardRole === "answer" && reply.promptId) return `answer:${reply.promptId}`;
   return reply.kind === "stream_content" || reply.kind === "stream_finish"
     ? `stream:${reply.rootMessageId}`

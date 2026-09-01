@@ -422,6 +422,69 @@ export class SqliteBindingStore implements BindingStorePort {
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[] {
     return (this.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? ORDER BY page_index").all(turnId) as Array<Record<string, unknown>>).map(mapWorkerTurnCardPage);
   }
+  getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts {
+    const page = this.database.prepare("SELECT element_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(turnId, pageIndex) as { element_id: string } | undefined;
+    if (!page) return { latestContent: null, finishPending: false, continuationPending: false };
+    const rows = this.database.prepare("SELECT kind, payload, state, view_version FROM outbound_replies WHERE worker_turn_id = ? AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC").all(turnId) as Array<{ kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
+    let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
+    let finishPending = false;
+    let continuationPending = false;
+    for (const row of rows) {
+      const payload = parseJsonRecord(row.payload);
+      if (row.kind === "stream_card_create" && row.state === "pending" && Number((payload.stream as Record<string, unknown> | undefined)?.pageIndex) === pageIndex + 1) continuationPending = true;
+      if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
+      if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
+      if (row.kind === "stream_content" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null };
+    }
+    return { latestContent, finishPending, continuationPending };
+  }
+  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome {
+    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
+      if (page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
+      const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
+      if (facts.latestContent?.state === "pending" || facts.latestContent?.content === input.content) return "waiting";
+      const sequence = page.sequence + 1;
+      this.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
+      this.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:stream:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sourceEnd: input.sourceEnd, sequence }) });
+      return "reserved";
+    });
+  }
+  reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome {
+    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
+      if (page.cardId !== input.cardId) return "stale";
+      const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
+      if (facts.finishPending) return "waiting";
+      const sequence = page.sequence + 1;
+      this.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
+      this.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:finish:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
+      return "reserved";
+    });
+  }
+  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
+    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
+      if (page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.pageStart) return "stale";
+      const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
+      if ((facts.latestContent && facts.latestContent.state !== "delivered") || facts.finishPending || facts.continuationPending) return "waiting";
+      const sequence = page.sequence + 1;
+      this.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
+      this.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:finish:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) });
+      return "reserved";
+    });
+  }
+  private reserveWorkerTurnPageIntent(turnId: string, pageIndex: number, reserve: (page: WorkerTurnCardPage, view: WorkerTurnCardView) => AnswerPageReservationOutcome): AnswerPageReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const pageRow = this.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ? AND state = 'active'").get(turnId, pageIndex) as Record<string, unknown> | undefined;
+      const view = this.loadWorkerTurnCard(turnId);
+      const outcome = pageRow && view ? reserve(mapWorkerTurnCardPage(pageRow), view) : "stale";
+      this.database.exec("COMMIT");
+      return outcome;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -430,7 +493,7 @@ export class SqliteBindingStore implements BindingStorePort {
       const next = reduceWorkerTurnCard(current, input.change);
       if (next !== current) {
         this.saveWorkerTurnCard(next);
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId ?? next.rootMessageId, kind: next.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(next.messageId ? input.render(next) : { card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
+        if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: next.messageId ? `worker-turn:update:${next.turnId}:${next.viewVersion}` : `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId ?? next.rootMessageId, kind: next.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(next.messageId ? input.render(next) : { card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
       }
       this.database.exec("COMMIT"); return next;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
@@ -2061,6 +2124,16 @@ export class SqliteBindingStore implements BindingStorePort {
           VALUES (?, ?, NULL, NULL, ?, ?, 0, 'creating', 'streaming', ?, ?) ON CONFLICT(prompt_id, page_index) DO NOTHING`)
           .run(input.promptId, pageIndex, elementId, stream?.pageStart ?? 0, timestamp, timestamp);
       }
+      if (input.kind === "stream_card_create" && input.workerTurnId) {
+        const stream = streamCardState(input.payload);
+        const view = this.loadWorkerTurnCard(input.workerTurnId);
+        const pageIndex = stream?.pageIndex ?? 0;
+        const elementId = stream?.elementId ?? view?.elementId;
+        if (!view || !elementId) throw new Error(`Worker card page metadata missing for turn: ${input.workerTurnId}`);
+        this.database.prepare(`INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, state, sequence, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, NULL, NULL, 'creating', 0, ?, ?) ON CONFLICT(turn_id, page_index) DO NOTHING`)
+          .run(`${input.workerTurnId}:${pageIndex}`, input.workerTurnId, pageIndex, stream?.pageStart ?? 0, elementId, timestamp, timestamp);
+      }
       if (ownsTransaction) this.database.exec("COMMIT");
       return mapOutboundReply(row);
     } catch (error) {
@@ -2124,7 +2197,7 @@ export class SqliteBindingStore implements BindingStorePort {
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.database.prepare("SELECT binding_id, prompt_id, view_version, card_sequence, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
+      const row = this.database.prepare("SELECT binding_id, prompt_id, worker_turn_id, view_version, card_sequence, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
       this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
@@ -2152,6 +2225,30 @@ export class SqliteBindingStore implements BindingStorePort {
           }
         } else if (row.kind === "card_reply") this.database.prepare("UPDATE run_cards SET lark_message_id = ?, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(messageId, row.view_version ?? 0, now(), row.prompt_id);
         else this.database.prepare("UPDATE run_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
+      }
+      if (row?.worker_turn_id) {
+        const stream = streamCardState(row.payload);
+        const pageIndex = stream?.pageIndex ?? 0;
+        if (row.kind === "stream_card_create") {
+          const expectedPageIndex = pageIndex > 0 ? pageIndex - 1 : pageIndex;
+          const updated = this.database.prepare("UPDATE worker_turn_cards SET message_id = ?, card_id = COALESCE(?, card_id), element_id = COALESCE(?, element_id), page_index = ?, page_start = COALESCE(?, page_start), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?")
+            .run(messageId, cardId ?? null, stream?.elementId ?? null, pageIndex, stream?.pageStart ?? null, cardId ?? null, row.view_version ?? 0, now(), row.worker_turn_id, expectedPageIndex);
+          if (updated.changes > 0) {
+            if (pageIndex > 0) this.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, pageIndex);
+            this.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'")
+              .run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, pageIndex);
+          }
+        } else {
+          this.database.prepare("UPDATE worker_turn_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ?")
+            .run(row.view_version ?? 0, now(), row.worker_turn_id);
+          if (row.kind === "stream_content") this.database.prepare("UPDATE worker_turn_card_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?")
+            .run(row.view_version ?? 0, now(), row.worker_turn_id, pageIndex);
+          if (row.kind === "stream_finish") {
+            const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.worker_turn_id);
+            this.database.prepare("UPDATE worker_turn_card_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active'")
+              .run(row.view_version ?? 0, pendingContinuation ? "frozen" : "finished", now(), row.worker_turn_id, pageIndex);
+          }
+        }
       }
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       if (row?.binding_id && row.target_role === "session_status") {
@@ -3200,6 +3297,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
     this.ensureWorkerTurnCards();
+    this.ensureWorkerTurnCardPageStates();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
@@ -3690,6 +3788,25 @@ export class SqliteBindingStore implements BindingStorePort {
         CREATE INDEX IF NOT EXISTS worker_turn_card_pages_turn ON worker_turn_card_pages(turn_id, page_index);
         INSERT INTO schema_migrations(version) VALUES (8);
       `);
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerTurnCardPageStates(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 9").get();
+    if (migrated) return;
+    const schema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_turn_card_pages'").get() as { sql: string } | undefined;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (schema && (!schema.sql.includes("'creating'") || !schema.sql.includes("'frozen'"))) this.database.exec(`
+        CREATE TABLE worker_turn_card_pages_next(
+          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
+        );
+        INSERT INTO worker_turn_card_pages_next SELECT * FROM worker_turn_card_pages;
+        DROP TABLE worker_turn_card_pages; ALTER TABLE worker_turn_card_pages_next RENAME TO worker_turn_card_pages;
+      `);
+      this.database.exec("CREATE INDEX IF NOT EXISTS worker_turn_card_pages_turn ON worker_turn_card_pages(turn_id, page_index)");
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (9)").run();
       this.database.exec("COMMIT");
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }

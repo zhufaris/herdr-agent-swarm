@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { renderInstanceDirectoryCard } from "../src/cards/instance-directory-card.js";
 import { renderInstanceDetailCard } from "../src/cards/instance-detail-card.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../src/cards/instance-control-card.js";
+import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { createQueuedWorkerTurnCard, reduceWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 
 const instance = { id: "i1", projectId: "p1", name: "reviewer", role: "worker" as const, agentKind: "claude-code" as const, model: "sonnet", desiredState: "running" as const, observedState: "idle" as const, workspaceLeaseId: "ws1", generation: 2, runtimeRef: { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1", generation: 2 }, pendingRuntimeRef: null, provisioningCheckpoint: "verified" as const, lastError: null };
 const workspace = { id: "ws1", projectId: "p1", instanceId: "i1", kind: "git-worktree" as const, cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "abc123", state: "ready" as const, generation: 1 };
@@ -9,6 +11,29 @@ const capabilities = { available: true, structuredEvents: true, nativeResume: tr
 const primary = { bindingId: "binding-1", generation: 3, paneId: "w1:p0", state: "active" as const };
 
 describe("instance cards", () => {
+  it.each(["queued", "preparing", "running", "blocked", "completed", "failed", "cancelled", "dispatch-uncertain"] as const)("renders a bounded and actionable %s Worker task card", (phase) => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn:unsafe/id", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: "parent-turn", rootMessageId: "root-1", requestText: `review ${"x".repeat(4_000)}`, queuePosition: 3, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const view = { ...queued, phase, answer: phase === "completed" ? "final finding" : "", notice: ["blocked", "failed", "cancelled", "dispatch-uncertain"].includes(phase) ? "Bearer live-secret" : null, resultCapture: phase === "completed" ? "captured" as const : "pending" as const };
+    const card = renderWorkerTurnCard(view);
+    const text = JSON.stringify(card);
+
+    expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true }, body: { elements: expect.any(Array) } });
+    expect(text).toContain("reviewer · Task turn:uns");
+    expect(text).toContain("parent-turn");
+    expect(text).toContain("View Worker");
+    expect(text).toContain('\"instanceId\":\"i1\"');
+    expect(text).toContain('\"instanceGeneration\":2');
+    expect(text).not.toContain("live-secret");
+    expect(text.length).toBeLessThan(12_000);
+    expect(queued.elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+  });
+
+  it("states explicitly when a completed Worker result could not be captured", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-a", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const completed = reduceWorkerTurnCard(queued, { type: "completed-without-output", occurredAt: "2026-09-01T00:01:00.000Z", notice: "Structured output is unavailable" });
+
+    expect(JSON.stringify(renderWorkerTurnCard(completed))).toContain("无法获取可信的结构化输出");
+  });
   it("renders the current thread as Primary and counts only Workers", () => {
     const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries: [{ instance, workspace, capabilities, queueDepth: 3 }], target: { kind: "instance", instanceId: "i1" }, primary });
     const text = JSON.stringify(card);

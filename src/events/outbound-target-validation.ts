@@ -1,5 +1,6 @@
 import type { OutboxStore } from "../domain/ports.js";
 import { answerElementId } from "../domain/run-card-view.js";
+import { workerTurnElementId } from "../domain/worker-turn-card-view.js";
 
 export class PermanentDeliveryError extends Error {}
 
@@ -40,6 +41,32 @@ export function assertAnswerMessageTarget(store: Pick<OutboxStore, "loadRunCard"
   if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card target is missing binding or prompt identity");
   const view = store.loadRunCard(promptId);
   if (!view || view.bindingId !== bindingId || view.answerMessageId !== messageId) throw new PermanentDeliveryError(`Answer card message target mismatch for prompt ${promptId}`);
+}
+
+export function assertWorkerCardCreateTarget(
+  store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, rootMessageId: string,
+  card: object, stream?: { pageIndex: number; pageStart: number; elementId: string }
+): void {
+  const view = store.loadWorkerTurnCard(turnId);
+  if (!view || view.rootMessageId !== rootMessageId || !stream) throw new PermanentDeliveryError(`Worker card create target mismatch for turn ${turnId}`);
+  const pages = store.listWorkerTurnCardPages(turnId);
+  const page = pages.find(({ pageIndex }) => pageIndex === stream.pageIndex);
+  if (!page || page.pageStart !== stream.pageStart || page.elementId !== stream.elementId || page.messageId || page.cardId) throw new PermanentDeliveryError(`Worker card page target mismatch for turn ${turnId}`);
+  const expectedElementId = workerTurnElementId(turnId, stream.pageIndex);
+  const cardElementIds = collectElementIds(card);
+  if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) throw new PermanentDeliveryError(`Worker card element mismatch for turn ${turnId}`);
+}
+
+export function assertWorkerCardTarget(store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, cardId: string, elementId?: string): void {
+  const view = store.loadWorkerTurnCard(turnId);
+  const page = store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view?.pageIndex);
+  if (!view || !page || page.cardId !== cardId || (elementId !== undefined && page.elementId !== elementId)) throw new PermanentDeliveryError(`Worker card target mismatch for turn ${turnId}`);
+}
+
+export function assertWorkerMessageTarget(store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, messageId: string): void {
+  const view = store.loadWorkerTurnCard(turnId);
+  const page = store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view?.pageIndex);
+  if (!view || (page?.messageId ?? view.messageId) !== messageId) throw new PermanentDeliveryError(`Worker card message target mismatch for turn ${turnId}`);
 }
 
 function collectElementIds(value: unknown): string[] {

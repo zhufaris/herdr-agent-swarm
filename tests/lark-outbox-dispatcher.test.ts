@@ -14,10 +14,64 @@ import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-vie
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("Lark channel publisher", () => {
+  it("checkpoints a delivered Worker task card and emits a turn-scoped convergence hint", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "lark:m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, card: renderWorkerTurnCard(view) });
+    const create = vi.fn(async () => ({ messageId: "worker-message-1", cardId: "worker-card-1" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+    const checkpoint = vi.fn();
+    publisher.onWorkerTurnCheckpoint(checkpoint);
+
+    await publisher.requestScan(true);
+
+    expect(create).toHaveBeenCalledOnce();
+    expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ messageId: "worker-message-1", cardId: "worker-card-1", deliveredVersion: 1 });
+    expect(store.listWorkerTurnCardPages("turn-1")).toEqual([expect.objectContaining({ pageIndex: 0, messageId: "worker-message-1", cardId: "worker-card-1", state: "active" })]);
+    expect(checkpoint).toHaveBeenCalledWith("turn-1", 2);
+    store.close();
+  });
+
+  it("permanently rejects cross-turn Worker card, message, and element targets", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    for (const turnId of ["turn-a", "turn-b", "turn-c", "turn-d"]) {
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, card: renderWorkerTurnCard(view) });
+      const create = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === turnId)!;
+      store.markOutboundReplyDelivered(create.id, `worker-message-${turnId}`, `worker-card-${turnId}`);
+    }
+    store.enqueueOutboundReply({ id: "wrong-turn", idempotencyKey: "wrong-turn", workerTurnId: "turn-b", viewVersion: 1, rootMessageId: "worker-card-turn-a", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: "worker_turn_turn_a_0", content: "x", sequence: 1 }) });
+    store.enqueueOutboundReply({ id: "wrong-card", idempotencyKey: "wrong-card", workerTurnId: "turn-c", viewVersion: 1, rootMessageId: "worker-card-turn-a", kind: "stream_finish", payload: JSON.stringify({ pageIndex: 0, summary: "done", sequence: 1 }) });
+    store.enqueueOutboundReply({ id: "wrong-element", idempotencyKey: "wrong-element", workerTurnId: "turn-d", viewVersion: 1, rootMessageId: "worker-card-turn-d", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: "worker_turn_turn_a_0", content: "x", sequence: 1 }) });
+    store.enqueueOutboundReply({ id: "wrong-message", idempotencyKey: "wrong-message", workerTurnId: "turn-a", viewVersion: 2, rootMessageId: "worker-message-turn-b", kind: "card_update", payload: JSON.stringify({ schema: "2.0" }) });
+    const stream = vi.fn(async () => {});
+    const finish = vi.fn(async () => {});
+    const update = vi.fn(async () => {});
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream, finishStreamingCard: finish, updateCard: update }), pino({ enabled: false }));
+
+    await publisher.requestScan(true);
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(store.database.prepare("SELECT id, state, failure_class FROM outbound_replies WHERE id LIKE 'wrong-%' ORDER BY id").all()).toEqual([
+      { id: "wrong-card", state: "dead_letter", failure_class: "permanent" },
+      { id: "wrong-element", state: "dead_letter", failure_class: "permanent" },
+      { id: "wrong-message", state: "dead_letter", failure_class: "permanent" },
+      { id: "wrong-turn", state: "dead_letter", failure_class: "permanent" }
+    ]);
+    store.close();
+  });
   it("checkpoints a delivered Main Card version and emits a convergence hint", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

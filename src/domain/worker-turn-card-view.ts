@@ -47,7 +47,7 @@ export interface WorkerTurnCardPage {
   elementId: string;
   messageId: string | null;
   cardId: string | null;
-  state: "active" | "finished";
+  state: "creating" | "active" | "frozen" | "finished";
   sequence: number;
   createdAt: string;
   updatedAt: string;
@@ -87,6 +87,12 @@ export function createQueuedWorkerTurnCard(input: {
 
 export function workerTurnElementId(turnId: string, pageIndex: number): string {
   return normalizeLarkElementId(`worker-turn-${turnId}-${pageIndex}`);
+}
+
+export function workerTurnStreamContent(view: WorkerTurnCardView): string {
+  return view.resultCapture === "unavailable"
+    ? "⚠️ 任务已结束，但无法获取可信的结构化输出。请前往对应 Herdr Pane 查看本地会话。"
+    : view.answer;
 }
 
 export function reduceWorkerTurnCard(state: WorkerTurnCardView, change: WorkerTurnCardChange): WorkerTurnCardView {
