@@ -123,7 +123,21 @@ describe("standalone installer", () => {
 
   it("keeps source maps but excludes declarations from production artifacts", () => {
     const tsconfig = JSON.parse(readFileSync("tsconfig.json", "utf8")) as { compilerOptions: Record<string, unknown> };
-    expect(tsconfig.compilerOptions).toMatchObject({ declaration: false, sourceMap: true });
+    const typecheckConfig = JSON.parse(readFileSync("tsconfig.typecheck.json", "utf8")) as { extends: string; compilerOptions: Record<string, unknown> };
+    expect(tsconfig.compilerOptions).toMatchObject({
+      declaration: false, sourceMap: true, incremental: true,
+      outDir: ".cache/ts-build-output", tsBuildInfoFile: ".cache/tsconfig.build.tsbuildinfo"
+    });
+    expect(typecheckConfig).toMatchObject({
+      extends: "./tsconfig.json",
+      compilerOptions: { noEmit: true, tsBuildInfoFile: ".cache/tsconfig.typecheck.tsbuildinfo" }
+    });
+    expect(packageJson.scripts.typecheck).toBe("tsc -p tsconfig.typecheck.json");
+    expect(readFileSync(".gitignore", "utf8").split("\n")).toContain(".cache/");
+    expect(packageJson.scripts.build).toContain("sync-build-output.mjs prepare");
+    expect(packageJson.scripts.build).toContain("sync-build-output.mjs publish");
+    expect(productionBuildScript).toContain('cp -R "$ROOT/dist" "$STAGING/dist"');
+    expect(productionBuildScript).not.toContain('.cache');
     expect(packageJson.scripts.start).toBe("node --enable-source-maps dist/main.js");
   });
 
