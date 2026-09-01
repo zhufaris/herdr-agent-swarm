@@ -1,4 +1,5 @@
 import type { AgentState, Binding, FailureSummary, SessionSummary } from "../domain/types.js";
+import { appendWithinCardLimit } from "./card-payload.js";
 import { callbackButton } from "./cardkit-button.js";
 
 const LIFECYCLE_LABEL: Record<Binding["lifecycle"], string> = {
@@ -46,7 +47,20 @@ export function renderFailureCards(failures: FailureSummary[], notice?: string):
 
 function paginate(title: string, empty: string, rows: object[][], template: string): object[] {
   const pages: object[][] = [];
-  for (let index = 0; index < rows.length; index += 20) pages.push(rows.slice(index, index + 20).flatMap((row, offset) => [...row, ...((offset < 19 && index + offset < rows.length - 1) ? [{ tag: "hr" }] : [])]));
+  let page: object[] = [];
+  let rowCount = 0;
+  for (const row of rows) {
+    const additions = page.length > 0 ? [{ tag: "hr" }, ...row] : row;
+    if (rowCount > 0 && (rowCount >= 20 || !appendWithinCardLimit(page, additions))) {
+      pages.push(page);
+      page = [...row];
+      rowCount = 1;
+      continue;
+    }
+    page.push(...additions);
+    rowCount += 1;
+  }
+  if (page.length > 0) pages.push(page);
   if (!pages.length) pages.push([{ tag: "markdown", content: empty }]);
   return pages.map((elements, index) => ({ schema: "2.0", config: { update_multi: true, summary: { content: title } }, header: { title: { tag: "plain_text", content: pages.length > 1 ? `${title} · ${index + 1}/${pages.length}` : title }, template }, body: { elements } }));
 }

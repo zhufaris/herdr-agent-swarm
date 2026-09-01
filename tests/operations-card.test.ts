@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderFailureCards, renderSessionCards } from "../src/cards/operations-card.js";
+import { MAX_CARD_SERIALIZED_LENGTH } from "../src/cards/card-payload.js";
 
 describe("operations cards", () => {
   it("shows topic navigation for sessions", () => {
@@ -27,6 +28,25 @@ describe("operations cards", () => {
     expect(serialized).toContain("w1:p1");
     expect(serialized).toContain('"replyId":"outbound-reply-123456789"');
     expect(serialized).toContain('"type":"default"');
+  });
+
+  it("keeps large session and failure pages within the CardKit payload limit", () => {
+    const sessions = Array.from({ length: 20 }, (_, index) => ({
+      queueDepth: index,
+      spaceName: `space-${"s".repeat(500)}-${index}`,
+      binding: { ...binding(), id: `binding-${index}`, title: `session-${"t".repeat(500)}-${index}`, paneId: `pane-${"p".repeat(500)}-${index}` }
+    }));
+    const failures = Array.from({ length: 20 }, (_, index) => ({
+      kind: "outbound" as const, id: `outbound-${index}`, bindingId: `binding-${index}`, attemptCount: 5, updatedAt: "now",
+      error: `error-${"e".repeat(500)}-${index}`, title: `title-${"t".repeat(500)}-${index}`,
+      spaceName: `space-${"s".repeat(500)}-${index}`, paneId: `pane-${"p".repeat(500)}-${index}`
+    }));
+
+    for (const card of [...renderSessionCards(sessions), ...renderFailureCards(failures)]) {
+      expect(JSON.stringify(card).length).toBeLessThanOrEqual(MAX_CARD_SERIALIZED_LENGTH);
+    }
+    expect(renderSessionCards(sessions).length).toBeGreaterThan(1);
+    expect(renderFailureCards(failures).length).toBeGreaterThan(1);
   });
 });
 
