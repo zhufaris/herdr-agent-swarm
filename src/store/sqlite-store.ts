@@ -498,6 +498,37 @@ export class SqliteBindingStore implements BindingStorePort {
       this.database.exec("COMMIT"); return next;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
+  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getInstanceTurn(input.turnId);
+      const currentView = this.loadWorkerTurnCard(input.turnId);
+      if (!current || !currentView || current.instanceGeneration !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      const changed = this.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)")
+        .run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
+      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state });
+      const next = reduceWorkerTurnCard(currentView, input.change);
+      if (next !== currentView) {
+        this.saveWorkerTurnCard(next);
+        if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: next.messageId ? `worker-turn:update:${next.turnId}:${next.viewVersion}` : `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId ?? next.rootMessageId, kind: next.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(next.messageId ? input.render(next) : { card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
+      }
+      if (["completed", "failed", "cancelled"].includes(input.state)) {
+        const queued = this.database.prepare("SELECT c.* FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE t.instance_id = ? AND t.instance_generation = ? AND t.state = 'queued' ORDER BY t.created_at, t.rowid").all(current.instanceId, input.expectedGeneration) as Array<Record<string, unknown>>;
+        for (const [index, row] of queued.entries()) {
+          const queuedView = mapWorkerTurnCard(row);
+          if (!queuedView || queuedView.queuePosition === index + 1) continue;
+          const reordered = reduceWorkerTurnCard(queuedView, { type: "queue-position", occurredAt: timestamp, queuePosition: index + 1 });
+          this.saveWorkerTurnCard(reordered);
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: reordered.messageId ? `worker-turn:update:${reordered.turnId}:${reordered.viewVersion}` : `worker-turn:create:${reordered.turnId}:0`, bindingId: null, workerTurnId: reordered.turnId, viewVersion: reordered.viewVersion, rootMessageId: reordered.messageId ?? reordered.rootMessageId, kind: reordered.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(reordered.messageId ? input.render(reordered) : { card: input.render(reordered), stream: { pageIndex: reordered.pageIndex, pageStart: reordered.pageStart, elementId: reordered.elementId } }) });
+        }
+      }
+      const turn = this.getInstanceTurn(input.turnId);
+      this.database.exec("COMMIT");
+      return turn ? { turn, view: next } : null;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
   private saveWorkerTurnCard(view: WorkerTurnCardView): void {
     this.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, phase, request_text, answer, queue_position, started_at, finished_at, notice, result_capture, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET message_id=excluded.message_id, card_id=excluded.card_id, phase=excluded.phase, answer=excluded.answer, queue_position=excluded.queue_position, started_at=excluded.started_at, finished_at=excluded.finished_at, notice=excluded.notice, result_capture=excluded.result_capture, page_index=excluded.page_index, page_start=excluded.page_start, sequence=excluded.sequence, view_version=excluded.view_version, delivered_version=excluded.delivered_version, updated_at=excluded.updated_at`)
       .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.phase, view.requestText, view.answer, view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);

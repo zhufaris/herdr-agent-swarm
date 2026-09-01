@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { InstanceTurnSupervisor } from "../src/coordinator/instance-turn-supervisor.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
+import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -10,13 +12,15 @@ function setup(state: "dispatching" | "running") {
   store = new SqliteBindingStore(":memory:");
   store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
   const instance = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
-  store.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+  const view = createQueuedWorkerTurnCard({ turnId: "turn", instanceId: instance.id, instanceGeneration: instance.generation, workerName: instance.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+  store.acceptInstanceTurnWithCard({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: "m1", view, card: renderWorkerTurnCard(view) });
   store.claimNextInstanceTurn(instance.id, instance.generation);
   store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state, eventKind: `turn.${state}` });
   const inspectPane = vi.fn(async () => ({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" }));
   const wake = vi.fn();
-  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake });
-  return { supervisor, inspectPane, wake };
+  const wakeOutbound = vi.fn();
+  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake, wakeOutbound });
+  return { supervisor, inspectPane, wake, wakeOutbound };
 }
 
 describe("InstanceTurnSupervisor", () => {
@@ -34,11 +38,23 @@ describe("InstanceTurnSupervisor", () => {
   });
 
   it("observes a proven running turn to completion without dispatching it again", async () => {
-    const { supervisor, wake } = setup("running");
+    const { supervisor, wake, wakeOutbound } = setup("running");
     supervisor.prepareRecovery();
     await supervisor.reconcile();
-    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed" });
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed", result: "" });
+    expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "completed", resultCapture: "unavailable", answer: "" });
+    expect(JSON.stringify(store!.loadWorkerTurnCard("turn"))).not.toContain("observed:idle");
+    expect(wakeOutbound).toHaveBeenCalled();
     expect(wake).toHaveBeenCalledWith("worker");
+  });
+
+  it("projects recovered blocked and uncertain states only to their own task card", async () => {
+    const { supervisor, inspectPane, wakeOutbound } = setup("running");
+    inspectPane.mockResolvedValueOnce({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "blocked", foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" });
+    await supervisor.reconcile();
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "blocked" });
+    expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "blocked" });
+    expect(wakeOutbound).toHaveBeenCalled();
   });
 
   it("keeps an ambiguous dispatch uncertain when the pane is idle", async () => {

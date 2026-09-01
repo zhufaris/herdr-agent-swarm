@@ -25,7 +25,7 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
   const workflow = new InstanceMessagingWorkflow({ store, drivers, paneHost: { interruptPane: vi.fn(async () => undefined) } as unknown as PaneHost, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
-  const scheduler = new InstanceWorkScheduler({ store, drivers });
+  const scheduler = new InstanceWorkScheduler({ store, drivers, wakeOutbound });
   return { create, workflow, scheduler, wake, wakeOutbound, submit, driver };
 }
 
@@ -144,8 +144,8 @@ describe("instance messaging", () => {
     expect(store!.listInstanceEvents(worker.id).map(({ kind }) => kind)).toContain("turn.dispatch-uncertain");
   });
 
-  it("completes settled dispatches and drains the next FIFO turn", async () => {
-    const { create, workflow, scheduler, submit } = setup();
+  it("completes unstructured dispatches without inventing output and drains FIFO", async () => {
+    const { create, workflow, scheduler, submit } = setup({ structuredEvents: false });
     const worker = create("worker");
     const actor = { kind: "human" as const, userId: "u1" };
     await workflow.submit({ idempotencyKey: "m1", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "one" } });
@@ -156,30 +156,37 @@ describe("instance messaging", () => {
     expect(submit).toHaveBeenCalledTimes(2);
   });
 
-  it("persists the dispatch boundary before a driver settles", async () => {
-    const { create, workflow, scheduler, driver } = setup();
+  it("keeps a structured Worker turn running after dispatch delivery", async () => {
+    const { create, workflow, scheduler, driver, wakeOutbound } = setup();
     const worker = create("worker");
     let release!: () => void;
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, onDispatched) => {
       onDispatched?.();
       await new Promise<void>((resolve) => { release = resolve; });
-      return { status: "confirmed-delivered" };
+      return { status: "confirmed-delivered", runtimeCursor: "not-an-answer" };
     });
-    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" }, source: { messageId: "m1", rootMessageId: "root-1" } });
     const draining = scheduler.drain(worker.id);
-    await vi.waitFor(() => expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "running" }));
+    await vi.waitFor(() => {
+      expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "running", result: null });
+      expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "" });
+    });
     release();
     await draining;
-    expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "completed" });
+    expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "running", result: null });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "" });
+    expect(JSON.stringify(store!.listPendingOutboundReplies())).not.toContain("not-an-answer");
+    expect(wakeOutbound).toHaveBeenCalled();
   });
 
   it("fences a thrown driver call as uncertain without rejecting the drain", async () => {
     const { create, workflow, scheduler, driver } = setup();
     const worker = create("worker");
     vi.mocked(driver.submit).mockRejectedValueOnce(new Error("driver crashed"));
-    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" }, source: { messageId: "m1", rootMessageId: "root-1" } });
     await expect(scheduler.drain(worker.id)).resolves.toBeUndefined();
     expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "dispatch-uncertain", error: "driver crashed" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "dispatch-uncertain", notice: "driver crashed", answer: "" });
     expect(scheduler.snapshot()).toMatchObject({ activeDispatchWorkers: 0, lastFailure: "driver crashed" });
   });
 
@@ -192,7 +199,7 @@ describe("instance messaging", () => {
       await new Promise<void>((resolve) => { release = resolve; });
       return { status: "confirmed-delivered" };
     });
-    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" } });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" }, source: { messageId: "m1", rootMessageId: "root-1" } });
     scheduler.wake(worker.id);
     await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running" }));
     const controller = new AbortController();
@@ -200,6 +207,7 @@ describe("instance messaging", () => {
     controller.abort();
     await expect(stopped).resolves.toBeUndefined();
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "dispatch-uncertain" });
     release();
     await new Promise((resolve) => setImmediate(resolve));
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });

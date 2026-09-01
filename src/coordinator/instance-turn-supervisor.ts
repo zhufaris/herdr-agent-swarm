@@ -4,8 +4,10 @@ import type { InstanceStore } from "../domain/ports.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
+import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 
-interface Options { store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; logger?: Pick<Logger, "info" | "warn"> }
+interface Options { store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; wakeOutbound?: () => void; logger?: Pick<Logger, "info" | "warn"> }
 
 export class InstanceTurnSupervisor {
   private timer: NodeJS.Timeout | null = null;
@@ -101,18 +103,28 @@ export class InstanceTurnSupervisor {
       return;
     }
     if (pane.agentState === "working") {
-      this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, state: "running", eventKind: "turn.running" }); return;
+      this.transition(turnId, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() }); return;
     }
     if (pane.agentState === "blocked") {
-      this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, state: "blocked", eventKind: "turn.blocked" }); return;
+      this.transition(turnId, turn.instanceGeneration, "blocked", "turn.blocked", { type: "blocked", occurredAt: new Date().toISOString(), notice: "Worker 正在等待 Herdr 中的本地操作。" }); return;
     }
     if (pane.agentState === "idle" || pane.agentState === "done") {
       if (turn.state === "running" || turn.state === "blocked") {
-        this.options.store.completeInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, result: `observed:${pane.agentState}` });
+        this.transition(turnId, turn.instanceGeneration, "completed", "turn.completed", { type: "completed-without-output", occurredAt: new Date().toISOString(), notice: "任务已结束，但无法从当前恢复路径确认可信的结构化输出。" }, null, "");
         this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState: "idle" });
         this.options.wake(instance.id);
         this.options.logger?.info({ event: "instance-turn-recovered", instanceId: instance.id, turnId, outcome: "observed_without_replay" }, "observed recovered instance turn completion");
-      } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, state: "dispatch-uncertain", error: "Agent is idle but dispatch completion was never proven; prompt was not replayed", eventKind: "turn.dispatch-uncertain" });
+      } else {
+        const notice = "Agent is idle but dispatch completion was never proven; prompt was not replayed";
+        this.transition(turnId, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, notice);
+      }
     }
+  }
+
+  private transition(turnId: string, generation: number, state: Parameters<InstanceStore["updateInstanceTurn"]>[0]["state"], eventKind: string, change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
+    if (this.options.store.loadWorkerTurnCard(turnId)) {
+      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: renderWorkerTurnCard });
+      if (projected) this.options.wakeOutbound?.();
+    } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }
 }

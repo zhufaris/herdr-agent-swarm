@@ -107,8 +107,8 @@ const agentDrivers = new AgentDriverRegistry([
   new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, piAvailable)
 ]);
 const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
-const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, logger });
-const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
+const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, wakeOutbound: () => outboundWork.wake(), logger });
+const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), logger });
 instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);

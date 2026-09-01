@@ -3,6 +3,8 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { Logger } from "pino";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
+import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 
 export class InstanceWorkScheduler {
   private readonly active = new Set<string>();
@@ -12,7 +14,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry; wakeOutbound?: () => void; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;
@@ -34,34 +36,41 @@ export class InstanceWorkScheduler {
         const turn = this.options.store.claimNextInstanceTurn(instance.id, instance.generation);
         if (!turn) return;
         const driver = this.options.drivers.get(instance.agentKind);
-        if (!driver) { this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "failed", error: "Agent adapter unavailable", eventKind: "turn.failed" }); continue; }
-        this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "dispatching", eventKind: "turn.dispatching" });
+        if (!driver) { this.transition(turn.id, turn.instanceGeneration, "failed", "turn.failed", { type: "failed", occurredAt: new Date().toISOString(), notice: "Agent adapter unavailable" }, "Agent adapter unavailable"); continue; }
+        this.transition(turn.id, turn.instanceGeneration, "dispatching", "turn.dispatching", { type: "preparing", occurredAt: new Date().toISOString() });
         this.inFlight.set(instanceId, { turnId: turn.id, generation: turn.instanceGeneration });
         let receipt;
         try {
           receipt = await driver.submit(instance.runtimeRef, turn.text, () => {
             if (this.detachedTurns.has(turn.id)) return;
-            this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "running", eventKind: "turn.running" });
+            this.transition(turn.id, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() });
           });
         } catch (error) {
           if (this.detachedTurns.has(turn.id)) return;
           const message = safeLogError(error).message;
-          this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "dispatch-uncertain", error: message, eventKind: "turn.dispatch-uncertain" });
+          this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: message }, message);
           this.recordFailure(error, instanceId, turn.id);
           return;
         }
         if (this.detachedTurns.has(turn.id)) return;
         if (receipt.status === "confirmed-delivered") {
-          this.options.store.completeInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, result: receipt.runtimeCursor ?? "" });
+          if (driver.describe().structuredEvents) return;
+          this.transition(turn.id, turn.instanceGeneration, "completed", "turn.completed", { type: "completed-without-output", occurredAt: new Date().toISOString(), notice: "该 Worker 不支持结构化输出捕获；请前往对应 Herdr Pane 查看本地会话。" }, null, "");
           this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "running", observedState: "idle" });
           continue;
         }
-        else if (receipt.status === "delivery-uncertain") this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "dispatch-uncertain", error: receipt.reason, eventKind: "turn.dispatch-uncertain" });
-        else this.options.store.updateInstanceTurn({ turnId: turn.id, expectedGeneration: turn.instanceGeneration, state: "failed", error: receipt.reason, eventKind: "turn.failed" });
+        else if (receipt.status === "delivery-uncertain") this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: receipt.reason }, receipt.reason);
+        else this.transition(turn.id, turn.instanceGeneration, "failed", "turn.failed", { type: "failed", occurredAt: new Date().toISOString(), notice: receipt.reason }, receipt.reason);
         return;
       }
     } catch (error) { this.recordFailure(error, instanceId, this.inFlight.get(instanceId)?.turnId); }
     finally { this.active.delete(instanceId); this.inFlight.delete(instanceId); }
+  }
+  private transition(turnId: string, generation: number, state: Parameters<InstanceStore["updateInstanceTurn"]>[0]["state"], eventKind: string, change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
+    if (this.options.store.loadWorkerTurnCard(turnId)) {
+      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: renderWorkerTurnCard });
+      if (projected) this.options.wakeOutbound?.();
+    } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }
   snapshot(): { state: "idle" | "running" | "stopping"; activeDispatchWorkers: number; lastFailureAt: string | null; lastFailure: string | null } {
     return { state: this.stopping ? "stopping" : this.active.size > 0 ? "running" : "idle", activeDispatchWorkers: this.active.size, lastFailureAt: this.lastFailureAt, lastFailure: this.lastFailure };
@@ -73,7 +82,8 @@ export class InstanceWorkScheduler {
     if (context.remainingMs() > 0 && !context.signal.aborted && await settlesWithin(settled, context.remainingMs(), context.signal)) return;
     for (const { turnId, generation } of this.inFlight.values()) {
       this.detachedTurns.add(turnId);
-      this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state: "dispatch-uncertain", error: "Bridge stopped observing an in-flight instance turn; prompt was not replayed", eventKind: "turn.dispatch-uncertain" });
+      const notice = "Bridge stopped observing an in-flight instance turn; prompt was not replayed";
+      this.transition(turnId, generation, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, notice);
     }
   }
   private recordFailure(error: unknown, instanceId: string, turnId?: string): void {

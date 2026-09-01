@@ -9,6 +9,7 @@ import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-vie
 import { renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
@@ -103,6 +104,24 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT DISTINCT lane_key FROM outbound_replies ORDER BY lane_key").all()).toEqual([
       { lane_key: "worker-turn:turn-a" }, { lane_key: "worker-turn:turn-b" }
     ]);
+  });
+
+  it("settles one Worker card and recomputes queued card positions atomically", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    for (const [index, turnId] of ["turn-a", "turn-b", "turn-c"].entries()) {
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: index + 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, card: renderWorkerTurnCard(view) });
+    }
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+
+    const result = store.transitionInstanceTurnWithProjection({ turnId: "turn-a", expectedGeneration: worker.generation, state: "completed", result: "", eventKind: "turn.completed", change: { type: "completed-without-output", occurredAt: "2026-09-01T00:01:00.000Z", notice: "unavailable" }, render: renderWorkerTurnCard });
+
+    expect(result).toMatchObject({ turn: { state: "completed", result: "" }, view: { phase: "completed", queuePosition: 0 } });
+    expect(store.loadWorkerTurnCard("turn-b")).toMatchObject({ queuePosition: 1 });
+    expect(store.loadWorkerTurnCard("turn-c")).toMatchObject({ queuePosition: 2 });
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(3);
   });
   it("adds the Session operation inbox to an existing database", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-session-operation-migration-"));
