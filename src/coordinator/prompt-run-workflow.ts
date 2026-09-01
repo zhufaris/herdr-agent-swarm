@@ -26,6 +26,7 @@ export interface PromptRunWorkflowPort {
   snapshot(): PromptWorkerDiagnostics;
   activeTurn(bindingId: string): ActiveTurnSnapshot | null;
   isBindingBusy(bindingId: string): boolean;
+  awake(bindingId: string): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "busy" | "unavailable"; reason: string }>;
   stop(context?: ShutdownContext): Promise<void>;
 }
 
@@ -41,6 +42,8 @@ interface PromptRunWorkflowOptions {
   safetyScanIntervalMs?: number;
   transcriptReader?: TraexTranscriptReaderPort;
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
+  observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
+  recoverExternalTurns?: (binding: Binding, prompt: PromptJob) => Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }>;
 }
 
 type TurnOutputSource =
@@ -178,6 +181,29 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   isBindingBusy(bindingId: string): boolean {
     return this.turns.has(bindingId) || this.workers.has(bindingId) || this.steeringWorkers.has(bindingId);
+  }
+
+  async awake(bindingId: string): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "busy" | "unavailable"; reason: string }> {
+    const prompt = this.options.store.listDetachedPrompts().find((candidate) => candidate.bindingId === bindingId);
+    if (!prompt) return { outcome: "none", reason: "no_detached_prompt" };
+    const binding = this.options.store.getBinding(bindingId);
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") return { outcome: "unavailable", reason: "binding_not_active" };
+    if (!this.options.recoverExternalTurns) return { outcome: "unavailable", reason: "recovery_unavailable" };
+    const existing = this.workers.get(bindingId);
+    if (existing) {
+      this.turns.abort(bindingId);
+      await existing;
+    }
+    if (this.workers.has(bindingId) || this.steeringWorkers.has(bindingId)) return { outcome: "busy", reason: "binding_busy" };
+    const recovery = this.options.recoverExternalTurns(binding, prompt);
+    const worker = recovery.then(() => undefined);
+    this.workers.set(bindingId, worker);
+    try {
+      return await recovery;
+    } finally {
+      if (this.workers.get(bindingId) === worker) this.workers.delete(bindingId);
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
+    }
   }
 
   async stop(context?: ShutdownContext): Promise<void> {
@@ -402,7 +428,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const paneId = binding.paneId!;
     let outputSource = initialSource;
     try {
-      while (!this.stopping) {
+      while (!this.stopping && !abortController.signal.aborted) {
         if (!this.isBindingActive(binding.id)) return;
         const observation = await this.options.herdr.observeRuntime(paneId);
         const pane = observation.pane;
@@ -411,6 +437,15 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(binding.id, prompt.id, state);
         const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
         outputSource = typed.source;
+        if (this.isLaterConflictingTurn(prompt, typed.observation) && this.options.observeSupersedingExternalTurn) {
+          const handoff = await this.options.observeSupersedingExternalTurn(binding, prompt, typed.observation);
+          if (handoff === "completed") return;
+          if (handoff === "pending" || handoff === "observing") {
+            if (this.options.herdr.waitForRuntimeChange) await this.options.herdr.waitForRuntimeChange(paneId, 500, abortController.signal);
+            else await abortableWait(500, abortController.signal);
+            continue;
+          }
+        }
         const owned = this.ownTranscriptObservation(binding, prompt, typed.observation);
         if (owned.owned) {
           this.retainOwnedObservation(outputSource, owned.observation);
@@ -438,6 +473,15 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       this.options.store.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
       this.options.logger.warn({ event: "detached-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId, outcome: "uncertain" }, "could not observe existing TraeX turn");
     }
+  }
+
+  private isLaterConflictingTurn(prompt: PromptJob, observation: TraexTranscriptObservation): boolean {
+    if (!prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt || !observation.turnId || observation.turnId === prompt.transcriptTurnId) return false;
+    const observedStartedAt = observation.turnLifecycle?.startedAt;
+    if (!observedStartedAt) return false;
+    const observedMs = Date.parse(observedStartedAt);
+    const ownedMs = Date.parse(prompt.transcriptTurnStartedAt);
+    return Number.isFinite(observedMs) && Number.isFinite(ownedMs) && observedMs > ownedMs;
   }
 
   private isBindingActive(bindingId: string): boolean {

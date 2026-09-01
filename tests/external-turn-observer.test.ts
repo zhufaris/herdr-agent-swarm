@@ -2,6 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { ExternalTurnObserver } from "../src/coordinator/external-turn-observer.js";
 import type { TraexTranscriptObservation } from "../src/domain/ports.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
@@ -88,5 +89,25 @@ describe("ExternalTurnObserver", () => {
     expect(wakePrompt).toHaveBeenCalledWith("b1");
     await observer.stop();
     store.close();
+  });
+
+  it("does not reproject a superseding turn after its handed-off cursor completed it", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const existing = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "Old", workspaceId: "w1", paneId: "w1:p1", requestText: "old", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "u1", body: "old" }, view: existing, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state='running', observation_state='detached', dispatched_at='2026-08-31T10:00:01.000Z', transcript_turn_id='old-turn', transcript_turn_started_at='2026-08-31T10:00:01.000Z' WHERE id='old'").run();
+    const replay: TraexTranscriptObservation[] = [
+      { turnId: "new-turn", freshTurnStart: true, requestText: "new", answerDelta: "answer", turnLifecycle: { turnId: "new-turn", state: "completed", startedAt: "2026-08-31T10:00:02.000Z", finalAnswer: "answer" } }, { answerDelta: "" }
+    ];
+    const bus = new BridgeEventBus(); const events: string[] = []; bus.onBridgeEvent("capture", (event) => events.push(event.type));
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return replay.shift() ?? { answerDelta: "" }; } } }) }, bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external" });
+    const binding = store.getBinding("b1")!; const old = store.getPrompt("old")!;
+    const completed = await observer.observeSupersedingTurn(binding, old, { turnId: "new-turn", freshTurnStart: true, requestText: "new", answerDelta: "answer", turnLifecycle: { turnId: "new-turn", state: "completed", startedAt: "2026-08-31T10:00:02.000Z", finalAnswer: "answer" } });
+    expect(completed).toBe("completed"); const eventCount = events.length;
+    await observer.observe(binding); await observer.observe(binding);
+    expect(events).toHaveLength(eventCount); expect(store.loadRunCard("external")).toMatchObject({ answer: "answer", phase: "completed" });
+    await observer.stop(); store.close();
   });
 });

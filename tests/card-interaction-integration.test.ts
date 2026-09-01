@@ -9,12 +9,11 @@ function harness() {
   store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
   store.enqueuePrompt({ id: "parent", bindingId: "b1", larkMessageId: "parent-message", actorOpenId: "member", body: "work" });
   store.updatePrompt("parent", "running");
-  let active: { promptId: string; paneId: string } | null = { promptId: "parent", paneId: "w1:p1" };
-  const steer = vi.fn(async () => true);
   const wakePrompt = vi.fn();
   const logger = { info: vi.fn(), warn: vi.fn() };
-  const workflow = new CardInteractionWorkflow({ store, paneControl: { steer, stop: vi.fn(async () => true) }, sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) }, provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) }, activeTurn: () => active, wakePrompt, logger });
-  return { store, binding: store.getBinding("b1")!, workflow, steer, wakePrompt, logger, end: () => { active = null; } };
+  const sessionOperations = { accept: vi.fn(() => "accepted" as const) };
+  const workflow = new CardInteractionWorkflow({ store, sessionAdministration: { emitStatus: vi.fn(async () => {}) }, sessionOperations, wakePrompt, logger });
+  return { store, binding: store.getBinding("b1")!, workflow, wakePrompt, logger, sessionOperations };
 }
 
 describe("card interactions", () => {
@@ -22,49 +21,16 @@ describe("card interactions", () => {
     const h = harness();
     const opened = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "member", value: { action: "open_supplement", bindingId: "b1" } });
     expect(opened?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；请将内容作为普通消息发送。" });
-    expect(h.steer).not.toHaveBeenCalled();
     h.store.close();
   });
 
-  it("keeps a queued prompt in FIFO when immediate supplement is unsupported", async () => {
+  it("rejects legacy queued-steering callbacks without changing FIFO state", async () => {
     const h = harness();
     h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
     const value = { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" };
     const converted = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value });
-    expect(converted?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；原消息仍按原顺序排队。" });
+    expect(converted?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；请将内容作为普通消息发送。" });
     expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "turn", parentPromptId: null });
-    h.store.enqueuePrompt({ id: "queued-2", bindingId: "b1", larkMessageId: "queued-message-2", actorOpenId: "member", body: "later" }); h.end();
-    const stale = await h.workflow.handle({ messageId: "answer-2", chatId: "chat", operatorOpenId: "member", value: { ...value, targetPromptId: "queued-2" } });
-    expect(stale?.toast?.type).toBe("warning"); expect(h.store.getPrompt("queued-2")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" }); h.store.close();
-  });
-
-  it("keeps a queued prompt in FIFO without probing TraeX", async () => {
-    const h = harness();
-    h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
-
-    const result = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" } });
-
-    expect(result?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；原消息仍按原顺序排队。" });
-    expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" });
-    h.store.close();
-  });
-
-  it("never converts an old queued card into a newer active turn", async () => {
-    const h = harness();
-    h.store.enqueuePrompt({ id: "queued-old", bindingId: "b1", larkMessageId: "queued-old-message", actorOpenId: "member", body: "old follow-up" });
-    h.end();
-    h.store.updatePrompt("parent", "delivered");
-    h.store.enqueuePrompt({ id: "new-parent", bindingId: "b1", larkMessageId: "new-parent-message", actorOpenId: "member", body: "new work" });
-    h.store.updatePrompt("new-parent", "running");
-    const workflow = new CardInteractionWorkflow({
-      store: h.store, paneControl: { steer: h.steer, stop: vi.fn(async () => true) },
-      sessionAdministration: { emitStatus: vi.fn(async () => {}), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) },
-      provisioning: { reset: vi.fn(async () => true), reattach: vi.fn(async () => {}), replace: vi.fn(async () => {}) }, paneClosure: { requestPaneClose: vi.fn(async () => true) }, modelSelection: { runModel: vi.fn(async () => true) },
-      activeTurn: () => ({ promptId: "new-parent", paneId: "w1:p1" }), wakePrompt: h.wakePrompt, logger: h.logger
-    });
-    const result = await workflow.handle({ messageId: "old-answer", chatId: "chat", operatorOpenId: "member", value: { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued-old" } });
-    expect(result?.toast?.type).toBe("warning");
-    expect(h.store.getPrompt("queued-old")).toMatchObject({ dispatchKind: "turn", parentPromptId: null, state: "queued" });
     h.store.close();
   });
 
@@ -75,7 +41,39 @@ describe("card interactions", () => {
     const forged = await h.workflow.handle({ messageId: "more", chatId: "chat", operatorOpenId: "member", value: { action: "session_archive", bindingId: "b1", bindingGeneration: 1 } });
     expect(forged?.toast?.type).toBe("error");
     const creator = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1" } });
-    expect(JSON.stringify(creator?.card)).toContain("停止当前任务"); expect(JSON.stringify(creator?.card)).toContain("关闭 Pane"); h.store.close();
+    expect(JSON.stringify(creator?.card)).toContain("停止当前任务"); expect(JSON.stringify(creator?.card)).toContain("关闭 Pane"); expect(JSON.stringify(creator?.card)).not.toContain("模型"); h.store.close();
+  });
+
+  it("rejects a historical model callback without persisting Session work", async () => {
+    const h = harness();
+    const result = await h.workflow.handle({ messageId: "old-more", chatId: "chat", operatorOpenId: "creator", value: { action: "session_model", bindingId: "b1", bindingGeneration: 1, interactionId: "old" } });
+    expect(result?.toast?.type).toBe("warning");
+    expect(h.sessionOperations.accept).not.toHaveBeenCalled();
+    h.store.close();
+  });
+
+  it("durably delegates mutating Session callbacks before external execution", async () => {
+    const h = harness();
+    const opened = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1", bindingGeneration: 1 } });
+    const rename = findValue(opened!.card!, "open_rename");
+
+    const result = await h.workflow.handle({ messageId: "rename-card", chatId: "chat", operatorOpenId: "creator", value: { ...rename, action: "submit_rename" }, formValues: { title: "New title" } });
+
+    expect(result?.toast).toEqual({ type: "success", content: "操作已受理。" });
+    expect(h.sessionOperations.accept).toHaveBeenCalledWith(expect.objectContaining({ operatorOpenId: "creator" }), expect.objectContaining({ id: "b1" }), rename.interactionId, "rename", "New title");
+    h.store.close();
+  });
+
+  it("rejects oversized Session form arguments before durable acceptance", async () => {
+    const h = harness();
+    const opened = await h.workflow.handle({ messageId: "main", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1", bindingGeneration: 1 } });
+    const rename = findValue(opened!.card!, "open_rename");
+
+    const result = await h.workflow.handle({ messageId: "rename-card", chatId: "chat", operatorOpenId: "creator", value: { ...rename, action: "submit_rename" }, formValues: { title: "x".repeat(501) } });
+
+    expect(result?.toast?.type).toBe("warning");
+    expect(h.sessionOperations.accept).not.toHaveBeenCalled();
+    h.store.close();
   });
 
   it("shows only recovery-safe controls for an orphaned binding", async () => {

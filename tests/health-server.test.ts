@@ -96,6 +96,41 @@ describe("health server", () => {
     expect(JSON.stringify(body)).not.toContain("payload");
   });
 
+  it("reports the inbound dispatcher and degrades for a stale durable backlog", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), inbound: {
+      states: { received: 2, processing: 0, accepted: 4 }, retryable: 1, oldestPendingAt: "2026-08-31T12:00:00.000Z", oldestPendingAgeSeconds: 600,
+      recentFailure: { eventId: "event-1", updatedAt: "2026-08-31T12:09:00.000Z", error: "temporary failure" }
+    } });
+    const inboundDispatcher = { snapshot: () => ({ state: "retry_wait" as const, drainRequested: false, retryAttempt: 3, nextRetryAt: "2026-08-31T12:10:02.000Z", lastAcceptedAt: null, lastFailureAt: "2026-08-31T12:10:00.000Z", lastFailure: "temporary failure" }) };
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never, inboundDispatcher,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+
+    expect((await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json()).toMatchObject({
+      status: "degraded", operational: { inbound: { states: { received: 2 }, oldestPendingAgeSeconds: 600 } },
+      inboundDispatcher: { state: "retry_wait", retryAttempt: 3, lastFailure: "temporary failure" }
+    });
+  });
+
+  it("reports Session operation dispatcher diagnostics without exposing operation arguments", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const snapshot = { state: "running" as const, activeOperations: 1, drainRequested: true, lastCompletedAt: null, lastFailureAt: null, lastFailure: null };
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never, sessionOperationDispatcher: { snapshot: () => snapshot },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+
+    const body = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json();
+    expect(body).toMatchObject({ status: "ok", sessionOperationDispatcher: snapshot, operational: { sessionOperations: { states: { accepted: 0, running: 0, uncertain: 0 } } } });
+    expect(JSON.stringify(body)).not.toContain("argument");
+  });
+
   it("reports and degrades active or uncertain instance work", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({
@@ -318,6 +353,22 @@ describe("health server", () => {
     expect(await status.json()).toMatchObject({
       status: "degraded", readiness: { status: "ready" },
       outboxDispatcher: { error: "diagnostic failed" }
+    });
+  });
+
+  it("isolates inbound dispatcher diagnostic failure from readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      inboundDispatcher: { snapshot() { throw new Error("inbound diagnostics failed"); } }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" }, inboundDispatcher: { error: "inbound diagnostics failed" }
     });
   });
 

@@ -216,7 +216,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         const card = JSON.parse(reply.payload) as object;
         if (reply.targetRole === "session_status" && this.lark.updateCardKit) {
-          await this.lark.updateCardKit(reply.rootMessageId, card, reply.viewVersion ?? 0);
+          await this.lark.updateCardKit(reply.rootMessageId, card, reply.cardSequence ?? 1);
         } else await this.lark.updateCard(reply.rootMessageId, card);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
@@ -238,9 +238,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           if (prompt?.dispatchKind === "steering" && prompt.parentPromptId) this.scheduler?.wake({ kind: "steering-ready", bindingId: reply.bindingId, parentPromptId: prompt.parentPromptId });
           else this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
-        if (reply.promptId && decoded.stream && decoded.stream.pageIndex > 0) {
-          for (const listener of this.answerCheckpointListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
-        }
+        if (reply.promptId && decoded.stream) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
       } else if (reply.kind === "stream_content") {
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
         const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
@@ -299,13 +297,15 @@ function deliveryTargetKey(reply: OutboundReply): string {
     : `message:${reply.rootMessageId}`;
 }
 
-function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string } } {
-  const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };
-  return decoded.card && decoded.stream
-    ? { card: decoded.card, stream: {
-      pageIndex: typeof decoded.stream.pageIndex === "number" ? decoded.stream.pageIndex : -1,
-      pageStart: typeof decoded.stream.pageStart === "number" ? decoded.stream.pageStart : -1,
-      elementId: typeof decoded.stream.elementId === "string" ? decoded.stream.elementId : ""
-    } }
-    : { card: decoded };
+function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" } } {
+  const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown; deliveryMode?: unknown } };
+  if (!decoded.card || !decoded.stream) return { card: decoded };
+  const stream = {
+    pageIndex: typeof decoded.stream.pageIndex === "number" ? decoded.stream.pageIndex : -1,
+    pageStart: typeof decoded.stream.pageStart === "number" ? decoded.stream.pageStart : -1,
+    elementId: typeof decoded.stream.elementId === "string" ? decoded.stream.elementId : ""
+  };
+  return decoded.stream.deliveryMode === "static"
+    ? { card: decoded.card, stream: { ...stream, deliveryMode: "static" } }
+    : { card: decoded.card, stream };
 }

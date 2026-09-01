@@ -20,6 +20,8 @@ describe("commands", () => {
     expect(parseCommand("/swarm reattach w1:p9")).toEqual({ kind: "reattach", paneId: "w1:p9" });
     expect(parseCommand("/swarm replace")).toEqual({ kind: "replace" });
     expect(parseCommand("/swarm resume")).toEqual({ kind: "resume" });
+    expect(parseCommand("/swarm awake")).toEqual({ kind: "awake" });
+    expect(parseCommand("/swarm awake extra")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm pane close")).toEqual({ kind: "pane_close_request" });
     expect(parseCommand("/swarm pane close confirm A7K9Q2")).toEqual({ kind: "pane_close_confirm", code: "A7K9Q2" });
     expect(parseCommand("/swarm pane close confirm")).toEqual({ kind: "help" });

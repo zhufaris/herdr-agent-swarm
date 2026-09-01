@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderModelResultCard } from "../src/cards/model-card.js";
-import { renderMoreActionsCard, renderSupplementInputCard } from "../src/cards/interaction-card.js";
+import { renderMoreActionsCard } from "../src/cards/interaction-card.js";
 import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
@@ -106,17 +106,6 @@ describe("run card", () => {
     expect(findTaggedNodes(more, "action")).toEqual([]);
   });
 
-  it("renders supplement submission with CardKit 2.0 form and callback behaviors", () => {
-    const card = renderSupplementInputCard({ interactionId: "i1", bindingId: "b1", bindingGeneration: 2 });
-    const submit = findTaggedNodes(card, "button")[0]!;
-
-    expect(submit).toMatchObject({
-      name: "submit_supplement", action_type: "form_submit",
-      behaviors: [{ type: "callback", value: { action: "submit_supplement", interactionId: "i1", bindingId: "b1", bindingGeneration: 2 } }]
-    });
-    expect(submit).not.toHaveProperty("form_action_type");
-    expect(submit).not.toHaveProperty("value");
-  });
 
   it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
     const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };

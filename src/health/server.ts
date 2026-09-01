@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
-import type { HerdrCircuitBreakerStatus, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, ReconciliationDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
+import type { HerdrCircuitBreakerStatus, InboundDispatcherDiagnostics, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, ReconciliationDiagnostics, SessionOperationDispatcherDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
@@ -25,6 +25,8 @@ export function startHealthServer(options: {
   workspaceCache?: { status(): WorkspaceCacheStatus };
   herdrCircuitBreaker?: { status(): HerdrCircuitBreakerStatus };
   startupRecovery?: { snapshot(): StartupRecoveryDiagnostics };
+  inboundDispatcher?: { snapshot(): InboundDispatcherDiagnostics };
+  sessionOperationDispatcher?: { snapshot(): SessionOperationDispatcherDiagnostics };
   sqliteIntegrity?: { snapshot(): SqliteIntegrityDiagnostics };
   lifecycleEvents?: LifecycleEventDiagnostics;
   cardConvergence?: { snapshot(): CardUpdateSchedulerDiagnostics };
@@ -70,6 +72,12 @@ export function startHealthServer(options: {
       let startupRecovery: StartupRecoveryDiagnostics | { error: string } | undefined;
       try { startupRecovery = options.startupRecovery?.snapshot(); }
       catch (error) { startupRecovery = { error: boundedError(error) }; }
+      let inboundDispatcher: InboundDispatcherDiagnostics | { error: string } | undefined;
+      try { inboundDispatcher = options.inboundDispatcher?.snapshot(); }
+      catch (error) { inboundDispatcher = { error: boundedError(error) }; }
+      let sessionOperationDispatcher: SessionOperationDispatcherDiagnostics | { error: string } | undefined;
+      try { sessionOperationDispatcher = options.sessionOperationDispatcher?.snapshot(); }
+      catch (error) { sessionOperationDispatcher = { error: boundedError(error) }; }
       let sqliteIntegrity: SqliteIntegrityDiagnostics | { error: string } | undefined;
       try { sqliteIntegrity = options.sqliteIntegrity?.snapshot(); }
       catch (error) { sqliteIntegrity = { error: boundedError(error) }; }
@@ -88,10 +96,14 @@ export function startHealthServer(options: {
         || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
         || operational.eligibleDeadLetterRecoveries > 0
         || operational.outboxQuarantines.active > 0
-        || operational.outboxLanes.stalled > 0;
+        || operational.outboxLanes.stalled > 0
+        || operational.inbound.oldestPendingAgeSeconds !== null && operational.inbound.oldestPendingAgeSeconds >= 300;
+      const sessionOperationsDegraded = !("error" in operational) && operational.sessionOperations.oldestAcceptedAgeSeconds !== null && operational.sessionOperations.oldestAcceptedAgeSeconds >= 300;
       response.end(JSON.stringify({
-        status: readiness.status === "ready" && !operationalDegraded
+        status: readiness.status === "ready" && !operationalDegraded && !sessionOperationsDegraded
           && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
+          && !(inboundDispatcher && "error" in inboundDispatcher)
+          && !(sessionOperationDispatcher && "error" in sessionOperationDispatcher)
           && !(outboxDispatcher && "lastScanOutcome" in outboxDispatcher && outboxDispatcher.lastScanOutcome === "failed")
           && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
           && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
@@ -105,6 +117,8 @@ export function startHealthServer(options: {
         ...(options.workspaceCache ? { workspaceCache: options.workspaceCache.status() } : {}),
         ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}),
         ...(startupRecovery ? { startupRecovery } : {}),
+        ...(inboundDispatcher ? { inboundDispatcher } : {}),
+        ...(sessionOperationDispatcher ? { sessionOperationDispatcher } : {}),
         ...(sqliteIntegrity ? { sqliteIntegrity } : {}),
         ...(reconciliation ? { reconciliation } : {}),
         ...(cardConvergence ? { cardConvergence } : {}),

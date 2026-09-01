@@ -2,6 +2,8 @@ import type { Logger } from "pino";
 
 interface OutboxRetentionStore {
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
+  pruneAcceptedInboundMessages(cutoff: string, limit: number): number;
+  pruneTerminalSessionOperations(cutoff: string, limit: number): number;
 }
 
 export class OutboxRetentionMaintainer {
@@ -39,20 +41,28 @@ export class OutboxRetentionMaintainer {
     try {
       const cutoff = new Date(Date.now() - this.options.retentionDays * 86_400_000).toISOString();
       const maxBatches = this.options.maxBatches ?? 20;
-      let removed = 0;
-      let batches = 0;
-      while (!this.stopping && batches < maxBatches) {
-        const batch = this.store.pruneDeliveredOutboundReplies(cutoff, this.options.batchSize);
-        removed += batch;
-        batches += 1;
-        if (batch < this.options.batchSize) break;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-      if (removed > 0) this.logger.info({ event: "outbox-retention-pruned", removed, batches, cutoff, limit: this.options.batchSize, maxBatches, outcome: "pruned" }, "pruned retained Lark outbox history");
+      const outbound = await this.pruneKind((limit) => this.store.pruneDeliveredOutboundReplies(cutoff, limit), maxBatches);
+      const inbound = await this.pruneKind((limit) => this.store.pruneAcceptedInboundMessages(cutoff, limit), maxBatches);
+      const sessionOperations = await this.pruneKind((limit) => this.store.pruneTerminalSessionOperations(cutoff, limit), maxBatches);
+      const removed = outbound.removed + inbound.removed + sessionOperations.removed;
+      if (removed > 0) this.logger.info({ event: "durable-history-pruned", removed, outboundRemoved: outbound.removed, inboundRemoved: inbound.removed, sessionOperationRemoved: sessionOperations.removed, outboundBatches: outbound.batches, inboundBatches: inbound.batches, sessionOperationBatches: sessionOperations.batches, cutoff, limit: this.options.batchSize, maxBatches, outcome: "pruned" }, "pruned retained Lark delivery, inbound, and Session operation history");
       return removed;
     } catch (error) {
       this.logger.error({ event: "outbox-retention-failed", err: error, outcome: "failed" }, "failed to prune retained Lark outbox history");
       return 0;
     }
+  }
+
+  private async pruneKind(prune: (limit: number) => number, maxBatches: number): Promise<{ removed: number; batches: number }> {
+    let removed = 0;
+    let batches = 0;
+    while (!this.stopping && batches < maxBatches) {
+      const batch = prune(this.options.batchSize);
+      removed += batch;
+      batches += 1;
+      if (batch < this.options.batchSize) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return { removed, batches };
   }
 }

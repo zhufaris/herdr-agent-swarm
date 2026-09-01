@@ -26,6 +26,27 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("keeps external turn observation live while handling a targeted Pane event", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle" });
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const, foregroundExecutables: ["traex"] };
+    const externalTurnObserver = { observe: vi.fn(async () => undefined) };
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { observeRuntime: async () => ({ pane, traexProcess: true, composerReady: false, evidenceSource: "structured" as const }) } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, externalTurnObserver
+    });
+
+    await reconciler.requestPaneReconciliation(["w1:p1"]);
+    await reconciler.requestPaneReconciliation(["w1:p1"]);
+
+    expect(externalTurnObserver.observe).toHaveBeenCalledTimes(2);
+    expect(externalTurnObserver.observe).toHaveBeenLastCalledWith(expect.objectContaining({ id: "b1", paneId: "w1:p1" }));
+    store.close();
+  });
+
   it("captures structured Agent sequence baselines without terminal access", async () => {
     const store = new SqliteBindingStore(":memory:");
     const listPanes = vi.fn(async () => [{

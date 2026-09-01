@@ -7,6 +7,7 @@ import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
+import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
@@ -216,6 +217,64 @@ describe("coordinator concurrency controls", () => {
     expect(replies).toEqual(["m1", "m2"]);
     expect(store.database.prepare("SELECT state FROM inbound_messages ORDER BY created_at, event_id").all()).toEqual([{ state: "accepted" }, { state: "accepted" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("persists a Lark callback before acknowledging it and consumes it in the background", async () => {
+    let onMessage!: Parameters<LarkPort["start"]>[0];
+    let releaseAcceptance!: () => void;
+    const acceptanceBlocked = new Promise<void>((resolve) => { releaseAcceptance = resolve; });
+    const inboundWork = new InProcessInboundWorkNotifier();
+    const stopBlocker = inboundWork.subscribe(() => acceptanceBlocked);
+    const lark: LarkPort = {
+      ...quietLark(),
+      async start(handler) { onMessage = handler; }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, emptyHerdr(), lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
+
+    try {
+      await coordinator.start();
+      const acknowledged = onMessage(message(1));
+      await expect(acknowledged).resolves.toBeUndefined();
+      expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: "processing" });
+
+      releaseAcceptance();
+      await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: "accepted" }));
+    } finally {
+      releaseAcceptance();
+      await coordinator.stop(); stopBlocker(); await publisher.stop(); store.close();
+    }
+  });
+
+  it("automatically retries a failed durable inbound acceptance without another message", async () => {
+    let onMessage!: Parameters<LarkPort["start"]>[0];
+    let attempts = 0;
+    const inboundWork = new InProcessInboundWorkNotifier();
+    const stopFailure = inboundWork.subscribe(() => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary inbound failure");
+    });
+    const lark: LarkPort = {
+      ...quietLark(),
+      async start(handler) { onMessage = handler; }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, emptyHerdr(), lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
+
+    try {
+      await coordinator.start();
+      await expect(onMessage(message(1))).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(coordinator.inboundSnapshot()).toMatchObject({ state: "retry_wait", retryAttempt: 1, nextRetryAt: expect.any(String), lastFailure: "temporary inbound failure" }));
+      await vi.waitFor(() => expect(attempts).toBe(2));
+      expect(store.database.prepare("SELECT state, error FROM inbound_messages WHERE event_id = 'e1'").get()).toEqual({ state: "accepted", error: null });
+      expect(coordinator.inboundSnapshot()).toMatchObject({ state: "idle", retryAttempt: 0, nextRetryAt: null, lastAcceptedAt: expect.any(String), lastFailureAt: expect.any(String) });
+    } finally {
+      await coordinator.stop(); stopFailure(); await publisher.stop(); store.close();
+    }
   });
 
   it("starts a queued prompt while its initial answer card retries independently", async () => {

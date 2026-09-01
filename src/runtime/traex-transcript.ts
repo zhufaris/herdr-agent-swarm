@@ -15,6 +15,7 @@ const DEFAULT_MAX_CACHED_PATHS = 256;
 const DEFAULT_NEGATIVE_CACHE_TTL_MS = 250;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
+const MAX_RECOVERY_SCAN_BYTES = 64 * 1024 * 1024;
 const MAX_EPOCH_SECONDS = 10_000_000_000;
 
 const envelopeSchema = z.object({
@@ -145,6 +146,42 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     } catch {
       return { mode: "unavailable", reason: "transcript_validation_failed" };
     }
+  }
+
+  async openAfterTurn(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult> {
+    if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
+    if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value) || !SESSION_ID.test(turnId)) {
+      return { mode: "unavailable", reason: "unsupported_session_identity" };
+    }
+    try {
+      const path = await this.resolveTranscriptPath(session.value);
+      if (!path) return { mode: "unavailable", reason: "transcript_not_found" };
+      const file = await stat(path);
+      if (file.size > MAX_RECOVERY_SCAN_BYTES) return { mode: "unavailable", reason: "transcript_validation_failed" };
+      const boundary = await findCompletedTurnBoundary(path, file.size, turnId, startedAt);
+      if (boundary === "missing") return { mode: "unavailable", reason: "turn_boundary_not_found" };
+      if (boundary === "incomplete") return { mode: "unavailable", reason: "turn_boundary_incomplete" };
+      const baseline = await latestTranscriptBaseline(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars);
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, undefined) };
+    } catch {
+      return { mode: "unavailable", reason: "transcript_validation_failed" };
+    }
+  }
+
+  private async resolveTranscriptPath(sessionId: string): Promise<string | null> {
+    const cachedPath = this.pathsBySessionId.get(sessionId);
+    if (cachedPath && await isValidTranscriptPath(this.sessionsRoot, cachedPath, sessionId)) {
+      this.pathsBySessionId.delete(sessionId);
+      this.pathsBySessionId.set(sessionId, cachedPath);
+      return cachedPath;
+    }
+    if (cachedPath) this.pathsBySessionId.delete(sessionId);
+    const discovery = await this.discoverOnce(sessionId);
+    if (discovery.exhausted || discovery.paths.length !== 1) return null;
+    const path = discovery.paths[0]!;
+    if (!await containsMatchingSessionMeta(path, sessionId)) return null;
+    this.rememberPath(sessionId, path);
+    return path;
   }
 
   private rememberPath(sessionId: string, path: string): void {
@@ -468,6 +505,35 @@ async function latestTranscriptBaseline(path: string, end: number, maxBytes: num
       } catch {}
     }
     return { tokenCount, turnLifecycle };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function findCompletedTurnBoundary(path: string, end: number, turnId: string, startedAt: string): Promise<number | "missing" | "incomplete"> {
+  const expectedStartedAt = Date.parse(startedAt);
+  if (!Number.isFinite(expectedStartedAt)) return "missing";
+  const handle = await open(path, "r");
+  const buffer = Buffer.alloc(end);
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    let offset = 0;
+    let matchedStart = false;
+    for (const record of buffer.subarray(0, bytesRead).toString("utf8").split(/(?<=\n)/)) {
+      const nextOffset = offset + Buffer.byteLength(record);
+      const envelope = parseEnvelope(record.trimEnd());
+      if (envelope?.type === "event_msg") {
+        const started = taskStartedEventSchema.safeParse(envelope.payload);
+        if (started.success) {
+          if (started.data.turn_id === turnId && eventTime(started.data.started_at) === startedAt) matchedStart = true;
+          else if (matchedStart && started.data.turn_id !== turnId) return offset;
+        }
+        const completed = taskCompleteEventSchema.safeParse(envelope.payload);
+        if (matchedStart && completed.success && completed.data.turn_id === turnId && eventTime(completed.data.started_at) === startedAt) return nextOffset;
+      }
+      offset = nextOffset;
+    }
+    return matchedStart ? "incomplete" : "missing";
   } finally {
     await handle.close();
   }

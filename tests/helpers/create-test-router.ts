@@ -9,7 +9,9 @@ import { ModelSelectionWorkflow } from "../../src/coordinator/model-selection-wo
 import { PaneControlWorkflow } from "../../src/coordinator/pane-control-workflow.js";
 import { OperationsQueryWorkflow } from "../../src/coordinator/operations-query-workflow.js";
 import { SessionAdministrationWorkflow } from "../../src/coordinator/session-administration-workflow.js";
+import { SessionOperationWorkflow } from "../../src/coordinator/session-operation-workflow.js";
 import { DeliveryRecoveryWorkflow } from "../../src/coordinator/delivery-recovery-workflow.js";
+import { ExternalTurnObserver } from "../../src/coordinator/external-turn-observer.js";
 import { PaneClosureWorkflow } from "../../src/coordinator/pane-closure-workflow.js";
 import { PromptRunWorkflow } from "../../src/coordinator/prompt-run-workflow.js";
 import { RetiredPaneCleanupWorkflow } from "../../src/coordinator/retired-pane-cleanup-workflow.js";
@@ -34,13 +36,25 @@ export function createTestRouter(
   shutdownGraceMs = 30_000,
   scheduler: PromptWorkScheduler = new InProcessPromptWorkScheduler(logger),
   inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier(),
-  transcriptReader?: TraexTranscriptReaderPort
+  transcriptReader?: TraexTranscriptReaderPort,
+  observeExternalTurns = false
 ): InboundRouter {
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   outboundWork.subscribe(() => outbound.requestScan());
   const writer = new OutboundIntentWriter(store, outboundWork);
   outbound.connectPromptScheduler(scheduler);
-  const promptRun = new PromptRunWorkflow({ store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader });
+  let promptRun!: PromptRunWorkflow;
+  const externalTurns = transcriptReader && observeExternalTurns ? new ExternalTurnObserver({
+    store, transcriptReader, bus, outboundWork, logger,
+    isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
+    wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
+  }) : undefined;
+  promptRun = new PromptRunWorkflow({
+    store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader,
+    handoffExternalTurns: externalTurns ? (bindingId) => externalTurns.handoff(bindingId) : undefined,
+    observeSupersedingExternalTurn: externalTurns ? (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation) : undefined,
+    recoverExternalTurns: externalTurns ? (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt) : undefined
+  });
   const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
   const primaryTools = {
     issueBinding: (bindingId: string, generation: number) => {
@@ -57,14 +71,15 @@ export function createTestRouter(
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-  const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
+  const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
+  const cardInteractions = new CardInteractionWorkflow({ store, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
-    isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId)
+    isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns
   });
   return new InboundRouter({
     config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
+    promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, sessionOperations, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
   });
 }

@@ -27,7 +27,7 @@ interface HerdrRuntimeReconcilerOptions {
   scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
   worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>;
-  externalTurnObserver?: { observe(binding: Binding): Promise<void>; stop(): Promise<void> };
+  externalTurnObserver?: { observe(binding: Binding): Promise<void> };
 }
 
 const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
@@ -123,7 +123,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   async requestPaneReconciliation(paneIds: readonly string[]): Promise<void> {
     if (this.stopping) return;
     if (this.reconciliation) await this.reconciliation;
-    await this.options.externalTurnObserver?.stop();
     for (const paneId of [...new Set(paneIds)]) {
       const existing = this.options.store.findBindingByPane(paneId);
       if (!existing || (existing.state !== "active" && existing.state !== "orphaned")) continue;

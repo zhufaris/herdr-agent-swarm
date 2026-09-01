@@ -19,6 +19,7 @@ export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_
 export type RequestCardRole = "task" | "answer";
 export type OutboundTargetRole = "session_status" | "operation_result";
 export type AnswerPageState = "creating" | "active" | "frozen" | "finished";
+export type AnswerPageDeliveryMode = "streaming" | "static";
 export type MainCardReservationOutcome = "reserved" | "waiting" | "current";
 export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
@@ -104,6 +105,25 @@ export interface StartupRecoveryDiagnostics {
   stages: Array<{ name: string; state: "completed" | "failed"; durationMs: number; error?: string }>;
 }
 
+export interface InboundDispatcherDiagnostics {
+  state: "idle" | "running" | "retry_wait" | "stopping";
+  drainRequested: boolean;
+  retryAttempt: number;
+  nextRetryAt: string | null;
+  lastAcceptedAt: string | null;
+  lastFailureAt: string | null;
+  lastFailure: string | null;
+}
+
+export interface SessionOperationDispatcherDiagnostics {
+  state: "idle" | "running" | "stopping";
+  activeOperations: number;
+  drainRequested: boolean;
+  lastCompletedAt: string | null;
+  lastFailureAt: string | null;
+  lastFailure: string | null;
+}
+
 export interface SessionSummary {
   binding: Binding;
   queueDepth: number;
@@ -165,6 +185,7 @@ export interface Binding {
   runtime: "traex";
   state: BindingState;
   statusMessageId: string | null;
+  statusCardSequence: number;
   lastAgentState: AgentState;
   lastOutputFingerprint: string | null;
   lifecycle: SessionLifecycle;
@@ -186,6 +207,14 @@ export interface CardInteraction {
   id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind;
   parentPromptId: string | null; targetPromptId: string | null; state: CardInteractionState; expiresAt: string;
   resultCode: string | null; createdAt: string; claimedAt: string | null; consumedAt: string | null;
+}
+
+export type SessionOperationKind = "stop" | "model" | "reset" | "archive" | "resume" | "replace" | "pane_close" | "rename" | "reattach";
+export type SessionOperationState = "accepted" | "running" | "succeeded" | "rejected" | "failed" | "uncertain";
+export interface SessionOperation {
+  id: string; idempotencyKey: string; interactionId: string; bindingId: string; bindingGeneration: number;
+  expectedPaneId: string | null; expectedTerminalId: string | null; actorOpenId: string; kind: SessionOperationKind;
+  argument: string | null; state: SessionOperationState; attemptCount: number; detail: string | null; createdAt: string; updatedAt: string;
 }
 
 export type BindingMetadataPatch = Partial<Pick<Binding,
@@ -225,6 +254,12 @@ export interface ExternalTurnAdoption {
   outboxReserved: boolean;
 }
 
+export interface ExternalTurnSupersessionFence {
+  promptId: string;
+  turnId: string;
+  startedAt: string;
+}
+
 export type TranscriptTurnClaimOutcome =
   | { state: "claimed"; prompt: PromptJob }
   | { state: "matched"; prompt: PromptJob }
@@ -261,6 +296,7 @@ export interface OutboundReply {
   bindingId: string | null;
   promptId: string | null;
   viewVersion: number | null;
+  cardSequence: number | null;
   selectionId: string | null;
   cardRole: RequestCardRole | null;
   targetRole: OutboundTargetRole | null;
@@ -291,6 +327,7 @@ export interface AnswerPage {
   sourceStart: number;
   sequence: number;
   state: AnswerPageState;
+  deliveryMode: AnswerPageDeliveryMode;
   createdAt: string;
   updatedAt: string;
 }
@@ -337,6 +374,18 @@ export interface OperationalSummary {
   automaticSteering: { queued: number; delivered: number; failed: number; rejected: number; uncertain: number };
   queueFeedback: { withEstimate: number; withoutEstimate: number };
   promptLatency: PromptLatencySummary;
+  inbound: {
+    states: Record<"received" | "processing" | "accepted", number>;
+    retryable: number;
+    oldestPendingAt: string | null;
+    oldestPendingAgeSeconds: number | null;
+    recentFailure: { eventId: string; updatedAt: string; error: string } | null;
+  };
+  sessionOperations: {
+    states: Record<SessionOperationState, number>;
+    oldestAcceptedAt: string | null;
+    oldestAcceptedAgeSeconds: number | null;
+  };
   outbound: Record<OutboundReplyState, number>;
   pendingOutbox: number;
   deadLetters: number;
@@ -591,6 +640,7 @@ export type BridgeCommand =
   | { kind: "reattach"; paneId: string }
   | { kind: "replace" }
   | { kind: "resume" }
+  | { kind: "awake" }
   | { kind: "help" };
 
 export type InstanceCommand =

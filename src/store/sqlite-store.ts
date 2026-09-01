@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, SqliteIntegrityInspection, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -16,18 +16,19 @@ import { normalizeLarkCardElementIds } from "../runtime/lark-card-id.js";
 import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
-import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SqlValue } from "./sqlite-records.js";
+import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, mapSessionOperation, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SessionOperationRow, type SqlValue } from "./sqlite-records.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnState } from "../domain/instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
+import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 
 const FENCED_TABLES = [
   "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
-  "project_selections", "card_interactions", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
+  "project_selections", "card_interactions", "session_operations", "pane_close_requests", "pane_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
@@ -36,7 +37,7 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
     rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
   agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value",
-  title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id",
+  title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id", statusCardSequence: "status_card_sequence",
   lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
   lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint",
   degradationCount: "degradation_count", hasCompletedTurn: "has_completed_turn", lastObservedAt: "last_observed_at",
@@ -626,28 +627,87 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  convertQueuedPromptToSteering(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; targetPromptId: string; now: string }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } {
+  acceptSessionOperation(input: { id: string; idempotencyKey: string; interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; expectedPaneId: string | null; expectedTerminalId: string | null; kind: SessionOperationKind; argument: string | null; now: string }): { outcome: "accepted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; operation: SessionOperation | null } {
+    const requiresArgument = input.kind === "rename" || input.kind === "reattach";
+    if (requiresArgument && (!input.argument || input.argument !== input.argument.trim())) throw new Error(`Session operation ${input.kind} requires a trimmed argument`);
+    if (!requiresArgument && input.argument !== null) throw new Error(`Session operation ${input.kind} does not accept an argument`);
+    if (input.argument !== null && input.argument.length > 500) throw new Error("Session operation argument exceeds 500 characters");
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const interaction = this.getCardInteraction(input.interactionId);
-      if (!interaction) { this.database.exec("COMMIT"); return { outcome: "missing", interaction: null }; }
-      if (interaction.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", interaction }; }
-      if (interaction.state === "consumed") { this.database.exec("COMMIT"); return { outcome: "duplicate", interaction }; }
-      if (interaction.expiresAt <= input.now) { this.database.prepare("UPDATE card_interactions SET state = 'expired' WHERE id = ?").run(input.interactionId); this.database.exec("COMMIT"); return { outcome: "expired", interaction: this.getCardInteraction(input.interactionId) }; }
+      if (!interaction) { this.database.exec("COMMIT"); return { outcome: "missing", operation: null }; }
+      if (interaction.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", operation: null }; }
+      const existing = this.database.prepare("SELECT * FROM session_operations WHERE interaction_id = ?").get(input.interactionId) as SessionOperationRow | undefined;
+      if (existing) {
+        const exactDuplicate = existing.idempotency_key === input.idempotencyKey && existing.kind === input.kind
+          && existing.binding_id === input.bindingId && existing.binding_generation === input.bindingGeneration;
+        this.database.exec("COMMIT");
+        return exactDuplicate ? { outcome: "duplicate", operation: mapSessionOperation(existing) } : { outcome: "stale", operation: null };
+      }
+      // A consumed interaction without its operation predates atomic Session
+      // acceptance (or was consumed by another workflow). Treat it as stale:
+      // reporting a successful duplicate would claim durability we cannot prove.
+      if (interaction.state === "consumed") { this.database.exec("COMMIT"); return { outcome: "stale", operation: null }; }
+      if (interaction.expiresAt <= input.now) {
+        this.database.prepare("UPDATE card_interactions SET state = 'expired' WHERE id = ? AND state = 'active'").run(input.interactionId);
+        this.database.exec("COMMIT"); return { outcome: "expired", operation: null };
+      }
       const binding = this.getBinding(input.bindingId);
-      const parent = this.getPrompt(input.parentPromptId);
-      const target = this.getPrompt(input.targetPromptId);
-      const matches = interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
-        && interaction.parentPromptId === input.parentPromptId && interaction.targetPromptId === input.targetPromptId
-        && binding?.generation === input.bindingGeneration && binding.lifecycle === "active"
-        && parent?.bindingId === input.bindingId && parent.state === "running"
-        && target?.bindingId === input.bindingId && target.state === "queued" && target.dispatchKind === "turn";
-      if (!matches) { this.database.exec("COMMIT"); return { outcome: "stale", interaction }; }
-      this.database.prepare("UPDATE prompt_jobs SET dispatch_kind = 'steering', parent_prompt_id = ?, steering_origin = 'converted', updated_at = ? WHERE id = ?").run(input.parentPromptId, input.now, input.targetPromptId);
-      this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = 'converted', consumed_at = ? WHERE id = ?").run(input.now, input.interactionId);
+      const identityMatches = interaction.state === "active" && interaction.actionKind === "more_actions"
+        && interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
+        && binding?.generation === input.bindingGeneration && binding.paneId === input.expectedPaneId
+        && binding.traexSessionId === input.expectedTerminalId;
+      if (!identityMatches) { this.database.exec("COMMIT"); return { outcome: "stale", operation: null }; }
+      if (sessionOperationRejection(binding, input.kind)) { this.database.exec("COMMIT"); return { outcome: "stale", operation: null }; }
+      this.database.prepare(`
+        INSERT INTO session_operations(
+          id, idempotency_key, interaction_id, binding_id, binding_generation, expected_pane_id, expected_terminal_id,
+          actor_open_id, kind, argument, state, attempt_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
+      `).run(input.id, input.idempotencyKey, input.interactionId, input.bindingId, input.bindingGeneration, input.expectedPaneId, input.expectedTerminalId, input.actorOpenId, input.kind, input.argument, input.now, input.now);
+      const consumed = this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = ?, consumed_at = ? WHERE id = ? AND state = 'active'")
+        .run(input.kind, input.now, input.interactionId);
+      if (consumed.changes !== 1) throw new Error(`Session interaction acceptance lost ownership: ${input.interactionId}`);
+      const operation = this.getSessionOperation(input.id);
       this.database.exec("COMMIT");
-      return { outcome: "converted", interaction: this.getCardInteraction(input.interactionId) };
+      return { outcome: "accepted", operation };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  getSessionOperation(id: string): SessionOperation | null {
+    const row = this.database.prepare("SELECT * FROM session_operations WHERE id = ?").get(id) as SessionOperationRow | undefined;
+    return row ? mapSessionOperation(row) : null;
+  }
+
+  claimNextSessionOperation(bindingId?: string): SessionOperation | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare(`
+        SELECT operation.* FROM session_operations operation
+        WHERE operation.state = 'accepted' ${bindingId ? "AND operation.binding_id = ?" : ""}
+        ORDER BY operation.created_at, operation.rowid LIMIT 1
+      `).get(...(bindingId ? [bindingId] : [])) as SessionOperationRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const changed = this.database.prepare("UPDATE session_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), row.id);
+      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      const operation = this.getSessionOperation(row.id);
+      this.database.exec("COMMIT"); return operation;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  finishSessionOperation(id: string, state: Extract<SessionOperationState, "succeeded" | "rejected" | "failed" | "uncertain">, detail: string | null = null): SessionOperation | null {
+    const changed = this.database.prepare("UPDATE session_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('running','uncertain')")
+      .run(state, detail?.slice(0, 500) ?? null, now(), id);
+    return changed.changes === 1 ? this.getSessionOperation(id) : null;
+  }
+
+  listRecoverableSessionOperations(): SessionOperation[] {
+    return (this.database.prepare("SELECT * FROM session_operations WHERE state IN ('accepted','running','uncertain') ORDER BY created_at, rowid").all() as SessionOperationRow[]).map(mapSessionOperation);
+  }
+
+  pruneTerminalSessionOperations(cutoff: string, limit: number): number {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    return Number(this.database.prepare(`DELETE FROM session_operations WHERE id IN (SELECT id FROM session_operations WHERE state IN ('succeeded','rejected','failed') AND updated_at < ? ORDER BY updated_at, rowid LIMIT ?)` ).run(cutoff, limit).changes);
   }
 
   convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
@@ -1561,7 +1621,16 @@ export class SqliteBindingStore implements BindingStorePort {
         return { outcome: owners.length === 1 && owned.binding_id === input.bindingId ? "already_owned" : "conflict", prompt: mapPrompt(owned), supersededPromptIds: [], outboxReserved: false };
       }
       const active = this.database.prepare("SELECT * FROM prompt_jobs WHERE binding_id = ? AND dispatch_kind = 'turn' AND state = 'running' ORDER BY created_at, id").all(input.bindingId) as PromptRow[];
-      if (active.some((row) => row.observation_state !== "detached" || row.transcript_turn_id !== null)) {
+      const superseded = input.supersede;
+      const supersessionIsFenced = superseded !== undefined
+        && active.length === 1
+        && active[0]!.id === superseded.promptId
+        && active[0]!.observation_state === "detached"
+        && active[0]!.transcript_turn_id === superseded.turnId
+        && active[0]!.transcript_turn_started_at === superseded.startedAt
+        && Date.parse(input.startedAt) > Date.parse(superseded.startedAt);
+      const identitylessDetached = active.every((row) => row.observation_state === "detached" && row.transcript_turn_id === null);
+      if (!identitylessDetached && !supersessionIsFenced) {
         this.database.exec("COMMIT");
         return { outcome: "conflict", prompt: null, supersededPromptIds: [], outboxReserved: false };
       }
@@ -1572,7 +1641,7 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.prepare("UPDATE run_cards SET phase = 'failed', finished_at = ?, notice = ?, queue_position = 0, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ? AND phase IN ('running','blocked')").run(input.startedAt, "A newer Herdr turn started while this detached turn had an uncertain outcome.", timestamp, row.id);
       }
       const normalizedRequest = normalizeExternalRequest(input.requestText);
-      const candidates = (this.database.prepare(`
+      const candidates = input.supersede ? [] : (this.database.prepare(`
         SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
         WHERE p.binding_id = ? AND p.dispatch_kind = 'turn' AND p.state = 'queued' AND p.observation_state = 'not_started'
           AND c.binding_generation = ? AND c.pane_id = ? AND p.created_at <= ?
@@ -1887,7 +1956,7 @@ export class SqliteBindingStore implements BindingStorePort {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
     const timestamp = now();
     const laneKey = outboundLaneKey(input);
     const ownsTransaction = !this.database.isTransaction;
@@ -1913,13 +1982,14 @@ export class SqliteBindingStore implements BindingStorePort {
           .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
       this.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, target_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
         ON CONFLICT(idempotency_key) DO UPDATE SET
           payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
           view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
+          card_sequence = CASE WHEN outbound_replies.state = 'pending' THEN excluded.card_sequence ELSE outbound_replies.card_sequence END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.selectionId ?? null, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
       const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
       if (input.kind === "stream_card_create" && input.promptId) {
@@ -1928,8 +1998,8 @@ export class SqliteBindingStore implements BindingStorePort {
         const view = this.loadRunCard(input.promptId);
         const elementId = stream?.elementId ?? view?.answerElementId;
         if (!view || !elementId) throw new Error(`Answer page metadata missing for prompt: ${input.promptId}`);
-        this.database.prepare(`INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at)
-          VALUES (?, ?, NULL, NULL, ?, ?, 0, 'creating', ?, ?) ON CONFLICT(prompt_id, page_index) DO NOTHING`)
+        this.database.prepare(`INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at)
+          VALUES (?, ?, NULL, NULL, ?, ?, 0, 'creating', 'streaming', ?, ?) ON CONFLICT(prompt_id, page_index) DO NOTHING`)
           .run(input.promptId, pageIndex, elementId, stream?.pageStart ?? 0, timestamp, timestamp);
       }
       if (ownsTransaction) this.database.exec("COMMIT");
@@ -1995,7 +2065,7 @@ export class SqliteBindingStore implements BindingStorePort {
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.database.prepare("SELECT binding_id, prompt_id, view_version, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; view_version: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
+      const row = this.database.prepare("SELECT binding_id, prompt_id, view_version, card_sequence, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
       this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
@@ -2026,7 +2096,8 @@ export class SqliteBindingStore implements BindingStorePort {
       }
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       if (row?.binding_id && row.target_role === "session_status") {
-        if (row.kind === "card_reply") this.updateBinding(row.binding_id, { statusMessageId: messageId });
+        if (row.kind === "card_reply") this.updateBinding(row.binding_id, { statusMessageId: messageId, statusCardSequence: 0 });
+        else if (row.kind === "card_update" && row.card_sequence !== null) this.updateBinding(row.binding_id, { statusCardSequence: Math.max(this.requireBinding(row.binding_id).statusCardSequence, row.card_sequence) });
         this.database.prepare(`
           UPDATE topic_views
           SET state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?)),
@@ -2082,7 +2153,9 @@ export class SqliteBindingStore implements BindingStorePort {
       }
       const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status"
         && (metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
-      const failed = metadata.failureClass === "permanent" || staleMainCard
+      const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content"
+        && metadata.larkErrorCode === "300309";
+      const failed = metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream
         ? this.markOutboundReplyDeadLetter(id, error, metadata)
         : this.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
       if (!failed) { this.database.exec("COMMIT"); return null; }
@@ -2095,7 +2168,15 @@ export class SqliteBindingStore implements BindingStorePort {
       const timestamp = now();
       let action: OutboundFailureTransition["action"] = "blocked";
       let quarantineState: "active" | "released" = "active";
-      if (laneClass === "answer_stream" && failed.promptId) {
+      if (closedAnswerStream && failed.promptId) {
+        const pageIndex = streamContentPageIndex(failed.payload);
+        if (pageIndex === null) throw new Error(`Closed Answer stream ${failed.id} has invalid page metadata`);
+        this.database.prepare(`UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static', updated_at = ?
+          WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND card_id = ?`).run(timestamp, failed.promptId, pageIndex, failed.rootMessageId);
+        this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Dismissed after Lark closed the Answer stream', updated_at = ?
+          WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
+        action = "rebuild_answer"; quarantineState = "released";
+      } else if (laneClass === "answer_stream" && failed.promptId) {
         this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ?
           WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
         // A failed cumulative stream update is an unconfirmed content boundary.
@@ -2327,6 +2408,20 @@ export class SqliteBindingStore implements BindingStorePort {
     return Number(result.changes);
   }
 
+  pruneAcceptedInboundMessages(cutoff: string, limit: number): number {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    const result = this.database.prepare(`
+      DELETE FROM inbound_messages
+      WHERE event_id IN (
+        SELECT event_id FROM inbound_messages
+        WHERE state = 'accepted' AND updated_at < ?
+        ORDER BY updated_at, event_id
+        LIMIT ?
+      )
+    `).run(cutoff, limit);
+    return Number(result.changes);
+  }
+
   private changeDeadLetter(id: string, chatId: string, actorOpenId: string, action: "retry" | "dismiss"): DeadLetterActionOutcome {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -2367,6 +2462,11 @@ export class SqliteBindingStore implements BindingStorePort {
       return result;
     };
     const recentFailedPrompt = this.database.prepare("SELECT id, binding_id, updated_at, error FROM prompt_jobs WHERE state = 'failed' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string; updated_at: string; error: string | null } | undefined;
+    const inboundStates = groupedCounts<"received" | "processing" | "accepted">("inbound_messages", "state", ["received", "processing", "accepted"]);
+    const inboundPending = this.database.prepare("SELECT MIN(created_at) AS oldest_pending_at, SUM(CASE WHEN state = 'received' AND error IS NOT NULL THEN 1 ELSE 0 END) AS retryable FROM inbound_messages WHERE state IN ('received', 'processing')").get() as { oldest_pending_at: string | null; retryable: number | null };
+    const recentInboundFailure = this.database.prepare("SELECT event_id, updated_at, error FROM inbound_messages WHERE error IS NOT NULL ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { event_id: string; updated_at: string; error: string } | undefined;
+    const sessionOperationStates = groupedCounts<SessionOperationState>("session_operations", "state", ["accepted", "running", "succeeded", "rejected", "failed", "uncertain"]);
+    const oldestAcceptedSessionOperation = this.database.prepare("SELECT MIN(created_at) AS value FROM session_operations WHERE state = 'accepted'").get() as { value: string | null };
     const recentDeadLetter = this.database.prepare("SELECT id, binding_id, prompt_id, attempt_count, updated_at, error FROM outbound_replies WHERE state = 'dead_letter' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
     const promptLatency = this.database.prepare(`
       WITH recent AS (
@@ -2441,6 +2541,15 @@ export class SqliteBindingStore implements BindingStorePort {
       automaticSteering: { queued: Number(automaticSteering.queued ?? 0), delivered: Number(automaticSteering.delivered ?? 0), failed: Number(automaticSteering.failed ?? 0), rejected: Number(automaticSteering.rejected ?? 0), uncertain: Number(automaticSteering.uncertain ?? 0) },
       queueFeedback: { withEstimate: Number(queueFeedback.with_estimate ?? 0), withoutEstimate: Number(queueFeedback.without_estimate ?? 0) },
       promptLatency: { windowSize: promptLatencyWindowSize, sampleCount: Number(promptLatency.sample_count ?? 0), queue: latencyPhase("queue"), execution: latencyPhase("execution"), delivery: latencyPhase("delivery") },
+      inbound: {
+        states: inboundStates, retryable: Number(inboundPending.retryable ?? 0), oldestPendingAt: inboundPending.oldest_pending_at,
+        oldestPendingAgeSeconds: inboundPending.oldest_pending_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(inboundPending.oldest_pending_at)) / 1_000)),
+        recentFailure: recentInboundFailure ? { eventId: recentInboundFailure.event_id, updatedAt: recentInboundFailure.updated_at, error: boundedError(recentInboundFailure.error) } : null
+      },
+      sessionOperations: {
+        states: sessionOperationStates, oldestAcceptedAt: oldestAcceptedSessionOperation.value,
+        oldestAcceptedAgeSeconds: oldestAcceptedSessionOperation.value === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(oldestAcceptedSessionOperation.value)) / 1_000))
+      },
       outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),
@@ -2519,9 +2628,19 @@ export class SqliteBindingStore implements BindingStorePort {
     if (!binding.statusMessageId) {
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
     } else {
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, cardSequence: this.nextMainCardSequence(binding), targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
     }
     return "reserved";
+  }
+
+  private nextMainCardSequence(binding: Binding): number {
+    const row = this.database.prepare(`
+      SELECT MAX(COALESCE(card_sequence, 0)) AS sequence
+      FROM outbound_replies
+      WHERE binding_id = ? AND target_role = 'session_status' AND root_message_id = ?
+        AND kind = 'card_update' AND state = 'pending'
+    `).get(binding.id, binding.statusMessageId) as { sequence: number | null };
+    return Math.max(binding.statusCardSequence, Number(row.sequence ?? 0)) + 1;
   }
 
   saveRunCard(view: RunCardView): RunCardView {
@@ -2590,7 +2709,7 @@ export class SqliteBindingStore implements BindingStorePort {
 
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
+      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if (facts.latestContent?.state === "pending" || facts.latestContent?.content === input.content) return "waiting";
       const sequence = page.sequence + 1;
@@ -2605,7 +2724,7 @@ export class SqliteBindingStore implements BindingStorePort {
 
   reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.cardId !== input.cardId) return "stale";
+      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if (facts.finishPending || page.state === "finished") return "waiting";
       const sequence = page.sequence + 1;
@@ -2620,7 +2739,7 @@ export class SqliteBindingStore implements BindingStorePort {
 
   reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
+      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if ((facts.latestContent && facts.latestContent.state !== "delivered") || facts.finishPending || facts.continuationPending) return "waiting";
       const sequence = page.sequence + 1;
@@ -2636,7 +2755,7 @@ export class SqliteBindingStore implements BindingStorePort {
 
   reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (input.nextPageIndex !== input.pageIndex + 1 || input.sourceStart !== page.sourceStart) return "stale";
+      if (page.deliveryMode !== "streaming" || input.nextPageIndex !== input.pageIndex + 1 || input.sourceStart !== page.sourceStart) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if (facts.latestContent && facts.latestContent.state !== "delivered") return "waiting";
       if (this.hasPendingAnswerContinuation(input.promptId, input.nextPageIndex)) return "waiting";
@@ -2660,7 +2779,7 @@ export class SqliteBindingStore implements BindingStorePort {
       const key = `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`;
       const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
       if (existing) {
-        if (existing.state === "dead_letter" || existing.state === "dismissed") {
+        if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
           const timestamp = now();
           this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
             .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
@@ -2669,6 +2788,73 @@ export class SqliteBindingStore implements BindingStorePort {
         this.database.exec("COMMIT"); return "waiting";
       }
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
+      this.database.exec("COMMIT"); return "reserved";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  reserveClosedAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const page = this.database.prepare("SELECT state, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; message_id: string | null } | undefined;
+      const view = this.loadRunCard(input.promptId);
+      if (!page || !view || page.state !== "finished" || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
+      const key = `answer-closed:${input.promptId}:${input.pageIndex}:${input.messageId}`;
+      const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
+      if (existing) {
+        if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
+          const timestamp = now();
+          this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+            .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
+          this.refreshOutboxLaneHead(outboundLaneKey({ cardRole: "answer", promptId: input.promptId, rootMessageId: input.messageId, kind: "card_update" }));
+          this.database.exec("COMMIT"); return "reserved";
+        }
+        this.database.exec("COMMIT"); return "waiting";
+      }
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
+      this.database.exec("COMMIT"); return "reserved";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const page = this.database.prepare("SELECT state, message_id, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; message_id: string | null; delivery_mode: string } | undefined;
+      const view = this.loadRunCard(input.promptId);
+      if (!page || !view || page.state !== "active" || page.delivery_mode !== "static" || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
+      const key = `answer-static:${input.promptId}:${input.pageIndex}:${input.messageId}`;
+      const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
+      const timestamp = now();
+      if (existing) {
+        if (existing.state === "pending") {
+          this.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE id = ?")
+            .run(JSON.stringify(input.card), view.viewVersion, timestamp, existing.id);
+          this.database.exec("COMMIT"); return "reserved";
+        }
+        this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+          .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
+        this.refreshOutboxLaneHead(outboundLaneKey({ cardRole: "answer", promptId: input.promptId, rootMessageId: input.messageId, kind: "card_update" }));
+        this.database.exec("COMMIT"); return "reserved";
+      }
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
+      this.database.exec("COMMIT"); return "reserved";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  reserveStaticAnswerReplacement(input: { promptId: string; previousPageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.database.prepare("SELECT state, delivery_mode, source_start FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.previousPageIndex) as { state: string; delivery_mode: string; source_start: number } | undefined;
+      const view = this.loadRunCard(input.promptId);
+      if (!previous || !view || previous.state !== "frozen" || previous.delivery_mode !== "static" || input.nextPageIndex !== input.previousPageIndex + 1 || input.sourceStart !== Number(previous.source_start)) { this.database.exec("COMMIT"); return "stale"; }
+      const existing = this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.nextPageIndex) as { state: string } | undefined;
+      if (existing) { this.database.exec("COMMIT"); return existing.state === "creating" ? "waiting" : "stale"; }
+      const replacement = this.enqueueOutboundReply({
+        id: randomUUID(), idempotencyKey: `answer-static-rebuild:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
+        rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId, deliveryMode: "static" } })
+      });
+      this.database.prepare("UPDATE answer_pages SET delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'")
+        .run(now(), input.promptId, input.nextPageIndex);
+      this.refreshOutboxLaneHead(outboundLaneKey(replacement));
       this.database.exec("COMMIT"); return "reserved";
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
@@ -2691,7 +2877,7 @@ export class SqliteBindingStore implements BindingStorePort {
   private insertRunCard(view: RunCardView): void {
     this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, steering_origin, steering_failure_kind, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, queue_position, started_at, finished_at, notice, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
-    this.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    this.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'streaming', ?, ?)")
       .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
   }
 
@@ -2731,7 +2917,7 @@ export class SqliteBindingStore implements BindingStorePort {
         root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
         runtime TEXT NOT NULL CHECK(runtime = 'traex'),
         state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
-        status_message_id TEXT,
+        status_message_id TEXT, status_card_sequence INTEGER NOT NULL DEFAULT 0,
         last_agent_state TEXT NOT NULL CHECK(last_agent_state IN ('idle','working','blocked','done','unknown')),
         last_output_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
@@ -2812,7 +2998,7 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
       CREATE TABLE IF NOT EXISTS outbound_replies(
-        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
         error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -2863,13 +3049,14 @@ export class SqliteBindingStore implements BindingStorePort {
       CREATE INDEX IF NOT EXISTS run_cards_binding ON run_cards(binding_id, created_at);
       CREATE TABLE IF NOT EXISTS answer_pages(
         prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id), page_index INTEGER NOT NULL, message_id TEXT, card_id TEXT, element_id TEXT NOT NULL,
-        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')),
+        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','static')),
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
       );
       CREATE UNIQUE INDEX IF NOT EXISTS answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
     `);
     this.ensureOutboundReplyColumns();
+    this.ensureMainCardSequences();
     this.ensureAgentInstanceLifecycleColumns();
     this.ensureInboundMessageIdempotency();
     this.ensureOutboundCardCheckpoint();
@@ -2883,6 +3070,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureRunCardAnswerState();
     this.ensureRunCardInteractionColumns();
     this.ensureStreamingCardColumns();
+    this.ensureAnswerPageDeliveryMode();
     this.ensureAnswerPages();
     this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
@@ -2890,6 +3078,7 @@ export class SqliteBindingStore implements BindingStorePort {
     this.ensureBindingPrimaryToolCapabilities();
     this.ensureBindingCreatorColumn();
     this.ensureFailedSteeringInteractionKind();
+    this.ensureSessionOperations();
     this.ensureAgentSessionColumns();
     this.removeReportedTraexSessionColumns();
     this.ensureBindingResetColumns();
@@ -3064,11 +3253,11 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec(`
       PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
       CREATE TABLE outbound_replies_next(
-        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
-      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
-      SELECT id, idempotency_key, binding_id, prompt_id, view_version, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql()}, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
+      SELECT id, idempotency_key, binding_id, prompt_id, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql()}, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
       CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
     `);
@@ -3091,14 +3280,19 @@ export class SqliteBindingStore implements BindingStorePort {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS answer_pages(
         prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id), page_index INTEGER NOT NULL, message_id TEXT, card_id TEXT, element_id TEXT NOT NULL,
-        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')),
+        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','static')),
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
       );
       CREATE UNIQUE INDEX IF NOT EXISTS answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
-      INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, created_at, updated_at)
+      INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at)
       SELECT prompt_id, answer_page_index, answer_message_id, answer_card_id, answer_element_id, answer_page_start, answer_sequence,
-        CASE WHEN answer_card_id IS NULL THEN 'creating' ELSE 'active' END, created_at, updated_at FROM run_cards;
+        CASE WHEN answer_card_id IS NULL THEN 'creating' ELSE 'active' END, 'streaming', created_at, updated_at FROM run_cards;
     `);
+  }
+
+  private ensureAnswerPageDeliveryMode(): void {
+    const columns = new Set((this.database.prepare("PRAGMA table_info(answer_pages)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("delivery_mode")) this.database.exec("ALTER TABLE answer_pages ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','static'))");
   }
 
   private ensurePromptCancelledState(): void {
@@ -3159,6 +3353,13 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
   }
 
+  private ensureMainCardSequences(): void {
+    const bindingColumns = new Set((this.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!bindingColumns.has("status_card_sequence")) this.database.exec("ALTER TABLE bindings ADD COLUMN status_card_sequence INTEGER NOT NULL DEFAULT 0");
+    const outboundColumns = new Set((this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!outboundColumns.has("card_sequence")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN card_sequence INTEGER");
+  }
+
   private ensureBindingPrimaryToolCapabilities(): void {
     const columns = new Set((this.database.prepare("PRAGMA table_info(primary_tool_capabilities)").all() as Array<{ name: string }>).map(({ name }) => name));
     const primaryKey = (this.database.prepare("PRAGMA table_info(primary_tool_capabilities)").all() as Array<{ name: string; pk: number }>).filter(({ pk }) => pk > 0).sort((left, right) => left.pk - right.pk).map(({ name }) => name);
@@ -3206,6 +3407,20 @@ export class SqliteBindingStore implements BindingStorePort {
     `);
     const violation = this.database.prepare("PRAGMA foreign_key_check").get();
     if (violation) throw new Error(`Card-interaction migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
+  }
+
+  private ensureSessionOperations(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS session_operations(
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, interaction_id TEXT NOT NULL UNIQUE REFERENCES card_interactions(id),
+        binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, expected_pane_id TEXT, expected_terminal_id TEXT,
+        actor_open_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('stop','model','reset','archive','resume','replace','pane_close','rename','reattach')),
+        argument TEXT CHECK((kind IN ('rename','reattach') AND argument IS NOT NULL AND length(argument) BETWEEN 1 AND 500) OR (kind NOT IN ('rename','reattach') AND argument IS NULL)),
+        state TEXT NOT NULL CHECK(state IN ('accepted','running','succeeded','rejected','failed','uncertain')), attempt_count INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS session_operations_claim ON session_operations(state, binding_id, created_at);
+      CREATE INDEX IF NOT EXISTS session_operations_recovery ON session_operations(state, updated_at);
+    `);
   }
 
   private ensureAgentSessionColumns(): void {
@@ -3597,6 +3812,13 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
     const stream = decoded.stream;
     return stream && Number.isInteger(stream.pageIndex) && Number.isInteger(stream.pageStart) && typeof stream.elementId === "string"
       ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
+  } catch { return null; }
+}
+
+function streamContentPageIndex(payload: string): number | null {
+  try {
+    const decoded = JSON.parse(payload) as { pageIndex?: unknown };
+    return Number.isInteger(decoded.pageIndex) ? Number(decoded.pageIndex) : null;
   } catch { return null; }
 }
 

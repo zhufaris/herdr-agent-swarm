@@ -530,6 +530,89 @@ describe("pane/thread lifecycle integration", () => {
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
+  it("supersedes an interrupted detached turn and projects the later Herdr turn to a new Answer Card", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const, foregroundExecutables: ["traex"] };
+    const runPrompt = vi.fn(async () => "done" as const);
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+      async observeRuntime() { return { pane, traexProcess: true, composerReady: false, evidenceSource: "structured" }; },
+      async waitForRuntimeChange() { await new Promise((resolve) => setTimeout(resolve, 1)); },
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, runPrompt, async renamePane() {}
+    };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {} };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
+    const oldView = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "old", workspaceId: "w1", paneId: "w1:p1", requestText: "old request", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "user", body: "old request" }, view: oldView, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', attempt_count = 1 WHERE id = 'old'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'old'").run();
+    store.markPromptDispatched("old", "2026-08-30T00:00:01.000Z");
+    expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5501", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
+    store.markPromptObservationDetached("old", "interrupted");
+    const observations: TraexTranscriptObservation[] = [
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", requestText: "new request", answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "new answer", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "new answer" } }
+    ];
+    const transcriptReader = { async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; } };
+    const active = runtime(store, herdr, lark, 10, transcriptReader, pino({ enabled: false }), true);
+
+    await active.coordinator.start();
+    await vi.waitFor(() => expect(store.getPrompt("old")).toMatchObject({ state: "failed", observationState: "completed" }), { timeout: 2_000 });
+    const external = store.database.prepare("SELECT id FROM prompt_jobs WHERE execution_origin = 'herdr'").get() as { id: string };
+    await vi.waitFor(() => expect(store.getPrompt(external.id)).toMatchObject({ state: "delivered", observationState: "completed", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb5502" }), { timeout: 2_000 });
+    expect(store.loadRunCard(external.id)).toMatchObject({ phase: "completed", answer: "new answer", answerMessageId: expect.any(String) });
+    expect(runPrompt).not.toHaveBeenCalled();
+
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
+  it("awakes completed Herdr turns written before restart into new Answer Cards and then releases FIFO", async () => {
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const submitted: string[] = [];
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [pane]; }, async getPane() { return pane; },
+      async observeRuntime() { return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
+      async waitForRuntimeChange(_paneId, _timeout, signal) { await new Promise<void>((resolve) => { const timer = setTimeout(resolve, 5); signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); }); },
+      async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt(_paneId, text) { submitted.push(text); return "done"; }, async renamePane() {}
+    };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {} };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "user", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
+    for (const [id, body] of [["old", "old request"], ["queued", "queued Feishu work"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: body, queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "user", body }, view, rootMessageId: "root", answerCard: {} });
+    }
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', attempt_count = 1 WHERE id = 'old'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'old'").run();
+    store.markPromptDispatched("old", "2026-08-30T00:00:01.000Z");
+    expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5501", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
+    store.markPromptObservationDetached("old", "restart recovery");
+    const observations: TraexTranscriptObservation[] = [
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, requestText: "external one", answerDelta: "answer one", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "answer one" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", freshTurnStart: true, requestText: "external two", answerDelta: "answer two", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", state: "completed", startedAt: "2026-08-30T00:00:03.000Z", finalAnswer: "answer two" } }
+    ];
+    const transcriptReader = {
+      async open() { return { mode: "unavailable" as const, reason: "transcript_not_found" as const }; },
+      async openAfterTurn() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; }
+    };
+    const active = runtime(store, herdr, lark, 10, transcriptReader, pino({ enabled: false }), true);
+    await active.coordinator.start();
+    await active.coordinator.handleMessage(message(90, "/swarm awake"));
+
+    await vi.waitFor(() => expect(submitted).toEqual(["queued Feishu work"]), { timeout: 2_000 });
+    expect(store.getPrompt("old")).toMatchObject({ state: "failed", observationState: "completed" });
+    const recovered = store.database.prepare("SELECT id FROM prompt_jobs WHERE execution_origin = 'herdr' ORDER BY created_at, id").all() as Array<{ id: string }>;
+    expect(recovered).toHaveLength(2);
+    expect(recovered.map(({ id }) => store.loadRunCard(id)?.answer)).toEqual(["answer one", "answer two"]);
+    expect(submitted).not.toContain("old request");
+
+    await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
+  });
+
   it("reattaches an orphaned session without replay, then resumes explicitly", async () => {
     const submitted: string[] = [];
     const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
@@ -589,11 +672,11 @@ function message(index: number, text: string) {
   return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
 }
 
-function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort, logger = pino({ enabled: false })) {
+function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort, logger = pino({ enabled: false }), observeExternalTurns = false) {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
-  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, shutdownGraceMs, undefined, undefined, transcriptReader);
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, shutdownGraceMs, undefined, undefined, transcriptReader, observeExternalTurns);
   return { coordinator, projector, publisher };
 }
 

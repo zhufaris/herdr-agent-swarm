@@ -8,7 +8,6 @@ function setup() {
     reconcileBindings: vi.fn(async () => undefined),
     reconcileInstances: vi.fn(async () => undefined),
     observeInstanceTurns: vi.fn(async () => undefined),
-    observeExternalTurns: vi.fn(async () => undefined),
     retryRetiredPanes: vi.fn(async () => undefined)
   };
   return { calls, router: new HerdrEventRouter({ ...calls, logger: pino({ enabled: false }) }) };
@@ -23,7 +22,6 @@ describe("HerdrEventRouter", () => {
     expect(calls.reconcileBindings).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
     expect(calls.reconcileInstances).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
     expect(calls.observeInstanceTurns).toHaveBeenCalledWith(["w1:p1"]);
-    expect(calls.observeExternalTurns).toHaveBeenCalledWith(["w1:p1"]);
     expect(calls.retryRetiredPanes).toHaveBeenCalledWith(["w1:p1"]);
   });
 
@@ -44,7 +42,6 @@ describe("HerdrEventRouter", () => {
     expect(calls.reconcileBindings).toHaveBeenCalledWith();
     expect(calls.reconcileInstances).toHaveBeenCalledWith();
     expect(calls.observeInstanceTurns).toHaveBeenCalledWith();
-    expect(calls.observeExternalTurns).toHaveBeenCalledWith();
     expect(calls.retryRetiredPanes).toHaveBeenCalledWith();
   });
 

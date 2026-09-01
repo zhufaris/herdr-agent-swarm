@@ -60,6 +60,8 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "replace" };
     case "resume":
       return { kind: "resume" };
+    case "awake":
+      return argument ? { kind: "help" } : { kind: "awake" };
     case "help":
     default:
       return { kind: "help" };

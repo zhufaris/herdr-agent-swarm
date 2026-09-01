@@ -153,7 +153,7 @@ describe("AnswerPageWorkflow", () => {
     const visibleContinuation = "the last visible continuation";
     const elementId = "answer_content_p1_1";
     store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1' AND page_index = 0");
-    store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 1, 'answer-2', 'card-2', ?, 9351, 10, 'finished', 'now', 'now')").run(elementId);
+    store.database.prepare("INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES ('p1', 1, 'answer-2', 'card-2', ?, 9351, 10, 'finished', 'streaming', 'now', 'now')").run(elementId);
     store.database.prepare("UPDATE run_cards SET answer_message_id = 'answer-2', answer_card_id = 'card-2', answer_element_id = ?, answer_page_index = 1, answer_page_start = 9351 WHERE prompt_id = 'p1'").run(elementId);
     store.enqueueOutboundReply({
       id: "visible-continuation", idempotencyKey: "visible-continuation", bindingId: "b1", promptId: "p1", viewVersion: 9, cardRole: "answer",

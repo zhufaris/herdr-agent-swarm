@@ -27,14 +27,14 @@ describe("Lark channel publisher", () => {
     const checkpoint = vi.fn();
     publisher.onMainCardCheckpoint(checkpoint);
 
-    await publisher.requestScan();
+    await publisher.requestScan(true);
 
     expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 2, deliveredVersion: 2 });
     expect(checkpoint).toHaveBeenCalledWith("b1", 2);
     store.close();
   });
 
-  it("delivers Main Card updates through CardKit rather than legacy message patch", async () => {
+  it("uses a contiguous CardKit sequence when Main Card view versions skip", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { statusMessageId: "main-1" });
@@ -45,8 +45,14 @@ describe("Lark channel publisher", () => {
 
     await publisher.requestScan();
 
-    expect(updateCardKit).toHaveBeenCalledWith("main-1", { version: 7 }, 7);
-    expect(updateCard).not.toHaveBeenCalled();
+    expect(updateCardKit).toHaveBeenCalledWith("main-1", { version: 7 }, 1);
+    expect(store.getBinding("b1")?.statusCardSequence).toBe(1);
+
+    store.reserveMainCard({ ...initialTopicView("b1"), title: "Version 10", viewVersion: 10, deliveredVersion: 7 }, "root-1", { version: 10 });
+    await publisher.requestScan();
+
+    expect(updateCardKit).toHaveBeenLastCalledWith("main-1", { version: 10 }, 2);
+    expect(store.getBinding("b1")?.statusCardSequence).toBe(2);
     store.close();
   });
 
@@ -196,7 +202,7 @@ describe("Lark channel publisher", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
-    store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'; INSERT INTO answer_pages VALUES ('p1', 1, 'answer-2', 'cardkit-2', 'answer_content_p1_1', 3500, 0, 'active', 'now', 'now'); UPDATE run_cards SET answer_message_id = 'answer-2', answer_card_id = 'cardkit-2', answer_element_id = 'answer_content_p1_1', answer_page_index = 1, answer_page_start = 3500 WHERE prompt_id = 'p1';");
+    store.database.exec("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'; INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES ('p1', 1, 'answer-2', 'cardkit-2', 'answer_content_p1_1', 3500, 0, 'active', 'streaming', 'now', 'now'); UPDATE run_cards SET answer_message_id = 'answer-2', answer_card_id = 'cardkit-2', answer_element_id = 'answer_content_p1_1', answer_page_index = 1, answer_page_start = 3500 WHERE prompt_id = 'p1';");
     store.enqueueOutboundReply({ id: "stale-content", idempotencyKey: "stream:p1:cardkit-1:2", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ elementId: answerElementId("p1", 0), content: "stale", sequence: 2 }) });
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream }), pino({ enabled: false }));
 
@@ -316,6 +322,55 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("archives a closed Answer stream and continues on a new static Answer Card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "running", answer: "partial answer", answerSegments: ["partial answer"], viewVersion: 2 });
+    const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+    await workflow.converge("p1");
+
+    const streamClosed = Object.assign(new Error("Lark CardKit content update failed (code=300309, msg=streaming mode is closed)"), { larkCode: 300309 });
+    const updateCard = vi.fn(async () => {});
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      streamCardContent: vi.fn(async () => { throw streamClosed; }), updateCard,
+      replyStreamingCard: vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }))
+    }), pino({ enabled: false }));
+    let convergence = Promise.resolve();
+    publisher.onAnswerCheckpoint((promptId) => { convergence = workflow.converge(promptId); });
+
+    await publisher.requestScan(true);
+    await convergence;
+
+    expect(store.listAnswerPages("p1")).toEqual(expect.arrayContaining([expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" })]));
+    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" })]);
+
+    await publisher.requestScan();
+    await convergence;
+
+    expect(updateCard).toHaveBeenCalledOnce();
+    expect(updateCard.mock.calls[0]![0]).toBe("answer-2");
+    expect(store.listAnswerPages("p1")).toEqual([
+      expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" }),
+      expect.objectContaining({ pageIndex: 1, state: "active", deliveryMode: "static", messageId: "answer-2" })
+    ]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+
+    store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "later answer", answerSegments: ["later answer"], viewVersion: 3 });
+    await workflow.converge("p1");
+    await publisher.requestScan();
+
+    expect(updateCard).toHaveBeenCalledTimes(2);
+    expect(updateCard.mock.calls[1]![0]).toBe("answer-2");
+    expect(JSON.stringify(updateCard.mock.calls[1]![1])).toContain("later answer");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    await publisher.stop();
+    store.close();
+  });
+
   it("streams canonical content from the preserved offset after a lightweight startup replacement is delivered", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -325,7 +380,7 @@ describe("Lark channel publisher", () => {
     const answer = Array.from({ length: 14_000 }, (_, index) => `line-${index}`).join("\n");
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer, answerSegments: [answer], viewVersion: 20 });
     store.database.prepare("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'p1'").run();
-    store.database.prepare("INSERT INTO answer_pages VALUES ('p1', 12, 'answer-12', 'cardkit-12', ?, 100000, 0, 'active', 'now', 'now')").run(answerElementId("p1", 12));
+    store.database.prepare("INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES ('p1', 12, 'answer-12', 'cardkit-12', ?, 100000, 0, 'active', 'streaming', 'now', 'now')").run(answerElementId("p1", 12));
     store.database.prepare("UPDATE run_cards SET answer_message_id = 'answer-12', answer_card_id = 'cardkit-12', answer_element_id = ?, answer_page_index = 12, answer_page_start = 100000 WHERE prompt_id = 'p1'").run(answerElementId("p1", 12));
     expect(store.reserveAnswerContinuation({
       promptId: "p1", pageIndex: 12, cardId: "cardkit-12", summary: "continued", nextPageIndex: 13, nextPageStart: 109_267,

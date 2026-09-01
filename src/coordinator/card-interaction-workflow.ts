@@ -2,23 +2,16 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard } from "../cards/interaction-card.js";
-import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { BindingStorePort } from "../domain/ports.js";
-import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/types.js";
-import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
+import type { IncomingLarkCardAction, LarkCardActionResult } from "../domain/types.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
-import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
-import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
+import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 
 interface Options {
-  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "consumeCardInteraction" | "convertQueuedPromptToSteering" | "convertFailedSteeringToTurn" | "getBinding" | "getPrompt" | "loadRunCard" | "countPendingPrompts" | "loadTopicView">;
-  paneControl: Pick<PaneControlWorkflowPort, "steer" | "stop">;
-  sessionAdministration: SessionAdministrationWorkflowPort;
-  provisioning: Pick<BindingProvisioningWorkflowPort, "reset" | "reattach" | "replace">;
-  paneClosure: Pick<PaneClosureWorkflowPort, "requestPaneClose">;
-  modelSelection: Pick<ModelSelectionWorkflowPort, "runModel">;
-  activeTurn(bindingId: string): { promptId: string; paneId: string } | null;
+  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "convertFailedSteeringToTurn" | "getBinding" | "getPrompt" | "loadRunCard" | "countPendingPrompts" | "loadTopicView">;
+  sessionAdministration: Pick<SessionAdministrationWorkflowPort, "emitStatus">;
+  sessionOperations: Pick<SessionOperationWorkflowPort, "accept">;
   wakePrompt(bindingId: string): void;
   logger: Pick<Logger, "info" | "warn">;
 }
@@ -33,9 +26,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
   async handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
     if (!action.value || typeof action.value !== "object" || Array.isArray(action.value)) return;
     const value = action.value as Record<string, unknown>;
-    if (value.action === "open_supplement") return this.openSupplement(action, value);
-    if (value.action === "submit_supplement") return this.submitSupplement(action, value);
-    if (value.action === "convert_queued_prompt") return this.convertQueuedPrompt(action, value);
+    if (value.action === "open_supplement" || value.action === "submit_supplement" || value.action === "convert_queued_prompt") return interactionToast("warning", "当前 Agent 不支持立即补充；请将内容作为普通消息发送。");
     if (value.action === "enqueue_failed_steering") return this.enqueueFailedSteering(action, value);
     if (value.action === "open_more_actions") return this.openMoreActions(action, value);
     if (value.action === "view_queue") return this.viewQueue(action, value);
@@ -44,43 +35,6 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (value.action === "open_rename") return this.openRename(action, value);
     if (value.action === "open_reattach") return this.openReattach(action, value);
     if (typeof value.action === "string" && (value.action.startsWith("session_") || value.action === "submit_rename" || value.action === "submit_reattach")) return this.sessionControl(action, value);
-  }
-
-  private openSupplement(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
-    void action; void value;
-    return interactionToast("warning", "当前 Agent 不支持立即补充；请将内容作为普通消息发送。");
-  }
-
-  private async submitSupplement(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
-    const interactionId = stringValue(value.interactionId); const bindingId = stringValue(value.bindingId); const generation = numberValue(value.bindingGeneration);
-    const text = action.formValues?.supplement_text?.trim();
-    if (!interactionId || !bindingId || generation === null || !text) return interactionToast("warning", "请输入补充内容。");
-    const interaction = this.options.store.getCardInteraction(interactionId);
-    const binding = this.options.store.getBinding(bindingId);
-    const active = binding ? this.options.activeTurn(binding.id) : null;
-    if (!interaction || interaction.actionKind !== "supplement" || !binding || binding.generation !== generation || interaction.bindingId !== bindingId || interaction.bindingGeneration !== generation) return interactionToast("warning", "补充入口已失效，内容未发送。");
-    if (interaction.actorOpenId !== action.operatorOpenId) return interactionToast("error", "这张输入卡仅限打开它的人使用。");
-    if (interaction.state === "consumed") return interactionToast("success", "这条补充已处理。");
-    if (interaction.expiresAt <= new Date().toISOString() || !active || active.promptId !== interaction.parentPromptId) return interactionToast("warning", "任务刚刚结束，补充内容未发送。");
-    void text;
-    return interactionToast("warning", "当前 Agent 不支持立即补充；内容未发送。请作为普通消息进入 FIFO 队列。");
-  }
-
-  private async convertQueuedPrompt(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
-    let interactionId = stringValue(value.interactionId); const bindingId = stringValue(value.bindingId); let generation = numberValue(value.bindingGeneration);
-    const capturedParentPromptId = stringValue(value.parentPromptId);
-    let interaction = interactionId ? this.options.store.getCardInteraction(interactionId) : null;
-    if (!interaction && bindingId) {
-      const binding = this.options.store.getBinding(bindingId); const active = binding ? this.options.activeTurn(binding.id) : null;
-      const targetPromptId = stringValue(value.targetPromptId);
-      if (!binding || !active || !capturedParentPromptId || active.promptId !== capturedParentPromptId || !targetPromptId || generation === null || binding.generation !== generation || binding.lifecycle !== "active") return interactionToast("warning", "当前任务已结束，原消息仍按原顺序排队。");
-      interaction = this.options.store.createCardInteraction({ id: randomUUID(), bindingId, bindingGeneration: generation, actorOpenId: action.operatorOpenId, actionKind: "convert_queued_prompt", parentPromptId: capturedParentPromptId, targetPromptId, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() });
-      interactionId = interaction.id;
-    }
-    generation ??= interaction?.bindingGeneration ?? null;
-    if (!interactionId || !bindingId || generation === null || !interaction?.parentPromptId || !interaction.targetPromptId) return interactionToast("warning", "转换入口已失效，原消息仍在队列中。");
-    void action;
-    return interactionToast("warning", "当前 Agent 不支持立即补充；原消息仍按原顺序排队。");
   }
 
   private enqueueFailedSteering(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {
@@ -147,35 +101,23 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (!binding) return interactionToast("error", "操作无权限，或会话状态已变化。");
     if (value.action === "submit_rename" && !action.formValues?.title?.trim()) return interactionToast("warning", "请输入新标题。");
     if (value.action === "submit_reattach" && !action.formValues?.pane_id?.trim()) return interactionToast("warning", "请输入 Pane ID。");
-    if (value.action !== "session_status") {
+    if (value.action === "submit_rename" && action.formValues!.title!.trim().length > 500) return interactionToast("warning", "标题过长，请控制在 500 个字符以内。");
+    if (value.action === "submit_reattach" && action.formValues!.pane_id!.trim().length > 500) return interactionToast("warning", "Pane ID 过长，请刷新后重试。");
+    if (value.action === "session_model") return interactionToast("warning", "运行中的 Agent 不支持远程切换模型。请在创建或替换 Agent 时选择模型。");
+    const durableKind = sessionOperationKind(value.action);
+    if (durableKind) {
       const interactionId = stringValue(value.interactionId);
       if (!interactionId) return interactionToast("error", "操作入口已失效。");
-      const consumed = this.options.store.consumeCardInteraction({ id: interactionId, actorOpenId: action.operatorOpenId, bindingId: binding.id, bindingGeneration: binding.generation, now: new Date().toISOString(), resultCode: String(value.action) });
-      if (consumed.outcome === "duplicate") return interactionToast("success", "这项操作已处理。");
-      if (consumed.outcome !== "consumed") return interactionToast("error", "操作入口已失效或无权限。");
+      const argument = durableKind === "rename" ? action.formValues!.title!.trim() : durableKind === "reattach" ? action.formValues!.pane_id!.trim() : null;
+      const outcome = this.options.sessionOperations.accept(action, binding, interactionId, durableKind, argument);
+      if (outcome === "accepted" || outcome === "duplicate") return interactionToast("success", outcome === "accepted" ? "操作已受理。" : "这项操作已处理。");
+      return interactionToast(outcome === "unauthorized" ? "error" : "warning", outcome === "unauthorized" ? "操作无权限。" : "操作入口已失效或会话状态已变化。");
     }
-    const message = syntheticMessage(action, binding, String(value.action));
-    let accepted = true;
     switch (value.action) {
       case "session_status": await this.options.sessionAdministration.emitStatus(binding); break;
-      case "session_stop": accepted = await this.options.paneControl.stop(message, binding); break;
-      case "session_model": accepted = await this.options.modelSelection.runModel(message, binding, null); break;
-      case "session_reset": accepted = await this.options.provisioning.reset(message, binding, null); break;
-      case "session_archive": accepted = await this.options.sessionAdministration.archive(message, binding); break;
-      case "session_resume": accepted = await this.options.sessionAdministration.resume(message, binding); break;
-      case "session_replace": await this.options.provisioning.replace(binding, action.operatorOpenId); break;
-      case "session_pane_close": accepted = await this.options.paneClosure.requestPaneClose(message, binding); break;
-      case "submit_rename": {
-        const title = action.formValues!.title!.trim();
-        accepted = await this.options.sessionAdministration.rename(message, binding, title); break;
-      }
-      case "submit_reattach": {
-        const paneId = action.formValues!.pane_id!.trim();
-        await this.options.provisioning.reattach(binding, paneId, action.operatorOpenId); break;
-      }
       default: return interactionToast("warning", "未知操作。");
     }
-    return accepted ? interactionToast("success", value.action === "session_pane_close" ? "已发送 Pane 关闭确认卡。" : "操作已受理。") : interactionToast("warning", "当前状态不允许执行此操作。");
+    return interactionToast("success", "操作已受理。");
   }
 
   private freshBinding(action: IncomingLarkCardAction, value: Record<string, unknown>, creatorOnly: boolean) {
@@ -187,8 +129,17 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
   }
 }
 
-function syntheticMessage(action: IncomingLarkCardAction, binding: NonNullable<ReturnType<BindingStorePort["getBinding"]>>, name: string): IncomingLarkMessage {
-  return { eventId: `card:${action.messageId}:${name}`, messageId: `card:${action.messageId}:${name}`, chatId: action.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: action.operatorOpenId, text: name, mentionsBot: true, isRootMessage: false };
+function sessionOperationKind(action: unknown): import("../domain/types.js").SessionOperationKind | null {
+  if (action === "session_stop") return "stop";
+  if (action === "session_model") return "model";
+  if (action === "session_reset") return "reset";
+  if (action === "session_archive") return "archive";
+  if (action === "submit_rename") return "rename";
+  if (action === "submit_reattach") return "reattach";
+  if (action === "session_replace") return "replace";
+  if (action === "session_resume") return "resume";
+  if (action === "session_pane_close") return "pane_close";
+  return null;
 }
 
 function stringValue(value: unknown): string | null { return typeof value === "string" && value ? value : null; }

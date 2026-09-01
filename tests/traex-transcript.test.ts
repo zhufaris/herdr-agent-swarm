@@ -57,6 +57,59 @@ describe("TraexTranscriptReader", () => {
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toMatchObject({ mode: "typed" });
   });
 
+  it("reopens after an exact completed turn and emits turns already written before restart", async () => {
+    const { root, path } = await createTranscript();
+    const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const laterTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: oldTurn, started_at: 1_788_035_304 }),
+      eventMessage({ type: "user_message", message: "old request" }),
+      eventMessage({ type: "task_complete", turn_id: oldTurn, started_at: 1_788_035_304, completed_at: 1_788_035_305 }),
+      eventMessage({ type: "task_started", turn_id: laterTurn, started_at: 1_788_035_306 }),
+      eventMessage({ type: "user_message", message: "missed external request" }),
+      eventMessage({ type: "task_complete", turn_id: laterTurn, started_at: 1_788_035_306, completed_at: 1_788_035_307, last_agent_message: "missed answer" })
+    ].join(""));
+
+    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+    const cursor = await expectTyped(await reader.openAfterTurn(session(), oldTurn, "2026-08-29T20:28:24.000Z"));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: laterTurn,
+      freshTurnStart: true,
+      requestText: "missed external request",
+      turnLifecycle: { turnId: laterTurn, state: "completed", startedAt: "2026-08-29T20:28:26.000Z", finalAnswer: "missed answer" }
+    });
+  });
+
+  it("fails closed when an exact recovery boundary is incomplete or mismatched", async () => {
+    const { root, path } = await createTranscript();
+    const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, eventMessage({ type: "task_started", turn_id: oldTurn, started_at: 1_788_035_304 }));
+    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+
+    await expect(reader.openAfterTurn(session(), oldTurn, "2026-08-29T20:28:24.000Z")).resolves.toEqual({ mode: "unavailable", reason: "turn_boundary_incomplete" });
+    await expect(reader.openAfterTurn(session(), oldTurn, "2026-08-29T20:28:25.000Z")).resolves.toEqual({ mode: "unavailable", reason: "turn_boundary_not_found" });
+  });
+
+  it("reopens at the next turn when the exact detached turn was interrupted without task_complete", async () => {
+    const { root, path } = await createTranscript();
+    const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const laterTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: oldTurn, started_at: 1_788_035_304 }),
+      eventMessage({ type: "user_message", message: "interrupted request" }),
+      eventMessage({ type: "task_started", turn_id: laterTurn, started_at: 1_788_035_306 }),
+      eventMessage({ type: "user_message", message: "replacement request" }),
+      eventMessage({ type: "task_complete", turn_id: laterTurn, started_at: 1_788_035_306, completed_at: 1_788_035_307, last_agent_message: "replacement answer" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAfterTurn(session(), oldTurn, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: laterTurn, freshTurnStart: true, requestText: "replacement request",
+      turnLifecycle: { turnId: laterTurn, state: "completed", finalAnswer: "replacement answer" }
+    });
+  });
+
   it("emits only assistant output_text parts in source order", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

@@ -12,6 +12,7 @@ import { ModelSelectionWorkflow } from "./coordinator/model-selection-workflow.j
 import { PaneControlWorkflow } from "./coordinator/pane-control-workflow.js";
 import { OperationsQueryWorkflow } from "./coordinator/operations-query-workflow.js";
 import { SessionAdministrationWorkflow } from "./coordinator/session-administration-workflow.js";
+import { SessionOperationWorkflow } from "./coordinator/session-operation-workflow.js";
 import { DeliveryRecoveryWorkflow } from "./coordinator/delivery-recovery-workflow.js";
 import { PaneClosureWorkflow } from "./coordinator/pane-closure-workflow.js";
 import { PromptRunWorkflow } from "./coordinator/prompt-run-workflow.js";
@@ -136,7 +137,9 @@ const externalTurns = new ExternalTurnObserver({
 });
 promptRun = new PromptRunWorkflow({
   store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader,
-  handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId)
+  handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId),
+  observeSupersedingExternalTurn: (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation),
+  recoverExternalTurns: (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt)
 });
 const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
 const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
@@ -146,7 +149,8 @@ const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outb
 const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
 const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound, outboundWork, logger });
 const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-const cardInteractions = new CardInteractionWorkflow({ store, paneControl, sessionAdministration, provisioning, paneClosure, modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
+const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
+const cardInteractions = new CardInteractionWorkflow({ store, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
 const reconciler = new HerdrRuntimeReconciler({
   projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
   wakeOutbound: () => outboundWork.wake(),
@@ -164,12 +168,11 @@ herdrEventRouter = new HerdrEventRouter({
   },
   reconcileInstances: (scope) => instanceRuntime.requestReconciliation(scope),
   observeInstanceTurns: (paneIds) => paneIds ? instanceTurns.requestObservationByPane(paneIds) : instanceTurns.reconcile(),
-  observeExternalTurns: (paneIds) => paneIds ? externalTurns.observeByPane(paneIds) : externalTurns.scanActiveBindings(),
   retryRetiredPanes: (paneIds) => paneIds ? retiredPaneCleanup.requestPanes(paneIds) : retiredPaneCleanup.requestScan(),
   logger
 });
 const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
+const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, sessionOperations, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 try {
   lease.acquire();
@@ -189,7 +192,7 @@ try {
     const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot();
     return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure };
   } };
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
+  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() }, sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => {

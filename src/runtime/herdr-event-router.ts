@@ -7,7 +7,6 @@ export interface HerdrEventRouterOptions {
   reconcileBindings(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
   reconcileInstances(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
   observeInstanceTurns(paneIds?: readonly string[]): Promise<void>;
-  observeExternalTurns(paneIds?: readonly string[]): Promise<void>;
   retryRetiredPanes(paneIds?: readonly string[]): Promise<void>;
   logger: Pick<Logger, "warn" | "debug">;
 }
@@ -58,7 +57,6 @@ export class HerdrEventRouter {
         this.options.reconcileBindings({ paneIds: hint.paneIds }),
         this.options.reconcileInstances({ paneIds: hint.paneIds }),
         this.options.observeInstanceTurns(hint.paneIds),
-        this.options.observeExternalTurns(hint.paneIds),
         this.options.retryRetiredPanes(hint.paneIds)
       ]);
       return;
@@ -73,7 +71,6 @@ export class HerdrEventRouter {
       if (hint.paneIds.length > 0) {
         work.push(
           this.options.observeInstanceTurns(hint.paneIds),
-          this.options.observeExternalTurns(hint.paneIds),
           this.options.retryRetiredPanes(hint.paneIds)
         );
       }
@@ -85,7 +82,6 @@ export class HerdrEventRouter {
       this.options.reconcileBindings(),
       this.options.reconcileInstances(),
       this.options.observeInstanceTurns(),
-      this.options.observeExternalTurns(),
       this.options.retryRetiredPanes()
     ]);
   }

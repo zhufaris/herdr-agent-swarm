@@ -1,20 +1,5 @@
 import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 
-export function renderSupplementInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object {
-  return {
-    schema: "2.0",
-    config: { update_multi: true, summary: { content: "立即补充" } },
-    header: { title: { tag: "plain_text", content: "立即补充当前任务" }, template: "blue" },
-    body: { elements: [
-      { tag: "markdown", content: "这段内容只会发送给当前正在执行的任务；任务结束后不会自动转投下一条。" },
-      { tag: "form", name: "supplement_form", elements: [
-        { tag: "input", name: "supplement_text", placeholder: { tag: "plain_text", content: "输入需要立即补充的内容" } },
-        formSubmitButton("发送补充", "submit_supplement", { action: "submit_supplement", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration }, "primary")
-      ] }
-    ] }
-  };
-}
-
 export function interactionToast(type: "success" | "warning" | "error", content: string): { toast: { type: "success" | "warning" | "error"; content: string } } {
   return { toast: { type, content } };
 }
@@ -33,7 +18,7 @@ export function renderMoreActionsCard(input: { bindingId: string; bindingGenerat
   const actions: object[] = [button("刷新状态", "session_status", input)];
   if (input.creator) {
     if (input.attachment === "orphaned") actions.push(button("重新连接 Pane", "open_reattach", input), button("创建替代 Pane", "session_replace", input), button("归档", "session_archive", input));
-    else if (input.lifecycle === "active") actions.push(button("停止当前任务", "session_stop", input), button("模型", "session_model", input), button("重命名", "open_rename", input), button("重置会话", "session_reset", input), button("归档", "session_archive", input), button("关闭 Pane", "session_pane_close", input));
+    else if (input.lifecycle === "active") actions.push(button("停止当前任务", "session_stop", input), button("重命名", "open_rename", input), button("重置会话", "session_reset", input), button("归档", "session_archive", input), button("关闭 Pane", "session_pane_close", input));
     else if (input.lifecycle === "archived") actions.push(button("恢复会话", "session_resume", input));
   }
   return { schema: "2.0", config: { update_multi: true, summary: { content: "更多操作" } }, header: { title: { tag: "plain_text", content: "更多操作" }, template: "blue" }, body: { elements: [

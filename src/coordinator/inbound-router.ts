@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderRequestAnswerCard } from "../cards/run-card.js";
+import { renderAwakeStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { classifyContinuation } from "../domain/continuation-classifier.js";
@@ -8,12 +8,13 @@ import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-e
 import type { BridgeEvent } from "../domain/events.js";
 import type { InboundStore, InstanceStore, LarkPort, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
-import type { Binding, EventOrigin, IncomingLarkCardAction, IncomingLarkMessage, ProjectSelection, StartupRecoveryDiagnostics } from "../domain/types.js";
+import type { Binding, EventOrigin, InboundDispatcherDiagnostics, IncomingLarkCardAction, IncomingLarkMessage, ProjectSelection, StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { CoalescingDrain } from "../runtime/coalescing-drain.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { CardInteractionWorkflowPort } from "./card-interaction-workflow.js";
@@ -28,6 +29,10 @@ import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
+import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
+
+const INBOUND_RETRY_INITIAL_MS = 250;
+const INBOUND_RETRY_MAX_MS = 30_000;
 
 export interface InboundRouterPort {
   start(): Promise<void>;
@@ -35,6 +40,7 @@ export interface InboundRouterPort {
   handleMessage(message: IncomingLarkMessage): Promise<void>;
   handleCardAction(action: IncomingLarkCardAction): Promise<import("../domain/types.js").LarkCardActionResult | void>;
   snapshot(): StartupRecoveryDiagnostics;
+  inboundSnapshot(): InboundDispatcherDiagnostics;
 }
 
 type InboundRouterStore = InboundStore & PromptAcceptanceStore & InstanceStore;
@@ -62,10 +68,18 @@ export interface InboundRouterOptions {
   retiredPaneCleanup: RetiredPaneCleanupWorkflowPort;
   startupViews: StartupViewConvergerPort;
   instanceInteractions?: InstanceInteractionWorkflow;
+  sessionOperations: SessionOperationWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {
-  private inboundDrain: Promise<void> | null = null;
+  private readonly inboundDrain: CoalescingDrain;
+  private inboundRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private inboundRetryAttempt = 0;
+  private inboundNextRetryAt: string | null = null;
+  private inboundLastAcceptedAt: string | null = null;
+  private inboundLastFailureAt: string | null = null;
+  private inboundLastFailure: string | null = null;
+  private stopping = false;
   private readonly cardActionTasks = new Set<Promise<void>>();
   private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
@@ -76,10 +90,20 @@ export class InboundRouter implements InboundRouterPort {
   constructor(private readonly options: InboundRouterOptions) {
     this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
     this.uniqueProjectByWorkspace = uniqueProjectsByWorkspace(options.config.projects);
+    this.inboundDrain = new CoalescingDrain({
+      drain: () => this.runInboundDrainPass(),
+      onError: (error) => {
+        this.recordInboundFailure(error);
+        this.options.logger.error({ event: "inbound-message-drain-failed", err: safeLogError(error), outcome: "retry" }, "durable inbound drain failed; scheduling retry");
+        this.scheduleInboundRetry();
+      }
+    });
   }
 
   async start(): Promise<void> {
     const { config, store, herdr, lark, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews } = this.options;
+    this.stopping = false;
+    this.inboundRetryAttempt = 0;
     this.startupRecovery = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
@@ -93,20 +117,32 @@ export class InboundRouter implements InboundRouterPort {
       if (event.kind === "control-ready") void this.options.paneControl.drainPaneControls(event.bindingId).catch((error) => this.options.logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
     });
     await this.runStartupStage("pane-controls", () => Promise.all([paneControl.recover(), this.options.paneClosure.recover()]).then(() => undefined));
+    await this.runStartupStage("session-operations", () => this.options.sessionOperations.recover());
     await this.runStartupStage("retired-pane-cleanup", () => retiredPaneCleanup.recover());
     await this.runStartupStage("runtime-reconciliation", () => reconciler.reconcile());
     promptRun.start();
+    this.options.sessionOperations.start(config.reconcileIntervalMs);
     reconciler.start(config.reconcileIntervalMs);
     retiredPaneCleanup.start(config.reconcileIntervalMs);
     this.stopInboundSubscription = inboundWork.subscribe((event) => this.acceptInboundMessage(event.payload));
-    await lark.start((message) => this.handleMessage(message), (action) => this.handleCardAction(action));
+    await lark.start((message) => this.receiveMessage(message), (action) => this.handleCardAction(action));
     await this.runStartupStage("provisioning", () => provisioning.recover());
     await this.runStartupStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
-    await this.drainInboundMessages();
+    this.inboundDrain.start();
+    await this.inboundDrain.request();
     this.startupRecovery = { ...this.startupRecovery, state: this.startupRecovery.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
   }
 
   snapshot(): StartupRecoveryDiagnostics { return { ...this.startupRecovery, stages: this.startupRecovery.stages.map((stage) => ({ ...stage })) }; }
+
+  inboundSnapshot(): InboundDispatcherDiagnostics {
+    const drain = this.inboundDrain.snapshot();
+    return {
+      state: this.stopping ? "stopping" : this.inboundRetryTimer ? "retry_wait" : drain.state,
+      drainRequested: drain.requested, retryAttempt: this.inboundRetryAttempt, nextRetryAt: this.inboundNextRetryAt,
+      lastAcceptedAt: this.inboundLastAcceptedAt, lastFailureAt: this.inboundLastFailureAt, lastFailure: this.inboundLastFailure
+    };
+  }
 
   private async runStartupStage(stage: string, operation: () => Promise<void>): Promise<void> {
     const startedAt = Date.now();
@@ -121,12 +157,14 @@ export class InboundRouter implements InboundRouterPort {
   }
 
   async stop(context?: ShutdownContext): Promise<void> {
+    this.stopping = true;
+    this.clearInboundRetry();
     this.stopInboundSubscription?.();
     this.stopControlSubscription?.();
     this.options.modelSelection.shutdown();
     await Promise.allSettled([
       this.options.lark.stop(), this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context),
-      ...(this.inboundDrain ? [this.inboundDrain] : []), ...this.cardActionTasks
+      this.options.sessionOperations.stop(), this.inboundDrain.stop(), ...this.cardActionTasks
     ]);
   }
 
@@ -134,11 +172,21 @@ export class InboundRouter implements InboundRouterPort {
   async reconcile(): Promise<void> { await Promise.all([this.options.reconciler.reconcile(), this.options.retiredPaneCleanup.requestScan()]); }
 
   async handleMessage(message: IncomingLarkMessage): Promise<void> {
-    const { config, logger, store } = this.options;
-    if (message.chatId !== config.lark.chatId) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "chat_not_allowed" }, "ignored Lark message"); return; }
-    if (store.isBridgeMessage(message.messageId)) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "bridge_message" }, "ignored Lark message"); return; }
-    if (!store.recordInboundMessage(message)) { logger.debug({ event: "lark-message-duplicate", eventId: message.eventId, messageId: message.messageId, outcome: "ignored" }, "ignored duplicate Lark message"); return; }
+    if (!this.persistInboundMessage(message)) return;
     await this.drainInboundMessages();
+  }
+
+  private async receiveMessage(message: IncomingLarkMessage): Promise<void> {
+    if (!this.persistInboundMessage(message)) return;
+    this.wakeInboundDrain();
+  }
+
+  private persistInboundMessage(message: IncomingLarkMessage): boolean {
+    const { config, logger, store } = this.options;
+    if (message.chatId !== config.lark.chatId) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "chat_not_allowed" }, "ignored Lark message"); return false; }
+    if (store.isBridgeMessage(message.messageId)) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "bridge_message" }, "ignored Lark message"); return false; }
+    if (!store.recordInboundMessage(message)) { logger.debug({ event: "lark-message-duplicate", eventId: message.eventId, messageId: message.messageId, outcome: "ignored" }, "ignored duplicate Lark message"); return false; }
+    return true;
   }
 
   async handleCardAction(action: IncomingLarkCardAction): Promise<import("../domain/types.js").LarkCardActionResult | void> {
@@ -202,15 +250,61 @@ export class InboundRouter implements InboundRouterPort {
   }
 
   private async drainInboundMessages(): Promise<void> {
-    const previous = this.inboundDrain ?? Promise.resolve(); const drain = previous.catch(() => undefined).then(() => this.drainInboundMessagesOnce()); this.inboundDrain = drain;
-    try { await drain; } finally { if (this.inboundDrain === drain) this.inboundDrain = null; }
+    await this.inboundDrain.request();
   }
 
-  private async drainInboundMessagesOnce(): Promise<void> {
-    for (let message = this.options.store.claimNextInboundMessage(); message; message = this.options.store.claimNextInboundMessage()) {
-      try { await this.options.inboundWork.notify({ eventId: message.eventId, type: "InboundMessageReceived", origin: "lark", occurredAt: new Date().toISOString(), payload: message }); this.options.store.markInboundMessageAccepted(message.eventId); }
-      catch (error) { this.options.store.releaseInboundMessage(message.eventId, errorMessage(error)); this.options.logger.error({ event: "lark-message-acceptance-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, outcome: "retry" }, "inbound message acceptance failed; retained for retry"); return; }
+  private async runInboundDrainPass(): Promise<void> {
+    try {
+      if (await this.drainInboundMessagesOnce()) {
+        this.inboundRetryAttempt = 0;
+        this.clearInboundRetry();
+      } else {
+        this.scheduleInboundRetry();
+      }
+    } catch (error) {
+      this.recordInboundFailure(error);
+      this.options.logger.error({ event: "inbound-message-drain-failed", err: safeLogError(error), outcome: "retry" }, "durable inbound drain failed; scheduling retry");
+      this.scheduleInboundRetry();
     }
+  }
+
+  private wakeInboundDrain(): void {
+    if (this.stopping) return;
+    this.clearInboundRetry();
+    this.inboundDrain.wake();
+  }
+
+  private scheduleInboundRetry(): void {
+    if (this.stopping || this.inboundRetryTimer) return;
+    const delayMs = Math.min(INBOUND_RETRY_INITIAL_MS * (2 ** this.inboundRetryAttempt), INBOUND_RETRY_MAX_MS);
+    this.inboundRetryAttempt += 1;
+    this.inboundNextRetryAt = new Date(Date.now() + delayMs).toISOString();
+    this.inboundRetryTimer = setTimeout(() => {
+      this.inboundRetryTimer = null;
+      this.inboundNextRetryAt = null;
+      if (!this.stopping) this.inboundDrain.wake();
+    }, delayMs);
+    this.inboundRetryTimer.unref?.();
+    this.options.logger.warn({ event: "inbound-message-retry-scheduled", attempt: this.inboundRetryAttempt, delayMs, outcome: "scheduled" }, "scheduled durable inbound retry");
+  }
+
+  private clearInboundRetry(): void {
+    if (this.inboundRetryTimer) clearTimeout(this.inboundRetryTimer);
+    this.inboundRetryTimer = null;
+    this.inboundNextRetryAt = null;
+  }
+
+  private async drainInboundMessagesOnce(): Promise<boolean> {
+    for (let message = this.options.store.claimNextInboundMessage(); message; message = this.stopping ? null : this.options.store.claimNextInboundMessage()) {
+      try { await this.options.inboundWork.notify({ eventId: message.eventId, type: "InboundMessageReceived", origin: "lark", occurredAt: new Date().toISOString(), payload: message }); this.options.store.markInboundMessageAccepted(message.eventId); this.inboundLastAcceptedAt = new Date().toISOString(); }
+      catch (error) { this.options.store.releaseInboundMessage(message.eventId, errorMessage(error)); this.recordInboundFailure(error); this.options.logger.error({ event: "lark-message-acceptance-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, outcome: "retry" }, "inbound message acceptance failed; retained for retry"); return false; }
+    }
+    return true;
+  }
+
+  private recordInboundFailure(error: unknown): void {
+    this.inboundLastFailureAt = new Date().toISOString();
+    this.inboundLastFailure = errorMessage(error).slice(0, 500);
   }
 
   private async acceptInboundMessage(message: IncomingLarkMessage): Promise<void> {
@@ -239,6 +333,21 @@ export class InboundRouter implements InboundRouterPort {
       else if (command?.kind === "reattach") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected"; } else await this.options.provisioning.reattach(binding, command.paneId, message.actorOpenId); }
       else if (command?.kind === "replace") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected"; } else await this.options.provisioning.replace(binding, message.actorOpenId); }
       else if (command?.kind === "resume") disposition = await this.requireCreator(message, binding) && await this.options.sessionAdministration.resume(message, binding) ? "command_completed" : "rejected";
+      else if (command?.kind === "awake") {
+        if (!await this.requireCreator(message, binding) || !binding) disposition = "rejected";
+        else {
+          const result = await this.options.promptRun.awake(binding.id);
+          const recovered = result.outcome === "recovered";
+          const detail = recovered
+            ? `已从 Herdr transcript 恢复 ${result.recoveredTurns} 个遗漏 turn；每个 turn 使用新的 Answer Card，未向 TraeX 重发任务。`
+            : result.outcome === "busy" ? "当前绑定仍在切换观察器，请稍后重试 `/swarm awake`。"
+              : result.reason === "no_detached_prompt" ? "当前没有 detached prompt，无需唤醒。"
+                : result.reason === "no_complete_later_turn" ? "没有找到可安全恢复的完整后续 Herdr turn；原任务保持 detached，不会重发。"
+                  : `无法安全恢复（${result.reason}）；原任务保持 detached，不会重发。`;
+          await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `awake:${message.messageId}`, renderAwakeStatusCard(detail, recovered));
+          disposition = recovered || result.outcome === "none" ? "command_completed" : "rejected";
+        }
+      }
       else if (binding?.state === "active" && binding.lifecycle === "active") disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected";
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) disposition = "prompt_queued";
       else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
@@ -247,20 +356,9 @@ export class InboundRouter implements InboundRouterPort {
     this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");
   }
 
-  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text, forcedParentPromptId?: string): Promise<boolean> {
+  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<boolean> {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
-    if (!forcedParentPromptId) return this.enqueueClassified(binding, message, body);
-    const promptId = randomUUID(); const occurredAt = new Date().toISOString(); const parentPromptId = forcedParentPromptId; const dispatchKind = "steering" as const;
-    const view = createQueuedRunCard({ promptId, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: null, title: requestTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, queuePosition: 0, occurredAt });
-    const { prompt, inserted } = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body, dispatchKind, parentPromptId }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view) });
-    this.options.outboundWork.wake();
-    if (!inserted) { if (prompt.dispatchKind === "steering" && prompt.parentPromptId) this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId: prompt.parentPromptId }); else this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true; }
-    const depth = this.options.store.countPendingPrompts(binding.id);
-    this.options.logger.info({ event: "prompt-dispatch-decided", eventId: message.eventId, messageId: message.messageId, bindingId: binding.id, promptId: prompt.id, parentPromptId, workspaceId: binding.workspaceId, paneId: binding.paneId, dispatchKind, queueDepth: depth, outcome: "accepted" }, "accepted Lark prompt dispatch decision");
-    this.options.scheduler.wake({ kind: "steering-ready", bindingId: binding.id, parentPromptId });
-    await this.publish(binding.id, "SteeringQueued", "lark", { promptId: prompt.id, parentPromptId, actorOpenId: message.actorOpenId });
-    this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.steer", target: binding.id, outcome: "success" });
-    return true;
+    return this.enqueueClassified(binding, message, body);
   }
 
   private async enqueueClassified(binding: Binding, message: IncomingLarkMessage, body: string): Promise<boolean> {
