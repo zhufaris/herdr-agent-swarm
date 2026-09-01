@@ -29,14 +29,14 @@ export function renderMoreActionsCard(input: { bindingId: string; bindingGenerat
 
 export function renderRenameInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object {
   return { schema: "2.0", config: { update_multi: true, summary: { content: "重命名会话" } }, header: { title: { tag: "plain_text", content: "重命名会话" }, template: "blue" }, body: { elements: [{ tag: "form", name: "rename_form", elements: [
-    { tag: "input", name: "title", placeholder: { tag: "plain_text", content: "输入新标题" } },
+    { tag: "input", name: "title", input_type: "text", placeholder: { tag: "plain_text", content: "输入新标题" } },
     formSubmitButton("确认重命名", "submit_rename", { action: "submit_rename", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration }, "primary")
   ] }] } };
 }
 
 export function renderReattachInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object {
   return { schema: "2.0", config: { update_multi: true, summary: { content: "重新连接 Pane" } }, header: { title: { tag: "plain_text", content: "重新连接 Pane" }, template: "orange" }, body: { elements: [{ tag: "form", name: "reattach_form", elements: [
-    { tag: "input", name: "pane_id", placeholder: { tag: "plain_text", content: "输入原 Pane ID" } },
+    { tag: "input", name: "pane_id", input_type: "text", placeholder: { tag: "plain_text", content: "输入原 Pane ID" } },
     formSubmitButton("验证并连接", "submit_reattach", { action: "submit_reattach", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration }, "primary")
   ] }] } };
 }

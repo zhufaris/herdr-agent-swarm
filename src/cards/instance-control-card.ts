@@ -3,9 +3,9 @@ import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 
 export function renderInstanceCreateCard(input: { projectId: string; requestedBy: string; conversationKey?: string; bindingId?: string; bindingGeneration?: number }): object {
   return card("创建 Worker", "blue", [{ tag: "form", name: "instance_create_form", elements: [
-    { tag: "input", name: "name", required: true, placeholder: { tag: "plain_text", content: "实例名，例如 reviewer" } },
+    { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "实例名，例如 reviewer" } },
     select("agent_kind", "选择底层 Agent", [["TraeX", "traex"], ["Codex", "codex"], ["Claude Code", "claude-code"], ["Pi", "pi"]]),
-    { tag: "input", name: "model", placeholder: { tag: "plain_text", content: "可选模型名" } },
+    { tag: "input", name: "model", input_type: "text", placeholder: { tag: "plain_text", content: "可选模型名" } },
     select("start", "创建后是否启动", [["暂不启动", "false"], ["立即启动", "true"]]),
     formSubmitButton("创建 Worker", "instance_create_submit", { action: "instance_create_submit", projectId: input.projectId, requestedBy: input.requestedBy, ...(input.bindingId ? { bindingId: input.bindingId, bindingGeneration: input.bindingGeneration } : {}), ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}) }, "primary")
   ] }]);
@@ -15,7 +15,7 @@ export function renderInstanceSteerCard(input: { instance: AgentInstance; reques
   return card(`Steer · ${input.instance.name}`, "blue", [
     { tag: "markdown", content: "内容只注入当前活动 turn；若实例状态或 generation 已变化，提交会被拒绝。" },
     { tag: "form", name: "instance_steer_form", elements: [
-      { tag: "input", name: "steer_text", required: true, placeholder: { tag: "plain_text", content: "输入调整指令" } },
+      { tag: "input", name: "steer_text", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "输入调整指令" } },
       formSubmitButton("发送 Steer", "instance_steer_submit", { action: "instance_steer_submit", instanceId: input.instance.id, generation: input.instance.generation, requestedBy: input.requestedBy, ...(input.bindingId ? { bindingId: input.bindingId, bindingGeneration: input.bindingGeneration } : {}), ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}) }, "primary")
     ] }
   ]);

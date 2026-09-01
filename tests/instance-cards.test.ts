@@ -52,7 +52,8 @@ describe("instance cards", () => {
   });
 
   it("renders actor-bound create and steer forms with CardKit submit behaviors", () => {
-    const create = JSON.stringify(renderInstanceCreateCard({ projectId: "p1", requestedBy: "u1" }));
+    const createCard = renderInstanceCreateCard({ projectId: "p1", requestedBy: "u1" }) as { body: { elements: Array<{ elements?: Array<Record<string, unknown>> }> } };
+    const create = JSON.stringify(createCard);
     const steer = JSON.stringify(renderInstanceSteerCard({ instance, requestedBy: "u1" }));
     expect(create).toContain('\"action\":\"instance_create_submit\"');
     expect(create).toContain('\"projectId\":\"p1\"');
@@ -62,6 +63,9 @@ describe("instance cards", () => {
     expect(create).toContain("创建 Worker");
     expect(create).not.toContain("选择角色");
     expect(create).not.toContain("\"name\":\"role\"");
+    const inputs = createCard.body.elements[0]!.elements!.filter(({ tag }) => tag === "input");
+    expect(inputs).toHaveLength(2);
+    expect(inputs).toEqual(inputs.map((input) => expect.objectContaining({ input_type: "text" })));
     expect(steer).toContain('\"action\":\"instance_steer_submit\"');
     expect(steer).toContain('\"generation\":2');
     expect(steer).toContain('\"action_type\":\"form_submit\"');
