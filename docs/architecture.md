@@ -90,6 +90,9 @@ The production implementation uses the following modules and seams.
 | --- | --- | --- |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
 | `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
+| `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, and no-replay recovery | Generation-fenced `InstanceStore` transitions and Agent driver hooks |
+| `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
+| Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
 | `ModelSelectionWorkflow` / `PaneControlWorkflow` | Stop control plus deterministic rejection of unsupported runtime model/steering operations | One queue owner with no raw terminal-input seam |
 | `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
@@ -239,6 +242,36 @@ Lark message or card action                 Herdr Socket event
                               v
                     SQLite outbox -> Lark port
 ```
+
+The Worker task path is a parallel durable flow with one card aggregate per turn:
+
+```text
+Lark inbound -> atomic InstanceTurn + WorkerTurnCard projection + outbox
+             -> FIFO scheduler -> exact structured observation
+             -> SQLite result/page projection -> Worker-specific outbox lane
+             -> Lark CardKit
+```
+
+Acceptance persists the turn, its initial queued card projection, and delivery
+intent before waking the scheduler. A Worker claims at most one ordinary turn at
+a time. The Agent driver's dispatch receipt proves only that submission crossed
+the boundary; it is never interpreted as the task result. `WorkerTurnObserver`
+claims output ownership only when the instance generation, runtime turn ID, and
+canonical turn start time all match. Restart recovery reopens that transcript
+boundary for observation and never calls the submission boundary again.
+
+Each task uses a separate `worker-turn:<turnId>` outbox lane. A permanent CardKit
+failure quarantines only that lane, so another task card or unrelated reply can
+still advance. Output pages are ordered within the task. Once a continuation page
+is created, earlier pages are frozen and are not patched. SQLite retains the full
+sanitized canonical result; recent Worker history and card previews are bounded
+render-only summaries.
+
+Direct replies use the normalized Lark `parent_id`, not the topic root or selected
+Worker. A reply to the exact active card is generation-fenced steering. A reply
+to a settled card atomically creates a follow-up with the original turn as parent.
+Queued and `dispatch-uncertain` cards reject contextual replies. Explicit `/to`
+and `/steer` commands remain authoritative and do not inherit reply context.
 
 ## Request lifecycle
 

@@ -37,10 +37,31 @@ Primary 或 Worker 模板。当前飞书 Thread 本身就是该 Thread 的 Prima
 
 ```text
 /instance reviewer
-/to reviewer 检查当前改动并给出建议
-/steer reviewer 只关注并发安全  # 当前返回 unsupported
+/to reviewer Review the SQLite transaction boundaries
+/steer reviewer Focus on generation fencing
 /interrupt reviewer
 ```
+
+`/to` 始终创建一条新的 Worker 任务，并按该 Worker 的 FIFO 排队；即使这条命令是回复
+另一张任务卡发送的，也不会变成 steer 或 follow-up。`/steer` 只作用于该 Worker 当前唯一的
+active turn；没有 active turn、目标已经换代或 Agent 不支持 steering 时会明确拒绝，不会退化成
+一条新的 `/to` 任务。
+
+每次 `/to` 都会立即创建独立的 Worker task card。卡片从排队、准备、运行或阻塞推进到完成、
+失败、取消或 `dispatch-uncertain`，可信的结构化输出会持续写入这张卡。长输出会分页；已经
+冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
+capture 状态，点击“打开”只读取该任务的持久化卡片，不会再次执行任务。
+
+要持续给同一个任务补充要求，请直接回复它的 task card 并 `@Bot`：
+
+- 回复正在运行或 blocked 的卡片会精确 steer 该 turn。
+- 回复 completed、failed 或 cancelled 的卡片会创建一条带父任务关系的新 follow-up，并进入 FIFO。
+- 回复仍 queued 的卡片会被拒绝，因为任务尚未开始。
+- 回复 `dispatch-uncertain` 的卡片会被拒绝，因为请求可能已到达 Agent；自动重试可能造成重复执行。请先在对应 Herdr Pane 核对。
+- 只有直接父消息能匹配 task card；系统不会根据 Thread、当前选中的 Worker 或更早的父消息猜测目标。
+
+task card 上的结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
+TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。
 
 在实例详情卡选择“设为当前目标”后，普通消息会持续发给该实例；若目标为 symbolic
 Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
@@ -214,9 +235,10 @@ Agent 时选择模型，或显式替换 Agent 后使用新模型。该命令不�
 
 ### 命令边界
 
-只有以 `/swarm` 开头的消息由 HerdrSwarm 处理。`/herdr`、`/model`、`/new`、
-`/stop`、`/steer` 以及其它 slash 命令都会作为普通任务原样提交给绑定 pane 中的
-TraeX，使其可使用自身命令与已安装 skills。
+传统单话题流程只把 `/swarm ...` 识别为该 binding 的控制命令。未被多 Agent 命令层
+识别的 `/herdr`、`/model`、`/new`、`/stop` 以及其它 slash 命令，会作为普通任务原样
+提交给绑定 pane 中的 TraeX，使其可使用自身命令与已安装 skills。顶层
+`/steer <worker> <要求>` 属于多 Agent Worker 控制命令，不会进入 Primary FIFO。
 
 ### `/swarm rename <标题>`
 
