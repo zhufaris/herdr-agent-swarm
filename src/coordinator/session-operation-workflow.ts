@@ -131,5 +131,5 @@ export class SessionOperationWorkflow implements SessionOperationWorkflowPort {
 
 function syntheticMessage(operation: SessionOperation, binding: Binding): IncomingLarkMessage {
   const messageId = `session-operation:${operation.id}`;
-  return { eventId: messageId, messageId, chatId: binding.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: operation.actorOpenId, text: operation.kind, mentionsBot: true, isRootMessage: false };
+  return { eventId: messageId, messageId, parentMessageId: null, chatId: binding.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: operation.actorOpenId, text: operation.kind, mentionsBot: true, isRootMessage: false };
 }

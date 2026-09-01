@@ -213,7 +213,7 @@ export class InboundRouter implements InboundRouterPort {
     if (paneClaim) {
       const project = this.projectsById.get(paneClaim.projectId);
       if (!project || project.workspaceId !== paneClaim.workspaceId) return;
-      const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
+      const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, parentMessageId: null, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
       const attached = await this.options.provisioning.attach(synthetic, projectSpaceName(project), paneClaim.paneId);
       this.options.logger.info({ event: "space-pane-claim-decided", projectId: project.id, workspaceId: project.workspaceId, paneId: paneClaim.paneId, outcome: attached ? "attached" : "rejected" }, "processed Space pane claim");
       return;
@@ -243,7 +243,7 @@ export class InboundRouter implements InboundRouterPort {
   private async enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void> {
     if (!selection.initialPromptText) return;
     await this.enqueue(binding, {
-      eventId: `project-selection:${selection.id}`, messageId: selection.commandMessageId, chatId: selection.chatId,
+      eventId: `project-selection:${selection.id}`, messageId: selection.commandMessageId, parentMessageId: null, chatId: selection.chatId,
       topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: selection.actorOpenId,
       text: selection.initialPromptText, mentionsBot: true, isRootMessage: false
     });

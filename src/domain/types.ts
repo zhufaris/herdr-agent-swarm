@@ -612,6 +612,7 @@ export interface HerdrPaneCreationOptions {
 export interface IncomingLarkMessage {
   eventId: string;
   messageId: string;
+  parentMessageId: string | null;
   chatId: string;
   topicId: string | null;
   rootMessageId: string | null;

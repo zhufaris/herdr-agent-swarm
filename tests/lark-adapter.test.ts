@@ -308,13 +308,17 @@ describe("Lark message normalization", () => {
     const reply = {
       ...base,
       event_id: "e2",
-      message: { ...base.message, message_id: "m2", root_id: "root-1", thread_id: "thread-1", content: JSON.stringify({ text: "continue" }), mentions: [] }
+      message: { ...base.message, message_id: "m2", parent_id: "worker-card-message", root_id: "root-1", thread_id: "thread-1", content: JSON.stringify({ text: "continue" }), mentions: [] }
     };
 
     expect(normalizeMessage(reply, "bot")).toMatchObject({
-      messageId: "m2", rootMessageId: "root-1", topicId: "thread-1", text: "continue", mentionsBot: false, isRootMessage: false,
+      messageId: "m2", parentMessageId: "worker-card-message", rootMessageId: "root-1", topicId: "thread-1", text: "continue", mentionsBot: false, isRootMessage: false,
       hasUnsupportedContent: false
     });
+  });
+
+  it("normalizes a root message with no direct parent", () => {
+    expect(normalizeMessage(base, "bot")).toMatchObject({ messageId: "m1", parentMessageId: null, rootMessageId: "m1", isRootMessage: true });
   });
 
   it("marks plain continuation post content as supported", () => {

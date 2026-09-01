@@ -258,7 +258,7 @@ export function normalizeMessage(data: MessageEvent, botOpenId: string): Incomin
   const rootMessageId = data.message.root_id ?? null;
   return {
     eventId: data.event_id ?? data.uuid ?? `message:${messageId}`,
-    messageId,
+    messageId, parentMessageId: data.message.parent_id ?? null,
     chatId: data.message.chat_id,
     topicId: data.message.thread_id ?? rootMessageId ?? messageId,
     rootMessageId: rootMessageId ?? messageId,

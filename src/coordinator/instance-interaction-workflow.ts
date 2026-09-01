@@ -45,6 +45,7 @@ export class InstanceInteractionWorkflow {
   }
 
   async handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean> {
+    if (message.parentMessageId) return this.handleWorkerCardReply(message);
     const context = this.resolveConversationContext(message);
     const selected = this.getSelectedTarget(context, message.chatId);
     const projectId = context.boundProjectId ?? selected?.projectId;
@@ -59,6 +60,33 @@ export class InstanceInteractionWorkflow {
       await this.reject(message, "当前目标实例已重新启动，请从实例目录重新选择。"); return true;
     }
     await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, projectId, targetInstanceId: target.id, content: { kind: "turn", text: message.text }, source: { messageId: message.messageId, rootMessageId: message.rootMessageId ?? message.messageId } });
+    return true;
+  }
+
+  private async handleWorkerCardReply(message: IncomingLarkMessage): Promise<boolean> {
+    const matched = this.options.store.findWorkerTurnByCardMessage(message.parentMessageId!);
+    if (!matched) return false;
+    if (!message.mentionsBot) return false;
+    if (!this.isOperator(message.actorOpenId)) { await this.reject(message, "你没有 Agent 管理权限。"); return true; }
+    const { turn } = matched;
+    const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
+    if (["running", "blocked"].includes(turn.state)) {
+      const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: turn.instanceId, targetTurnId: turn.id, text: message.text });
+      if (result.status !== "delivered") await this.reply(message, statusCard(`Steer: ${result.status}`));
+      return true;
+    }
+    if (["completed", "failed", "cancelled"].includes(turn.state)) {
+      await this.options.messaging.submit({
+        idempotencyKey: `lark:${message.messageId}`, actor, projectId: turn.projectId, targetInstanceId: turn.instanceId,
+        content: { kind: "followup", text: message.text },
+        source: { messageId: message.messageId, rootMessageId: message.rootMessageId ?? message.messageId, parentTurnId: turn.id }
+      });
+      return true;
+    }
+    const notice = turn.state === "dispatch-uncertain"
+      ? "该任务的投递状态无法确认，不能安全地追加消息。请先在 Herdr 中确认任务状态。"
+      : "该任务仍在排队，暂时不能追加消息。";
+    await this.reject(message, notice);
     return true;
   }
 

@@ -31,8 +31,14 @@ export class InstanceMessagingWorkflow {
     return { accepted: true, ...result, card: null };
   }
 
-  async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; text: string }): Promise<SteerReceipt> {
+  async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; text: string }): Promise<SteerReceipt> {
     const target = this.authorize(input.actor, undefined, input.targetInstanceId);
+    if (input.targetTurnId) {
+      const turn = this.options.store.getInstanceTurn(input.targetTurnId);
+      if (!turn || turn.instanceId !== target.id || turn.instanceGeneration !== target.generation || !["running", "blocked"].includes(turn.state)) return { status: "not-active" };
+      const active = this.options.store.getActiveInstanceTurn(target.id, target.generation);
+      if (!active || active.id !== turn.id) return { status: "not-active" };
+    }
     const driver = this.options.drivers.get(target.agentKind);
     if (!driver || driver.describe().steering === "unsupported" || !driver.steer) return { status: "unsupported" };
     if (!target.runtimeRef || !["working", "blocked"].includes(target.observedState)) return { status: "not-active" };

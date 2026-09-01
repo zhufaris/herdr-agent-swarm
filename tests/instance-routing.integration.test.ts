@@ -3,12 +3,14 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { InstanceInteractionWorkflow } from "../src/coordinator/instance-interaction-workflow.js";
 import { normalizeCardActionEvent } from "../src/adapters/lark-adapter.js";
 import type { IncomingLarkMessage } from "../src/domain/types.js";
+import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 const project = { id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" };
 const secondProject = { id: "p2", displayName: "Project Two", description: "second project", workspaceId: "w2", cwd: "/repo-two" };
-const message = (text: string, messageId = text): IncomingLarkMessage => ({ eventId: messageId, messageId, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "u1", text, mentionsBot: true, isRootMessage: false });
+const message = (text: string, messageId = text): IncomingLarkMessage => ({ eventId: messageId, messageId, parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "u1", text, mentionsBot: true, isRootMessage: false });
 function callbackValue(card: unknown, action: string): Record<string, unknown> {
   const visit = (value: unknown): Record<string, unknown> | null => {
     if (!value || typeof value !== "object") return null;
@@ -41,7 +43,72 @@ function setup(operatorOpenIds: readonly string[] = []) {
   return { create, workflow, outbound, messaging, control };
 }
 
+function taskCard(instanceId: string, state: "queued" | "running" | "completed" | "failed" | "cancelled" | "dispatch-uncertain", turnId = `turn-${state}`) {
+  const worker = store!.getAgentInstance(instanceId)!;
+  const view = createQueuedWorkerTurnCard({ turnId, instanceId, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+  store!.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: worker.projectId, instanceId, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, card: renderWorkerTurnCard(view) });
+  store!.markOutboundReplyDelivered(store!.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === turnId)!.id, `card-message-${turnId}`, `card-${turnId}`);
+  if (state !== "queued") store!.updateInstanceTurn({ turnId, expectedGeneration: worker.generation, state, eventKind: `turn.${state}` });
+  return { turnId, cardMessageId: `card-message-${turnId}` };
+}
+
 describe("instance routing", () => {
+  it("routes a direct reply to the exact active Worker turn as steering", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "running");
+    vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("focus on transactions", "reply-1"), parentMessageId: task.cardMessageId })).resolves.toBe(true);
+
+    expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId, text: "focus on transactions" }));
+    expect(messaging.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed", "cancelled"] as const)("routes a direct reply to a %s Worker card as a follow-up", async (state) => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, state);
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("check the fix", `reply-${state}`), parentMessageId: task.cardMessageId })).resolves.toBe(true);
+
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, content: { kind: "followup", text: "check the fix" }, source: { messageId: `reply-${state}`, rootMessageId: "root", parentTurnId: task.turnId } }));
+    expect(messaging.steer).not.toHaveBeenCalled();
+  });
+
+  it.each(["queued", "dispatch-uncertain"] as const)("rejects a direct reply to a %s Worker card without guessing another target", async (state) => {
+    const { create, workflow, messaging, outbound } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, state);
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("do not reroute", `reply-${state}`), parentMessageId: task.cardMessageId })).resolves.toBe(true);
+
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(messaging.steer).not.toHaveBeenCalled();
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2])).toContain(state === "queued" ? "排队" : "无法确认");
+  });
+
+  it("does not route an unmapped direct reply through the selected Worker", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    store!.setConversationTarget({ chatId: "root:root", projectId: "p1", target: { kind: "instance", instanceId: worker.id, expectedGeneration: worker.generation } });
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("unknown parent", "reply-unmapped"), parentMessageId: "not-a-worker-card" })).resolves.toBe(false);
+
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(messaging.steer).not.toHaveBeenCalled();
+  });
+
+  it("ignores a direct Worker-card reply that does not mention the bot", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "running");
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("side conversation", "reply-no-mention"), parentMessageId: task.cardMessageId, mentionsBot: false })).resolves.toBe(false);
+
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(messaging.steer).not.toHaveBeenCalled();
+  });
   it("uses the bound topic project for /instances without a separate conversation target", async () => {
     const { workflow, outbound } = setup();
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "Project / task" });
@@ -149,6 +216,19 @@ describe("instance routing", () => {
     expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "worker", content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root" } }));
     expect(outbound.enqueueCard).not.toHaveBeenCalled();
     expect(store!.getConversationTarget("root:root")).toEqual({ projectId: "p1", target: { kind: "primary" } });
+  });
+  it("keeps explicit /to routing independent of the replied Worker card", async () => {
+    const { create, workflow, messaging } = setup();
+    const first = create("first", "worker");
+    create("second", "worker");
+    store!.setConversationTarget({ chatId: "root:root", projectId: "p1", target: { kind: "primary" } });
+    const task = taskCard(first.id, "running");
+    const explicit = { ...message("/to second new task", "explicit-to"), parentMessageId: task.cardMessageId };
+
+    await workflow.handleCommand(explicit, { kind: "to", name: "second", text: "new task" });
+
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "second", content: { kind: "turn", text: "new task" } }));
+    expect(messaging.steer).not.toHaveBeenCalled();
   });
   it("leaves symbolic Primary messages to the binding FIFO", async () => {
     const { workflow, messaging } = setup();

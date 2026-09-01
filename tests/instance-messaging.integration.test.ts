@@ -118,6 +118,23 @@ describe("instance messaging", () => {
     expect(driver.steer).toHaveBeenCalledTimes(1);
   });
 
+  it("steers only the exact current-generation active turn and deduplicates the reply event", async () => {
+    const { create, workflow, driver } = setup();
+    const worker = create("worker");
+    store!.acceptInstanceTurn({ id: "active-turn", idempotencyKey: "active-turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
+    store!.claimNextInstanceTurn(worker.id, worker.generation);
+    store!.updateInstanceTurn({ turnId: "active-turn", expectedGeneration: worker.generation, state: "running", eventKind: "turn.running" });
+    store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "working" });
+    const input = { idempotencyKey: "reply-once", actor: { kind: "human" as const, userId: "u1" }, targetInstanceId: worker.id, targetTurnId: "active-turn", text: "focus" };
+
+    await expect(workflow.steer({ ...input, targetTurnId: "other-turn" })).resolves.toEqual({ status: "not-active" });
+    await expect(workflow.steer(input)).resolves.toEqual({ status: "delivered" });
+    await expect(workflow.steer(input)).resolves.toEqual({ status: "delivered" });
+
+    expect(driver.steer).toHaveBeenCalledTimes(1);
+    expect(driver.steer).toHaveBeenCalledWith(worker.runtimeRef, "focus");
+  });
+
   it("does not let a stale generation write a turn result", () => {
     const { create } = setup(); const worker = create("worker");
     store!.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
