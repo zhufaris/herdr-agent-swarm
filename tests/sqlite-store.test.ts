@@ -1811,6 +1811,20 @@ describe("SQLite store", () => {
     expect(plan.map((row) => row.detail).join(" " )).toContain("outbound_replies_prompt_kind_state_updated");
   });
 
+  it("uses ordered retention indexes for bounded history pruning", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const outboundColumns = store.database.prepare("PRAGMA index_info(outbound_replies_retention)").all() as Array<{ name: string }>;
+    const inboundColumns = store.database.prepare("PRAGMA index_info(inbound_messages_retention)").all() as Array<{ name: string }>;
+    const outboundPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT id FROM outbound_replies WHERE state IN ('delivered', 'dismissed') AND updated_at < ? ORDER BY updated_at, delivery_order LIMIT ?").all("2026-08-12T00:00:00.000Z", 100) as Array<{ detail: string }>;
+    const inboundPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT event_id FROM inbound_messages WHERE state = 'accepted' AND updated_at < ? ORDER BY updated_at, event_id LIMIT ?").all("2026-08-12T00:00:00.000Z", 100) as Array<{ detail: string }>;
+
+    expect(outboundColumns.map((column) => column.name)).toEqual(["state", "updated_at", "delivery_order"]);
+    expect(inboundColumns.map((column) => column.name)).toEqual(["state", "updated_at", "event_id"]);
+    expect(outboundPlan.map((row) => row.detail).join(" " )).toContain("outbound_replies_retention");
+    expect(inboundPlan.map((row) => row.detail).join(" " )).toContain("inbound_messages_retention");
+  });
+
   it("creates the ordinary prompt queue index with the exact column order", () => {
     store = new SqliteBindingStore(":memory:");
 
