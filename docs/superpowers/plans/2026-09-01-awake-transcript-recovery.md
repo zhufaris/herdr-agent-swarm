@@ -81,4 +81,3 @@
 - [ ] Run `./install.sh` to stage the immutable release.
 - [ ] Inspect active work and restart with the supported force flag when required.
 - [ ] Verify `npm run swarm:status`, service logs, and `/ready` on the configured port.
-

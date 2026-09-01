@@ -53,4 +53,3 @@ woken so queued Feishu prompts can continue.
 Tests cover command parsing/routing, exact transcript-boundary reopening, completed
 turns that predate service restart, multiple missed turns in order, idempotent repeat
 invocation, missing/incomplete boundaries, no TraeX submission, and FIFO release.
-
