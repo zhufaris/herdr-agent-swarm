@@ -143,10 +143,11 @@ describe("instance routing", () => {
     expect(JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2])).toContain("暂无 Worker");
   });
   it("keeps a persistent target but /to remains a one-shot destination", async () => {
-    const { create, workflow, messaging } = setup(); create("worker", "worker");
+    const { create, workflow, messaging, outbound } = setup(); create("worker", "worker");
     store!.setConversationTarget({ chatId: "root:root", projectId: "p1", target: { kind: "primary" } });
     await workflow.handleCommand(message("/to worker review", "m1"), { kind: "to", name: "worker", text: "review" });
-    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "worker", content: { kind: "turn", text: "review" } }));
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "worker", content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root" } }));
+    expect(outbound.enqueueCard).not.toHaveBeenCalled();
     expect(store!.getConversationTarget("root:root")).toEqual({ projectId: "p1", target: { kind: "primary" } });
   });
   it("leaves symbolic Primary messages to the binding FIFO", async () => {

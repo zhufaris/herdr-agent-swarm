@@ -35,7 +35,10 @@ export class InstanceInteractionWorkflow {
     const instance = this.findByName(projectId, command.name);
     if (!instance) return this.reject(message, `实例不存在：${command.name}`);
     if (command.kind === "instance") return this.showDetail(message, instance, context.conversationKey);
-    if (command.kind === "to") { await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor, projectId, targetInstanceId: instance.id, content: { kind: "turn", text: command.text } }); return this.reply(message, statusCard(`已提交给 ${instance.name}`)); }
+    if (command.kind === "to") {
+      await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor, projectId, targetInstanceId: instance.id, content: { kind: "turn", text: command.text }, source: { messageId: message.messageId, rootMessageId: message.rootMessageId ?? message.messageId } });
+      return;
+    }
     if (command.kind === "steer_instance") { const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: instance.id, text: command.text }); return this.reply(message, statusCard(`Steer: ${result.status}`)); }
     const result = await this.options.messaging.interrupt({ idempotencyKey: `lark:${message.messageId}:interrupt`, actor, targetInstanceId: instance.id });
     return this.reply(message, statusCard(`Interrupt: ${result.status}`));
@@ -55,7 +58,7 @@ export class InstanceInteractionWorkflow {
     if (selectedTarget.expectedGeneration !== undefined && selectedTarget.expectedGeneration !== target.generation) {
       await this.reject(message, "当前目标实例已重新启动，请从实例目录重新选择。"); return true;
     }
-    await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, projectId, targetInstanceId: target.id, content: { kind: "turn", text: message.text } });
+    await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, projectId, targetInstanceId: target.id, content: { kind: "turn", text: message.text }, source: { messageId: message.messageId, rootMessageId: message.rootMessageId ?? message.messageId } });
     return true;
   }
 

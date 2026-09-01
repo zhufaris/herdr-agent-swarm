@@ -116,7 +116,7 @@ const scheduler = new InProcessPromptWorkScheduler(logger);
 const inboundWork = new InProcessInboundWorkNotifier();
 const outboundWork = new InProcessOutboundWorkNotifier(logger);
 const outbound = new OutboundIntentWriter(store, outboundWork);
-const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
+const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
 const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("./cli/primary-tools-mcp.js", import.meta.url))], store, instanceMessaging, logger);
 const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
 const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, operatorOpenIds: config.lark.operatorOpenIds, store, control: instanceControl, messaging: instanceMessaging, drivers: agentDrivers, outbound });

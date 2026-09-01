@@ -2,23 +2,33 @@ import type { AgentInstance } from "../domain/agent-instance.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceTurn } from "../domain/instance-turn.js";
+import { createQueuedWorkerTurnCard, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { InstanceStore } from "../domain/ports.js";
+import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 
-interface Options { store: InstanceStore; drivers: AgentDriverRegistry; paneHost: PaneHost; wake: (instanceId: string) => void; idFactory: () => string; maxQueueDepth?: number }
+interface Options { store: InstanceStore; drivers: AgentDriverRegistry; paneHost: PaneHost; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; maxQueueDepth?: number }
 export interface InstanceConversationView { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] }
 
 export class InstanceMessagingWorkflow {
   constructor(private readonly options: Options) {}
 
-  async submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string } }): Promise<{ accepted: true; turn: InstanceTurn; inserted: boolean }> {
+  async submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string }; source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null } }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView | null; inserted: boolean }> {
     const target = this.authorize(input.actor, input.projectId, input.targetInstanceId);
     if (!target.runtimeRef || target.desiredState !== "running") throw new Error("Target instance is not running");
-    if (this.options.store.countPendingInstanceTurns(target.id) >= (this.options.maxQueueDepth ?? 20)) throw new Error("Target instance queue is full");
-    const result = this.options.store.acceptInstanceTurn({ id: this.options.idFactory(), idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text });
+    const queueDepth = this.options.store.countPendingInstanceTurns(target.id);
+    if (queueDepth >= (this.options.maxQueueDepth ?? 20)) throw new Error("Target instance queue is full");
+    const id = this.options.idFactory();
+    if (input.source) {
+      const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: target.id, instanceGeneration: target.generation, workerName: target.name, parentTurnId: input.source.parentTurnId ?? null, rootMessageId: input.source.rootMessageId, requestText: input.content.text, queuePosition: queueDepth + 1, occurredAt: new Date().toISOString() });
+      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, card: renderWorkerTurnCard(view) });
+      if (result.inserted) { this.options.wakeOutbound?.(); this.options.wake(target.id); }
+      return { accepted: true, ...result, card: result.view };
+    }
+    const result = this.options.store.acceptInstanceTurn({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text });
     if (result.inserted) this.options.wake(target.id);
-    return { accepted: true, ...result };
+    return { accepted: true, ...result, card: null };
   }
 
   async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; text: string }): Promise<SteerReceipt> {
