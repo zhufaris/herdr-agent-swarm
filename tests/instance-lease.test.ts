@@ -88,6 +88,20 @@ describe("instance lease controller", () => {
     expect(lease.snapshot()).toMatchObject({ held: false, fencingToken: 1 });
     expect(lost).toHaveBeenCalledOnce();
   });
+
+  it("contains and logs a rejected lease-loss shutdown callback", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    stores.push(store);
+    let current = 0;
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const lease = new InstanceLeaseController(store, { ttlMs: 15_000, heartbeatMs: 5_000 }, logger as never, () => current, "owner-a");
+    lease.acquire();
+    lease.start(async () => { throw new Error("shutdown failed"); });
+
+    current = 15_000;
+    expect(lease.renewNow()).toBe(false);
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "instance-lease-shutdown-failed", outcome: "failed" }), "bridge shutdown failed after instance lease loss"));
+  });
 });
 
 function at(offsetMs: number): string { return new Date(Date.UTC(2026, 7, 22) + offsetMs).toISOString(); }

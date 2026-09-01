@@ -75,7 +75,12 @@ export class InstanceLeaseController {
     this.timer = null;
     this.status = { ...this.status, held: false, error: reason };
     this.logger.error({ event: "instance-lease-lost", ownerSuffix: this.status.ownerSuffix, fencingToken: this.status.fencingToken, reason, outcome: "shutdown" }, "bridge instance lease lost");
-    void this.onLost?.();
+    const onLost = this.onLost;
+    if (onLost) {
+      void Promise.resolve().then(onLost).catch((error) => {
+        this.logger.error({ event: "instance-lease-shutdown-failed", err: safeLogError(error), ownerSuffix: this.status.ownerSuffix, fencingToken: this.status.fencingToken, outcome: "failed" }, "bridge shutdown failed after instance lease loss");
+      });
+    }
     return false;
   }
 }

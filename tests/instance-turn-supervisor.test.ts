@@ -119,4 +119,22 @@ describe("InstanceTurnSupervisor", () => {
     expect(inspectPane).toHaveBeenCalledWith("w1:p1");
     expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed" });
   });
+
+  it("records a periodic scan failure and retries on the next interval", async () => {
+    vi.useFakeTimers();
+    const { supervisor } = setup("running");
+    const warn = vi.fn();
+    (supervisor as unknown as { options: { logger: object } }).options.logger = { warn, info: vi.fn() };
+    vi.spyOn(store!, "listObservableInstanceTurns").mockImplementationOnce(() => { throw new Error("database busy"); });
+
+    supervisor.start(100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(supervisor.snapshot()).toMatchObject({ lastFailureAt: expect.any(String), lastFailure: "database busy" });
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "instance-turn-scan-failed", outcome: "retry_later" }), "instance turn scan failed");
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed" });
+    await supervisor.stop();
+    vi.useRealTimers();
+  });
 });

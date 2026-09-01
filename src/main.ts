@@ -179,7 +179,7 @@ try {
   const writeFence = lease.writeFence();
   store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
   lease.start(() => {
-    if (runtimeShutdown) return runtimeShutdown.shutdown("lease-lost").then(() => { process.exitCode = 1; });
+    if (runtimeShutdown) return runtimeShutdown.shutdown("lease-lost").then(() => undefined).finally(() => { process.exitCode = 1; });
     process.kill(process.pid, "SIGTERM");
   });
   instanceTurns.prepareRecovery();

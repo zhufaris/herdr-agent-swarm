@@ -45,7 +45,7 @@ export class InstanceTurnSupervisor {
 
   start(intervalMs: number): void {
     if (this.stopping || this.timer) return;
-    this.timer = setInterval(() => { void this.reconcile().catch(() => undefined); }, intervalMs); this.timer.unref();
+    this.timer = setInterval(() => { void this.reconcile().catch((error) => this.recordScanFailure(error)); }, intervalMs); this.timer.unref();
   }
 
   async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
@@ -63,6 +63,14 @@ export class InstanceTurnSupervisor {
     }
     await this.observeTurns(turns, panesById);
     this.lastScanAt = new Date().toISOString();
+  }
+
+  private recordScanFailure(error: unknown): void {
+    const safe = safeLogError(error);
+    this.lastFailureAt = new Date().toISOString();
+    this.lastFailure = safe.message;
+    const decision = this.failureLogs.fail("supervisor-scan", safe.message);
+    if (decision.kind !== "suppressed") this.options.logger?.warn({ event: decision.kind === "summary" ? "instance-turn-scan-failure-summary" : "instance-turn-scan-failed", err: safe, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "retry_later" }, "instance turn scan failed");
   }
 
   private async observeTurns(turns: ReturnType<InstanceStore["listObservableInstanceTurns"]>, panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null): Promise<void> {
