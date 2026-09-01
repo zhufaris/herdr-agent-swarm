@@ -1,17 +1,9 @@
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute } from "node:path";
 
 export type HerdrShimInvocation =
   | { kind: "delegate"; argv: string[] }
   | { kind: "project"; argv: string[] }
   | { kind: "start-traex"; name: string; paneId: string; timeoutMs: number; traexArgs: string[] };
-
-export interface ShimConfig {
-  realHerdr: string;
-  traex: string;
-  shim: string;
-  installVersion: string;
-  validatedHerdrVersion: string;
-}
 
 export interface TraexStartInput {
   name: string;
@@ -113,14 +105,6 @@ export function projectTraexAgentJson(value: unknown): unknown {
     }
   }
   return projected;
-}
-
-export function validateShimPaths(config: ShimConfig): void {
-  for (const [label, value] of [["real Herdr", config.realHerdr], ["TraeX", config.traex], ["shim", config.shim]] as const) {
-    if (!isAbsolute(value)) throw new Error(`${label} path must be absolute`);
-  }
-  if (resolve(config.realHerdr) === resolve(config.shim)) throw new Error("Real Herdr and shim paths must be different");
-  if (!config.installVersion || !config.validatedHerdrVersion) throw new Error("Shim version metadata is required");
 }
 
 export function encodeLaunchRequest(executable: string, args: readonly string[]): Buffer {

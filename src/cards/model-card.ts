@@ -28,17 +28,6 @@ export function renderModelResultCard(input: { bindingId: string; spaceName: str
   };
 }
 
-export function renderModelModeCard(input: { bindingId: string; operationId: string; spaceName: string; paneId: string; model: string; modes: readonly string[] }): object {
-  return {
-    schema: "2.0", config: { update_multi: true, summary: { content: "Herdr 模型模式" } },
-    header: { title: { tag: "plain_text", content: truncate(`TraeX · ${input.spaceName} / ${input.paneId}`, 96) }, subtitle: { tag: "plain_text", content: "HERDR MODEL" }, template: "blue" },
-    body: { elements: [
-      { tag: "markdown", content: `已选择模型：**${input.model}**\n请选择运行模式。` },
-      { tag: "select_static", name: "mode", placeholder: { tag: "plain_text", content: "选择运行模式" }, options: input.modes.map((mode) => ({ text: { tag: "plain_text", content: mode }, value: mode })), behaviors: [{ type: "callback", value: { action: "select_model_mode", bindingId: input.bindingId, operationId: input.operationId } }] }
-    ] }
-  };
-}
-
 function parseModelSelector(output: string): { current: string | null; options: string[] } {
   const options: string[] = [];
   let current: string | null = null;

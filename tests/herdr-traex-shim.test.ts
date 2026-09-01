@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexStart, TraexStartError, validateShimPaths } from "../src/runtime/herdr-traex-shim.js";
+import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexStart, TraexStartError } from "../src/runtime/herdr-traex-shim.js";
 
 describe("Herdr TraeX shim invocation", () => {
   it.each([
@@ -66,10 +66,6 @@ describe("Herdr TraeX shim invocation", () => {
     expect(() => parseHerdrShimInvocation(argv)).toThrow(error);
   });
 
-  it("rejects unsafe executable configuration", () => {
-    expect(() => validateShimPaths({ realHerdr: "herdr", traex: "/bin/traex", shim: "/opt/shim/herdr", installVersion: "1", validatedHerdrVersion: "0.7.5" })).toThrow(/absolute/);
-    expect(() => validateShimPaths({ realHerdr: "/opt/shim/herdr", traex: "/bin/traex", shim: "/opt/shim/herdr", installVersion: "1", validatedHerdrVersion: "0.7.5" })).toThrow(/different/);
-  });
 });
 
 describe("Herdr TraeX managed start", () => {
