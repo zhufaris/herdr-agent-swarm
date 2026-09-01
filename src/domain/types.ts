@@ -295,6 +295,7 @@ export interface OutboundReply {
   idempotencyKey: string;
   bindingId: string | null;
   promptId: string | null;
+  workerTurnId: string | null;
   viewVersion: number | null;
   cardSequence: number | null;
   selectionId: string | null;

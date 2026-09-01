@@ -4,6 +4,7 @@ export type InstanceTurnState = "queued" | "claimed" | "dispatching" | "running"
 export interface InstanceTurn {
   id: string; idempotencyKey: string; projectId: string; instanceId: string; instanceGeneration: number;
   actor: ControlActor; kind: "turn" | "followup"; text: string; state: InstanceTurnState; result: string | null; error: string | null;
+  parentTurnId: string | null; sourceMessageId: string | null; runtimeTurnId: string | null; runtimeTurnStartedAt: string | null;
   createdAt: string; updatedAt: string;
 }
 export interface InstanceTurnCursor { createdAt: string; id: string }

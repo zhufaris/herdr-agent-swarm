@@ -8,6 +8,12 @@ import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheck
 import type { ControlActor } from "./commands.js";
 import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState } from "./instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
+import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "./worker-turn-card-view.js";
+
+export interface AcceptInstanceTurnWithCardInput {
+  id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
+  kind: InstanceTurn["kind"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; card: object;
+}
 
 export interface ClassifiedPromptInput {
   prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin">;
@@ -63,7 +69,12 @@ export interface InstanceStore {
   consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean };
+  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
   getInstanceTurn(id: string): InstanceTurn | null;
+  loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
+  findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
+  listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
+  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
   setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
@@ -322,7 +333,7 @@ export interface BindingStorePort {
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding;
   failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void;
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void;
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "workerTurnId" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean;
   dismissSupersededAnswerStream(replyId: string): boolean;
   listPendingOutboundReplies(): OutboundReply[];
