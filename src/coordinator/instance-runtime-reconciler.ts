@@ -1,12 +1,15 @@
+import type { Logger } from "pino";
 import { matchesHerdrAgentKind, type AgentInstance, type ObservedInstanceState } from "../domain/agent-instance.js";
 import type { InstanceStore } from "../domain/ports.js";
 import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../domain/types.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
+import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void }
+interface Options { projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; logger?: Pick<Logger, "warn"> }
 interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
 
 export class InstanceRuntimeReconciler {
+  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private running: Promise<void> | null = null;
   private timer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -22,7 +25,9 @@ export class InstanceRuntimeReconciler {
   private maxDurationMs: number | null = null;
   private lastOutcome: ReconciliationDiagnostics["lastOutcome"] = null;
 
-  constructor(private readonly options: Options) {}
+  constructor(private readonly options: Options) {
+    this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
+  }
 
   reconcile(): Promise<void> {
     if (this.stopping) return Promise.resolve();
@@ -44,7 +49,11 @@ export class InstanceRuntimeReconciler {
   }
   start(intervalMs: number): void {
     if (this.stopping || this.timer) return;
-    this.timer = setInterval(() => this.requestReconciliation(), intervalMs);
+    this.timer = setInterval(() => {
+      void this.requestReconciliation().catch((error) => {
+        this.options.logger?.warn({ event: "instance-runtime-reconciliation-failed", err: safeLogError(error), outcome: "retry_later" }, "periodic instance runtime reconciliation failed");
+      });
+    }, intervalMs);
     this.timer.unref();
   }
   async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
@@ -80,12 +89,16 @@ export class InstanceRuntimeReconciler {
   private async reconcileOnce(scope?: ReconciliationScope): Promise<void> {
     try {
       if (scope?.paneIds) {
-        for (const paneId of [...new Set(scope.paneIds)]) {
+        const paneIds = [...new Set(scope.paneIds)];
+        const panesById = this.options.paneHost.snapshotPanes
+          ? new Map((await this.options.paneHost.snapshotPanes()).map((pane) => [pane.paneId, pane]))
+          : null;
+        for (const paneId of paneIds) {
           const instance = this.options.store.findAgentInstanceByPane(paneId);
           if (!instance) continue;
-          const project = this.options.projects.find((candidate) => candidate.id === instance.projectId);
+          const project = this.projectsById.get(instance.projectId);
           if (!project) continue;
-          const pane = await this.options.paneHost.inspectPane(paneId);
+          const pane = panesById ? panesById.get(paneId) ?? null : await this.options.paneHost.inspectPane(paneId);
           await this.reconcileInstance(instance, project, new Map(pane ? [[paneId, pane]] : []));
         }
         this.completed = true; this.lastError = null;

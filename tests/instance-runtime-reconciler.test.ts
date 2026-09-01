@@ -9,11 +9,15 @@ afterEach(() => { store?.close(); store = undefined; });
 
 const project = { id: "p1", name: "Project", description: "test", workspaceId: "herdr-w", cwd: "/repo" } as ProjectConfig;
 function pane(overrides: Partial<HerdrPane> = {}): HerdrPane { return { paneId: "herdr-w:p1", workspaceId: "herdr-w", cwd: "/repo", label: "worker", agentKind: "codex", agentState: "idle", foregroundExecutables: ["codex"], ...overrides }; }
-function setup(snapshot: HerdrPane[]) {
+function setup(snapshot: HerdrPane[], options: { bulkSnapshot?: boolean } = {}) {
   store = new SqliteBindingStore(":memory:");
   store.createAgentInstance({ id: "i1", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
   const instance = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: null })!;
-  const paneHost = { listPanes: vi.fn(async () => snapshot), inspectPane: vi.fn(async (paneId: string) => snapshot.find((candidate) => candidate.paneId === paneId) ?? null) } as unknown as PaneHost;
+  const paneHost = {
+    listPanes: vi.fn(async () => snapshot),
+    inspectPane: vi.fn(async (paneId: string) => snapshot.find((candidate) => candidate.paneId === paneId) ?? null),
+    ...(options.bulkSnapshot ? { snapshotPanes: vi.fn(async () => snapshot) } : {})
+  } as unknown as PaneHost;
   const wake = vi.fn();
   const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake });
   return { instance, reconciler, wake, paneHost };
@@ -122,5 +126,34 @@ describe("instance runtime reconciliation", () => {
     expect(paneHost.inspectPane).toHaveBeenCalledWith(target.paneId);
     expect(paneHost.listPanes).not.toHaveBeenCalled();
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+  });
+
+  it("uses one bulk snapshot for a batch of targeted panes", async () => {
+    const target = pane({ agentState: "working" });
+    const { instance, reconciler, paneHost } = setup([target], { bulkSnapshot: true });
+
+    await reconciler.requestReconciliation({ paneIds: [target.paneId, target.paneId] });
+
+    expect(paneHost.snapshotPanes).toHaveBeenCalledOnce();
+    expect(paneHost.inspectPane).not.toHaveBeenCalled();
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+  });
+
+  it("contains periodic reconciliation failures and retries on the next interval", async () => {
+    vi.useFakeTimers();
+    const { reconciler, paneHost } = setup([]);
+    const warn = vi.fn();
+    const periodic = new InstanceRuntimeReconciler({ projects: [project], store: store!, paneHost, wake: vi.fn(), logger: { warn } });
+    vi.spyOn(paneHost, "listPanes").mockRejectedValueOnce(new Error("snapshot unavailable")).mockResolvedValue([]);
+
+    periodic.start(100);
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledOnce());
+    expect(periodic.snapshot()).toMatchObject({ failureCount: 1, lastOutcome: "failed", lastError: "snapshot unavailable" });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.waitFor(() => expect(periodic.snapshot()).toMatchObject({ successCount: 1, lastOutcome: "succeeded", lastError: null }));
+    await periodic.stop();
+    vi.useRealTimers();
   });
 });

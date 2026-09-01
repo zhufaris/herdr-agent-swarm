@@ -109,7 +109,7 @@ const agentDrivers = new AgentDriverRegistry([
 const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
 const instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, logger });
 const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
-instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId) });
+instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
 const lark = new LarkSdkAdapter(config.lark, logger);
 const bus = new BridgeEventBus(logger);
 const scheduler = new InProcessPromptWorkScheduler(logger);
