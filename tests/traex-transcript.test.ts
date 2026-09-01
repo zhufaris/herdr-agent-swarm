@@ -81,6 +81,24 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("streams recovery across a large multibyte record before the completed boundary", async () => {
+    const { root, path } = await createTranscript();
+    const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const laterTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: oldTurn, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "large-record", role: "assistant", content: [{ type: "output_text", text: "界".repeat(40_000) }] }]),
+      eventMessage({ type: "task_complete", turn_id: oldTurn, started_at: 1_788_035_304, completed_at: 1_788_035_305 }),
+      eventMessage({ type: "task_started", turn_id: laterTurn, started_at: 1_788_035_306 }),
+      eventMessage({ type: "user_message", message: "request after large record" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAfterTurn(session(), oldTurn, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: laterTurn, freshTurnStart: true, requestText: "request after large record"
+    });
+  });
+
   it("fails closed when an exact recovery boundary is incomplete or mismatched", async () => {
     const { root, path } = await createTranscript();
     const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
@@ -107,6 +125,31 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readObservation?.()).resolves.toMatchObject({
       turnId: laterTurn, freshTurnStart: true, requestText: "replacement request",
       turnLifecycle: { turnId: laterTurn, state: "completed", finalAnswer: "replacement answer" }
+    });
+  });
+
+  it("returns the exact next-turn offset when its start record crosses a scan chunk", async () => {
+    const { root, path } = await createTranscript();
+    const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const laterTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: oldTurn, started_at: 1_788_035_304 }),
+      eventMessage({ type: "user_message", message: "interrupted request" })
+    ].join(""));
+    const currentBytes = (await readFile(path)).byteLength;
+    const emptyPadding = eventMessage({ type: "agent_reasoning_raw_content", text: "" });
+    const nextTurnOffset = 2 * 64 * 1024 - 32;
+    const paddingBytes = nextTurnOffset - currentBytes - Buffer.byteLength(emptyPadding);
+    expect(paddingBytes).toBeGreaterThan(0);
+    await appendFile(path, [
+      eventMessage({ type: "agent_reasoning_raw_content", text: "x".repeat(paddingBytes) }),
+      eventMessage({ type: "task_started", turn_id: laterTurn, started_at: 1_788_035_306 }),
+      eventMessage({ type: "user_message", message: "cross-chunk replacement" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAfterTurn(session(), oldTurn, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: laterTurn, freshTurnStart: true, requestText: "cross-chunk replacement"
     });
   });
 

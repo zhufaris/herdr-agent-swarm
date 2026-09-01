@@ -16,6 +16,8 @@ const DEFAULT_NEGATIVE_CACHE_TTL_MS = 250;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_RECOVERY_SCAN_BYTES = 64 * 1024 * 1024;
+const RECOVERY_SCAN_CHUNK_BYTES = 64 * 1024;
+const MAX_RECOVERY_RECORD_BYTES = 1024 * 1024;
 const MAX_EPOCH_SECONDS = 10_000_000_000;
 
 const envelopeSchema = z.object({
@@ -530,14 +532,10 @@ async function findCompletedTurnBoundary(path: string, end: number, turnId: stri
   const expectedStartedAt = Date.parse(startedAt);
   if (!Number.isFinite(expectedStartedAt)) return "missing";
   const handle = await open(path, "r");
-  const buffer = Buffer.alloc(end);
   try {
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    let offset = 0;
     let matchedStart = false;
-    for (const record of buffer.subarray(0, bytesRead).toString("utf8").split(/(?<=\n)/)) {
-      const nextOffset = offset + Buffer.byteLength(record);
-      const envelope = parseEnvelope(record.trimEnd());
+    const inspectRecord = (record: Buffer, offset: number, nextOffset: number): number | undefined => {
+      const envelope = parseEnvelope(record.toString("utf8").trimEnd());
       if (envelope?.type === "event_msg") {
         const started = taskStartedEventSchema.safeParse(envelope.payload);
         if (started.success) {
@@ -549,7 +547,36 @@ async function findCompletedTurnBoundary(path: string, end: number, turnId: stri
         const aborted = turnAbortedEventSchema.safeParse(envelope.payload);
         if (matchedStart && aborted.success && aborted.data.turn_id === turnId) return nextOffset;
       }
-      offset = nextOffset;
+      return undefined;
+    };
+
+    let readOffset = 0;
+    let carry = Buffer.alloc(0);
+    let carryOffset = 0;
+    while (readOffset < end) {
+      const length = Math.min(RECOVERY_SCAN_CHUNK_BYTES, end - readOffset);
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, readOffset);
+      if (bytesRead === 0) break;
+      const source = carry.length === 0 ? chunk.subarray(0, bytesRead) : Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+      const sourceOffset = carry.length === 0 ? readOffset : carryOffset;
+      let recordStart = 0;
+      while (true) {
+        const newline = source.indexOf(0x0a, recordStart);
+        if (newline < 0) break;
+        const nextOffset = sourceOffset + newline + 1;
+        const boundary = inspectRecord(source.subarray(recordStart, newline + 1), sourceOffset + recordStart, nextOffset);
+        if (boundary !== undefined) return boundary;
+        recordStart = newline + 1;
+      }
+      carry = source.subarray(recordStart);
+      carryOffset = sourceOffset + recordStart;
+      if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX recovery record exceeds bounded size");
+      readOffset += bytesRead;
+    }
+    if (carry.length > 0) {
+      const boundary = inspectRecord(carry, carryOffset, carryOffset + carry.length);
+      if (boundary !== undefined) return boundary;
     }
     return matchedStart ? "incomplete" : "missing";
   } finally {
