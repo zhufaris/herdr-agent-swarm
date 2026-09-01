@@ -261,6 +261,21 @@ TraeX，使其可使用自身命令与已安装 skills。
 Pane。请先检查对应 Space；已有 Pane 时发送
 `/swarm attach <space> <pane>`，确认不存在时再发送 `/swarm new`。
 
+### `/swarm awake`
+
+当一次已投递任务处于 `detached`，且之后已经直接在 Herdr 中提交并完成了
+新的 turn，可以在原飞书话题发送：
+
+```text
+/swarm awake
+```
+
+Bridge 会从 detached turn 的精确 transcript 边界（完成记录或 interrupt 后
+下一个 turn 的开始）开始，按时间顺序把遗漏的
+Herdr turn 投影为新的 Answer Card，然后继续原有飞书 FIFO。该命令不会向
+TraeX 重发旧任务，不会写入 terminal；重复执行不会重复创建已接管的 turn。
+如果找不到完整且带用户请求的后续 turn，原 detached 状态保持不变。
+
 ### `/swarm help`
 
 显示 Bridge 帮助卡片。

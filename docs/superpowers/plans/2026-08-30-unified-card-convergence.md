@@ -16,7 +16,7 @@
 - Terminal, blocked, failed, pagination, and checkpoint convergence are immediate.
 - Preserve the 9,000-character Answer page limit and immutable frozen pages.
 - Never replay a TraeX prompt because of card delivery or recovery.
-- Preserve existing user changes in `docs/superpowers/plans/2026-08-30-standalone-service-cutover.md`.
+- Preserve the archived `docs/archive/superpowers/plans/2026-08-30-standalone-service-cutover.md`.
 
 ---
 

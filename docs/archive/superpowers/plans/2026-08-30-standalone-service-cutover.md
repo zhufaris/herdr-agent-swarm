@@ -77,25 +77,26 @@
 - [x] Run `git diff --check`.
 - [x] Commit documentation and checked plan state as `docs: document standalone service cutover`.
 
-### Task 4: Live single-instance migration
+### Task 4: Live independent-deployment migration
 
-Live execution is conditional on the target standalone identity being unused or
-configuration-compatible. If it is already an independent deployment, stop at
-the preflight and require an explicit multi-instance/consolidation decision.
+Live execution found an independently configured standalone deployment. With the
+approved multi-instance decision, the compatibility deployment was migrated to
+the distinct `herdr-agent-swarm-multiproject.service` identity while preserving
+the existing `herdr-agent-swarm.service` deployment.
 
 **Files:**
-- Runtime configuration: `~/.config/herdr-agent-swarm/.env` and `projects.json`
-- Runtime state: `~/.local/state/herdr-agent-swarm/`
-- User units: `herdr-agent-swarm.service` and `herdr-lark-bridge.service`
+- Runtime configuration: `~/.config/herdr-agent-swarm-multiproject/.env` and `projects.json`
+- Runtime state: retained explicit compatibility database path
+- User units: `herdr-agent-swarm-multiproject.service`, `herdr-agent-swarm.service`, and `herdr-lark-bridge.service`
 
 **Interfaces:**
 - Consumes: committed build and `npm run swarm:migrate`.
-- Produces: enabled and ready standalone service with the compatibility service inactive and disabled.
+- Produces: two enabled and ready agent-swarm services with the compatibility service inactive and disabled.
 
-- [ ] Read current compatibility `/status`; require zero running and queued prompts, active workers, active or uncertain instance turns, pending outbox, and active deliveries.
-- [ ] Run `npm run swarm:migrate`.
-- [ ] Verify `systemctl --user is-active herdr-agent-swarm.service` is `active` and `is-enabled` is `enabled`.
-- [ ] Verify `systemctl --user is-active herdr-lark-bridge.service` is `inactive` and `is-enabled` is `disabled`.
-- [ ] Verify `/status` identity matches `dist/build-info.json`, startup recovery is completed, SQLite quick check is healthy, the lease is held, and no prompt or outbox work was replayed.
-- [ ] Verify `/ready` is `ready` for database, projects, Herdr, Lark, lease, and instance runtime.
-- [ ] Send a new Feishu prompt only when explicitly requested; otherwise report that typed JSONL delivery awaits the next user-originated prompt.
+- [x] Read current compatibility `/status`; require zero running and queued prompts, active workers, active or uncertain instance turns, pending outbox, and active deliveries.
+- [x] Run `npm run swarm:migrate` with the approved `herdr-agent-swarm-multiproject.service` target identity.
+- [x] Verify both agent-swarm units are active and enabled.
+- [x] Verify `systemctl --user is-active herdr-lark-bridge.service` is `inactive` and `is-enabled` is `disabled`.
+- [x] Verify both `/status` identities match `dist/build-info.json`, startup recovery is completed, SQLite quick checks are healthy, leases are held, and no prompt or outbox work was replayed.
+- [x] Verify both `/ready` endpoints are `ready` for database, projects, Herdr, Lark, lease, and instance runtime.
+- [x] Do not send a new Feishu prompt without an explicit request; typed JSONL delivery awaits the next user-originated prompt.

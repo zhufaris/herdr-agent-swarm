@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "entries": [
+    { "source": "docs/superpowers/plans/2026-08-27-natural-lark-group-interactions.md", "destination": "docs/archive/superpowers/plans/2026-08-27-natural-lark-group-interactions.md", "status": "superseded", "reason": "Historical interaction design predates the durable standalone workflow." },
+    { "source": "docs/superpowers/plans/2026-08-28-solo-agent-product.md", "destination": "docs/archive/superpowers/plans/2026-08-28-solo-agent-product.md", "status": "superseded", "reason": "The solo-agent product identity is no longer an operator surface." },
+    { "source": "docs/superpowers/plans/2026-08-29-exact-composer-prompt-confirmation.md", "destination": "docs/archive/superpowers/plans/2026-08-29-exact-composer-prompt-confirmation.md", "status": "completed", "reason": "Completed implementation record, retained outside the active entry path." },
+    { "source": "docs/superpowers/plans/2026-08-29-immediate-project-selector-delivery.md", "destination": "docs/archive/superpowers/plans/2026-08-29-immediate-project-selector-delivery.md", "status": "completed", "reason": "Completed implementation record, retained outside the active entry path." },
+    { "source": "docs/superpowers/plans/2026-08-29-node-version-contract.md", "destination": "docs/archive/superpowers/plans/2026-08-29-node-version-contract.md", "status": "completed", "reason": "The Node runtime contract is now documented by package metadata and operator docs." },
+    { "source": "docs/superpowers/plans/2026-08-30-first-run-setup-wizard.md", "destination": "docs/archive/superpowers/plans/2026-08-30-first-run-setup-wizard.md", "status": "superseded", "reason": "The obsolete migration-oriented first-run flow is not a supported surface." },
+    { "source": "docs/superpowers/plans/2026-08-30-remove-compatibility-plugin.md", "destination": "docs/archive/superpowers/plans/2026-08-30-remove-compatibility-plugin.md", "status": "completed", "reason": "Compatibility plugin removal is complete." },
+    { "source": "docs/superpowers/plans/2026-08-30-runtime-performance-hardening.md", "destination": "docs/archive/superpowers/plans/2026-08-30-runtime-performance-hardening.md", "status": "completed", "reason": "Completed performance implementation record, retained outside the active entry path." },
+    { "source": "docs/superpowers/plans/2026-08-30-standalone-service-cutover.md", "destination": "docs/archive/superpowers/plans/2026-08-30-standalone-service-cutover.md", "status": "completed", "reason": "Standalone service cutover is complete and architecture.md is authoritative.", "supersededBy": "docs/architecture.md" },
+    { "source": "docs/superpowers/specs/2026-08-29-node-version-contract-design.md", "destination": "docs/archive/superpowers/specs/2026-08-29-node-version-contract-design.md", "status": "completed", "reason": "The Node runtime contract is now documented by package metadata and operator docs." },
+    { "source": "docs/superpowers/specs/2026-08-30-first-run-setup-wizard-design.md", "destination": "docs/archive/superpowers/specs/2026-08-30-first-run-setup-wizard-design.md", "status": "superseded", "reason": "The obsolete migration-oriented first-run flow is not a supported surface." },
+    { "source": "docs/superpowers/specs/2026-08-30-remove-compatibility-plugin-design.md", "destination": "docs/archive/superpowers/specs/2026-08-30-remove-compatibility-plugin-design.md", "status": "completed", "reason": "Compatibility plugin removal is complete." }
+  ]
+}

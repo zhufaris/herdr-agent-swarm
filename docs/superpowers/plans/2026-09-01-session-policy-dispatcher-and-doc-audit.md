@@ -34,12 +34,12 @@
 - Consumes: `Binding`, `SessionOperationKind`.
 - Produces: `sessionOperationRejection(binding, kind): string | null`.
 
-- [ ] Add failing matrix tests for active, archived, and orphaned bindings.
-- [ ] Add a failing persistence test proving policy rejection leaves the More Actions interaction active and inserts no operation.
-- [ ] Add a failing dispatcher test proving a persisted `model` row becomes rejected and `runModel` is never called.
-- [ ] Implement the pure policy and call it inside the existing acceptance transaction.
-- [ ] Finalize legacy model rows directly with the standard unsupported-model reason.
-- [ ] Run `npx vitest run tests/session-operation-policy.test.ts tests/sqlite-store.test.ts tests/session-operation-workflow.test.ts`.
+- [x] Add failing matrix tests for active, archived, and orphaned bindings.
+- [x] Add a failing persistence test proving policy rejection leaves the More Actions interaction active and inserts no operation.
+- [x] Add a failing dispatcher test proving a persisted `model` row becomes rejected and `runModel` is never called.
+- [x] Implement the pure policy and call it inside the existing acceptance transaction.
+- [x] Finalize legacy model rows directly with the standard unsupported-model reason.
+- [x] Run `npx vitest run tests/session-operation-policy.test.ts tests/sqlite-store.test.ts tests/session-operation-workflow.test.ts`.
 
 ### Task 2: Extract the coalescing drain runtime
 
@@ -55,11 +55,11 @@
 - Consumes: owner callbacks `drain(): Promise<void>` and `onError(error): void`.
 - Produces: `start`, `request`, `wake`, `stop`, and a bounded lifecycle snapshot.
 
-- [ ] Add failing runtime tests for coalescing, periodic wake-up, errors, and stop.
-- [ ] Implement single-flight lifecycle state without retry policy or business state.
-- [ ] Replace Session dispatcher lifecycle fields with the runtime.
-- [ ] Replace inbound single-flight fields with the runtime while retaining the inbound retry timer and diagnostics.
-- [ ] Run `npx vitest run tests/coalescing-drain.test.ts tests/session-operation-workflow.test.ts tests/concurrency-controls.integration.test.ts`.
+- [x] Add failing runtime tests for coalescing, periodic wake-up, errors, and stop.
+- [x] Implement single-flight lifecycle state without retry policy or business state.
+- [x] Replace Session dispatcher lifecycle fields with the runtime.
+- [x] Replace inbound single-flight fields with the runtime while retaining the inbound retry timer and diagnostics.
+- [x] Run `npx vitest run tests/coalescing-drain.test.ts tests/session-operation-workflow.test.ts tests/concurrency-controls.integration.test.ts`.
 
 ### Task 3: Add a repeatable documentation archive audit
 
@@ -74,10 +74,10 @@
 - Consumes: manifest entries with `source`, `destination`, `status`, `reason`, and optional `supersededBy`.
 - Produces: `npm run docs:audit`, a read-only validation command with nonzero exit on drift.
 
-- [ ] Add failing fixture tests for missing destinations, active-source conflicts, duplicate paths, root escapes, and active links to archived sources.
-- [ ] Implement the audit script with exported validation logic and a CLI entrypoint.
-- [ ] Record only the historical files already moved in this worktree.
-- [ ] Document the archive workflow and run `npm run docs:audit`.
+- [x] Add failing fixture tests for missing destinations, active-source conflicts, duplicate paths, root escapes, and active links to archived sources.
+- [x] Implement the audit script with exported validation logic and a CLI entrypoint.
+- [x] Record only the historical files already moved in this worktree.
+- [x] Document the archive workflow and run `npm run docs:audit`.
 
 ### Task 4: Verify and commit by theme
 

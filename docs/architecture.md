@@ -34,6 +34,14 @@ When these sources disagree, do not repair SQLite from a Lark card or infer a
 pane state from a card. Reconcile against Herdr, then let the normal projection
 and durable Lark outbox converge the visible state.
 
+An operator can explicitly recover a binding blocked by an exact-owned detached
+prompt with `/swarm awake`. This path reopens the matching TraeX transcript
+immediately after the detached turn's exact completion boundary, or at the next
+distinct turn start when interruption left no completion record, adopts later
+turns in chronological order into separate Answer Cards, and then wakes the
+ordinary prompt FIFO. It never submits text to TraeX. Missing, incomplete, or
+mismatched boundaries fail closed and leave the detached prompt unchanged.
+
 ## Architecture and dependency direction
 
 The target architecture follows a ports-and-adapters structure. Dependencies
@@ -178,6 +186,13 @@ Every workflow-wake-up producer follows the durable-before-wake rule:
 2. Publish the scoped wake-up.
 3. Return without assuming delivery of that wake-up.
 
+For Herdr pane hints, `HerdrRuntimeReconciler` owns binding convergence and the
+corresponding external-turn observation as one ordered path. The event router
+must not invoke `ExternalTurnObserver` in parallel with binding reconciliation:
+that would duplicate transcript reads and race against binding lifecycle
+changes. Instance-turn observation and retired-pane cleanup remain separate
+consumers because they own different durable aggregates.
+
 An in-process event dispatcher is infrastructure, not storage. The SQLite
 outbox is the durable delivery mechanism for Lark work. If a future requirement
 needs reliable cross-process event consumption, it requires a separately
@@ -201,8 +216,10 @@ remain best effort because workers always reload durable state.
 Lark message or card action                 Herdr Socket event
              |                                |
              v                                v
-   InboundRouter and durable acceptance   bounded wake-up hint
+   SQLite inbound record -> quick ACK      bounded wake-up hint
              |                                |
+             v                                |
+   single-flight durable dispatcher           |
              +-------> application workflows <+
                               |             |
                               |             +--> HerdrRuntimeReconciler
@@ -228,9 +245,24 @@ Lark message or card action                 Herdr Socket event
 This section describes current externally observable behavior. Module names may
 change during the target decomposition without changing these steps.
 
-1. The Lark adapter normalizes an incoming message or card action.
-2. The coordinator rejects messages outside the configured chat and bridge-owned
-   messages, then durably records the rest before attempting business handling.
+1. The Lark adapter normalizes an incoming message or card action. For messages,
+   the WebSocket callback returns after the configured-chat and bridge-message
+   checks plus a successful SQLite inbound insert; it does not wait for Herdr or
+   command handling.
+2. A coalescing single-flight dispatcher claims persisted messages in FIFO order,
+   marks each accepted only after business handling completes, and releases a
+   failed item back to `received`. Failures retry automatically with bounded
+   exponential backoff, while a newly persisted message wakes the dispatcher
+   immediately. Startup returns interrupted `processing` rows to `received`;
+   shutdown cancels retry timers and waits only for the active drain, leaving any
+   unclaimed rows durable for the next start.
+   `/status` exposes aggregate-only inbound counts, retry backlog age, the most
+   recent bounded failure, and dispatcher retry state. It never includes message
+   text or the stored payload. A pending inbound head older than five minutes
+   degrades operational status without changing readiness.
+   Accepted inbound rows share the configured outbox retention window and are
+   pruned in an independently bounded batch loop. Rows still in `received` or
+   `processing` are never removed by retention.
 3. A command is handled as a binding or operational workflow. Ordinary text in
    an active bound topic normally becomes a FIFO prompt job. A conservative
    classifier may describe a message as a short continuation, but steering is
@@ -241,6 +273,14 @@ change during the target decomposition without changing these steps.
    `blocked`): it bypasses queued ordinary prompts and creates no prompt job.
    Explicit `/swarm steer <text>` is rejected before durable control acceptance;
    it never writes text to the terminal and never falls back to the ordinary FIFO.
+   Mutating Session card actions use a separate durable handoff: the callback
+   atomically consumes its scoped interaction and inserts one idempotent
+   `session_operations` row, then returns an accepted Toast. A coalescing
+   single-flight dispatcher validates the persisted binding generation and pane
+   identity before handing work to the owning workflow. Stop/model, reset, and
+   pane-close then retain their existing pane-control, provisioning-checkpoint,
+   and close-confirmation authorities. Interrupted running Session operations
+   become `uncertain` and are never blindly replayed.
    A natural-language root mention first persists a project selection and its
    original text. Only an explicit project callback provisions the binding; the
    original message ID is then reused as the prompt idempotency key, including
@@ -507,11 +547,17 @@ ambiguous or absent match creates a separate durable prompt and Answer Card.
 The atomic SQLite transition records `execution_origin = 'herdr'`, claims the
 full transcript turn ID, and reserves any initial card delivery before events
 enter the normal `BridgeEventBus` projection path; it never submits the request
-to TraeX again. A newer external turn may terminalize only an identity-less
-detached prompt as uncertain. Turns already owned by bridge dispatch are skipped
-by this observer, and an identified detached turn remains the responsibility of
-`PromptRunWorkflow`. Periodic scans and explicit handoffs are serialized per
-binding so two external cursor reads cannot race.
+to TraeX again. A newer external turn may terminalize an identity-less detached
+prompt as uncertain. It may also supersede an exact-owned detached prompt, but
+only when the same cursor observes a different `task_started` with a strictly
+later start time and its scoped `user_message`. That handoff atomically fails
+the old prompt without replay, creates a separate external prompt and Answer
+Card, and retains the new exact turn fence. It never consumes a queued Lark
+prompt even when the request text matches. `PromptRunWorkflow` keeps the live
+cursor through this handoff so the start or request record cannot be lost
+between observers. Other turn conflicts remain ignored. Periodic scans and
+explicit handoffs are serialized per binding so two external cursor reads
+cannot race.
 
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;
@@ -769,3 +815,7 @@ boundary change to fix.
 - Historical design and iteration records live in
   [archive/](archive/), including [archive/designs](archive/designs/) and
   [archive/superpowers](archive/superpowers/).
+- Archived plan/spec moves are declared in
+  [the archive manifest](superpowers/archive-manifest.json). Run
+  `npm run docs:audit` after a reviewed Git move; the command only reports
+  missing destinations, duplicate or unsafe paths, and stale active links.

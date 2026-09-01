@@ -18,7 +18,7 @@
 - Never replay a prompt that may have reached TraeX.
 - Worker topology changes remain human-only.
 - Legacy Primary rows are retained for explicit operator cleanup, never silently converted or deleted.
-- Do not stage or modify `docs/superpowers/plans/2026-08-30-standalone-service-cutover.md` or `TODO.md`.
+- Do not stage or modify `docs/archive/superpowers/plans/2026-08-30-standalone-service-cutover.md` or `TODO.md`.
 
 ---
 

@@ -9,6 +9,7 @@
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/generate-build-info.mjs",
     "config:validate": "node dist/cli/validate-config.js",
+    "docs:audit": "node scripts/audit-superpowers-docs.mjs",
     "service": "node dist/cli/service-lifecycle.js",
     "primary-tools:mcp": "node dist/cli/primary-tools-mcp.js",
     "herdr:traex:install": "bash scripts/install-herdr-traex-shim.sh install",

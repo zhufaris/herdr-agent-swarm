@@ -19,7 +19,7 @@
 - Existing detached prompts without exact identity remain visible and uncertain; do not silently fail, cancel, migrate, or rewrite them.
 - Keep prompt, Run Card, and outbox transitions inside their existing SQLite/event boundaries.
 - Do not modify the live SQLite database, cancel live prompts, or use `--force` during implementation.
-- Preserve the user's existing modified `docs/superpowers/plans/2026-08-30-standalone-service-cutover.md` and untracked `TODO.md`.
+- Preserve the archived `docs/archive/superpowers/plans/2026-08-30-standalone-service-cutover.md` and untracked `TODO.md`.
 
 ---
 

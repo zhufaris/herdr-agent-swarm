@@ -49,7 +49,8 @@ The stable policy is:
 
 | Operation | Required binding state |
 | --- | --- |
-| `stop`, `reset`, `rename`, `pane_close` | active lifecycle, active state, non-orphaned attachment, and a Pane |
+| `stop`, `reset`, `rename` | active lifecycle, active state, non-orphaned attachment, and a Pane |
+| `pane_close` | active lifecycle, active state, attached state, and a Pane |
 | `archive` | active lifecycle |
 | `resume` | archived lifecycle and a retained Pane |
 | `reattach`, `replace` | orphaned attachment and active lifecycle |
