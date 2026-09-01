@@ -53,13 +53,13 @@ describe("instance cards", () => {
 
   it("renders actor-bound create and steer forms with CardKit submit behaviors", () => {
     const createCard = renderInstanceCreateCard({ projectId: "p1", requestedBy: "u1" }) as { body: { elements: Array<{ elements?: Array<Record<string, unknown>> }> } };
+    const steerCard = renderInstanceSteerCard({ instance, requestedBy: "u1" }) as { body: { elements: Array<{ elements?: Array<Record<string, unknown>> }> } };
     const create = JSON.stringify(createCard);
-    const steer = JSON.stringify(renderInstanceSteerCard({ instance, requestedBy: "u1" }));
+    const steer = JSON.stringify(steerCard);
     expect(create).toContain('\"action\":\"instance_create_submit\"');
     expect(create).toContain('\"projectId\":\"p1\"');
     expect(create).toContain('\"requestedBy\":\"u1\"');
-    expect(create).toContain('\"action_type\":\"form_submit\"');
-    expect(create).not.toContain("form_action_type");
+    expect(create).toContain('\"form_action_type\":\"submit\"');
     expect(create).toContain("创建 Worker");
     expect(create).not.toContain("选择角色");
     expect(create).not.toContain("\"name\":\"role\"");
@@ -68,8 +68,13 @@ describe("instance cards", () => {
     expect(inputs).toEqual(inputs.map((input) => expect.objectContaining({ input_type: "text" })));
     expect(steer).toContain('\"action\":\"instance_steer_submit\"');
     expect(steer).toContain('\"generation\":2');
-    expect(steer).toContain('\"action_type\":\"form_submit\"');
-    expect(steer).not.toContain("form_action_type");
+    expect(steer).toContain('\"form_action_type\":\"submit\"');
+    for (const renderedCard of [createCard, steerCard]) {
+      const form = renderedCard.body.elements.find(({ elements }) => elements !== undefined);
+      const submit = form!.elements!.find(({ tag }) => tag === "button");
+      expect(submit).toMatchObject({ form_action_type: "submit" });
+      expect(submit).not.toHaveProperty("action_type");
+    }
   });
 
   it("shows destructive confirmation only for a safe fresh removal plan", () => {
