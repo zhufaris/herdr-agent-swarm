@@ -14,6 +14,9 @@ export interface RunProgressEvent {
   state: ProgressEventState;
   occurredAt: string;
 }
+export interface RunProgressSummary { total: number; stepTotal: number; stepDone: number }
+export const EMPTY_PROGRESS_SUMMARY: RunProgressSummary = { total: 0, stepTotal: 0, stepDone: 0 };
+export const RECENT_PROGRESS_LIMIT = 8;
 
 export interface MainCardLiveStatus {
   statusTitle: string | null;
@@ -48,6 +51,7 @@ export interface RunCardView {
   answerDraft: string;
   answerDraftTransient: boolean;
   progressEvents: RunProgressEvent[];
+  progressSummary: RunProgressSummary;
   queuePosition: number;
   queueFeedback: QueueWaitFeedback | null;
   startedAt: string | null;
@@ -79,7 +83,7 @@ export function createQueuedRunCard(input: {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, steeringOrigin: input.steeringOrigin ?? null, steeringFailureKind: null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
-    progressEvents: [], queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
+    progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
@@ -119,22 +123,14 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       const answerState = reduceAnswerSnapshot(state, change.answerSnapshot, change.answerUpdate ?? "replace");
       const answer = renderAnswer(answerState.answerSegments, answerState.answerDraft);
       if (change.hasProgressSnapshot) {
-        if (answer === state.answer && sameProgress(change.progressEvents, state.progressEvents)) return state;
-        patch = { answer, ...answerState, progressEvents: change.progressEvents };
+        const progress = progressSnapshot(change.progressEvents);
+        if (answer === state.answer && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
+        patch = { answer, ...answerState, progressEvents: progress.events, progressSummary: progress.summary };
         break;
       }
-      let events = state.progressEvents;
-      if (change.progressEvents.length > 0) {
-        events = [...state.progressEvents];
-        const positions = new Map(events.map((event, index) => [event.key, index]));
-        for (const event of change.progressEvents) {
-          const position = positions.get(event.key);
-          if (position === undefined) { positions.set(event.key, events.length); events.push(event); }
-          else events[position] = event;
-        }
-      }
-      if (answer === state.answer && sameProgress(events, state.progressEvents)) return state;
-      patch = { answer, ...answerState, progressEvents: events };
+      const progress = mergeRecentProgress(state.progressEvents, state.progressSummary, change.progressEvents);
+      if (answer === state.answer && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
+      patch = { answer, ...answerState, progressEvents: progress.events, progressSummary: progress.summary };
       break;
     }
     case "completed":
@@ -148,6 +144,39 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
   }
   const activityAt = change.type === "queue-position" || change.type === "queue-feedback" || change.type === "steering-delivered" ? state.activityAt : change.occurredAt;
   return { ...state, ...patch, activityAt, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
+}
+
+export function progressSnapshot(events: readonly RunProgressEvent[]): { events: RunProgressEvent[]; summary: RunProgressSummary } {
+  const latest = new Map<string, RunProgressEvent>();
+  for (const event of events) { latest.delete(event.key); latest.set(event.key, event); }
+  const all = [...latest.values()];
+  return { events: all.slice(-RECENT_PROGRESS_LIMIT), summary: summarizeProgress(all) };
+}
+
+export function mergeRecentProgress(current: readonly RunProgressEvent[], summary: RunProgressSummary, updates: readonly RunProgressEvent[]): { events: RunProgressEvent[]; summary: RunProgressSummary } {
+  if (updates.length === 0) return { events: [...current], summary };
+  const events = [...current];
+  const next = { ...summary };
+  for (const event of updates) {
+    const position = events.findIndex((candidate) => candidate.key === event.key);
+    if (position >= 0) {
+      const previous = events[position]!;
+      if (previous.kind === "step" && previous.state === "done" && event.state !== "done") next.stepDone -= 1;
+      if (previous.kind === "step" && previous.state !== "done" && event.state === "done") next.stepDone += 1;
+      events[position] = event;
+    } else {
+      events.push(event);
+      next.total += 1;
+      if (event.kind === "step") { next.stepTotal += 1; if (event.state === "done") next.stepDone += 1; }
+    }
+  }
+  return { events: events.slice(-RECENT_PROGRESS_LIMIT), summary: next };
+}
+
+export function summarizeProgress(events: readonly RunProgressEvent[]): RunProgressSummary {
+  let stepTotal = 0; let stepDone = 0;
+  for (const event of events) if (event.kind === "step") { stepTotal += 1; if (event.state === "done") stepDone += 1; }
+  return { total: events.length, stepTotal, stepDone };
 }
 
 function sameQueueFeedback(left: QueueWaitFeedback | null, right: QueueWaitFeedback | null): boolean {
@@ -207,4 +236,7 @@ function sameProgress(left: RunProgressEvent[], right: RunProgressEvent[]): bool
     const other = right[index];
     return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state;
   });
+}
+function sameProgressSummary(left: RunProgressSummary, right: RunProgressSummary): boolean {
+  return left.total === right.total && left.stepTotal === right.stepTotal && left.stepDone === right.stepDone;
 }

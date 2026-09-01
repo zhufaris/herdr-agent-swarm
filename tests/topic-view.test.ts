@@ -125,7 +125,7 @@ describe("topic view reducer", () => {
     expect(duplicate.activityAt).toBe("2026-08-27T12:00:00Z");
   });
 
-  it("keeps complete current-turn progress and the latest 9000 answer characters", () => {
+  it("keeps bounded current-turn progress and the latest 9000 answer characters", () => {
     let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     let fullAnswer = "";
     for (let index = 0; index < 34; index += 1) {
@@ -136,8 +136,9 @@ describe("topic view reducer", () => {
       }));
     }
 
-    expect(view.recentProgress).toHaveLength(34);
-    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 34 }, (_, index) => `read:${index}`));
+    expect(view.recentProgress).toHaveLength(8);
+    expect(view.recentProgress.map((item) => item.key)).toEqual(Array.from({ length: 8 }, (_, index) => `read:${index + 26}`));
+    expect(view.progressSummary).toEqual({ total: 34, stepTotal: 0, stepDone: 0 });
     expect(view.answer).toHaveLength(9_000);
     expect(view.answer).toBe(fullAnswer.slice(-9_000));
   });

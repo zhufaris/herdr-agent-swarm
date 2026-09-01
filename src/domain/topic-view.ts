@@ -1,14 +1,14 @@
 import type { AgentState } from "./types.js";
 import type { BridgeEvent } from "./events.js";
 import { normalizeTurnOutputObservation } from "./events.js";
-import type { MainCardLiveStatus, RunCardView, RunProgressEvent } from "./run-card-view.js";
+import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, progressSnapshot, type MainCardLiveStatus, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "./run-card-view.js";
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "degraded" | "draining" | "archived" | "orphaned";
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
-  agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; model: string | null; context: string | null;
+  agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; progressSummary: RunProgressSummary; model: string | null; context: string | null;
   liveStatus: MainCardLiveStatus | null;
   primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
   activityAt: string | null;
@@ -17,7 +17,7 @@ export interface TopicViewState {
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], model: null, context: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
@@ -48,7 +48,7 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
     case "PromptCancelled": return state;
     case "SteeringQueued": return state;
     case "RunQueuePositionChanged": return state;
-    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [], liveStatus: null };
+    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, liveStatus: null };
     case "SteeringStarted":
     case "SteeringDelivered":
     case "SteeringFailed": return state;
@@ -56,14 +56,16 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       const observation = normalizeTurnOutputObservation(event.payload);
       const answer = keepAnswerTail(observation.answer.snapshot);
-      const recentProgress = observation.answer.hasToolActivitySnapshot
-        ? stampProgress(observation.answer.toolActivities, event.occurredAt)
-        : mergeProgress(base.recentProgress ?? [], observation.answer.toolActivities, event.occurredAt);
+      const stamped = stampProgress(observation.answer.toolActivities, event.occurredAt);
+      const progress = observation.answer.hasToolActivitySnapshot
+        ? progressSnapshot(stamped)
+        : mergeRecentProgress(base.recentProgress ?? [], base.progressSummary ?? EMPTY_PROGRESS_SUMMARY, stamped);
+      const recentProgress = progress.events;
       const model = observation.main.model ?? state.model;
       const context = observation.main.context ?? state.context;
       const liveStatus = mergeLiveStatus(state.liveStatus, observation.main.status, event.occurredAt);
-      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && sameLiveStatus(liveStatus, state.liveStatus) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
-      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, liveStatus, model, context };
+      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && sameProgressSummary(progress.summary, state.progressSummary) && sameLiveStatus(liveStatus, state.liveStatus) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
+      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, progressSummary: progress.summary, liveStatus, model, context };
     }
     case "PaneOutputObserved": {
       const observation = event.payload.observation;
@@ -97,23 +99,8 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
     ...state, phase, queueDepth: run.queuePosition, answer: run.answer ? keepAnswerTail(run.answer) : null, notice: run.notice,
     activePromptId: run.phase === "running" || run.phase === "blocked" ? run.promptId : null,
     agentState: run.phase === "running" ? "working" : run.phase === "blocked" ? "blocked" : run.phase === "completed" ? "done" : state.agentState,
-    recentProgress: run.progressEvents, activityAt: run.updatedAt
+    recentProgress: run.progressEvents, progressSummary: run.progressSummary, activityAt: run.updatedAt
   });
-}
-
-function mergeProgress(current: RunProgressEvent[], updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
-  if (updates.length === 0) return current;
-  const result = [...current];
-  const positions = new Map(result.map((item, index) => [item.key, index]));
-  for (const update of updates) {
-    const event = { ...update, occurredAt };
-    const position = positions.get(event.key);
-    if (position === undefined) {
-      positions.set(event.key, result.length);
-      result.push(event);
-    } else result[position] = event;
-  }
-  return result;
 }
 
 function stampProgress(updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
@@ -135,8 +122,9 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.model === right.model && left.context === right.context
     && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice
     && sameLiveStatus(left.liveStatus, right.liveStatus)
-    && sameVisibleProgress(left.recentProgress, right.recentProgress);
+    && sameVisibleProgress(left.recentProgress, right.recentProgress) && sameProgressSummary(left.progressSummary, right.progressSummary);
 }
+function sameProgressSummary(left: RunProgressSummary, right: RunProgressSummary): boolean { return left.total === right.total && left.stepTotal === right.stepTotal && left.stepDone === right.stepDone; }
 
 function mergeLiveStatus(current: MainCardLiveStatus | null, update: Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["observation"]["main"]["status"], occurredAt: string): MainCardLiveStatus | null {
   if (!update) return current;

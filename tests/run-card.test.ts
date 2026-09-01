@@ -319,7 +319,7 @@ describe("run card", () => {
     const visibleActivities = [...serialized.matchAll(/activity-(\d+)/g)].map((match) => Number(match[1]));
 
     expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([8, 9, 10]);
-    expect(serialized).toContain("更早 5 项已省略");
+    expect(serialized).toContain("更早 7 项已省略");
   });
 
   it("bounds the 12-line project-card preview at 6000 characters", () => {

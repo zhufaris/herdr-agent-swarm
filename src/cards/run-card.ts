@@ -1,5 +1,5 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
-import type { RunCardView, RunProgressEvent } from "../domain/run-card-view.js";
+import { summarizeProgress, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
@@ -101,7 +101,7 @@ export function renderRunCard(input: TopicViewState): object {
   ];
 
   const recentProgress = input.recentProgress ?? [];
-  if (recentProgress.length) elements.push(...renderProgressTimeline(recentProgress, input.phase));
+  if (recentProgress.length) elements.push(...renderProgressTimeline(recentProgress, input.phase, { summary: effectiveProgressSummary(input.progressSummary, recentProgress) }));
   else if (input.phase === "running") elements.push({ tag: "markdown", content: "**执行进度**\n🧠 正在分析请求" });
 
   if (input.answer?.trim()) {
@@ -143,7 +143,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   const recentActivity = progress.filter((event) => !planKeys.has(event.key)).slice(-8);
-  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动" }));
+  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动", summary: effectiveProgressSummary(input.progressSummary, progress) }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
@@ -181,13 +181,14 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
   const streaming = options.streaming ?? input.phase !== "completed";
-  const stepProgress = progressSummary(input.progressEvents);
+  const summary = effectiveProgressSummary(input.progressSummary, input.progressEvents);
+  const stepProgress = { done: summary.stepDone, total: summary.stepTotal };
   const content = options.initialContent !== undefined
     ? options.initialContent
     : defaultAnswerContent(input, stepProgress);
   const elements: object[] = [
     { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
-    ...renderProgressTimeline(input.progressEvents, input.phase)
+    ...renderProgressTimeline(input.progressEvents, input.phase, { summary })
   ];
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
@@ -221,6 +222,10 @@ function defaultAnswerContent(input: RunCardView, stepProgress: { done: number; 
           : input.phase === "failed" ? "本次未产生可展示的回答。"
             : "暂无回答。";
   return truncateLarkMarkdownMiddle(baseContent, ANSWER_CARD_PREVIEW_LIMIT);
+}
+
+function effectiveProgressSummary(summary: RunProgressSummary, events: readonly RunProgressEvent[]): RunProgressSummary {
+  return summary.total === 0 && events.length > 0 ? summarizeProgress(events) : summary;
 }
 
 export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string }): object | null {
@@ -271,17 +276,6 @@ function formatElapsed(seconds: number | null): string | null {
 function formatTokenCount(tokens: number | null): string | null {
   if (tokens === null) return null;
   return `↑ ${tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 1 : 2)}K` : tokens} tokens`;
-}
-
-function progressSummary(events: readonly RunProgressEvent[]): { done: number; total: number } {
-  let done = 0;
-  let total = 0;
-  for (const event of events) {
-    if (event.kind !== "step") continue;
-    total += 1;
-    if (event.state === "done") done += 1;
-  }
-  return { done, total };
 }
 
 type FinalAnswerElement = { tag: string; [key: string]: unknown };

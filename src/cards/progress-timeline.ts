@@ -1,40 +1,33 @@
-import type { RunProgressEvent } from "../domain/run-card-view.js";
+import { summarizeProgress, type RunProgressEvent, type RunProgressSummary } from "../domain/run-card-view.js";
 
 type TimelinePhase = string;
 
 const VISIBLE_EVENT_COUNT = 3;
 
-export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string } = {}): object[] {
+export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string; summary?: RunProgressSummary } = {}): object[] {
   if (!events.length) return [];
+  const summary = options.summary ?? summarizeProgress(events);
   const visible = events.slice(-VISIBLE_EVENT_COUNT);
-  const earlierCount = Math.max(0, events.length - VISIBLE_EVENT_COUNT);
+  const earlierCount = Math.max(0, summary.total - visible.length);
   const elements: object[] = [{ tag: "markdown", content: visible.map(progressLine).join("\n") }];
   if (earlierCount) elements.push({ tag: "markdown", content: `… 更早 ${earlierCount} 项已省略，可在 Herdr pane 查看完整过程。` });
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: timelineColor(phase), corner_radius: "6px" },
-    header: { title: { tag: "plain_text", content: options.title ? activityTitle(options.title, events, phase) : timelineTitle(events, phase) } },
+    header: { title: { tag: "plain_text", content: options.title ? activityTitle(options.title, summary, phase) : timelineTitle(summary, phase) } },
     elements
   }];
 }
 
-function activityTitle(title: string, events: RunProgressEvent[], phase: TimelinePhase): string {
-  if (phase === "blocked" || phase === "failed" || phase === "error") return `${title} · 需要处理 · ${events.length} 项`;
-  if (phase === "running") return `${title} · ${events.length} 项`;
-  return `${title} · ${events.length} 项`;
+function activityTitle(title: string, summary: RunProgressSummary, phase: TimelinePhase): string {
+  if (phase === "blocked" || phase === "failed" || phase === "error") return `${title} · 需要处理 · ${summary.total} 项`;
+  return `${title} · ${summary.total} 项`;
 }
 
-function timelineTitle(events: RunProgressEvent[], phase: TimelinePhase): string {
-  let stepCount = 0;
-  let doneStepCount = 0;
-  for (const event of events) {
-    if (event.kind !== "step") continue;
-    stepCount += 1;
-    if (event.state === "done") doneStepCount += 1;
-  }
-  if (phase === "blocked" || phase === "failed" || phase === "error") return `过程轨迹 · 需要处理 · ${events.length} 项`;
-  if (phase === "running") return stepCount ? `过程轨迹 · 进行中 · ${doneStepCount}/${stepCount}` : `过程轨迹 · 进行中 · ${events.length} 项`;
-  if (phase === "completed" || phase === "done") return `过程轨迹 · 已完成 · ${events.length} 项`;
-  return `过程轨迹 · ${events.length} 项`;
+function timelineTitle(summary: RunProgressSummary, phase: TimelinePhase): string {
+  if (phase === "blocked" || phase === "failed" || phase === "error") return `过程轨迹 · 需要处理 · ${summary.total} 项`;
+  if (phase === "running") return summary.stepTotal ? `过程轨迹 · 进行中 · ${summary.stepDone}/${summary.stepTotal}` : `过程轨迹 · 进行中 · ${summary.total} 项`;
+  if (phase === "completed" || phase === "done") return `过程轨迹 · 已完成 · ${summary.total} 项`;
+  return `过程轨迹 · ${summary.total} 项`;
 }
 
 function timelineColor(phase: TimelinePhase): string {

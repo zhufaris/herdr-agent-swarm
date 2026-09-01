@@ -1569,6 +1569,26 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'prompt_jobs_source_prompt_once'").get()).toEqual({ name: "prompt_jobs_source_prompt_once" });
   });
 
+  it("derives cumulative progress before trimming legacy run-card history", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-progress-summary-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "legacy-progress", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "legacy-progress", bindingId: "b1", larkMessageId: "m-legacy-progress", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root", answerCard: {} });
+    const events = Array.from({ length: 10 }, (_, index) => ({ key: `step:${index}`, kind: "step", label: `step ${index}`, state: index < 6 ? "done" : "active", occurredAt: "now" }));
+    store.database.prepare("UPDATE run_cards SET progress_events_json = ? WHERE prompt_id = 'legacy-progress'").run(JSON.stringify(events));
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 6; DROP VIEW run_cards_view; ALTER TABLE run_cards DROP COLUMN progress_summary_json");
+    store.close();
+    store = undefined;
+
+    store = new SqliteBindingStore(path);
+    const migrated = store.loadRunCard("legacy-progress")!;
+    expect(migrated.progressEvents.map((event) => event.key)).toEqual(Array.from({ length: 8 }, (_, index) => `step:${index + 2}`));
+    expect(migrated.progressSummary).toEqual({ total: 10, stepTotal: 10, stepDone: 6 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 6").get()).toEqual({ version: 6 });
+  });
+
   it("drops a stale run-card view before migrating legacy tables", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-stale-run-card-view-"));
     const path = join(temporaryDirectory, "bridge.db");

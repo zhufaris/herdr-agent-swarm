@@ -3,13 +3,24 @@ import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.
 import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 
 describe("request run-card view", () => {
-  it("keeps complete current-turn progress for the main-card projection", () => {
+  it("keeps a bounded current-turn progress window with cumulative counts", () => {
     const initial = { ...initialTopicView("b1"), activePromptId: "p1", phase: "running" as const };
     const events = Array.from({ length: 10 }, (_, index) => ({ key: `step:${index}`, kind: "step" as const, label: `step ${index}`, state: "done" as const }));
     const projected = reduceTopicView(initial, { eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "working", progressEvents: events, hasProgressSnapshot: true } });
 
-    expect(projected.recentProgress).toHaveLength(10);
+    expect(projected.recentProgress).toHaveLength(8);
+    expect(projected.progressSummary).toEqual({ total: 10, stepTotal: 10, stepDone: 10 });
     expect(projected.recentProgress.at(-1)).toMatchObject({ key: "step:9" });
+  });
+
+  it("updates a retained step completion without increasing cumulative totals", () => {
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start" });
+    const active = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "", progressEvents: [{ key: "step:test", kind: "step", label: "Test", state: "active", occurredAt: "one" }] });
+    const done = reduceRunCard(active, { type: "output", occurredAt: "two", answerSnapshot: "", progressEvents: [{ key: "step:test", kind: "step", label: "Test", state: "done", occurredAt: "two" }] });
+
+    expect(active.progressSummary).toEqual({ total: 1, stepTotal: 1, stepDone: 0 });
+    expect(done.progressSummary).toEqual({ total: 1, stepTotal: 1, stepDone: 1 });
+    expect(done.progressEvents).toEqual([expect.objectContaining({ key: "step:test", state: "done" })]);
   });
   it("accumulates safe output, deduplicates progress, and completes with the final answer", () => {
     const queued = createQueuedRunCard({
