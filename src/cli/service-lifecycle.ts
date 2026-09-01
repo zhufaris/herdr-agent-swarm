@@ -40,6 +40,23 @@ interface RuntimePaths {
 
 export interface PrivateLogMetadata { kind: "directory" | "file"; uid: number | bigint; nlink: number | bigint }
 
+export function resolveUserSystemdFallbackEnvironment(
+  environment: NodeJS.ProcessEnv,
+  runtimeBase = "/run/user",
+  uid = process.getuid?.()
+): NodeJS.ProcessEnv | null {
+  if (uid === undefined || environment.XDG_RUNTIME_DIR || environment.DBUS_SESSION_BUS_ADDRESS) return null;
+  const runtimeDirectory = resolve(runtimeBase, String(uid));
+  const busPath = resolve(runtimeDirectory, "bus");
+  try {
+    const runtime = lstatSync(runtimeDirectory);
+    const bus = lstatSync(busPath);
+    if (!runtime.isDirectory() || !bus.isSocket()) return null;
+    if (BigInt(runtime.uid) !== BigInt(uid) || BigInt(bus.uid) !== BigInt(uid)) return null;
+  } catch { return null; }
+  return { ...environment, XDG_RUNTIME_DIR: runtimeDirectory, DBUS_SESSION_BUS_ADDRESS: `unix:path=${busPath}` };
+}
+
 export function validatePrivateLogMetadata(path: string, metadata: PrivateLogMetadata): void {
   const effectiveUid = process.geteuid?.();
   if (effectiveUid === undefined) throw new Error(`effective UID is unavailable; refusing private log path: ${path}`);
@@ -422,7 +439,7 @@ interface ListenerOwnership {
 }
 
 function probeListenerOwnership(serviceName: string, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
-  const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "MainPID", "--value"], { env: environment, encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024 });
+  const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "MainPID", "--value"], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024 });
   const parsedMainPid = Number(unit.stdout.trim());
   const mainPid = unit.status === 0 && Number.isSafeInteger(parsedMainPid) && parsedMainPid > 0 ? parsedMainPid : null;
   const sockets = spawnSync("ss", ["-H", "-ltnp"], { env: environment, encoding: "utf8", timeout: 5_000, maxBuffer: 1024 * 1024 });
@@ -459,8 +476,12 @@ function normalizeIpAddress(value: string): string {
 }
 
 function isUnitActive(serviceName: string, environment: NodeJS.ProcessEnv): boolean {
-  const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: environment, encoding: "utf8", timeout: 5_000 });
+  const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000 });
   return unit.status === 0 && unit.stdout.trim() === "active";
+}
+
+function userSystemdEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return resolveUserSystemdFallbackEnvironment(environment) ?? environment;
 }
 
 function isUnitConfirmedInactive(serviceName: string, environment: NodeJS.ProcessEnv): boolean {
@@ -471,14 +492,15 @@ function isUnitConfirmedInactive(serviceName: string, environment: NodeJS.Proces
 }
 
 function unitActivity(serviceName: string, environment: NodeJS.ProcessEnv): "active" | "inactive" | "indeterminate" {
-  const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: environment, encoding: "utf8", timeout: 5_000 });
+  const unit = spawnSync("systemctl", ["--user", "is-active", serviceName], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000 });
   if (unit.status === 0 && unit.stdout.trim() === "active") return "active";
   if (unit.status === 3 && unit.stdout.trim() === "inactive") return "inactive";
   return "indeterminate";
 }
 
 function delegate(command: string, args: string[], environment: NodeJS.ProcessEnv, tolerateFailure = false): number {
-  const result = spawnSync(command, args, { env: environment, encoding: "utf8", timeout: 30_000, stdio: "inherit" });
+  const commandEnvironment = command === "systemctl" && args[0] === "--user" ? userSystemdEnvironment(environment) : environment;
+  const result = spawnSync(command, args, { env: commandEnvironment, encoding: "utf8", timeout: 30_000, stdio: "inherit" });
   if (result.error) { if (tolerateFailure) return 1; throw result.error; }
   return result.status ?? 1;
 }

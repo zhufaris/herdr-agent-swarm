@@ -1,13 +1,36 @@
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
+import { createServer as createUnixServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createSetupLifecycleAdapter, inspectServiceLifecycle, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
+import { createSetupLifecycleAdapter, inspectServiceLifecycle, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
 
 describe("service lifecycle", () => {
+  it("restores a same-user systemd session bus only when the environment omits both session variables", async () => {
+    const runtimeBase = mkdtempSync(join(tmpdir(), "agent-swarm-runtime-"));
+    const uid = process.getuid!();
+    const runtimeDirectory = join(runtimeBase, String(uid));
+    mkdirSync(runtimeDirectory);
+    const busPath = join(runtimeDirectory, "bus");
+    const bus = createUnixServer();
+    await new Promise<void>((resolve) => bus.listen(busPath, resolve));
+    try {
+      expect(resolveUserSystemdFallbackEnvironment({ PATH: process.env.PATH }, runtimeBase, uid)).toMatchObject({
+        XDG_RUNTIME_DIR: runtimeDirectory, DBUS_SESSION_BUS_ADDRESS: `unix:path=${busPath}`
+      });
+      expect(resolveUserSystemdFallbackEnvironment({ XDG_RUNTIME_DIR: "/untrusted" }, runtimeBase, uid)).toBeNull();
+      expect(resolveUserSystemdFallbackEnvironment({ DBUS_SESSION_BUS_ADDRESS: "unix:path=/untrusted/bus" }, runtimeBase, uid)).toBeNull();
+    } finally { await new Promise<void>((resolve, reject) => bus.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("refuses systemd fallback when the expected session bus is absent", () => {
+    const runtimeBase = mkdtempSync(join(tmpdir(), "agent-swarm-runtime-"));
+    expect(resolveUserSystemdFallbackEnvironment({}, runtimeBase, process.getuid!())).toBeNull();
+  });
+
   it("inspects installation and activity without mutating lifecycle state", async () => {
     const fixture = createFixture();
 
