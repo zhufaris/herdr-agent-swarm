@@ -13,13 +13,34 @@ const config = {
 describe("StartupViewConverger", () => {
   it("recovers stale outbox quarantines before projecting views and wakes delivery", async () => {
     const store = new SqliteBindingStore(":memory:");
-    const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 1 });
+    const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 1, terminalizedQuarantines: 0 });
     const wake = vi.fn();
 
     await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake, subscribe: () => () => {} }).converge();
 
     expect(recover).toHaveBeenCalledOnce();
     expect(wake).toHaveBeenCalledOnce();
+    store.close();
+  });
+
+  it("reports terminalized quarantines without waking an empty outbox", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({
+      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 2
+    });
+    const wake = vi.fn();
+    const logger = { warn: vi.fn() };
+
+    await new StartupViewConverger(
+      config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort,
+      { wake, subscribe: () => () => {} }, undefined, undefined, logger as never
+    ).converge();
+
+    expect(wake).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "startup-outbox-quarantines-recovered", terminalizedQuarantines: 2 }),
+      expect.any(String)
+    );
     store.close();
   });
 

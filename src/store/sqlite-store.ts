@@ -2381,8 +2381,30 @@ export class SqliteBindingStore implements BindingStorePort {
         this.refreshOutboxLaneHead(row.lane_key);
         dismissedNotices += 1;
       }
+      const terminalRows = this.database.prepare(`
+        SELECT q.lane_key, q.failed_reply_id
+        FROM outbox_lane_quarantines q
+        JOIN outbound_replies failed ON failed.id = q.failed_reply_id
+        JOIN prompt_jobs prompt ON prompt.id = failed.prompt_id
+        JOIN run_cards card ON card.prompt_id = failed.prompt_id
+        WHERE q.state = 'active' AND q.lane_class IN ('answer_stream', 'immutable')
+          AND failed.state = 'dead_letter' AND failed.card_role = 'answer'
+          AND prompt.state IN ('delivered', 'failed', 'cancelled') AND prompt.observation_state = 'completed'
+          AND card.phase IN ('completed', 'failed')
+          AND NOT EXISTS (SELECT 1 FROM outbound_replies pending WHERE pending.lane_key = q.lane_key AND pending.state = 'pending')
+        ORDER BY q.created_at
+      `).all() as Array<{ lane_key: string; failed_reply_id: string }>;
+      let terminalizedQuarantines = 0;
+      for (const row of terminalRows) {
+        const released = this.database.prepare(`UPDATE outbox_lane_quarantines
+          SET state = 'released', action = 'startup_terminalized', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.failed_reply_id);
+        if (released.changes !== 1) continue;
+        this.refreshOutboxLaneHead(row.lane_key);
+        terminalizedQuarantines += 1;
+      }
       this.database.exec("COMMIT");
-      return { retriedAnswerPromptIds, rolledBackAnswerPromptIds, dismissedNotices };
+      return { retriedAnswerPromptIds, rolledBackAnswerPromptIds, dismissedNotices, terminalizedQuarantines };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
