@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Herdr Agent Swarm 项目架构图</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" integrity="sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/" crossorigin="anonymous"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; padding: 32px; background: #020617; color: #f8fafc; font-family: "JetBrains Mono", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
+    .container { width: 100%; max-width: 1540px; margin: 0 auto; }
+    .header { margin-bottom: 24px; }
+    .header-row { display: flex; align-items: center; gap: 14px; }
+    .pulse-dot { width: 11px; height: 11px; flex: 0 0 auto; border-radius: 50%; background: #22d3ee; box-shadow: 0 0 18px rgba(34, 211, 238, 0.75); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+    h1 { font-size: clamp(20px, 2.1vw, 30px); letter-spacing: -0.035em; }
+    .subtitle { margin: 8px 0 0 25px; color: #94a3b8; font-size: 13px; line-height: 1.7; }
+    .diagram-container { overflow-x: auto; padding: 18px; border: 1px solid #1e293b; border-radius: 16px; background: rgba(15, 23, 42, 0.58); box-shadow: 0 22px 70px rgba(0, 0, 0, 0.24); }
+    svg { display: block; width: 100%; min-width: 1180px; height: auto; }
+    svg text { font-family: "JetBrains Mono", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
+    .card { min-height: 178px; padding: 18px 20px; border: 1px solid #1e293b; border-radius: 12px; background: rgba(15, 23, 42, 0.68); }
+    .card-header { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; } .card-dot.amber { background: #fbbf24; } .card-dot.violet { background: #a78bfa; }
+    .card h2 { font-size: 14px; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 11px; line-height: 1.65; }
+    .card li + li { margin-top: 4px; }
+    .card code { color: #cbd5e1; font-family: inherit; }
+    .footer { margin-top: 18px; color: #64748b; font-size: 11px; text-align: center; }
+    .toolbar { display: flex; flex-shrink: 0; align-items: center; gap: 8px; margin-left: auto; }
+    .toolbar-toggle { padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: #64748b; cursor: pointer; font-size: 20px; line-height: 1; transition: color 0.2s, background 0.2s; }
+    .toolbar-toggle:hover { background: rgba(30, 41, 59, 0.7); color: #cbd5e1; }
+    .toolbar-actions { display: none; gap: 8px; }
+    .toolbar.expanded .toolbar-actions { display: flex; }
+    .toolbar-actions button { padding: 6px 10px; border: 1px solid #334155; border-radius: 6px; background: rgba(30, 41, 59, 0.85); color: #cbd5e1; cursor: pointer; font: 11px inherit; white-space: nowrap; }
+    .toolbar-actions button:hover { border-color: #475569; background: #334155; color: #fff; }
+    @media (max-width: 900px) { body { padding: 18px; } .cards { grid-template-columns: 1fr; } .subtitle { margin-left: 0; } }
+    @media print { body { padding: 16px; background: #020617; } .toolbar { display: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="container" id="report-container">
+    <header class="header">
+      <div class="header-row">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <h1>Herdr Agent Swarm · 项目架构</h1>
+        <div class="toolbar">
+          <div class="toolbar-actions">
+            <button type="button" onclick="copyAsImage(this)">📋 Copy</button>
+            <button type="button" onclick="downloadPNG(this)">🖼️ PNG</button>
+            <button type="button" onclick="downloadPDF(this)">📄 PDF</button>
+          </div>
+          <button class="toolbar-toggle" type="button" onclick="this.parentElement.classList.toggle('expanded')" title="导出选项" aria-label="导出选项">⋯</button>
+        </div>
+      </div>
+      <p class="subtitle">从 Lark 入站到 TraeX 执行、持久化投影与 CardKit 回传；同时标出权威来源、恢复闭环和首要排障入口。</p>
+    </header>
+
+    <section class="diagram-container" aria-label="Herdr Agent Swarm 运行时请求循环">
+      <svg viewBox="0 0 1440 980" role="img" aria-labelledby="diagram-title diagram-desc">
+        <title id="diagram-title">Herdr Agent Swarm 运行时、持久化和恢复架构</title>
+        <desc id="diagram-desc">请求从 Lark 被 SQLite 持久接受，经过工作流提交到 Herdr pane 和 TraeX，再经生命周期投影、SQLite outbox 和 CardKit 返回；虚线显示非权威唤醒提示。</desc>
+        <defs>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+          <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#fb923c"/></marker>
+          <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#a78bfa"/></marker>
+        </defs>
+        <rect width="1440" height="980" rx="12" fill="#07101f"/>
+        <rect width="1440" height="980" rx="12" fill="url(#grid)"/>
+
+        <!-- Connectors are intentionally painted before component boxes. -->
+        <g fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)">
+          <path d="M146 374H174"/><path d="M312 374H340"/><path d="M468 374H496"/><path d="M638 374H666"/>
+          <path d="M794 374H822"/><path d="M982 374H1010"/><path d="M1138 374H1166"/><path d="M1294 374H1322"/>
+          <path d="M243 412V538" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+          <path d="M1230 412V538" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+          <path d="M902 412V468H1074V412"/>
+          <path d="M902 328V268H900"/>
+          <path d="M900 268H1010V328"/>
+          <path d="M1068 412V760H956"/>
+          <path d="M956 790H820V706" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+          <path d="M1130 790H1242V706" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+          <path d="M1126 824H1282V706" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+          <path d="M986 824H868V412"/>
+        </g>
+        <g fill="none" stroke="#fb923c" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#arrow-orange)">
+          <path d="M902 328V238H572V328"/>
+          <path d="M1080 328V218H1052V760"/>
+          <path d="M622 412V498H750V760"/>
+          <path d="M1230 706V760"/>
+        </g>
+
+        <!-- Four authority callouts -->
+        <text x="24" y="30" fill="#64748b" font-size="10" font-weight="600" letter-spacing="1.5">AUTHORITATIVE SOURCES / 权威来源</text>
+        <g>
+          <rect x="24" y="48" width="330" height="102" rx="8" fill="#0f172a"/><rect x="24" y="48" width="330" height="102" rx="8" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="42" y="73" fill="#22d3ee" font-size="11" font-weight="700">HERDR</text><text x="42" y="94" fill="#e2e8f0" font-size="9">pane / terminal identity · foreground process</text><text x="42" y="112" fill="#94a3b8" font-size="9">agent runtime state · fresh snapshot</text><text x="42" y="132" fill="#64748b" font-size="8">运行时分歧必须回到真实 pane 观察</text>
+          <rect x="374" y="48" width="330" height="102" rx="8" fill="#0f172a"/><rect x="374" y="48" width="330" height="102" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="392" y="73" fill="#34d399" font-size="11" font-weight="700">EXACT TRAEX JSONL TRANSCRIPT</text><text x="392" y="94" fill="#e2e8f0" font-size="9">typed active-turn output · status · plan</text><text x="392" y="112" fill="#94a3b8" font-size="9">token observations · exact persisted identity</text><text x="392" y="132" fill="#64748b" font-size="8">不匹配或含糊的 transcript 必须 fail closed</text>
+          <rect x="724" y="48" width="330" height="102" rx="8" fill="#0f172a"/><rect x="724" y="48" width="330" height="102" rx="8" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="742" y="73" fill="#a78bfa" font-size="11" font-weight="700">SQLITE</text><text x="742" y="94" fill="#e2e8f0" font-size="9">workflow intent · FIFO · projections · outbox</text><text x="742" y="112" fill="#94a3b8" font-size="9">audit data · fenced instance lease</text><text x="742" y="132" fill="#64748b" font-size="8">所有可见投递之前先持久化意图</text>
+          <rect x="1074" y="48" width="342" height="102" rx="8" fill="#0f172a"/><rect x="1074" y="48" width="342" height="102" rx="8" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+          <text x="1092" y="73" fill="#fb7185" font-size="11" font-weight="700">USER SYSTEMD</text><text x="1092" y="94" fill="#e2e8f0" font-size="9">standalone service process lifecycle</text><text x="1092" y="112" fill="#94a3b8" font-size="9">npm run swarm:start / status / restart</text><text x="1092" y="132" fill="#64748b" font-size="8">应用本身不维护 PID 文件</text>
+        </g>
+
+        <!-- Boundaries -->
+        <rect x="318" y="190" width="992" height="294" rx="14" fill="rgba(6,78,59,.04)" stroke="#34d399" stroke-width="1.2" stroke-dasharray="8 5"/>
+        <text x="336" y="211" fill="#34d399" font-size="10" font-weight="700">STANDALONE SERVICE · workflow core</text>
+        <rect x="804" y="246" width="196" height="184" rx="10" fill="rgba(136,19,55,.025)" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="5 5"/>
+        <text x="818" y="266" fill="#fb7185" font-size="8" font-weight="600">LOCAL CONTROL BOUNDARY</text>
+
+        <!-- Main left-to-right request loop -->
+        <g>
+          <rect x="18" y="328" width="128" height="84" rx="7" fill="#0f172a"/><rect x="18" y="328" width="128" height="84" rx="7" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="82" y="353" fill="#fff" font-size="11" font-weight="700" text-anchor="middle">Lark inbound</text><text x="82" y="373" fill="#94a3b8" font-size="8" text-anchor="middle">message / CardKit</text><text x="82" y="391" fill="#22d3ee" font-size="8" text-anchor="middle">configured chat only</text>
+          <rect x="174" y="328" width="138" height="84" rx="7" fill="#0f172a"/><rect x="174" y="328" width="138" height="84" rx="7" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="243" y="353" fill="#fff" font-size="10" font-weight="700" text-anchor="middle">durable acceptance</text><text x="243" y="373" fill="#94a3b8" font-size="8" text-anchor="middle">SQLite inbound record</text><text x="243" y="391" fill="#a78bfa" font-size="8" text-anchor="middle">persist → quick ACK</text>
+          <rect x="340" y="328" width="128" height="84" rx="7" fill="#0f172a"/><rect x="340" y="328" width="128" height="84" rx="7" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="404" y="355" fill="#fff" font-size="10" font-weight="700" text-anchor="middle">InboundRouter</text><text x="404" y="375" fill="#94a3b8" font-size="8" text-anchor="middle">normalize · route</text><text x="404" y="393" fill="#34d399" font-size="8" text-anchor="middle">durable command intake</text>
+          <rect x="496" y="328" width="142" height="84" rx="7" fill="#0f172a"/><rect x="496" y="328" width="142" height="84" rx="7" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="567" y="355" fill="#fff" font-size="10" font-weight="700" text-anchor="middle">PromptRunWorkflow</text><text x="567" y="375" fill="#94a3b8" font-size="8" text-anchor="middle">claim FIFO · supervise</text><text x="567" y="393" fill="#34d399" font-size="8" text-anchor="middle">one ordinary turn</text>
+          <rect x="666" y="328" width="128" height="84" rx="7" fill="#0f172a"/><rect x="666" y="328" width="128" height="84" rx="7" fill="rgba(30,41,59,.55)" stroke="#94a3b8" stroke-width="1.5"/>
+          <text x="730" y="355" fill="#fff" font-size="10" font-weight="700" text-anchor="middle">Herdr adapter</text><text x="730" y="375" fill="#94a3b8" font-size="8" text-anchor="middle">bounded CLI / socket</text><text x="730" y="393" fill="#64748b" font-size="8" text-anchor="middle">redacted commands</text>
+          <rect x="822" y="328" width="160" height="84" rx="7" fill="#0f172a"/><rect x="822" y="328" width="160" height="84" rx="7" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="902" y="353" fill="#fff" font-size="10" font-weight="700" text-anchor="middle">real Herdr pane</text><text x="902" y="373" fill="#94a3b8" font-size="8" text-anchor="middle">foreground TraeX process</text><text x="902" y="391" fill="#22d3ee" font-size="8" text-anchor="middle">local approval stays here</text>
+          <rect x="812" y="274" width="180" height="36" rx="6" fill="#0f172a"/><rect x="812" y="274" width="180" height="36" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.2"/>
+          <text x="902" y="297" fill="#34d399" font-size="8" font-weight="600" text-anchor="middle">exact TraeX JSONL transcript</text>
+          <rect x="1010" y="328" width="128" height="84" rx="7" fill="#0f172a"/><rect x="1010" y="328" width="128" height="84" rx="7" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="1074" y="353" fill="#fff" font-size="9" font-weight="700" text-anchor="middle">lifecycle outcome</text><text x="1074" y="373" fill="#94a3b8" font-size="8" text-anchor="middle">BridgeEventBus</text><text x="1074" y="391" fill="#34d399" font-size="8" text-anchor="middle">deterministic reduce</text>
+          <rect x="1166" y="328" width="128" height="84" rx="7" fill="#0f172a"/><rect x="1166" y="328" width="128" height="84" rx="7" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="1230" y="353" fill="#fff" font-size="9" font-weight="700" text-anchor="middle">SQLite outbox</text><text x="1230" y="373" fill="#94a3b8" font-size="8" text-anchor="middle">ordered delivery intent</text><text x="1230" y="391" fill="#a78bfa" font-size="8" text-anchor="middle">idempotent retry</text>
+          <rect x="1322" y="328" width="100" height="84" rx="7" fill="#0f172a"/><rect x="1322" y="328" width="100" height="84" rx="7" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="1372" y="353" fill="#fff" font-size="10" font-weight="700" text-anchor="middle">CardKit</text><text x="1372" y="373" fill="#94a3b8" font-size="8" text-anchor="middle">visible delivery</text><text x="1372" y="391" fill="#22d3ee" font-size="8" text-anchor="middle">not authority</text>
+        </g>
+
+        <!-- Domain strip -->
+        <rect x="352" y="438" width="430" height="30" rx="5" fill="#0f172a"/><rect x="352" y="438" width="430" height="30" rx="5" fill="rgba(6,78,59,.22)" stroke="#34d399" stroke-width="1"/>
+        <text x="567" y="458" fill="#94a3b8" font-size="8" text-anchor="middle">domain contracts · lifecycle transitions · capability-focused ports</text>
+        <rect x="992" y="438" width="278" height="30" rx="5" fill="#0f172a"/><rect x="992" y="438" width="278" height="30" rx="5" fill="rgba(6,78,59,.22)" stroke="#34d399" stroke-width="1"/>
+        <text x="1131" y="458" fill="#94a3b8" font-size="8" text-anchor="middle">ConversationViewProjector → LarkOutboxDispatcher</text>
+
+        <!-- Expanded SQLite durability map -->
+        <rect x="158" y="510" width="1130" height="220" rx="14" fill="rgba(76,29,149,.06)" stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="8 5"/>
+        <text x="178" y="534" fill="#a78bfa" font-size="10" font-weight="700">SQLITE DURABLE WORKFLOW STATE</text>
+        <text x="1266" y="534" fill="#64748b" font-size="8" text-anchor="end">single transactional source for workflow intent</text>
+        <g>
+          <rect x="180" y="552" width="166" height="72" rx="6" fill="#0f172a"/><rect x="180" y="552" width="166" height="72" rx="6" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="263" y="580" fill="#fff" font-size="9" font-weight="600" text-anchor="middle">inbound records</text><text x="263" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">dedupe · acceptance</text>
+          <rect x="362" y="552" width="166" height="72" rx="6" fill="#0f172a"/><rect x="362" y="552" width="166" height="72" rx="6" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="445" y="580" fill="#fff" font-size="9" font-weight="600" text-anchor="middle">topic-pane bindings</text><text x="445" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">identity · generation</text>
+          <rect x="544" y="552" width="190" height="72" rx="6" fill="#0f172a"/><rect x="544" y="552" width="190" height="72" rx="6" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="639" y="580" fill="#fff" font-size="9" font-weight="600" text-anchor="middle">prompt FIFO + checkpoints</text><text x="639" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">claim · dispatch fence</text>
+          <rect x="750" y="552" width="174" height="72" rx="6" fill="#0f172a"/><rect x="750" y="552" width="174" height="72" rx="6" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="837" y="580" fill="#fff" font-size="9" font-weight="600" text-anchor="middle">Run / Topic / Answer</text><text x="837" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">durable projections</text>
+          <rect x="940" y="552" width="174" height="72" rx="6" fill="#0f172a"/><rect x="940" y="552" width="174" height="72" rx="6" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="1027" y="580" fill="#fff" font-size="9" font-weight="600" text-anchor="middle">Lark outbox</text><text x="1027" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">retry · dead letter</text>
+          <rect x="1130" y="552" width="136" height="72" rx="6" fill="#0f172a"/><rect x="1130" y="552" width="136" height="72" rx="6" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="1198" y="580" fill="#fff" font-size="9" font-weight="600" text-anchor="middle">instance lease</text><text x="1198" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">fenced ownership</text>
+        </g>
+        <rect x="180" y="646" width="1086" height="60" rx="7" fill="#0f172a"/><rect x="180" y="646" width="1086" height="60" rx="7" fill="rgba(136,19,55,.16)" stroke="#fb7185" stroke-width="1" stroke-dasharray="5 4"/>
+        <text x="723" y="672" fill="#fb7185" font-size="9" font-weight="600" text-anchor="middle">Lark 卡片只是可见投递面：禁止从卡片文本反向修复 SQLite</text>
+        <text x="723" y="691" fill="#94a3b8" font-size="8" text-anchor="middle">运行时冲突通过 fresh Herdr observation 收敛；不确定的 TraeX dispatch 不会自动 replay</text>
+
+        <!-- Recovery loop -->
+        <rect x="430" y="748" width="708" height="110" rx="12" fill="rgba(251,146,60,.04)" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="8 5"/>
+        <text x="448" y="772" fill="#fb923c" font-size="10" font-weight="700">RECOVERY / CONVERGENCE LOOP</text>
+        <g>
+          <rect x="450" y="790" width="158" height="48" rx="6" fill="#0f172a"/><rect x="450" y="790" width="158" height="48" rx="6" fill="rgba(6,78,59,.35)" stroke="#34d399"/><text x="529" y="811" fill="#fff" font-size="8" font-weight="600" text-anchor="middle">HerdrRuntimeReconciler</text><text x="529" y="827" fill="#94a3b8" font-size="7" text-anchor="middle">periodic + event-woken</text>
+          <rect x="622" y="790" width="158" height="48" rx="6" fill="#0f172a"/><rect x="622" y="790" width="158" height="48" rx="6" fill="rgba(6,78,59,.35)" stroke="#34d399"/><text x="701" y="811" fill="#fff" font-size="8" font-weight="600" text-anchor="middle">detached observation</text><text x="701" y="827" fill="#94a3b8" font-size="7" text-anchor="middle">exact transcript · no replay</text>
+          <rect x="794" y="790" width="158" height="48" rx="6" fill="#0f172a"/><rect x="794" y="790" width="158" height="48" rx="6" fill="rgba(6,78,59,.35)" stroke="#34d399"/><text x="873" y="811" fill="#fff" font-size="8" font-weight="600" text-anchor="middle">startup convergence</text><text x="873" y="827" fill="#94a3b8" font-size="7" text-anchor="middle">views + durable work scan</text>
+          <rect x="966" y="790" width="152" height="48" rx="6" fill="#0f172a"/><rect x="966" y="790" width="152" height="48" rx="6" fill="rgba(6,78,59,.35)" stroke="#34d399"/><text x="1042" y="811" fill="#fff" font-size="8" font-weight="600" text-anchor="middle">retry / dead letter</text><text x="1042" y="827" fill="#94a3b8" font-size="7" text-anchor="middle">outbox delivery only</text>
+        </g>
+        <text x="922" y="230" fill="#fb923c" font-size="8" text-anchor="middle">Herdr socket event = bounded wake-up hint</text>
+        <text x="654" y="493" fill="#fb923c" font-size="8" text-anchor="middle">PromptWorkScheduler hint → reload SQLite</text>
+
+        <!-- Legend remains below every boundary. -->
+        <text x="24" y="904" fill="#64748b" font-size="10" font-weight="700" letter-spacing="1.2">VISUAL GRAMMAR</text>
+        <line x1="24" y1="928" x2="74" y2="928" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/><text x="86" y="932" fill="#94a3b8" font-size="9">persisted business flow / authoritative observation</text>
+        <line x1="440" y1="928" x2="490" y2="928" stroke="#fb923c" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#arrow-orange)"/><text x="502" y="932" fill="#94a3b8" font-size="9">best-effort wake-up hint; reload authority before acting</text>
+        <rect x="908" y="917" width="44" height="22" rx="5" fill="transparent" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="5 4"/><text x="964" y="932" fill="#94a3b8" font-size="9">trust / control boundary</text>
+        <circle cx="1210" cy="928" r="6" fill="#a78bfa"/><text x="1224" y="932" fill="#94a3b8" font-size="9">durable SQLite state</text>
+      </svg>
+    </section>
+
+    <section class="cards" aria-label="生产排障索引">
+      <article class="card"><div class="card-header"><span class="card-dot cyan"></span><h2>状态冲突时相信谁</h2></div><ul><li>• pane、进程与 agent runtime：Herdr fresh snapshot</li><li>• active-turn 输出与 token：精确匹配的 TraeX transcript</li><li>• workflow intent、队列、投影、outbox：SQLite</li><li>• standalone service 生命周期：user systemd</li></ul></article>
+      <article class="card"><div class="card-header"><span class="card-dot amber"></span><h2>请求卡住时先查什么</h2></div><ul><li>• 用 <code>eventId / bindingId / promptId / paneId / replyId</code> 关联日志</li><li>• 检查 inbound → prompt/checkpoint → projection → outbox</li><li>• 再与 fresh Herdr snapshot 和精确 transcript 对照</li><li>• socket/work hint 丢失只影响延迟，不改变 durable truth</li></ul></article>
+      <article class="card"><div class="card-header"><span class="card-dot violet"></span><h2>必须保持的不变量</h2></div><ul><li>• 每个 binding 同时最多一个 ordinary turn；其余严格 FIFO</li><li>• uncertain dispatch 或 restart 后绝不自动重放 prompt</li><li>• Lark 投递前持久化 intent；delivery retry 不重复 TraeX prompt</li><li>• CardKit stream 有序；冻结页不可 patch；高风险审批仅留在 Herdr</li></ul></article>
+    </section>
+    <p class="footer">事实来源：docs/architecture.md 与当前 src/ 实现 · 用途：工程师 onboarding 与生产故障诊断 · standalone service only</p>
+  </main>
+
+  <script>
+    async function captureReport() {
+      const element = document.getElementById("report-container");
+      const bounds = element.getBoundingClientRect();
+      const padding = 32;
+      return html2canvas(document.body, {
+        x: bounds.left + window.scrollX - padding,
+        y: bounds.top + window.scrollY - padding,
+        width: bounds.width + padding * 2,
+        height: bounds.height + padding * 2,
+        scale: 2,
+        backgroundColor: "#020617",
+        useCORS: true,
+        ignoreElements: (node) => node.classList && node.classList.contains("toolbar")
+      });
+    }
+
+    async function copyAsImage(button) {
+      const original = button.textContent;
+      button.textContent = "⏳ ...";
+      try {
+        const canvas = await captureReport();
+        const blob = await new Promise((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("PNG encoding failed")), "image/png"));
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        button.textContent = "✓ Copied";
+      } catch { button.textContent = "✗ Failed"; }
+      window.setTimeout(() => { button.textContent = original; }, 2000);
+    }
+
+    async function downloadPNG(button) {
+      const original = button.textContent;
+      button.textContent = "⏳ ...";
+      try {
+        const canvas = await captureReport();
+        const link = document.createElement("a");
+        link.download = "herdr-agent-swarm-architecture.png";
+        link.href = canvas.toDataURL("image/png");
+        link.click();
+        button.textContent = "✓ Done";
+      } catch { button.textContent = "✗ Failed"; }
+      window.setTimeout(() => { button.textContent = original; }, 2000);
+    }
+
+    async function downloadPDF(button) {
+      const original = button.textContent;
+      button.textContent = "⏳ ...";
+      try {
+        const canvas = await captureReport();
+        const { jsPDF } = window.jspdf;
+        const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
+        const pdf = new jsPDF({ orientation, unit: "px", format: [canvas.width, canvas.height], hotfixes: ["px_scaling"] });
+        pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, canvas.width, canvas.height);
+        pdf.save("herdr-agent-swarm-architecture.pdf");
+        button.textContent = "✓ Done";
+      } catch { button.textContent = "✗ Failed"; }
+      window.setTimeout(() => { button.textContent = original; }, 2000);
+    }
+  </script>
+</body>
+</html>
