@@ -29,8 +29,11 @@ describe("instance cards", () => {
     expect(entries).toHaveLength(200);
   });
   it("shows runtime and Git evidence but hides unsupported steering controls", () => {
-    const text = JSON.stringify(renderInstanceDetailCard({ instance, workspace, capabilities, turns: [], queueDepth: 0 }));
+    const card = renderInstanceDetailCard({ instance, workspace, capabilities, turns: [], queueDepth: 0 });
+    const text = JSON.stringify(card);
     expect(text).toContain("w1:p1"); expect(text).toContain("abc123"); expect(text).toContain("claude-code"); expect(text).not.toContain("instance_steer_form");
+    expect(text).not.toContain('\"tag\":\"action\"');
+    expect(text).toContain('\"tag\":\"column_set\"');
   });
 
   it("shows durable provisioning diagnostics for a failed Worker", () => {

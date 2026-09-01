@@ -25,6 +25,9 @@ export function renderInstanceDetailCard(input: { instance: AgentInstance; works
   if (input.capabilities.steering !== "unsupported" && ["working", "blocked"].includes(input.instance.observedState)) controls.push(callbackButton("Steer", { action: "instance_steer_form", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
   if (["working", "blocked"].includes(input.instance.observedState)) controls.push(callbackButton("Interrupt", { action: "instance_interrupt", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "danger"));
   if (input.instance.desiredState === "stopped" && !input.instance.runtimeRef) controls.push(callbackButton("删除…", { action: "instance_plan_removal", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "danger"));
-  elements.push({ tag: "action", actions: controls });
+  elements.push({
+    tag: "column_set", flex_mode: "none", horizontal_spacing: "8px",
+    columns: controls.map((control) => ({ tag: "column", width: "auto", elements: [control] }))
+  });
   return { schema: "2.0", config: { update_multi: true, summary: { content: input.instance.name } }, header: { title: { tag: "plain_text", content: `${input.instance.name} · ${input.instance.agentKind}` }, template: input.instance.observedState === "failed" ? "red" : "turquoise" }, body: { elements } };
 }
