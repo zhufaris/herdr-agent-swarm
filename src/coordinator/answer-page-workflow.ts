@@ -29,7 +29,9 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
     const page = this.store.getActiveAnswerPage(promptId);
     if (!view?.answerCardId) return;
     if (!page) {
-      const previous = this.store.listAnswerPages(view.promptId).at(-1);
+      const pages = this.store.listAnswerPages(view.promptId);
+      const latest = pages.at(-1);
+      const previous = latest?.state === "creating" && latest.deliveryMode === "static" ? pages.at(-2) : latest;
       if (previous?.state === "frozen" && previous.deliveryMode === "static") this.reserveStaticAnswerReplacement(view);
       else this.reserveFinalFoldedCard(view);
       return;
@@ -96,10 +98,12 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
   }
 
   private reserveStaticAnswerReplacement(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>): void {
-    const previous = this.store.listAnswerPages(view.promptId).at(-1);
+    const pages = this.store.listAnswerPages(view.promptId);
+    const latest = pages.at(-1);
+    const previous = latest?.state === "creating" && latest.deliveryMode === "static" ? pages.at(-2) : latest;
     const binding = this.store.getBinding(view.bindingId);
     if (!previous || previous.state !== "frozen" || previous.deliveryMode !== "static" || !binding?.rootMessageId) return;
-    const nextPageIndex = previous.pageIndex + 1;
+    const nextPageIndex = latest?.state === "creating" && latest.deliveryMode === "static" ? latest.pageIndex : previous.pageIndex + 1;
     const nextElementId = answerElementId(view.promptId, nextPageIndex);
     const content = renderAnswerStreamPage(answerStreamContent(view), previous.sourceStart).page;
     const card = view.phase === "completed"

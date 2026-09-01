@@ -135,6 +135,13 @@ describe("AnswerPageWorkflow", () => {
     expect(replacement).toMatchObject({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" });
     expect(payload.stream.elementId).toBe(expectedElementId);
     expect(payload.card.body.elements).toEqual(expect.arrayContaining([expect.objectContaining({ tag: "markdown", element_id: expectedElementId })]));
+
+    store.markOutboundReplyFailedWithQuarantine(replacement!.id, "invalid legacy payload", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "invalid_card" });
+    await workflow.converge("p1");
+
+    const [reopened] = store.listPendingOutboundReplies();
+    expect(reopened).toMatchObject({ id: replacement!.id, state: "pending", attemptCount: 0, error: null });
+    expect(store.getOperationalSummary().outboxQuarantines.active).toBe(0);
     store.close();
   });
 

@@ -2846,11 +2846,26 @@ export class SqliteBindingStore implements BindingStorePort {
       const previous = this.database.prepare("SELECT state, delivery_mode, source_start FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.previousPageIndex) as { state: string; delivery_mode: string; source_start: number } | undefined;
       const view = this.loadRunCard(input.promptId);
       if (!previous || !view || previous.state !== "frozen" || previous.delivery_mode !== "static" || input.nextPageIndex !== input.previousPageIndex + 1 || input.sourceStart !== Number(previous.source_start)) { this.database.exec("COMMIT"); return "stale"; }
-      const existing = this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.nextPageIndex) as { state: string } | undefined;
-      if (existing) { this.database.exec("COMMIT"); return existing.state === "creating" ? "waiting" : "stale"; }
+      const existing = this.database.prepare("SELECT state, element_id, source_start, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.nextPageIndex) as { state: string; element_id: string; source_start: number; delivery_mode: string } | undefined;
+      const idempotencyKey = `answer-static-rebuild:${input.promptId}:${input.nextPageIndex}`;
+      const payload = JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId, deliveryMode: "static" } });
+      if (existing) {
+        if (existing.state !== "creating" || existing.element_id !== input.nextElementId || Number(existing.source_start) !== input.sourceStart || existing.delivery_mode !== "static") {
+          this.database.exec("COMMIT"); return "stale";
+        }
+        const failed = this.database.prepare("SELECT id, state, lane_key FROM outbound_replies WHERE idempotency_key = ?").get(idempotencyKey) as { id: string; state: OutboundReplyState; lane_key: string } | undefined;
+        if (!failed || (failed.state !== "dead_letter" && failed.state !== "dismissed")) { this.database.exec("COMMIT"); return "waiting"; }
+        const timestamp = now();
+        this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+          .run(payload, input.viewVersion, timestamp, timestamp, failed.id);
+        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, failed.lane_key, failed.id);
+        this.refreshOutboxLaneHead(failed.lane_key);
+        this.database.exec("COMMIT"); return "reserved";
+      }
       const replacement = this.enqueueOutboundReply({
-        id: randomUUID(), idempotencyKey: `answer-static-rebuild:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
-        rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId, deliveryMode: "static" } })
+        id: randomUUID(), idempotencyKey, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
+        rootMessageId: input.rootMessageId, kind: "stream_card_create", payload
       });
       this.database.prepare("UPDATE answer_pages SET delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'")
         .run(now(), input.promptId, input.nextPageIndex);
