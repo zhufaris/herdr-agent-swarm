@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,6 +76,32 @@ describe("standalone installer", () => {
     expect(productionBuildScript).toContain('npm --prefix "$STAGING" ci --omit=dev');
     expect(productionBuildScript).toContain('RELEASE_KEY="$BUILD_ID-$GIT_COMMIT"');
     expect(productionBuildScript).not.toContain('npm --prefix "$ROOT" prune');
+  });
+
+  it("retains the active, previous, and a bounded number of production releases", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "standalone-retention-"));
+    const bin = join(fixture, "bin");
+    const state = join(fixture, "state");
+    const releases = join(state, "releases");
+    mkdirSync(bin);
+    mkdirSync(releases, { recursive: true });
+    executable(join(bin, "npm"), "#!/bin/sh\nmkdir -p node_modules\n");
+    const names = Array.from({ length: 5 }, (_, index) => `${String(index + 1).repeat(64)}-${String(index + 1).repeat(12)}`);
+    for (const [index, name] of names.entries()) {
+      const path = join(releases, name);
+      mkdirSync(path);
+      utimesSync(path, index + 1, index + 1);
+    }
+    symlinkSync(join(releases, names[0]!), join(state, "current"));
+
+    const result = spawnSync("/bin/bash", ["scripts/stage-production-runtime.sh", state], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SWARM_RELEASE_RETENTION: "1" }
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const active = result.stdout.trim().split("\n").at(-1)!;
+    expect(readdirSync(releases).sort()).toEqual([names[0]!, names[4]!, active.split("/").at(-1)!].sort());
   });
 
   it("guards lifecycle installation until private configuration is complete", () => {
