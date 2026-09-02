@@ -310,6 +310,24 @@ describe("SQLite store", () => {
     expect(store.getActiveOrdinaryPrompt("b1", 2)).toBeNull();
   });
 
+  it("returns only the uniquely active external prompt for recovery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 1, agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const view = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 1, title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: "2026-08-30T00:00:00.000Z" });
+    store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1",
+      expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt: "2026-08-30T00:00:00.000Z", requestText: "direct", externalPromptId: "external",
+      externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
+    });
+
+    expect(store.getActiveExternalPrompt("b1", 1)).toMatchObject({ id: "external", executionOrigin: "herdr", transcriptTurnId: "turn-1" });
+    expect(store.getActiveExternalPrompt("b1", 2)).toBeNull();
+    store.completeTurn({ promptId: "external", bindingId: "b1", answer: "done", outputFingerprint: "fingerprint", occurredAt: "2026-08-30T00:00:01.000Z" });
+    expect(store.getActiveExternalPrompt("b1", 1)).toBeNull();
+  });
+
   it("atomically revokes the retained generation capability when attaching an unproven pane", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });

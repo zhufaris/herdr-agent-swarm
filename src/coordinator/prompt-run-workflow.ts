@@ -434,8 +434,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   ): Promise<void> {
     const paneId = binding.paneId!;
     let outputSource = initialSource;
+    let supersedingTurnInProgress = false;
     try {
       while (!this.stopping && !abortController.signal.aborted) {
+        const durablePrompt = this.options.store.getPrompt(prompt.id);
+        if (!durablePrompt || (!supersedingTurnInProgress && (durablePrompt.state !== "running" || durablePrompt.observationState !== "detached"))) return;
+        if (durablePrompt.state === "running") prompt = durablePrompt;
         if (!this.isBindingActive(binding.id)) return;
         const observation = await this.options.herdr.observeRuntime(paneId);
         const pane = observation.pane;
@@ -448,6 +452,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           const handoff = await this.options.observeSupersedingExternalTurn(binding, prompt, typed.observation);
           if (handoff === "completed") return;
           if (handoff === "pending" || handoff === "observing") {
+            supersedingTurnInProgress = true;
             if (this.options.herdr.waitForRuntimeChange) await this.options.herdr.waitForRuntimeChange(paneId, 500, abortController.signal);
             else await abortableWait(500, abortController.signal);
             continue;
