@@ -194,6 +194,7 @@ export type TraexTranscriptOpenResult =
 
 export interface TraexTranscriptReaderPort {
   open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
+  openAtTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
   openAfterTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
 }
 
@@ -271,6 +272,7 @@ export interface BindingStorePort {
   findBindingByPane(paneId: string): Binding | null;
   getBinding(id: string): Binding | null;
   getPrompt(id: string): PromptJob | null;
+  getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null;
   listBindings(): Binding[];
   listBindingsByState(state: Binding["state"]): Binding[];
   listSessions(chatId: string): SessionSummary[];

@@ -600,6 +600,15 @@ export class SqliteBindingStore implements BindingStorePort {
     return rows.length === 1 ? mapPrompt(rows[0]!) : null;
   }
 
+  getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
+    const rows = this.database.prepare(`SELECT p.* FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id JOIN run_cards r ON r.prompt_id = p.id
+      WHERE p.binding_id = ? AND p.state = 'running' AND p.dispatch_kind = 'turn' AND p.execution_origin = 'herdr'
+        AND p.transcript_turn_id IS NOT NULL AND p.transcript_turn_started_at IS NOT NULL
+        AND b.generation = ? AND r.binding_generation = b.generation AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached'
+      ORDER BY p.created_at, p.rowid LIMIT 2`).all(bindingId, expectedGeneration) as PromptRow[];
+    return rows.length === 1 ? mapPrompt(rows[0]!) : null;
+  }
+
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {

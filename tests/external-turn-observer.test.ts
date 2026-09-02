@@ -54,6 +54,43 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
+  it("recovers a persisted external turn from a terminal transcript baseline while the binding is busy after restart", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const startedAt = "2026-08-31T10:00:00.000Z";
+    const view = createQueuedRunCard({ promptId: "external-1", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct task", queuePosition: 0, occurredAt: startedAt });
+    store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1",
+      expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt, requestText: "direct task", externalPromptId: "external-1",
+      externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
+    });
+    const completed: TraexTranscriptObservation = {
+      turnId: "turn-1", answerDelta: "",
+      turnLifecycle: { turnId: "turn-1", state: "completed", startedAt, finalAnswer: "recovered answer" }
+    };
+    const wakePrompt = vi.fn();
+    const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { turnId: "later-turn", answerDelta: "", turnLifecycle: { turnId: "later-turn", state: "completed" as const, startedAt, finalAnswer: "later answer" } }; } } }));
+    const openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return completed; } } }));
+    const observer = new ExternalTurnObserver({
+      store,
+      transcriptReader: { open, openAtTurn },
+      bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => true, wakePrompt
+    });
+
+    await observer.observe(store.getBinding("b1")!);
+    await observer.observe(store.getBinding("b1")!);
+
+    expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", observationState: "completed" });
+    expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "recovered answer" });
+    expect(open).not.toHaveBeenCalled();
+    expect(openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ value: "session-1" }), "turn-1", startedAt);
+    expect(wakePrompt).toHaveBeenCalledWith("b1");
+    await observer.stop();
+    store.close();
+  });
+
   it("fails an adopted external turn when TraeX records a human interruption and wakes the FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
@@ -90,7 +127,7 @@ describe("ExternalTurnObserver", () => {
     const readObservation = vi.fn(async () => ({ answerDelta: "" }));
     const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: async () => "", readObservation } }));
     let active = false;
-    const store = { getBinding: () => binding } as never;
+    const store = { getBinding: () => binding, getActiveExternalPrompt: () => null } as never;
     const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => active, wakePrompt() {} });
     const binding = { id: "b1", generation: 1, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" } as never;
     await observer.observe(binding);

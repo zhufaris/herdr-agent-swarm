@@ -57,6 +57,49 @@ describe("TraexTranscriptReader", () => {
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toMatchObject({ mode: "typed" });
   });
 
+  it("opens at an exact completed turn even when newer turns already exist", async () => {
+    const { root, path } = await createTranscript();
+    const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const laterTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: oldTurn, started_at: 1_788_035_304 }),
+      eventMessage({ type: "user_message", message: "old request" }),
+      eventMessage({ type: "task_complete", turn_id: oldTurn, started_at: 1_788_035_304, completed_at: 1_788_035_305, last_agent_message: "old answer" }),
+      eventMessage({ type: "task_started", turn_id: laterTurn, started_at: 1_788_035_306 }),
+      eventMessage({ type: "task_complete", turn_id: laterTurn, started_at: 1_788_035_306, completed_at: 1_788_035_307 })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAtTurn(session(), oldTurn, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: oldTurn, freshTurnStart: true, requestText: "old request",
+      turnLifecycle: { turnId: oldTurn, state: "completed", finalAnswer: "old answer" }
+    });
+  });
+
+  it("opens at an exact turn after a large but valid session metadata record", async () => {
+    const { root, path } = await createTranscript({ metadata: { type: "session_meta", payload: { id: sessionId, model: { instructions: "x".repeat(1024 * 1024) } } } });
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_305, last_agent_message: "answer" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAtTurn(session(), turnId, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnId, turnLifecycle: { state: "completed", finalAnswer: "answer" } });
+  });
+
+  it("recognizes completion when TraeX records a null last agent message", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_305, last_agent_message: null })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAtTurn(session(), turnId, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnId, turnLifecycle: { state: "completed" } });
+  });
+
   it("reopens after an exact completed turn and emits turns already written before restart", async () => {
     const { root, path } = await createTranscript();
     const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";

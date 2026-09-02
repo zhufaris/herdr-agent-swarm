@@ -192,6 +192,29 @@ describe("PromptRunWorkflow durable safety scan", () => {
     expect(wake).not.toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
     await workflow.stop();
   });
+
+  it("releases a detached worker when another observer terminalizes its prompt", async () => {
+    const wake = vi.fn();
+    const running = { id: "p1", bindingId: "b1", state: "running", observationState: "detached", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-08-29T00:00:00.000Z" };
+    const delivered = { ...running, state: "delivered", observationState: "completed" };
+    const getPrompt = vi.fn().mockReturnValueOnce(running).mockReturnValueOnce(running).mockReturnValue(delivered);
+    const observeRuntime = vi.fn();
+    const workflow = new PromptRunWorkflow({
+      store: { getPrompt, getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" }) } as never,
+      scheduler: { subscribe: () => () => {}, wake },
+      turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "unavailable" as const, reason: "transcript_not_found" as const }; } },
+      herdr: { observeRuntime } as never, bus: { async publish() {} },
+      outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    workflow.wake({ kind: "detached-observer-ready", bindingId: "b1", promptId: "p1" });
+    await vi.waitFor(() => expect(workflow.snapshot().activeTurnWorkers).toBe(0));
+
+    expect(observeRuntime).not.toHaveBeenCalled();
+    expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
+    await workflow.stop();
+  });
 });
 
 function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanIntervalMs: number, error = vi.fn(), info = vi.fn()): PromptRunWorkflow {

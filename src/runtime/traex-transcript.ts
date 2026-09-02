@@ -17,7 +17,7 @@ const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_RECOVERY_SCAN_BYTES = 64 * 1024 * 1024;
 const RECOVERY_SCAN_CHUNK_BYTES = 64 * 1024;
-const MAX_RECOVERY_RECORD_BYTES = 1024 * 1024;
+const MAX_RECOVERY_RECORD_BYTES = SESSION_META_MAX_BYTES;
 const MAX_EPOCH_SECONDS = 10_000_000_000;
 
 const envelopeSchema = z.object({
@@ -65,7 +65,7 @@ const taskCompleteEventSchema = z.object({
   type: z.literal("task_complete"),
   turn_id: z.string().regex(SESSION_ID),
   started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS),
-  last_agent_message: z.string().optional()
+  last_agent_message: z.string().nullable().optional()
 }).passthrough();
 const turnAbortedEventSchema = z.object({
   type: z.literal("turn_aborted"),
@@ -168,6 +168,25 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       const boundary = await findCompletedTurnBoundary(path, file.size, turnId, startedAt);
       if (boundary === "missing") return { mode: "unavailable", reason: "turn_boundary_not_found" };
       if (boundary === "incomplete") return { mode: "unavailable", reason: "turn_boundary_incomplete" };
+      const baseline = await latestTranscriptBaseline(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars);
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, undefined) };
+    } catch {
+      return { mode: "unavailable", reason: "transcript_validation_failed" };
+    }
+  }
+
+  async openAtTurn(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult> {
+    if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
+    if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value) || !SESSION_ID.test(turnId)) {
+      return { mode: "unavailable", reason: "unsupported_session_identity" };
+    }
+    try {
+      const path = await this.resolveTranscriptPath(session.value);
+      if (!path) return { mode: "unavailable", reason: "transcript_not_found" };
+      const file = await stat(path);
+      if (file.size > MAX_RECOVERY_SCAN_BYTES) return { mode: "unavailable", reason: "transcript_validation_failed" };
+      const boundary = await findTurnStartBoundary(path, file.size, turnId, startedAt);
+      if (boundary === "missing") return { mode: "unavailable", reason: "turn_boundary_not_found" };
       const baseline = await latestTranscriptBaseline(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars);
       return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, undefined) };
     } catch {
@@ -579,6 +598,46 @@ async function findCompletedTurnBoundary(path: string, end: number, turnId: stri
       if (boundary !== undefined) return boundary;
     }
     return matchedStart ? "incomplete" : "missing";
+  } finally {
+    await handle.close();
+  }
+}
+
+async function findTurnStartBoundary(path: string, end: number, turnId: string, startedAt: string): Promise<number | "missing"> {
+  const expectedStartedAt = Date.parse(startedAt);
+  if (!Number.isFinite(expectedStartedAt)) return "missing";
+  const handle = await open(path, "r");
+  try {
+    let readOffset = 0;
+    let carry = Buffer.alloc(0);
+    let carryOffset = 0;
+    while (readOffset < end) {
+      const length = Math.min(RECOVERY_SCAN_CHUNK_BYTES, end - readOffset);
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, readOffset);
+      if (bytesRead === 0) break;
+      const source = carry.length === 0 ? chunk.subarray(0, bytesRead) : Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+      const sourceOffset = carry.length === 0 ? readOffset : carryOffset;
+      let recordStart = 0;
+      while (true) {
+        const newline = source.indexOf(0x0a, recordStart);
+        if (newline < 0) break;
+        const envelope = parseEnvelope(source.subarray(recordStart, newline + 1).toString("utf8").trimEnd());
+        const started = envelope?.type === "event_msg" ? taskStartedEventSchema.safeParse(envelope.payload) : null;
+        if (started?.success && started.data.turn_id === turnId && eventTime(started.data.started_at) === startedAt) return sourceOffset + recordStart;
+        recordStart = newline + 1;
+      }
+      carry = source.subarray(recordStart);
+      carryOffset = sourceOffset + recordStart;
+      if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX recovery record exceeds bounded size");
+      readOffset += bytesRead;
+    }
+    if (carry.length > 0) {
+      const envelope = parseEnvelope(carry.toString("utf8").trimEnd());
+      const started = envelope?.type === "event_msg" ? taskStartedEventSchema.safeParse(envelope.payload) : null;
+      if (started?.success && started.data.turn_id === turnId && eventTime(started.data.started_at) === startedAt) return carryOffset;
+    }
+    return "missing";
   } finally {
     await handle.close();
   }

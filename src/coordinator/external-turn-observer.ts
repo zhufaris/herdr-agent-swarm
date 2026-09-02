@@ -10,7 +10,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-type ExternalTurnStore = Pick<BindingStorePort, "adoptExternalTurn" | "completeTurn" | "countPendingPrompts" | "failPrompt" | "findBindingByPane" | "getBinding" | "getPrompt" | "listBindingsByState">;
+type ExternalTurnStore = Pick<BindingStorePort, "adoptExternalTurn" | "completeTurn" | "countPendingPrompts" | "failPrompt" | "findBindingByPane" | "getActiveExternalPrompt" | "getBinding" | "getPrompt" | "listBindingsByState">;
 
 interface ExternalTurnObserverOptions {
   store: ExternalTurnStore;
@@ -132,13 +132,20 @@ export class ExternalTurnObserver {
     const identity = `${binding.generation}:${binding.paneId}:${session.source}:${session.agent}:${session.kind}:${session.value}`;
     let observed = this.bindings.get(binding.id);
     if (!observed || observed.identity !== identity) {
-      const opened = await this.options.transcriptReader.open(session);
+      const durable = this.options.store.getActiveExternalPrompt(binding.id, binding.generation);
+      const opened = durable?.transcriptTurnId && durable.transcriptTurnStartedAt && this.options.transcriptReader.openAtTurn
+        ? await this.options.transcriptReader.openAtTurn(session, durable.transcriptTurnId, durable.transcriptTurnStartedAt)
+        : await this.options.transcriptReader.open(session);
       if (opened.mode !== "typed") { this.bindings.delete(binding.id); return; }
       observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map() };
+      if (durable?.transcriptTurnId && durable.transcriptTurnStartedAt) {
+        observed.pendingStarts.set(durable.transcriptTurnId, durable.transcriptTurnStartedAt);
+        observed.promptsByTurn.set(durable.transcriptTurnId, { promptId: durable.id, chunks: [] });
+      }
       this.bindings.set(binding.id, observed);
       return;
     }
-    if (!force && this.options.isBindingBusy(binding.id)) return;
+    if (!force && this.options.isBindingBusy(binding.id) && observed.promptsByTurn.size === 0) return;
     try {
       for (let count = 0; count < MAX_DRAIN_OBSERVATIONS; count += 1) {
         const observation = observed.cursor.readObservation
