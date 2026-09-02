@@ -8,6 +8,9 @@ source "$BUNDLE_ROOT/scripts/lib/bundle-common.sh"
 SYSTEMCTL_BIN="${SWARM_BUNDLE_SYSTEMCTL:-systemctl}"
 TRAEX_BIN="${SWARM_BUNDLE_TRAEX:-traex}"
 ACTION="${1:-}"
+CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
+STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
+UNIT_DIR="${SWARM_BUNDLE_SYSTEMD_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 
 usage() {
   printf 'usage: %s <verify|install|start|restart|status|logs|stop|uninstall> [options]\n' "$0" >&2
@@ -51,8 +54,81 @@ verify_bundle() {
   printf 'Bundle verification passed: Herdr %s, %s, Node %s\n' "$HERDR_RELEASE_VERSION" "$RELEASE_PLATFORM" "$(node --version)"
 }
 
+release_field() {
+  node -e 'const x=require(process.argv[1]); const value=x[process.argv[2]]; if (typeof value !== "string") process.exit(1); process.stdout.write(value)' \
+    "$BUNDLE_ROOT/release.json" "$1"
+}
+
+systemd_path() {
+  local value="$1"
+  if [[ "$value" == *$'\n'* ]] || [[ "$value" == *$'\r'* ]]; then bundle_die "systemd path contains a line break"; return; fi
+  value="${value//\\/\\x5c}"
+  printf '%s' "${value// /\\x20}"
+}
+
+write_unit() {
+  local template="$1" destination="$2" content
+  shift 2
+  content="$(cat "$template")"
+  while [ "$#" -gt 0 ]; do
+    content="${content//@$1@/$2}"
+    shift 2
+  done
+  local temporary="$destination.tmp.$$"
+  printf '%s\n' "$content" > "$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$destination"
+}
+
+install_bundle() {
+  verify_bundle
+  local version git_commit release_key releases release_path staging current_tmp
+  version="$(release_field version)"
+  git_commit="$(release_field gitCommit)"
+  release_key="$version-${git_commit:0:12}"
+  releases="$STATE_DIR/releases"
+  release_path="$releases/$release_key"
+
+  install -d -m 700 "$CONFIG_DIR" "$CONFIG_DIR/herdr" "$STATE_DIR" "$releases" "$STATE_DIR/logs" "$UNIT_DIR"
+  if [ ! -d "$release_path" ]; then
+    staging="$releases/.install-$release_key-$$"
+    rm -rf -- "$staging"
+    mkdir -m 700 "$staging"
+    cp -a "$BUNDLE_ROOT/." "$staging/"
+    mv "$staging" "$release_path"
+  fi
+  if [ ! -e "$CONFIG_DIR/.env" ]; then install -m 600 "$release_path/templates/env.example" "$CONFIG_DIR/.env"; fi
+  if [ ! -e "$CONFIG_DIR/projects.json" ]; then install -m 600 "$release_path/templates/projects.example.json" "$CONFIG_DIR/projects.json"; fi
+  touch "$STATE_DIR/logs/herdr.log" "$STATE_DIR/logs/service.log"
+  chmod 600 "$STATE_DIR/logs/herdr.log" "$STATE_DIR/logs/service.log"
+
+  current_tmp="$STATE_DIR/.current-$$"
+  ln -s "$release_path" "$current_tmp"
+  mv -Tf "$current_tmp" "$STATE_DIR/current"
+
+  local escaped_release escaped_config escaped_state node_bin build_id
+  escaped_release="$(systemd_path "$release_path")"
+  escaped_config="$(systemd_path "$CONFIG_DIR")"
+  escaped_state="$(systemd_path "$STATE_DIR")"
+  node_bin="$(systemd_path "$(command -v node)")"
+  build_id="$(release_field buildId)"
+  write_unit "$release_path/templates/herdr-headless.service" "$UNIT_DIR/herdr-headless.service" \
+    HERDR_CONFIG_PATH "$escaped_config/herdr/config.toml" HERDR_REAL_BIN "$escaped_release/bin/herdr-real" \
+    HERDR_LOG_PATH "$escaped_state/logs/herdr.log"
+  write_unit "$release_path/templates/herdr-agent-swarm.service" "$UNIT_DIR/herdr-agent-swarm.service" \
+    SWARM_RUNTIME_ROOT "$escaped_release/runtime" SWARM_ENV_PATH "$escaped_config/.env" \
+    PROJECTS_CONFIG_PATH "$escaped_config/projects.json" BRIDGE_DATABASE_PATH "$escaped_state/bridge.db" \
+    SWARM_BUILD_ID "$build_id" NODE_BIN "$node_bin" SWARM_LOG_PATH "$escaped_state/logs/service.log"
+
+  "$SYSTEMCTL_BIN" --user daemon-reload
+  "$SYSTEMCTL_BIN" --user enable herdr-headless.service
+  "$SYSTEMCTL_BIN" --user enable herdr-agent-swarm.service
+  printf 'Installed release %s and enabled both user units; services were not started.\n' "$release_key"
+}
+
 case "$ACTION" in
   verify) [ "$#" -eq 1 ] || { usage; exit 2; }; verify_bundle ;;
+  install) [ "$#" -eq 1 ] || { usage; exit 2; }; install_bundle ;;
   "") usage; exit 2 ;;
   *) printf 'error: command is not implemented yet: %s\n' "$ACTION" >&2; usage; exit 2 ;;
 esac

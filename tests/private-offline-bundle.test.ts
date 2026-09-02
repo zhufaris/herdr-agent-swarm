@@ -1,4 +1,4 @@
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -97,6 +97,63 @@ describe("private offline bundle verification", () => {
   });
 });
 
+describe("private offline bundle installation", () => {
+  it("installs an immutable release and enables two ordered units without starting them", () => {
+    const bundle = createBundleFixture("bundle-install-source-");
+    const home = mkdtempSync(join(process.cwd(), ".cache", "bundle install home-"));
+    const bin = join(home, "bin");
+    const calls = join(home, "systemctl.calls");
+    mkdirSync(bin);
+    const systemctl = join(bin, "systemctl");
+    writeFileSync(systemctl, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SWARM_TEST_SYSTEMCTL_CALLS\"\n");
+    chmodSync(systemctl, 0o755);
+
+    const result = runSwarmctl(bundle, ["install"], {
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, "config root"),
+      XDG_STATE_HOME: join(home, "state root"),
+      SWARM_BUNDLE_SYSTEMD_UNIT_DIR: join(home, "units"),
+      SWARM_BUNDLE_SYSTEMCTL: systemctl,
+      SWARM_TEST_SYSTEMCTL_CALLS: calls
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const state = join(home, "state root", "herdr-agent-swarm");
+    const config = join(home, "config root", "herdr-agent-swarm");
+    const current = join(state, "current");
+    expect(lstatSync(current).isSymbolicLink()).toBe(true);
+    const release = readlinkSync(current);
+    expect(release).toContain(join(state, "releases", "0.2.0-aaaaaaaaaaaa"));
+    expect(statSync(config).mode & 0o777).toBe(0o700);
+    expect(statSync(join(config, ".env")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(config, "projects.json")).mode & 0o777).toBe(0o600);
+
+    const herdrUnit = readFileSync(join(home, "units", "herdr-headless.service"), "utf8");
+    const swarmUnit = readFileSync(join(home, "units", "herdr-agent-swarm.service"), "utf8");
+    expect(herdrUnit).toContain(`${release.replaceAll(" ", "\\x20")}/bin/herdr-real server`);
+    expect(herdrUnit).not.toContain("HERDR_BIN");
+    expect(swarmUnit).toContain("Requires=herdr-headless.service");
+    expect(swarmUnit).toContain("After=network-online.target herdr-headless.service");
+    expect(swarmUnit).toContain(`${release.replaceAll(" ", "\\x20")}/runtime/dist/main.js`);
+    expect(`${herdrUnit}\n${swarmUnit}`).not.toMatch(/@[A-Z_]+@/);
+
+    const invoked = readFileSync(calls, "utf8");
+    expect(invoked).toContain("--user enable herdr-headless.service");
+    expect(invoked).toContain("--user enable herdr-agent-swarm.service");
+    expect(invoked).not.toMatch(/--now| start /);
+
+    writeFileSync(join(config, ".env"), "LARK_APP_SECRET=preserved\n", { mode: 0o600 });
+    const second = runSwarmctl(bundle, ["install"], {
+      HOME: home, XDG_CONFIG_HOME: join(home, "config root"), XDG_STATE_HOME: join(home, "state root"),
+      SWARM_BUNDLE_SYSTEMD_UNIT_DIR: join(home, "units"), SWARM_BUNDLE_SYSTEMCTL: systemctl,
+      SWARM_TEST_SYSTEMCTL_CALLS: calls
+    });
+    expect(second.status, second.stderr).toBe(0);
+    expect(readFileSync(join(config, ".env"), "utf8")).toBe("LARK_APP_SECRET=preserved\n");
+    expect(readlinkSync(current)).toBe(release);
+  });
+});
+
 function runBuilder(args: string[]) {
   return spawnSync("/bin/bash", [builder, ...args], {
     cwd: process.cwd(),
@@ -118,9 +175,11 @@ function createBundleFixture(prefix: string): string {
   writeFileSync(join(root, "runtime", "dist", "cli", "service-lifecycle.js"), "export {};\n");
   writeFileSync(join(root, "runtime", "package.json"), '{"name":"herdr-agent-swarm","version":"0.2.0","engines":{"node":">=22.12"}}\n');
   writeFileSync(join(root, "runtime", "package-lock.json"), "{}\n");
-  for (const name of ["herdr-headless.service", "herdr-agent-swarm.service", "env.example", "projects.example.json"]) {
-    writeFileSync(join(root, "templates", name), `${name}\n`);
-  }
+  cpSync("scripts/release/templates/herdr-headless.service", join(root, "templates", "herdr-headless.service"));
+  cpSync("scripts/release/templates/herdr-agent-swarm.service", join(root, "templates", "herdr-agent-swarm.service"));
+  cpSync(".env.example", join(root, "templates", "env.example"));
+  cpSync("config/projects.example.json", join(root, "templates", "projects.example.json"));
+  writeFileSync(join(root, "runtime", "dist", "build-info.json"), `${JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: `sha256:${"b".repeat(64)}`, gitCommit: "a".repeat(40) })}\n`);
   writeFileSync(join(root, "release.json"), `${JSON.stringify({
     product: "herdr-agent-swarm", version: "0.2.0", gitCommit: "a".repeat(40),
     buildId: `sha256:${"b".repeat(64)}`, platform: "linux-x64", node: ">=22.12",
@@ -131,13 +190,14 @@ function createBundleFixture(prefix: string): string {
   return root;
 }
 
-function runSwarmctl(root: string, args: string[]) {
+function runSwarmctl(root: string, args: string[], extraEnvironment: NodeJS.ProcessEnv = {}) {
   return spawnSync("/bin/bash", [join(root, "scripts", "swarmctl"), ...args], {
     encoding: "utf8",
     env: {
       ...process.env,
       SWARM_BUNDLE_SYSTEMCTL: "true",
-      SWARM_BUNDLE_TRAEX: "true"
+      SWARM_BUNDLE_TRAEX: "true",
+      ...extraEnvironment
     }
   });
 }
