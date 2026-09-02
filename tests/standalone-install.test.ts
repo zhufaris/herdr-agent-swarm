@@ -29,7 +29,11 @@ describe("standalone installer", () => {
     expect(readFileSync("AGENTS.md", "utf8")).not.toContain("remains available as a compatibility workflow");
 
     const readme = readFileSync("README.md", "utf8");
-    expect(readme).toMatch(/npm run build\nnpm run swarm:setup\n\.\/install\.sh\nnpm run swarm:start/);
+    const sourceInstall = readme.slice(readme.indexOf("## Install from source"), readme.indexOf("## Install as a standalone service"));
+    const sourceInstallSteps = ["npm run build", "npm run swarm:setup", "./install.sh", "npm run swarm:start"]
+      .map((command) => sourceInstall.indexOf(command));
+    expect(sourceInstallSteps.every((position) => position >= 0)).toBe(true);
+    expect(sourceInstallSteps).toEqual([...sourceInstallSteps].sort((left, right) => left - right));
     expect(readme).toContain("decline setup's optional install and start or restart prompts");
     expect(readme).toMatch(/Setup may separately offer to\s+install and then start or restart the service/);
     expect(readme).toContain("Installation enables the unit but deliberately does not start it");

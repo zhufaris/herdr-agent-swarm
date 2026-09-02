@@ -798,7 +798,7 @@ describe("TraexTranscriptReader", () => {
     await mkdir(join(root, "unvisited"));
     await writeFile(join(root, "unvisited", "extra-entry"), "ignored");
 
-    await expect(new TraexTranscriptReader({ sessionsRoot: root, maxDiscoveryEntries: 2 }).open(session())).resolves.toEqual({
+    await expect(new TraexTranscriptReader({ sessionsRoot: root, maxDiscoveryEntries: 4 }).open(session())).resolves.toEqual({
       mode: "unavailable", reason: "ambiguous_transcript"
     });
   });

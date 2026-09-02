@@ -138,10 +138,10 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       if (missingUntil !== undefined && missingUntil > this.now()) return { mode: "unavailable", reason: "transcript_not_found" };
       if (missingUntil !== undefined) this.missingUntilBySessionId.delete(session.value);
       const discovery = await this.discoverOnce(session.value);
-      if (discovery.exhausted) return { mode: "unavailable", reason: "transcript_validation_failed" };
       const paths = discovery.paths;
-      if (paths.length === 0) { this.rememberMissing(session.value); return { mode: "unavailable", reason: "transcript_not_found" }; }
       if (paths.length > 1) return { mode: "unavailable", reason: "ambiguous_transcript" };
+      if (discovery.exhausted) return { mode: "unavailable", reason: "transcript_validation_failed" };
+      if (paths.length === 0) { this.rememberMissing(session.value); return { mode: "unavailable", reason: "transcript_not_found" }; }
       const path = paths[0]!;
       if (!await containsMatchingSessionMeta(path, session.value)) {
         return { mode: "unavailable", reason: "transcript_validation_failed" };
