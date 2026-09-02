@@ -78,6 +78,11 @@ cp -R "$REPOSITORY_ROOT/dist" "$RUNTIME/dist"
 install -m 644 "$REPOSITORY_ROOT/package.json" "$RUNTIME/package.json"
 install -m 644 "$REPOSITORY_ROOT/package-lock.json" "$RUNTIME/package-lock.json"
 npm --prefix "$RUNTIME" ci --omit=dev --ignore-scripts --cache "$BUILD_TEMP/npm-cache"
+for directory_name in test tests __tests__; do
+  find "$RUNTIME/node_modules" -type d -name "$directory_name" -prune -exec rm -rf -- {} +
+done
+(cd "$RUNTIME" && node --input-type=module -e \
+  'await import("@larksuiteoapi/node-sdk"); await import("pino"); await import("zod");')
 
 install -m 755 "$REPOSITORY_ROOT/scripts/release/swarmctl" "$PAYLOAD/scripts/swarmctl"
 install -m 755 "$REPOSITORY_ROOT/scripts/release/lib/bundle-common.sh" "$PAYLOAD/scripts/lib/bundle-common.sh"

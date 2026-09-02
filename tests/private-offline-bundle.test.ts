@@ -62,6 +62,8 @@ describe("private offline bundle builder", () => {
     const script = readFileSync(builder, "utf8");
 
     expect(script).toContain('npm --prefix "$RUNTIME" ci --omit=dev --ignore-scripts');
+    expect(script).toContain('for directory_name in test tests __tests__');
+    expect(script).toContain('await import("@larksuiteoapi/node-sdk")');
     expect(script).toContain('tar --sort=name --format=gnu --mtime="@$SOURCE_EPOCH" --owner=0 --group=0 --numeric-owner');
     expect(script).toContain('VERIFY_ROOT="$BUILD_TEMP/verify extraction with spaces"');
     expect(script).toContain('"$VERIFY_ROOT/$RELEASE_NAME/scripts/swarmctl" verify');
