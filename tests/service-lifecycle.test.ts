@@ -168,6 +168,19 @@ describe("service lifecycle", () => {
     ]);
   });
 
+  it("optionally preserves a validated required user unit when rewriting the service", async () => {
+    const fixture = createFixture();
+    const environment = { ...fixture.environment, BRIDGE_REQUIRED_USER_UNIT: "herdr-headless.service" };
+
+    await expect(runServiceLifecycle("install", environment)).resolves.toBe(0);
+    const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
+    expect(unit).toContain("Requires=herdr-headless.service");
+    expect(unit).toContain("After=network-online.target herdr-headless.service");
+
+    await expect(runServiceLifecycle("install", { ...fixture.environment, BRIDGE_REQUIRED_USER_UNIT: "bad\nunit.service" }))
+      .rejects.toThrow(/BRIDGE_REQUIRED_USER_UNIT/);
+  });
+
   it("converges private log permissions without rotating during install", async () => {
     const fixture = createFixture({ active: true });
     const logDirectory = join(fixture.state, "logs");

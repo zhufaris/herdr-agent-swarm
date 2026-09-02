@@ -141,7 +141,8 @@ run_swarm_lifecycle() {
   shift
   release="$(installed_release)"
   SWARM_ROOT="$release/runtime" SWARM_CONFIG_DIR="$CONFIG_DIR" SWARM_STATE_DIR="$STATE_DIR" \
-    BRIDGE_SYSTEMD_UNIT_DIR="$UNIT_DIR" node "$release/runtime/dist/cli/service-lifecycle.js" "$action" "$@"
+    BRIDGE_SYSTEMD_UNIT_DIR="$UNIT_DIR" BRIDGE_REQUIRED_USER_UNIT="herdr-headless.service" \
+    node "$release/runtime/dist/cli/service-lifecycle.js" "$action" "$@"
 }
 
 validate_configuration() {

@@ -237,10 +237,12 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
 }
 
 function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): string {
+  const requiredUnit = requiredUserUnit(environment.BRIDGE_REQUIRED_USER_UNIT);
   return [
     "[Unit]",
     "Description=Herdr Agent Swarm",
-    "After=network-online.target",
+    ...(requiredUnit ? [`Requires=${requiredUnit}`] : []),
+    `After=network-online.target${requiredUnit ? ` ${requiredUnit}` : ""}`,
     "Wants=network-online.target",
     "",
     "[Service]",
@@ -262,6 +264,12 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     "WantedBy=default.target",
     ""
   ].join("\n");
+}
+
+function requiredUserUnit(value: string | undefined): string | null {
+  if (!value) return null;
+  if (!/^[A-Za-z0-9_.@-]+\.service$/.test(value)) throw new Error("BRIDGE_REQUIRED_USER_UNIT must be one systemd .service unit name");
+  return value;
 }
 
 function convergeLogPaths(paths: RuntimePaths): void {
