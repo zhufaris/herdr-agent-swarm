@@ -81,13 +81,17 @@ write_unit() {
 }
 
 install_bundle() {
+  local force="${1:-}"
+  if [ -n "$force" ] && [ "$force" != "--force" ]; then usage; return 2; fi
   verify_bundle
-  local version git_commit release_key releases release_path staging current_tmp
+  local version git_commit release_key releases release_path staging current_tmp prior_release="" was_active=0 backup
   version="$(release_field version)"
   git_commit="$(release_field gitCommit)"
   release_key="$version-${git_commit:0:12}"
   releases="$STATE_DIR/releases"
   release_path="$releases/$release_key"
+  if [ -L "$STATE_DIR/current" ]; then prior_release="$(readlink -f "$STATE_DIR/current")"; fi
+  if "$SYSTEMCTL_BIN" --user is-active --quiet herdr-agent-swarm.service; then was_active=1; fi
 
   install -d -m 700 "$CONFIG_DIR" "$CONFIG_DIR/herdr" "$STATE_DIR" "$releases" "$STATE_DIR/logs" "$UNIT_DIR"
   if [ ! -d "$release_path" ]; then
@@ -102,6 +106,11 @@ install_bundle() {
   touch "$STATE_DIR/logs/herdr.log" "$STATE_DIR/logs/service.log"
   chmod 600 "$STATE_DIR/logs/herdr.log" "$STATE_DIR/logs/service.log"
 
+  backup="$STATE_DIR/.upgrade-backup-$$"
+  mkdir -m 700 "$backup"
+  for unit in herdr-headless.service herdr-agent-swarm.service; do
+    if [ -f "$UNIT_DIR/$unit" ]; then cp -p "$UNIT_DIR/$unit" "$backup/$unit"; fi
+  done
   current_tmp="$STATE_DIR/.current-$$"
   ln -s "$release_path" "$current_tmp"
   mv -Tf "$current_tmp" "$STATE_DIR/current"
@@ -123,7 +132,24 @@ install_bundle() {
   "$SYSTEMCTL_BIN" --user daemon-reload
   "$SYSTEMCTL_BIN" --user enable herdr-headless.service
   "$SYSTEMCTL_BIN" --user enable herdr-agent-swarm.service
-  printf 'Installed release %s and enabled both user units; services were not started.\n' "$release_key"
+  if [ "$was_active" -eq 1 ] && [ -n "$prior_release" ] && [ "$prior_release" != "$release_path" ]; then
+    if ! restart_bundle "$force"; then
+      printf 'Upgrade handover failed; restoring previous release %s\n' "$prior_release" >&2
+      ln -s "$prior_release" "$current_tmp.rollback"
+      mv -Tf "$current_tmp.rollback" "$STATE_DIR/current"
+      for unit in herdr-headless.service herdr-agent-swarm.service; do
+        if [ -f "$backup/$unit" ]; then cp -p "$backup/$unit" "$UNIT_DIR/$unit"; else rm -f -- "$UNIT_DIR/$unit"; fi
+      done
+      "$SYSTEMCTL_BIN" --user daemon-reload
+      run_swarm_lifecycle start || true
+      rm -rf -- "$backup"
+      return 1
+    fi
+    printf 'Upgraded running deployment to release %s.\n' "$release_key"
+  else
+    printf 'Installed release %s and enabled both user units; services were not started.\n' "$release_key"
+  fi
+  rm -rf -- "$backup"
 }
 
 installed_release() {
@@ -234,7 +260,7 @@ uninstall_bundle() {
 
 case "$ACTION" in
   verify) [ "$#" -eq 1 ] || { usage; exit 2; }; verify_bundle ;;
-  install) [ "$#" -eq 1 ] || { usage; exit 2; }; install_bundle ;;
+  install) shift; [ "$#" -le 1 ] || { usage; exit 2; }; install_bundle "$@" ;;
   start) [ "$#" -eq 1 ] || { usage; exit 2; }; start_bundle ;;
   restart) shift; restart_bundle "$@" ;;
   status) [ "$#" -eq 1 ] || { usage; exit 2; }; status_bundle ;;

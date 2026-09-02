@@ -155,10 +155,12 @@ describe("private offline bundle installation", () => {
 
   it("defines dependency-safe lifecycle ordering and preserves the Swarm safety gate", () => {
     const script = readFileSync("scripts/release/swarmctl", "utf8");
-    const startHerdr = script.indexOf('start herdr-headless.service');
-    const startSwarm = script.indexOf('run_swarm_lifecycle start');
-    const stopSwarm = script.indexOf('run_swarm_lifecycle stop');
-    const stopHerdr = script.indexOf('stop herdr-headless.service');
+    const startFunction = script.slice(script.indexOf("start_bundle()"), script.indexOf("restart_bundle()"));
+    const stopFunction = script.slice(script.indexOf("stop_bundle()"), script.indexOf("uninstall_bundle()"));
+    const startHerdr = startFunction.indexOf('start herdr-headless.service');
+    const startSwarm = startFunction.indexOf('run_swarm_lifecycle start');
+    const stopSwarm = stopFunction.indexOf('run_swarm_lifecycle stop');
+    const stopHerdr = stopFunction.indexOf('stop herdr-headless.service');
 
     expect(startHerdr).toBeGreaterThan(0);
     expect(startSwarm).toBeGreaterThan(startHerdr);
@@ -170,6 +172,8 @@ describe("private offline bundle installation", () => {
     expect(script).toContain('herdr-real" api snapshot');
     expect(script).toContain('refusing unsafe release purge path');
     expect(script).toContain('refusing to purge a symlinked releases directory');
+    expect(script).toContain("Upgrade handover failed; restoring previous release");
+    expect(script).toContain('run_swarm_lifecycle start || true');
   });
 });
 
