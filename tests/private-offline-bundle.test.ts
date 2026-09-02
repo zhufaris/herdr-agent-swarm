@@ -152,6 +152,25 @@ describe("private offline bundle installation", () => {
     expect(readFileSync(join(config, ".env"), "utf8")).toBe("LARK_APP_SECRET=preserved\n");
     expect(readlinkSync(current)).toBe(release);
   });
+
+  it("defines dependency-safe lifecycle ordering and preserves the Swarm safety gate", () => {
+    const script = readFileSync("scripts/release/swarmctl", "utf8");
+    const startHerdr = script.indexOf('start herdr-headless.service');
+    const startSwarm = script.indexOf('run_swarm_lifecycle start');
+    const stopSwarm = script.indexOf('run_swarm_lifecycle stop');
+    const stopHerdr = script.indexOf('stop herdr-headless.service');
+
+    expect(startHerdr).toBeGreaterThan(0);
+    expect(startSwarm).toBeGreaterThan(startHerdr);
+    expect(stopSwarm).toBeGreaterThan(0);
+    expect(stopHerdr).toBeGreaterThan(stopSwarm);
+    expect(script).toContain('run_swarm_lifecycle restart "$@"');
+    expect(script).toContain('runtime/dist/cli/service-lifecycle.js');
+    expect(script).toContain('herdr-real" status server');
+    expect(script).toContain('herdr-real" api snapshot');
+    expect(script).toContain('refusing unsafe release purge path');
+    expect(script).toContain('refusing to purge a symlinked releases directory');
+  });
 });
 
 function runBuilder(args: string[]) {
