@@ -1,0 +1,58 @@
+#!/bin/bash
+set -euo pipefail
+
+BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+# shellcheck source=lib/bundle-common.sh
+source "$BUNDLE_ROOT/scripts/lib/bundle-common.sh"
+
+SYSTEMCTL_BIN="${SWARM_BUNDLE_SYSTEMCTL:-systemctl}"
+TRAEX_BIN="${SWARM_BUNDLE_TRAEX:-traex}"
+ACTION="${1:-}"
+
+usage() {
+  printf 'usage: %s <verify|install|start|restart|status|logs|stop|uninstall> [options]\n' "$0" >&2
+}
+
+verify_release_metadata() {
+  node - "$BUNDLE_ROOT/release.json" "$HERDR_RELEASE_VERSION" "$HERDR_RELEASE_SHA256" "$RELEASE_PLATFORM" <<'NODE'
+const fs = require("node:fs");
+const [path, herdrVersion, herdrSha256, platform] = process.argv.slice(2);
+let release;
+try { release = JSON.parse(fs.readFileSync(path, "utf8")); } catch (error) {
+  process.stderr.write(`error: invalid release metadata: ${error.message}\n`); process.exit(1);
+}
+const valid = release.product === "herdr-agent-swarm"
+  && typeof release.version === "string" && release.version.length > 0
+  && /^[a-f0-9]{40}$/.test(release.gitCommit)
+  && /^[a-f0-9]{64}$/.test(release.buildId)
+  && release.platform === platform && release.node === ">=22.12"
+  && release.herdrVersion === herdrVersion && release.herdrSha256 === herdrSha256
+  && !Number.isNaN(Date.parse(release.createdAt));
+if (!valid) { process.stderr.write("error: release metadata does not match the bundle contract\n"); process.exit(1); }
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 22 || (major === 22 && minor < 12)) {
+  process.stderr.write(`error: Node.js 22.12+ required; found ${process.versions.node}\n`); process.exit(1);
+}
+NODE
+}
+
+verify_bundle() {
+  bundle_require_linux_x64
+  bundle_verify_manifest "$BUNDLE_ROOT"
+  for path in \
+    runtime/dist/main.js runtime/dist/cli/service-lifecycle.js runtime/package.json runtime/package-lock.json \
+    templates/herdr-headless.service templates/herdr-agent-swarm.service templates/env.example templates/projects.example.json; do
+    if [ ! -f "$BUNDLE_ROOT/$path" ]; then bundle_die "required bundle file is missing: $path"; return; fi
+  done
+  verify_release_metadata
+  bundle_validate_herdr "$BUNDLE_ROOT/bin/herdr-real"
+  if ! "$TRAEX_BIN" --version >/dev/null 2>&1; then bundle_die "TraeX is required but unavailable: $TRAEX_BIN"; return; fi
+  if ! "$SYSTEMCTL_BIN" --user --version >/dev/null 2>&1; then bundle_die "user systemd is required but unavailable: $SYSTEMCTL_BIN"; return; fi
+  printf 'Bundle verification passed: Herdr %s, %s, Node %s\n' "$HERDR_RELEASE_VERSION" "$RELEASE_PLATFORM" "$(node --version)"
+}
+
+case "$ACTION" in
+  verify) [ "$#" -eq 1 ] || { usage; exit 2; }; verify_bundle ;;
+  "") usage; exit 2 ;;
+  *) printf 'error: command is not implemented yet: %s\n' "$ACTION" >&2; usage; exit 2 ;;
+esac
