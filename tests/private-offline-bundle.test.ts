@@ -121,7 +121,7 @@ function createBundleFixture(prefix: string): string {
   }
   writeFileSync(join(root, "release.json"), `${JSON.stringify({
     product: "herdr-agent-swarm", version: "0.2.0", gitCommit: "a".repeat(40),
-    buildId: "b".repeat(64), platform: "linux-x64", node: ">=22.12",
+    buildId: `sha256:${"b".repeat(64)}`, platform: "linux-x64", node: ">=22.12",
     herdrVersion: "0.7.5", herdrSha256: pinnedDigest, createdAt: "2026-09-02T00:00:00.000Z"
   }, null, 2)}\n`);
   const manifest = spawnSync("/bin/bash", ["-c", '. "$1/scripts/lib/bundle-common.sh"; bundle_write_manifest "$1"', "bundle-manifest", root], { encoding: "utf8" });

@@ -24,7 +24,7 @@ try { release = JSON.parse(fs.readFileSync(path, "utf8")); } catch (error) {
 const valid = release.product === "herdr-agent-swarm"
   && typeof release.version === "string" && release.version.length > 0
   && /^[a-f0-9]{40}$/.test(release.gitCommit)
-  && /^[a-f0-9]{64}$/.test(release.buildId)
+  && /^sha256:[a-f0-9]{64}$/.test(release.buildId)
   && release.platform === platform && release.node === ">=22.12"
   && release.herdrVersion === herdrVersion && release.herdrSha256 === herdrSha256
   && !Number.isNaN(Date.parse(release.createdAt));

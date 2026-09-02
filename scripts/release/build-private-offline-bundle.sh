@@ -69,7 +69,7 @@ mkdir -p "$PAYLOAD/bin" "$PAYLOAD/scripts/lib" "$PAYLOAD/templates" "$RUNTIME" "
 (cd "$REPOSITORY_ROOT" && npm run build)
 BUILD_INFO="$REPOSITORY_ROOT/dist/build-info.json"
 if [ ! -f "$BUILD_INFO" ]; then bundle_die "normal build did not generate dist/build-info.json"; exit 1; fi
-BUILD_ID="$(node -e 'const x=require(process.argv[1]); if (!/^[a-f0-9]{64}$/.test(x.buildId)) process.exit(1); process.stdout.write(x.buildId)' "$BUILD_INFO")" || { bundle_die "invalid Swarm build identity"; exit 1; }
+BUILD_ID="$(node -e 'const x=require(process.argv[1]); if (!/^sha256:[a-f0-9]{64}$/.test(x.buildId)) process.exit(1); process.stdout.write(x.buildId)' "$BUILD_INFO")" || { bundle_die "invalid Swarm build identity"; exit 1; }
 BUILD_GIT_COMMIT="$(node -e 'const x=require(process.argv[1]); process.stdout.write(x.gitCommit || "")' "$BUILD_INFO")"
 if [ "$BUILD_GIT_COMMIT" != "$GIT_COMMIT" ]; then bundle_die "Swarm build identity does not match Git commit $GIT_COMMIT"; exit 1; fi
 
