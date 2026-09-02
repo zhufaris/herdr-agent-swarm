@@ -117,18 +117,97 @@ The bridge accepts messages only from the configured chat ID. Set
 `LARK_OPERATOR_OPEN_IDS` to a comma-separated owner allowlist for instance
 management; leaving it empty preserves the existing configured-chat behavior.
 
-## Install as a standalone service
+## Install from source
 
-The standalone service needs a running Herdr server, but it does not need the
-Herdr TUI. On a fresh checkout, build before running the guided setup wizard:
+Use this sequence for a first installation from a fresh checkout. Clone the
+repository through your internal source-control service, enter the checkout, and
+confirm that the required host tools are available:
+
+```bash
+node --version
+npm --version
+herdr --version
+traex --version
+herdr status server
+```
+
+Node.js must be 22.12 or newer. Start Herdr before continuing if
+`herdr status server` does not report a running server. The Swarm service uses
+Herdr's CLI and socket API but does not require the Herdr TUI to remain open.
+
+Install the locked dependencies, compile the TypeScript sources, and run the
+guided setup:
 
 ```bash
 npm ci
 npm run build
 npm run swarm:setup
+```
+
+The wizard validates the Lark application, configured chat, Herdr workspace,
+project route, local executables, user systemd, and loopback port before writing
+private configuration. When following this explicit sequence, decline the
+wizard's optional install and start or restart actions so the commands below own
+those steps.
+
+Build and stage an immutable production release, install and enable the user
+unit, then start it explicitly:
+
+```bash
 ./install.sh
 npm run swarm:start
+npm run swarm:status
 ```
+
+`./install.sh` enables `herdr-agent-swarm.service` but deliberately does not
+start it. By default, configuration is stored under
+`~/.config/herdr-agent-swarm` and runtime state under
+`~/.local/state/herdr-agent-swarm`. The `.env` and `projects.json` files are
+private mode-`0600` files; do not commit or copy them into the repository.
+
+Finally, verify dependency readiness through the loopback endpoint:
+
+```bash
+curl -fsS http://127.0.0.1:8787/ready
+```
+
+The response must contain `"status":"ready"`. If a different
+`BRIDGE_HTTP_PORT` was saved during setup, use that port instead. `/health` only
+proves that the process responds; `/ready` also checks the database, project
+registry, Herdr, Lark, lease, and instance runtime.
+
+### Update a source installation
+
+Switch to the intended committed revision, refresh locked dependencies, rebuild,
+and install a new immutable release:
+
+```bash
+git pull --ff-only
+npm ci
+npm run build
+./install.sh
+npm run swarm:status
+npm run swarm:restart
+```
+
+Inspect status before restarting. An ordinary restart refuses to interrupt
+running or queued prompts, active instance work, or pending delivery work. Wait
+for that work to drain whenever possible. For an intentional observer handoff,
+use the explicit forced form:
+
+```bash
+npm run swarm:restart -- --force
+```
+
+The forced restart detaches observers and recovers the existing durable work
+without replay; it is not a general-purpose way to bypass workload safety. The
+restart succeeds only after the replacement process reports the expected build
+identity and readiness.
+
+## Install as a standalone service
+
+For the canonical first-install sequence, follow [Install from source](#install-from-source).
+This section describes the setup and lifecycle behavior in more detail.
 
 The wizard collects the Lark application and project route, discovers live
 Herdr workspaces, validates the complete draft, shows a redacted review, and
@@ -185,17 +264,9 @@ Useful recovery commands are `npm run swarm:doctor`, `npm run swarm:status`, and
 restore a matching `.env` and `projects.json` pair from the named private backup
 before rerunning it.
 
-After setup has saved valid configuration, `./install.sh` installs locked
-dependencies, builds, stages an immutable runtime, and installs the user unit:
-
-```bash
-./install.sh
-npm run swarm:start
-npm run swarm:status
-```
-
-Installation enables the unit but deliberately does not start it; use
-`npm run swarm:start` explicitly. The installer is for an already configured
+After setup has saved valid configuration, follow the install, start, status,
+and readiness commands in [Install from source](#install-from-source).
+Installation enables the unit but deliberately does not start it. The installer is for an already configured
 machine. It is deliberately non-interactive: missing files or the exact shipped template
 placeholders stop before service installation and direct the operator to
 `npm run swarm:setup`. The installer never enters the wizard implicitly. It
@@ -445,14 +516,7 @@ request using `eventId`, `bindingId`, `promptId`, `paneId`, or `replyId`. The
 bridge deliberately excludes Lark message bodies, terminal output, card payloads,
 and credentials from operational logs. For example:
 
-After source changes, install a fresh immutable release and restart after the
-active-work gate permits it:
-
-```bash
-./install.sh
-npm run swarm:restart
-```
-
+For source updates, follow [Update a source installation](#update-a-source-installation).
 The restart command completes only after the replacement service reports the
 expected build identity. This lets systemd finish an in-flight graceful shutdown
 without treating the handover as a failed restart.
