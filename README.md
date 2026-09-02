@@ -204,6 +204,31 @@ without replay; it is not a general-purpose way to bypass workload safety. The
 restart succeeds only after the replacement process reports the expected build
 identity and readiness.
 
+### Build the private offline bundle
+
+Private Linux x86-64 releases can be built from a clean committed checkout. The
+builder requires the original Herdr binary explicitly because the active
+`herdr` command may be the generated TraeX shim:
+
+```bash
+npm ci
+npm run release:private -- --herdr-bin /absolute/path/to/original/herdr
+```
+
+The supplied binary must be Herdr 0.7.5 with SHA-256
+`3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253`.
+The command creates
+`release/herdr-agent-swarm-<version>-linux-x64.tar.gz` and the adjacent
+`.tar.gz.sha256`. It compiles the current commit, installs only production Node
+dependencies in isolated staging, generates the payload manifest, extracts the
+archive under a fresh path, and runs its packaged verifier.
+
+The artifact is for authorized private distribution. It includes the original
+Herdr binary and compiled Swarm runtime, but does not include Node.js, TraeX,
+credentials, configuration, databases, logs, sessions, project source, or
+repository tests. Target installation and operation are documented in the
+archive's `README.md`.
+
 ## Install as a standalone service
 
 For the canonical first-install sequence, follow [Install from source](#install-from-source).

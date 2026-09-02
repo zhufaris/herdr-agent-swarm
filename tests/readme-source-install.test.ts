@@ -28,4 +28,12 @@ describe("README source installation guide", () => {
     expect(section).toContain("npm run swarm:restart -- --force");
     expect(section).toMatch(/detach(?:es|ed)[\s\S]{0,120}without replay/i);
   });
+
+  it("documents the pinned private offline release builder", async () => {
+    const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+    expect(readme).toContain("### Build the private offline bundle");
+    expect(readme).toContain("npm run release:private -- --herdr-bin /absolute/path/to/original/herdr");
+    expect(readme).toContain("herdr-agent-swarm-<version>-linux-x64.tar.gz");
+    expect(readme).toContain("3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253");
+  });
 });
