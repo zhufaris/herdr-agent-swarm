@@ -57,6 +57,20 @@ describe("private offline bundle builder", () => {
     expect(result.status).toBe(2);
     expect(result.stderr).toContain("unknown option: --surprise");
   });
+
+  it("assembles only an allowlisted reproducible runtime and self-verifies it", () => {
+    const script = readFileSync(builder, "utf8");
+
+    expect(script).toContain('npm --prefix "$RUNTIME" ci --omit=dev --ignore-scripts');
+    expect(script).toContain('tar --sort=name --format=gnu --mtime="@$SOURCE_EPOCH" --owner=0 --group=0 --numeric-owner');
+    expect(script).toContain('VERIFY_ROOT="$BUILD_TEMP/verify extraction with spaces"');
+    expect(script).toContain('"$VERIFY_ROOT/$RELEASE_NAME/scripts/swarmctl" verify');
+    expect(script).toContain('bundle_write_manifest "$PAYLOAD"');
+    expect(script).not.toMatch(/cps+-Rs+"$REPOSITORY_ROOT"(?:s|$)/);
+    for (const excluded of ["src", "tests", ".git", ".env", "bridge.db", "service.log"]) {
+      expect(script).not.toContain(`"$PAYLOAD/${excluded}`);
+    }
+  });
 });
 
 describe("private offline bundle verification", () => {
