@@ -14,6 +14,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { TurnSupervisor } from "./turn-supervisor.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, decidePromptExecutionFailure, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
+import { decidePromptSafetyScan, decidePromptSafetyScanFailure } from "./prompt-safety-scan-policy.js";
 
 export interface ActiveTurnSnapshot {
   promptId: string;
@@ -73,6 +74,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private stopping = false;
   private consecutiveIdleScans = 0;
   private currentSafetyScanDelayMs: number | null = null;
+  private nextSafetyScanDelayMs: number | null = null;
   private nextSafetyScanAt: string | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
@@ -115,33 +117,27 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         const prompt = this.options.store.getPrompt(promptId);
         if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.transcriptConflictTurns.delete(promptId);
       }
-      const discovered = { turns: 0, steering: 0, detached: 0, cancelled: result.cancelled, failedDetached: result.failedDetached };
-      for (const hint of result.hints) {
-        if (hint.kind === "prompt-ready") discovered.turns += 1;
-        else if (hint.kind === "steering-ready") discovered.steering += 1;
-        else if (hint.kind === "detached-observer-ready") discovered.detached += 1;
-        this.options.scheduler.wake(hint);
-      }
-      this.lastDiscovered = discovered;
-      this.lastScanOutcome = result.hints.length > 0 || result.cancelled > 0 || result.failedDetached > 0 ? "work_found" : "idle";
-      if (this.lastScanOutcome === "idle") this.consecutiveIdleScans += 1;
-      else this.consecutiveIdleScans = 0;
+      const decision = decidePromptSafetyScan(result, this.consecutiveIdleScans, this.safetyScanIntervalMs);
+      for (const hint of result.hints) this.options.scheduler.wake(hint);
+      this.lastDiscovered = decision.discovered;
+      this.lastScanOutcome = decision.outcome;
+      this.consecutiveIdleScans = decision.consecutiveIdleScans;
+      this.nextSafetyScanDelayMs = decision.nextDelayMs;
       if (result.cancelled > 0 || result.failedDetached > 0) this.options.logger.info({
         event: "prompt-backlog-converged", cancelled: result.cancelled, failedDetached: result.failedDetached, outcome: "terminalized"
       }, "converged prompt work whose bindings can no longer dispatch or observe");
     } catch (error) {
       this.lastDiscovered = { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 };
       this.lastScanOutcome = "failed";
-      this.consecutiveIdleScans = 0;
+      const decision = decidePromptSafetyScanFailure(this.safetyScanIntervalMs);
+      this.consecutiveIdleScans = decision.consecutiveIdleScans;
+      this.nextSafetyScanDelayMs = decision.nextDelayMs;
       this.lastScanFailureAt = new Date().toISOString();
       this.options.logger.error({ event: "prompt-safety-scan-failed", err: safeLogError(error), outcome: "deferred_to_next_scan" }, "durable prompt safety scan failed");
     } finally {
       this.lastScanAt = new Date().toISOString();
       if (this.started && !this.stopping) {
-        const delay = this.lastScanOutcome === "idle"
-          ? this.safetyScanIntervalMs * Math.min(2 ** Math.max(0, this.consecutiveIdleScans - 1), 6)
-          : this.safetyScanIntervalMs;
-        this.armSafetyScan(delay);
+        this.armSafetyScan(this.nextSafetyScanDelayMs ?? this.safetyScanIntervalMs);
       }
     }
   }
