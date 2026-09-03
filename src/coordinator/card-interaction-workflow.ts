@@ -10,6 +10,7 @@ import { createQueuedRunCard } from "../domain/run-card-view.js";
 
 interface Options {
   store: CardInteractionStore;
+  adminOpenIds: readonly string[];
   sessionAdministration: Pick<SessionAdministrationWorkflowPort, "emitStatus">;
   sessionOperations: Pick<SessionOperationWorkflowPort, "accept">;
   wakePrompt(bindingId: string): void;
@@ -97,6 +98,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
   }
 
   private async sessionControl(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
+    if (value.action !== "session_status" && !this.options.adminOpenIds.includes(action.operatorOpenId)) return interactionToast("error", "你没有管理权限。");
     const binding = this.freshBinding(action, value, value.action !== "session_status");
     if (!binding) return interactionToast("error", "操作无权限，或会话状态已变化。");
     if (value.action === "submit_rename" && !action.formValues?.title?.trim()) return interactionToast("warning", "请输入新标题。");

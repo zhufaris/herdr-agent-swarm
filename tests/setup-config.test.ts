@@ -16,7 +16,7 @@ function fixture() {
   const draft: SetupDraft = {
     environment: {
       LARK_APP_ID: "cli_test", LARK_APP_SECRET: "top-secret", LARK_CHAT_ID: "oc_chat",
-      LARK_BOT_OPEN_ID: "ou_bot", LARK_OPERATOR_OPEN_IDS: "ou_owner",
+      LARK_BOT_OPEN_ID: "ou_bot", LARK_ALLOWED_OPEN_IDS: "ou_user,ou_owner", LARK_ADMIN_OPEN_IDS: "ou_owner",
       PROJECTS_CONFIG_PATH: join(configDirectory, "projects.json"), BRIDGE_DATABASE_PATH: join(stateDirectory, "bridge.db"),
       BRIDGE_HTTP_HOST: "127.0.0.1", BRIDGE_HTTP_PORT: "8787", FUTURE_SUPPORTED_SETTING: "keep me",
       PATH: "/secret/process/path", HOME: "/secret/home", SWARM_ROOT: "/launcher/root",
@@ -171,6 +171,8 @@ describe("setup summary", () => {
     const summary = renderSetupSummary(draft, report, context);
     expect(summary).not.toContain("top-secret");
     expect(summary).toContain("Lark secret: set");
+    expect(summary).toContain("Lark allowed users: 2 configured");
+    expect(summary).toContain("Lark administrators: 1 configured");
     expect(summary).toContain("cli_test");
     expect(summary).toContain("127.0.0.1:8787");
     expect(summary).toContain("herdr-agent-swarm.service");

@@ -78,15 +78,15 @@ export function createTestRouter(
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
-  const cardInteractions = new CardInteractionWorkflow({ store, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
+  const cardInteractions = new CardInteractionWorkflow({ store, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
     isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns
   });
-  const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, store, inboundWork, logger });
+  const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store, inboundWork, logger });
   const messageRouting = new InboundMessageRoutingWorkflow({ config, store, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure });
-  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
+  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
   const startupViews = new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger);
   const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, reconciler, retiredPaneCleanup, startupViews });
   const router = new InboundRouter({ lark, modelSelection, promptRun, reconciler, retiredPaneCleanup, sessionOperations, inboundDispatcher, cardActionRouter, startupRecovery });

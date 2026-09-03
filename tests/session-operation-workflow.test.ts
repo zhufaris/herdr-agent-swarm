@@ -60,6 +60,7 @@ describe("Session operation workflow", () => {
     const h = harness();
     const cards = new CardInteractionWorkflow({
       store: h.store,
+      adminOpenIds: ["creator"],
       sessionAdministration: { emitStatus: vi.fn(async () => {}) },
       sessionOperations: h.workflow,
       wakePrompt: vi.fn(),

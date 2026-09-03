@@ -16,7 +16,7 @@ export interface CardActionRouterPort {
 }
 
 interface Options {
-  chatId: string;
+  chatId: string; allowedOpenIds: readonly string[]; adminOpenIds: readonly string[];
   projects: BridgeConfig["projects"];
   store: Pick<InboundRoutingStore, "getBinding">;
   provisioning: Pick<BindingProvisioningWorkflowPort, "attach" | "completeSelection">;
@@ -38,6 +38,7 @@ export class CardActionRouter implements CardActionRouterPort {
 
   async handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
     if (action.chatId !== this.options.chatId) return;
+    if (!this.options.allowedOpenIds.includes(action.operatorOpenId)) return { toast: { type: "error", content: "你没有访问权限。" } };
     const instanceInteraction = await this.options.instanceInteractions?.handleCardAction(action);
     if (instanceInteraction) return instanceInteraction;
     const interaction = await this.options.cardInteractions.handle(action);
@@ -58,6 +59,7 @@ export class CardActionRouter implements CardActionRouterPort {
     if (deadLetter) return this.options.deliveryRecovery.decideDeadLetter(action, deadLetter.replyId, deadLetter.action);
     const selection = parseProjectAction(action.value);
     if (selection) {
+      if (!this.isAdmin(action)) return { toast: { type: "error", content: "你没有管理权限。" } };
       this.track(this.options.provisioning.completeSelection(action, selection.selectionId, selection.projectId)
         .then(async (completed) => { if (completed) await this.options.enqueueInitialPrompt(completed.binding, completed.selection); })
         .catch((error) => this.options.logger.error({ event: "project-selection-background-failed", err: safeLogError(error), selectionId: selection.selectionId, projectId: selection.projectId, outcome: "checkpointed" }, "background project selection failed after the card callback returned")));
@@ -65,6 +67,7 @@ export class CardActionRouter implements CardActionRouterPort {
     }
     const paneClaim = parsePaneClaimAction(action.value);
     if (!paneClaim) return;
+    if (!this.isAdmin(action)) return { toast: { type: "error", content: "你没有管理权限。" } };
     const project = this.projectsById.get(paneClaim.projectId);
     if (!project || project.workspaceId !== paneClaim.workspaceId) return;
     const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${paneClaim.paneId}`, messageId: action.messageId, parentMessageId: null, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm attach ${projectSpaceName(project)} ${paneClaim.paneId}`, mentionsBot: true, isRootMessage: true };
@@ -82,6 +85,8 @@ export class CardActionRouter implements CardActionRouterPort {
     const binding = this.options.store.getBinding(bindingId);
     return Boolean(binding && binding.chatId === action.chatId && (binding.creatorOpenId === null || binding.creatorOpenId === action.operatorOpenId));
   }
+
+  private isAdmin(action: IncomingLarkCardAction): boolean { return this.options.adminOpenIds.includes(action.operatorOpenId); }
 }
 
 function parseOpenThreadAction(value: unknown): { bindingId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return item.action === "open_project_thread" && typeof item.bindingId === "string" ? { bindingId: item.bindingId } : null; }

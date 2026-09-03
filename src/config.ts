@@ -35,7 +35,8 @@ const environmentSchema = z.object({
   LARK_APP_SECRET: z.string().min(1),
   LARK_CHAT_ID: z.string().min(1),
   LARK_BOT_OPEN_ID: z.string().min(1),
-  LARK_OPERATOR_OPEN_IDS: z.string().default(""),
+  LARK_ALLOWED_OPEN_IDS: z.string().min(1),
+  LARK_ADMIN_OPEN_IDS: z.string().min(1),
   PROJECTS_CONFIG_PATH: z.string().min(1).default("./config/projects.json"),
   BRIDGE_DATABASE_PATH: z.string().min(1).default("./var/bridge.db"),
   BRIDGE_HTTP_HOST: z.enum(["127.0.0.1", "localhost", "::1"]).default("127.0.0.1"),
@@ -82,9 +83,14 @@ function buildConfig(
   if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
     throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
   }
+  const allowedOpenIds = parseOpenIds(value.LARK_ALLOWED_OPEN_IDS, "LARK_ALLOWED_OPEN_IDS");
+  const adminOpenIds = parseOpenIds(value.LARK_ADMIN_OPEN_IDS, "LARK_ADMIN_OPEN_IDS");
+  const allowedSet = new Set(allowedOpenIds);
+  const outsideAllowed = adminOpenIds.filter((openId) => !allowedSet.has(openId));
+  if (outsideAllowed.length) throw new Error("LARK_ADMIN_OPEN_IDS must be a subset of LARK_ALLOWED_OPEN_IDS");
   const defaultProject = registry.projects.find((project) => project.id === registry.defaultProjectId)!;
   return {
-    lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS, operatorOpenIds: [...new Set(value.LARK_OPERATOR_OPEN_IDS.split(",").map((item) => item.trim()).filter(Boolean))] },
+    lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS, allowedOpenIds, adminOpenIds },
     herdr: { workspaceId: defaultProject.workspaceId, workspaceCwd: defaultProject.cwd, executable: value.HERDR_BIN },
     projects: registry.projects,
     defaultProjectId: registry.defaultProjectId,
@@ -109,6 +115,12 @@ function buildConfig(
     outboxRetention: { days: value.OUTBOX_RETENTION_DAYS, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE, maxBatches: value.OUTBOX_RETENTION_MAX_BATCHES },
     sqliteIntegrityAudit: { intervalMs: value.SQLITE_INTEGRITY_AUDIT_INTERVAL_MS, issueLimit: 20 }
   } as const;
+}
+
+function parseOpenIds(value: string, name: string): string[] {
+  const entries = value.split(",").map((item) => item.trim());
+  if (entries.some((entry) => !/^ou_[A-Za-z0-9_-]+$/.test(entry))) throw new Error(`${name} must contain comma-separated Lark Open IDs`);
+  return [...new Set(entries)];
 }
 
 function loadProjectRegistry(path: string): { defaultProjectId: string; projects: ProjectConfig[] } {

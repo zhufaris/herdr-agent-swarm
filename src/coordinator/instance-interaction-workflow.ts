@@ -12,7 +12,7 @@ import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { projects: readonly ProjectConfig[]; operatorOpenIds?: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort }
+interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort }
 export class InstanceInteractionWorkflow {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   constructor(private readonly options: Options) { this.projects = new Map(options.projects.map((project) => [project.id, project])); }
@@ -222,7 +222,7 @@ export class InstanceInteractionWorkflow {
     return Boolean(binding && binding.chatId === chatId && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && value.bindingId === binding.id && Number(value.bindingGeneration) === binding.generation);
   }
   private findByName(projectId: string, name: string): AgentInstance | null { return this.options.control.listWorkers(projectId).find((item) => item.name === name) ?? null; }
-  private isOperator(openId: string): boolean { const allowed = this.options.operatorOpenIds ?? []; return allowed.length === 0 || allowed.includes(openId); }
+  private isOperator(openId: string): boolean { return this.options.adminOpenIds.includes(openId); }
   private reply(message: IncomingLarkMessage, card: object): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `instance:${message.messageId}:${JSON.stringify(card)}`, card); }
   private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.reply(message, renderMessageRejectedCard(reason)); }
 }

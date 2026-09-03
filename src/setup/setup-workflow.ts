@@ -108,7 +108,8 @@ async function collectLark(prompts: SetupPromptPort, draft: SetupDraft): Promise
     LARK_APP_SECRET: secret.action === "retain" ? current.LARK_APP_SECRET! : secret.value,
     LARK_CHAT_ID: await prompts.text("Lark topic-group Chat ID", current.LARK_CHAT_ID),
     LARK_BOT_OPEN_ID: await prompts.text("Lark bot Open ID", current.LARK_BOT_OPEN_ID),
-    LARK_OPERATOR_OPEN_IDS: await prompts.text("Allowed operator Open IDs (comma separated, optional)", current.LARK_OPERATOR_OPEN_IDS ?? "")
+    LARK_ALLOWED_OPEN_IDS: await prompts.text("Allowed Lark user Open IDs (comma separated, required)", current.LARK_ALLOWED_OPEN_IDS ?? ""),
+    LARK_ADMIN_OPEN_IDS: await prompts.text("Lark administrator Open IDs (comma separated, required subset of allowed users)", current.LARK_ADMIN_OPEN_IDS ?? "")
   };
   return { ...draft, environment };
 }

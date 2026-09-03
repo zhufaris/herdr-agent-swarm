@@ -53,6 +53,11 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   async handle(message: IncomingLarkMessage): Promise<void> {
     const instanceCommand = parseInstanceCommand(message.text);
     const command = parseCommand(message.text); const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
+    if (command && requiresAdministrator(command.kind) && !this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) {
+      await this.reject(message, "你没有管理权限。");
+      this.options.logger.warn({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, actorOpenId: message.actorOpenId, route: command.kind, reason: "administrator_required" }, "rejected unauthorized Lark management command");
+      return;
+    }
     const decision = instanceCommand ? `instance-command:${instanceCommand.kind}` : command ? `command:${command.kind}` : binding?.state === "active" && binding.lifecycle === "active" ? "prompt" : this.options.store.getConversationTarget(message.chatId) ? "instance-prompt" : message.isRootMessage && message.mentionsBot ? "create_binding" : binding?.state === "archived" ? "archived_feedback" : "unbound_feedback";
     this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: "accepted" }, "routed persisted Lark message");
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
@@ -117,3 +122,6 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
 
 function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> { const result = new Map<string, BridgeConfig["projects"][number] | null>(); for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project); return result; }
 function requestTitle(body: string): string { const normalized = body.replace(/\s+/g, " " ).trim(); return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request"; }
+function requiresAdministrator(kind: NonNullable<ReturnType<typeof parseCommand>>["kind"]): boolean {
+  return ["new", "projects", "stop", "steer", "model", "reset", "attach", "rename", "close", "pane_close_request", "pane_close_confirm", "reattach", "replace", "resume"].includes(kind);
+}

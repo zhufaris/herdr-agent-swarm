@@ -13,6 +13,7 @@ writeFileSync(defaultRegistryPath, JSON.stringify({
 }));
 const requiredEnvironment = {
   LARK_APP_ID: "app", LARK_APP_SECRET: "secret", LARK_CHAT_ID: "chat", LARK_BOT_OPEN_ID: "bot",
+  LARK_ALLOWED_OPEN_IDS: "ou_user,ou_admin", LARK_ADMIN_OPEN_IDS: "ou_admin",
   PROJECTS_CONFIG_PATH: defaultRegistryPath
 };
 
@@ -134,9 +135,14 @@ describe("project registry configuration", () => {
     }
   });
 
-  it("parses an optional Feishu operator allowlist", () => {
-    expect(loadConfig({ ...requiredEnvironment }).lark.operatorOpenIds).toEqual([]);
-    expect(loadConfig({ ...requiredEnvironment, LARK_OPERATOR_OPEN_IDS: "ou_one, ou_two,ou_one" }).lark.operatorOpenIds).toEqual(["ou_one", "ou_two"]);
+  it("requires explicit Feishu access and administrator allowlists", () => {
+    expect(loadConfig(requiredEnvironment).lark).toMatchObject({ allowedOpenIds: ["ou_user", "ou_admin"], adminOpenIds: ["ou_admin"] });
+    expect(loadConfig({ ...requiredEnvironment, LARK_ALLOWED_OPEN_IDS: "ou_one, ou_two,ou_one", LARK_ADMIN_OPEN_IDS: "ou_two" }).lark)
+      .toMatchObject({ allowedOpenIds: ["ou_one", "ou_two"], adminOpenIds: ["ou_two"] });
+    expect(() => loadConfig({ ...requiredEnvironment, LARK_ALLOWED_OPEN_IDS: "" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, LARK_ADMIN_OPEN_IDS: "" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, LARK_ADMIN_OPEN_IDS: "ou_other" })).toThrow(/subset/);
+    expect(() => loadConfig({ ...requiredEnvironment, LARK_ALLOWED_OPEN_IDS: "not-an-open-id" })).toThrow(/Open IDs/);
   });
 
   it("validates Herdr circuit breaker threshold and cooldown independently", () => {

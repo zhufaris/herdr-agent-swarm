@@ -6,7 +6,7 @@ import { readEnvironmentFile, serializeEnvironmentFile } from "../runtime/enviro
 import type { SetupCheck, SetupConfigPort, SetupContext, SetupDraft } from "./setup-types.js";
 
 export const setupEnvironmentOrder = [
-  "LARK_APP_ID", "LARK_APP_SECRET", "LARK_CHAT_ID", "LARK_BOT_OPEN_ID", "LARK_OPERATOR_OPEN_IDS",
+  "LARK_APP_ID", "LARK_APP_SECRET", "LARK_CHAT_ID", "LARK_BOT_OPEN_ID", "LARK_ALLOWED_OPEN_IDS", "LARK_ADMIN_OPEN_IDS",
   "PROJECTS_CONFIG_PATH", "BRIDGE_DATABASE_PATH", "TRAEX_SESSIONS_ROOT",
   "HERDR_BIN", "TRAEX_BIN", "CODEX_BIN", "CLAUDE_CODE_BIN", "PI_BIN", "TRAEX_PERMISSION_MODE",
   "BRIDGE_HTTP_HOST", "BRIDGE_HTTP_PORT", "LOG_LEVEL",

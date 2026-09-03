@@ -12,7 +12,7 @@ function harness() {
   const wakePrompt = vi.fn();
   const logger = { info: vi.fn(), warn: vi.fn() };
   const sessionOperations = { accept: vi.fn(() => "accepted" as const) };
-  const workflow = new CardInteractionWorkflow({ store, sessionAdministration: { emitStatus: vi.fn(async () => {}) }, sessionOperations, wakePrompt, logger });
+  const workflow = new CardInteractionWorkflow({ store, adminOpenIds: ["creator"], sessionAdministration: { emitStatus: vi.fn(async () => {}) }, sessionOperations, wakePrompt, logger });
   return { store, binding: store.getBinding("b1")!, workflow, wakePrompt, logger, sessionOperations };
 }
 

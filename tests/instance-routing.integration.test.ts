@@ -27,7 +27,7 @@ function callbackValue(card: unknown, action: string): Record<string, unknown> {
   return found;
 }
 
-function setup(operatorOpenIds: readonly string[] = []) {
+function setup(adminOpenIds: readonly string[] = ["u1"]) {
   store = new SqliteBindingStore(":memory:");
   const create = (id: string, role: "primary" | "worker", projectId = "p1") => store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: projectId === "p1" ? "/repo" : "/repo-two", branch: null, baseCommit: "base" } });
   const outbound = { enqueueCard: vi.fn(async () => undefined) };
@@ -39,7 +39,7 @@ function setup(operatorOpenIds: readonly string[] = []) {
     planRemoval: vi.fn(async ({ instanceId }) => { const instance = store!.getAgentInstance(instanceId)!; const workspace = store!.getWorkspaceLease(instance.workspaceLeaseId)!; return store!.createInstanceRemovalPlan({ id: "plan-1", instanceId, instanceGeneration: instance.generation, workspaceGeneration: workspace.generation, worktreeFingerprint: "clean-fp", safe: true, reason: "clean", state: "pending", createdAt: "now" }); }),
     confirmRemoval: vi.fn(async () => true)
   };
-  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], operatorOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never });
+  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never });
   return { create, workflow, outbound, messaging, control };
 }
 
@@ -139,7 +139,7 @@ describe("instance routing", () => {
   });
 
   it("rejects create and open callbacks from a stale binding generation", async () => {
-    const { create, workflow, control } = setup();
+    const { create, workflow, control } = setup(["u1", "u2"]);
     const worker = create("worker", "worker");
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "one" });
     store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2 });
@@ -257,7 +257,7 @@ describe("instance routing", () => {
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, bindingGeneration: 0 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
   });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
-    const { workflow, control } = setup();
+    const { workflow, control } = setup(["u1", "u2"]);
     const form = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1" } });
     expect(JSON.stringify(form)).toContain("instance_create_submit");
     await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });

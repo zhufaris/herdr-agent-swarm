@@ -19,7 +19,7 @@ export interface InboundMessageDispatcherPort {
 }
 
 export interface InboundMessageDispatcherOptions {
-  chatId: string;
+  chatId: string; allowedOpenIds: readonly string[];
   store: InboundMessageDispatchStore;
   inboundWork: InboundWorkNotifier;
   logger: Logger;
@@ -84,6 +84,7 @@ export class InboundMessageDispatcher implements InboundMessageDispatcherPort {
   private persist(message: IncomingLarkMessage): boolean {
     const { chatId, logger, store } = this.options;
     if (message.chatId !== chatId) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "chat_not_allowed" }, "ignored Lark message"); return false; }
+    if (!this.options.allowedOpenIds.includes(message.actorOpenId)) { logger.warn({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, actorOpenId: message.actorOpenId, reason: "actor_not_allowed" }, "ignored unauthorized Lark message"); return false; }
     if (store.isBridgeMessage(message.messageId)) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "bridge_message" }, "ignored Lark message"); return false; }
     if (!store.recordInboundMessage(message)) { logger.debug({ event: "lark-message-duplicate", eventId: message.eventId, messageId: message.messageId, outcome: "ignored" }, "ignored duplicate Lark message"); return false; }
     return true;

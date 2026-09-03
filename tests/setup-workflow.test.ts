@@ -51,7 +51,7 @@ function dependencies(answers: unknown[], options: { existing?: SetupDraft; chec
 
 describe("setup workflow", () => {
   it("collects first-run defaults, checks, reviews, commits, installs, and starts in order", async () => {
-    const fixture = dependencies(["app", "secret", "chat", "bot", "", "", "", "", "", "", true, true, true]);
+    const fixture = dependencies(["app", "secret", "chat", "bot", "ou_user,ou_admin", "ou_admin", "", "", "", "", "", true, true, true]);
     await expect(runSetupWorkflow(fixture.value, context)).resolves.toMatchObject({ status: "started" });
     expect(fixture.committed?.registry).toEqual({
       defaultProjectId: "my-app",
@@ -63,22 +63,22 @@ describe("setup workflow", () => {
   });
 
   it("retains an existing secret and preserves multi-project configuration unless editing is requested", async () => {
-    const existing: SetupDraft = { environment: { LARK_APP_ID: "old-app", LARK_APP_SECRET: "kept", LARK_CHAT_ID: "old-chat", LARK_BOT_OPEN_ID: "old-bot" }, registry: { defaultProjectId: "one", projects: [
+    const existing: SetupDraft = { environment: { LARK_APP_ID: "old-app", LARK_APP_SECRET: "kept", LARK_CHAT_ID: "old-chat", LARK_BOT_OPEN_ID: "old-bot", LARK_ALLOWED_OPEN_IDS: "ou_user,ou_admin", LARK_ADMIN_OPEN_IDS: "ou_admin" }, registry: { defaultProjectId: "one", projects: [
       { id: "one", displayName: "One", description: "One", workspaceId: "w-old", cwd: "/one" },
       { id: "two", displayName: "Two", description: "Two", workspaceId: "w-current", cwd: "/two" }
     ] } };
-    const fixture = dependencies(["new-app", "retain", "", "", "", false, true, false], { existing });
+    const fixture = dependencies(["new-app", "retain", "", "", "", "", false, true, false], { existing });
     expect((await runSetupWorkflow(fixture.value, context)).status).toBe("saved");
     expect(fixture.committed?.environment.LARK_APP_SECRET).toBe("kept");
     expect(fixture.committed?.registry).toEqual(existing.registry);
   });
 
   it("replaces only the selected default project when editing a multi-project registry", async () => {
-    const existing: SetupDraft = { environment: { LARK_APP_ID: "app", LARK_APP_SECRET: "old", LARK_CHAT_ID: "chat", LARK_BOT_OPEN_ID: "bot" }, registry: { defaultProjectId: "one", projects: [
+    const existing: SetupDraft = { environment: { LARK_APP_ID: "app", LARK_APP_SECRET: "old", LARK_CHAT_ID: "chat", LARK_BOT_OPEN_ID: "bot", LARK_ALLOWED_OPEN_IDS: "ou_user,ou_admin", LARK_ADMIN_OPEN_IDS: "ou_admin" }, registry: { defaultProjectId: "one", projects: [
       { id: "one", displayName: "One", description: "One", workspaceId: "w-old", cwd: "/one" },
       { id: "two", displayName: "Two", description: "Two", workspaceId: "w-current", cwd: "/two" }
     ] } };
-    const fixture = dependencies(["", "replace-secret", "", "", "", true, "one-edited", "One edited", "One space", "w-current", "/one", true, false], { existing });
+    const fixture = dependencies(["", "replace-secret", "", "", "", "", true, "one-edited", "One edited", "One space", "w-current", "/one", true, false], { existing });
     expect((await runSetupWorkflow(fixture.value, context)).status).toBe("saved");
     expect(fixture.committed?.environment.LARK_APP_SECRET).toBe("replace-secret");
     expect(fixture.committed?.registry.defaultProjectId).toBe("one-edited");
@@ -86,11 +86,11 @@ describe("setup workflow", () => {
   });
 
   it("requires explicit acceptance for warnings and saves skips without lifecycle mutation", async () => {
-    const warning = dependencies(["app", "secret", "chat", "bot", "", "", "", "", "", "", true, true, false], { checks: [{ id: "config.manual", status: "warning", summary: "verify manually" }] });
+    const warning = dependencies(["app", "secret", "chat", "bot", "ou_user,ou_admin", "ou_admin", "", "", "", "", "", true, true, false], { checks: [{ id: "config.manual", status: "warning", summary: "verify manually" }] });
     expect((await runSetupWorkflow(warning.value, context)).status).toBe("saved");
     expect(warning.prompts.output.join("\n")).toContain("verify manually");
 
-    const skipped = dependencies(["app", "secret", "chat", "bot", "", "", "", "", "", "", true, true], {});
+    const skipped = dependencies(["app", "secret", "chat", "bot", "ou_user,ou_admin", "ou_admin", "", "", "", "", "", true, true], {});
     skipped.value.skipNetwork = true;
     expect((await runSetupWorkflow(skipped.value, context)).status).toBe("saved");
     expect(skipped.events).not.toContain("validate:lark");
@@ -98,11 +98,11 @@ describe("setup workflow", () => {
   });
 
   it("cancels before commit and separately confirms an active-service restart", async () => {
-    const cancelled = dependencies(["app", "secret", "chat", "bot", "", "", "", "", "", "", false]);
+    const cancelled = dependencies(["app", "secret", "chat", "bot", "ou_user,ou_admin", "ou_admin", "", "", "", "", "", false]);
     expect((await runSetupWorkflow(cancelled.value, context)).status).toBe("cancelled");
     expect(cancelled.events).not.toContain("commit");
 
-    const active = dependencies(["app", "secret", "chat", "bot", "", "", "", "", "", "", true, true, true], { active: true });
+    const active = dependencies(["app", "secret", "chat", "bot", "ou_user,ou_admin", "ou_admin", "", "", "", "", "", true, true, true], { active: true });
     await expect(runSetupWorkflow(active.value, context)).resolves.toMatchObject({ status: "started" });
     expect(active.events.slice(-5)).toEqual(["inspect-service", "confirm-install", "install", "confirm-restart", "restart"]);
   });
@@ -113,7 +113,7 @@ describe("setup workflow", () => {
     expect((await runSetupWorkflow(fixture.value, context)).status).toBe("cancelled");
     expect(fixture.events).toEqual(["load", "collect:lark"]);
 
-    const active = dependencies(["app", "secret", "chat", "bot", "", "", "", "", "", "", true, true, true], { active: true });
+    const active = dependencies(["app", "secret", "chat", "bot", "ou_user,ou_admin", "ou_admin", "", "", "", "", "", true, true, true], { active: true });
     active.value.lifecycle.restart = async () => { throw new Error("active work prevents safe restart"); };
     await expect(runSetupWorkflow(active.value, context)).rejects.toThrow("active work prevents safe restart");
   });

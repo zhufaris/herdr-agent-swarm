@@ -5,7 +5,8 @@ export function renderSetupSummary(draft: SetupDraft, report: SetupCheckReport, 
   const environment = draft.environment;
   const secret = environment.LARK_APP_SECRET ?? "";
   const secretState = secret ? "set" : "missing";
-  const operators = environment.LARK_OPERATOR_OPEN_IDS?.split(",").map((value) => value.trim()).filter(Boolean).join(", ") || "none";
+  const allowedUsers = countOpenIds(environment.LARK_ALLOWED_OPEN_IDS);
+  const administrators = countOpenIds(environment.LARK_ADMIN_OPEN_IDS);
   const endpoint = `${environment.BRIDGE_HTTP_HOST ?? "127.0.0.1"}:${environment.BRIDGE_HTTP_PORT ?? "8787"}`;
   const projects = draft.registry.projects.flatMap((project) => renderProject(project));
   const redact = (value: string) => secret ? value.replaceAll(secret, "[redacted]") : value;
@@ -16,7 +17,8 @@ export function renderSetupSummary(draft: SetupDraft, report: SetupCheckReport, 
     `Lark secret: ${secretState}`,
     `Lark chat: ${environment.LARK_CHAT_ID ?? "missing"}`,
     `Lark bot: ${environment.LARK_BOT_OPEN_ID ?? "missing"}`,
-    `Lark operators: ${operators}`,
+    `Lark allowed users: ${allowedUsers}`,
+    `Lark administrators: ${administrators}`,
     `Default project: ${draft.registry.defaultProjectId}`,
     ...projects,
     `Configuration directory: ${context.configDirectory}`,
@@ -28,6 +30,11 @@ export function renderSetupSummary(draft: SetupDraft, report: SetupCheckReport, 
     `Save allowed: ${report.policy.canSave ? "yes" : "no"}`,
     `Automatic startup allowed: ${report.policy.canStart ? "yes" : "no"}`
   ].join("\n");
+}
+
+function countOpenIds(value: string | undefined): string {
+  const count = value?.split(",").map((item) => item.trim()).filter(Boolean).length ?? 0;
+  return count ? `${count} configured` : "missing";
 }
 
 function renderProject(project: ProjectConfig): string[] {
