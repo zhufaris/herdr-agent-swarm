@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
+import { transcriptObserverIdentity, transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
@@ -76,9 +77,9 @@ export class ExternalTurnObserver {
   }
 
   async observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
-    const session = sessionFor(binding);
-    if (!session || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return "ignored";
-    const identity = `${binding.generation}:${binding.paneId}:${session.source}:${session.agent}:${session.kind}:${session.value}`;
+    const session = transcriptSessionFor(binding);
+    const identity = transcriptObserverIdentity(binding);
+    if (!session || !identity || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return "ignored";
     let handedOff = this.handedOffBindings.get(binding.id);
     if (!handedOff || handedOff.identity !== identity) {
       handedOff = { identity, state: { pendingStarts: new Map(), promptsByTurn: new Map() } };
@@ -90,7 +91,7 @@ export class ExternalTurnObserver {
   }
 
   async recoverAfterDetachedTurn(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
-    const session = sessionFor(binding);
+    const session = transcriptSessionFor(binding);
     if (!session || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return { outcome: "unavailable", reason: "missing_exact_turn_identity" };
     if (!this.options.transcriptReader.openAfterTurn) return { outcome: "unavailable", reason: "recovery_cursor_unavailable" };
     const opened = await this.options.transcriptReader.openAfterTurn(session, prompt.transcriptTurnId, prompt.transcriptTurnStartedAt);
@@ -129,9 +130,9 @@ export class ExternalTurnObserver {
 
   private async observeBinding(binding: Binding, force = false): Promise<void> {
     if (this.stopping) return;
-    const session = sessionFor(binding);
-    if (!session || !binding.paneId) { this.bindings.delete(binding.id); return; }
-    const identity = `${binding.generation}:${binding.paneId}:${session.source}:${session.agent}:${session.kind}:${session.value}`;
+    const session = transcriptSessionFor(binding);
+    const identity = transcriptObserverIdentity(binding);
+    if (!session || !identity || !binding.paneId) { this.bindings.delete(binding.id); return; }
     let observed = this.bindings.get(binding.id);
     if (!observed || observed.identity !== identity) {
       const durable = this.options.store.getActiveExternalPrompt(binding.id, binding.generation);
@@ -172,7 +173,7 @@ export class ExternalTurnObserver {
     this.handedOffBindings.clear();
   }
 
-  private async apply(binding: Binding, session: NonNullable<ReturnType<typeof sessionFor>>, observed: TurnProjectionState, observation: TraexTranscriptObservation, supersede?: ExternalTurnSupersessionFence): Promise<"ignored" | "pending" | "observing" | "completed"> {
+  private async apply(binding: Binding, session: NonNullable<ReturnType<typeof transcriptSessionFor>>, observed: TurnProjectionState, observation: TraexTranscriptObservation, supersede?: ExternalTurnSupersessionFence): Promise<"ignored" | "pending" | "observing" | "completed"> {
     const lifecycle = observation.turnLifecycle;
     if (observation.freshTurnStart && lifecycle) observed.pendingStarts.set(lifecycle.turnId, lifecycle.startedAt);
     const turnId = observation.turnId ?? lifecycle?.turnId;
@@ -257,12 +258,6 @@ export class ExternalTurnObserver {
   private async publish<T extends Parameters<typeof createBridgeEvent>[1]>(bindingId: string, type: T, origin: EventOrigin, payload: Extract<ReturnType<typeof createBridgeEvent>, { type: T }>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
   }
-}
-
-function sessionFor(binding: Binding) {
-  return binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
-    ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
-    : null;
 }
 
 function hasObservation(value: TraexTranscriptObservation): boolean {
