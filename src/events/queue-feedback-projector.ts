@@ -1,10 +1,11 @@
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { QueueFeedbackStore } from "../domain/ports.js";
+import type { QueueFeedbackStore } from "../domain/ports/projection.js";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import { reduceRunCard } from "../domain/run-card-view.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { KeyedSerialWorkQueue } from "../runtime/keyed-serial-work-queue.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 
@@ -17,7 +18,7 @@ const REFRESH_EVENTS = new Set<BridgeEvent["type"]>([
 ]);
 
 export class QueueFeedbackProjector {
-  private readonly bindingTails = new Map<string, Promise<void>>();
+  private readonly bindingWork = new KeyedSerialWorkQueue<string>();
   private readonly queuedBindings = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private timer: IntervalHandle | null = null;
@@ -41,16 +42,11 @@ export class QueueFeedbackProjector {
 
   refresh(bindingId: string): Promise<void> {
     if (this.stopping) return Promise.resolve();
-    const previous = this.bindingTails.get(bindingId) ?? Promise.resolve();
-    const work = previous.catch(() => undefined).then(() => this.projectBinding(bindingId));
-    const tail = work.catch(() => undefined);
-    this.bindingTails.set(bindingId, tail);
-    void tail.then(() => { if (this.bindingTails.get(bindingId) === tail) this.bindingTails.delete(bindingId); });
-    return work;
+    return this.bindingWork.enqueue(bindingId, () => this.projectBinding(bindingId));
   }
 
   async settle(): Promise<void> {
-    await Promise.allSettled([...this.bindingTails.values()]);
+    await this.bindingWork.settle();
   }
 
   async stop(): Promise<void> {
@@ -58,7 +54,7 @@ export class QueueFeedbackProjector {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.clearTimer();
-    await this.settle();
+    await this.bindingWork.stop();
   }
 
   private async projectBinding(bindingId: string): Promise<void> {

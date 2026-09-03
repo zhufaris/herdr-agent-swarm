@@ -4,13 +4,15 @@ import { projectSpaceName } from "../config.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } from "../domain/types.js";
-import type { HerdrPort, RuntimeReconciliationStore } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
+import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -56,15 +58,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
-  private runCount = 0;
-  private successCount = 0;
-  private failureCount = 0;
-  private coalescedRequestCount = 0;
-  private lastStartedAt: string | null = null;
-  private lastCompletedAt: string | null = null;
-  private lastDurationMs: number | null = null;
-  private maxDurationMs: number | null = null;
-  private lastOutcome: ReconciliationDiagnostics["lastOutcome"] = null;
+  private readonly metrics = new ReconciliationRunMetrics();
   private readonly workspaceFailureLogs = new FailureLogGate();
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
@@ -94,7 +88,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
-    if (this.reconciliation) { this.coalescedRequestCount += 1; return this.reconciliation; }
+    if (this.reconciliation) { this.metrics.markCoalesced(); return this.reconciliation; }
     this.enqueueReconciliation(workspaceIds);
     const work = this.drainReconciliations();
     this.reconciliation = work;
@@ -105,15 +99,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   async requestReconciliation(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
     if (this.reconciliation && this.activeReconciliationCovers(workspaceIds)) {
-      this.coalescedRequestCount += 1;
+      this.metrics.markCoalesced();
       return this.reconciliation;
     }
     if (!this.reconciliation && this.recentReconciliationCovers(workspaceIds)) {
-      this.coalescedRequestCount += 1;
+      this.metrics.markCoalesced();
       return;
     }
     this.enqueueReconciliation(workspaceIds);
-    if (this.reconciliation) { this.coalescedRequestCount += 1; return this.reconciliation; }
+    if (this.reconciliation) { this.metrics.markCoalesced(); return this.reconciliation; }
     const work = this.drainReconciliations();
     this.reconciliation = work;
     try { await work; }
@@ -166,33 +160,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   snapshot(): ReconciliationDiagnostics {
-    return {
-      state: this.stopping ? "stopping" : this.reconciliation ? "running" : "idle",
-      runCount: this.runCount, successCount: this.successCount, failureCount: this.failureCount, coalescedRequestCount: this.coalescedRequestCount,
-      lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastDurationMs: this.lastDurationMs, maxDurationMs: this.maxDurationMs, lastOutcome: this.lastOutcome
-    };
+    return this.metrics.snapshot(this.stopping ? "stopping" : this.reconciliation ? "running" : "idle");
   }
 
   private async runMeasured(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
-    const started = performance.now();
-    this.runCount += 1;
-    this.lastStartedAt = new Date().toISOString();
-    try {
+    await this.metrics.measure(async () => {
       const reconciledWorkspaceIds = await this.reconcileOnce(requestedWorkspaceIds);
       const completedAt = performance.now();
       for (const workspaceId of reconciledWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
-      this.successCount += 1;
-      this.lastOutcome = "succeeded";
-    } catch (error) {
-      this.failureCount += 1;
-      this.lastOutcome = "failed";
-      throw error;
-    } finally {
-      const duration = Math.max(0, Math.round(performance.now() - started));
-      this.lastDurationMs = duration;
-      this.maxDurationMs = Math.max(this.maxDurationMs ?? 0, duration);
-      this.lastCompletedAt = new Date().toISOString();
-    }
+    });
   }
 
   start(intervalMs: number): void {

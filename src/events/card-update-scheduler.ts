@@ -1,4 +1,5 @@
 export type CardUpdatePriority = "normal" | "interactive" | "terminal";
+import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 
 interface PendingCardUpdate { desiredVersion: number; timer: NodeJS.Timeout | null; dueAt: number; requestedAt: number; inFlight: boolean; requestedWhileInFlight: boolean; priority: CardUpdatePriority; consecutiveFailures: number }
 
@@ -16,7 +17,7 @@ export interface CardUpdateFlushResult { cardKey: string; desiredVersion: number
 
 export class CardUpdateScheduler {
   private readonly pending = new Map<string, PendingCardUpdate>();
-  private readonly activeFlushes = new Set<Promise<void>>();
+  private readonly activeFlushes = new ActiveWorkTracker();
   private stopped = false;
   private stopPromise: Promise<void> | null = null;
 
@@ -70,8 +71,8 @@ export class CardUpdateScheduler {
 
   private launchFlush(cardKey: string): void {
     const work = this.flush(cardKey);
-    this.activeFlushes.add(work);
-    void work.catch((error) => this.reportError(error, cardKey, this.pending.get(cardKey)?.desiredVersion ?? 0)).finally(() => this.activeFlushes.delete(work));
+    this.activeFlushes.track(work);
+    void work.catch((error) => this.reportError(error, cardKey, this.pending.get(cardKey)?.desiredVersion ?? 0));
   }
 
   stop(): Promise<void> {
@@ -79,7 +80,7 @@ export class CardUpdateScheduler {
     this.stopped = true;
     for (const item of this.pending.values()) if (item.timer) clearTimeout(item.timer);
     this.pending.clear();
-    this.stopPromise = Promise.allSettled([...this.activeFlushes]).then(() => undefined);
+    this.stopPromise = this.activeFlushes.settle();
     return this.stopPromise;
   }
 

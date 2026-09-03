@@ -1,7 +1,9 @@
 import type { Logger } from "pino";
-import type { LarkPort, OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports.js";
+import type { LarkPort } from "../domain/ports/external.js";
+import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports/outbox.js";
 import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { classifyDeliveryError } from "./delivery-error-classifier.js";
@@ -14,7 +16,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private static readonly SCAN_RETRY_MAX_MS = 30_000;
   private static readonly MAX_DELIVERIES_PER_SCAN = 100;
   private draining: Promise<void> | null = null;
-  private readonly activeHandlers = new Set<Promise<unknown>>();
+  private readonly activeHandlers = new ActiveWorkTracker();
   private unsubscribe: (() => void) | null = null;
   private stopping = false;
   private stopPromise: Promise<void> | null = null;
@@ -143,16 +145,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   }
 
   private trackHandler<T>(work: Promise<T>): Promise<T> {
-    this.activeHandlers.add(work);
-    void work.then(
-      () => this.activeHandlers.delete(work),
-      () => this.activeHandlers.delete(work)
-    );
-    return work;
+    return this.activeHandlers.track(work);
   }
 
   private async waitForActiveWork(): Promise<void> {
-    await Promise.allSettled([...this.activeHandlers]);
+    await this.activeHandlers.settle();
     if (this.draining) await this.draining;
   }
 

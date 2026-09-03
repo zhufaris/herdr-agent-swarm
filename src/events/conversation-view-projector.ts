@@ -1,7 +1,8 @@
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { normalizeTurnOutputObservation, type BridgeEvent } from "../domain/events.js";
-import type { AnswerPageStore, MainCardStore, OutboundCheckpointSubscriber, OutboundIntentPort, ProjectionStore } from "../domain/ports.js";
+import type { OutboundCheckpointSubscriber, OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { AnswerPageStore, MainCardStore, ProjectionStore } from "../domain/ports/projection.js";
 import type { AnswerPageWorkflowPort } from "../coordinator/answer-page-workflow.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import type { MainCardWorkflowPort } from "../coordinator/main-card-workflow.js";
@@ -12,6 +13,7 @@ import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler, type CardUpdateSchedulerDiagnostics } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { LruMap } from "../runtime/lru-map.js";
+import { KeyedSerialWorkQueue } from "../runtime/keyed-serial-work-queue.js";
 
 const ANSWER_STREAM_INTERVAL_MS = 500;
 const ANSWER_UPDATE_BUDGET_MS = 1_500;
@@ -22,7 +24,7 @@ const ANSWER_LENGTH_CACHE_CAPACITY = 512;
 
 export class ConversationViewProjector {
   private readonly views = new LruMap<string, ReturnType<typeof initialTopicView>>(TOPIC_VIEW_CACHE_CAPACITY);
-  private readonly bindingTails = new Map<string, Promise<void>>();
+  private readonly bindingWork = new KeyedSerialWorkQueue<string>();
   private unsubscribe: (() => void) | null = null;
   private unsubscribeStreamCardCreated: (() => void) | null = null;
   private unsubscribeMainCardCheckpoint: (() => void) | null = null;
@@ -98,8 +100,7 @@ export class ConversationViewProjector {
     this.unsubscribeMainCardCheckpoint = null;
     this.views.clear();
     this.answerContentLengths.clear();
-    this.stopPromise = Promise.allSettled([...this.bindingTails.values()])
-      .then(() => this.scheduler.stop());
+    this.stopPromise = this.bindingWork.stop().then(() => this.scheduler.stop());
     return this.stopPromise;
   }
 
@@ -150,14 +151,7 @@ export class ConversationViewProjector {
   }
 
   private enqueue(event: BridgeEvent): Promise<void> {
-    const previous = this.bindingTails.get(event.bindingId) ?? Promise.resolve();
-    const work = previous.catch(() => undefined).then(() => this.onEvent(event));
-    const tail = work.catch(() => undefined);
-    this.bindingTails.set(event.bindingId, tail);
-    void tail.then(() => {
-      if (this.bindingTails.get(event.bindingId) === tail) this.bindingTails.delete(event.bindingId);
-    });
-    return work;
+    return this.bindingWork.enqueue(event.bindingId, () => this.onEvent(event));
   }
 }
 
