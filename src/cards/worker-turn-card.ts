@@ -10,7 +10,7 @@ const STATE = {
   blocked: { label: "等待本地处理", icon: "⚠️", color: "orange" },
   completed: { label: "任务完成", icon: "✅", color: "green" },
   failed: { label: "执行失败", icon: "❌", color: "red" },
-  cancelled: { label: "任务已取消", icon: "⏹", color: "grey" },
+  cancelled: { label: "任务已取消", icon: "⏹", color: "purple" },
   "dispatch-uncertain": { label: "派发状态不确定", icon: "⚠️", color: "orange" }
 } as const;
 

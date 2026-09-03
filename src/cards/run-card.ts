@@ -26,7 +26,7 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
   error: { label: "执行失败", icon: "×", color: "red" },
   degraded: { label: "连接降级", icon: "!", color: "orange" },
   draining: { label: "正在归档", icon: "◌", color: "orange" },
-  archived: { label: "已归档", icon: "□", color: "grey" },
+  archived: { label: "已归档", icon: "□", color: "purple" },
   orphaned: { label: "绑定异常", icon: "!", color: "orange" }
 };
 

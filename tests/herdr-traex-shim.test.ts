@@ -34,6 +34,25 @@ describe("Herdr TraeX shim invocation", () => {
     expect(parseHerdrShimInvocation(["agent", "start", "reviewer", "--kind", "traex", "--pane", "w1:p1"])).toMatchObject({ timeoutMs: 30000 });
   });
 
+  it("parses exact-turn native steering without losing text boundaries", () => {
+    expect(parseHerdrShimInvocation([
+      "agent", "steer", "reviewer", "focus on generation fencing",
+      "--turn-id", "turn-42", "--idempotency-key", "message:123", "--agent-session", '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"session-1"}', "--timeout", "2500"
+    ])).toEqual({
+      kind: "steer-traex", target: "reviewer", text: "focus on generation fencing",
+      turnId: "turn-42", idempotencyKey: "message:123", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, timeoutMs: 2500
+    });
+  });
+
+  it.each([
+    [["agent", "steer", "reviewer", "text", "--idempotency-key", "key"], /turn-id/],
+    [["agent", "steer", "reviewer", "text", "--turn-id", "turn-1"], /idempotency-key/],
+    [["agent", "steer", "reviewer", "text", "--turn-id", "turn-1", "--idempotency-key", "key"], /agent-session/],
+    [["agent", "steer", "reviewer", "text", "--turn-id", "turn-1", "--idempotency-key", "key", "--timeout", "0"], /timeout/]
+  ])("rejects unsafe native steering invocation %j", (argv, error) => {
+    expect(() => parseHerdrShimInvocation(argv)).toThrow(error);
+  });
+
   it("projects only explicitly marked managed TraeX agents", () => {
     expect(projectTraexAgentJson({ result: { agents: [
       { agent: "codex", display_agent: "traex", name: "managed" },
@@ -99,7 +118,7 @@ describe("Herdr TraeX managed start", () => {
     const reports: unknown[] = [];
     const result = await runHerdrTraexStart(
       { name: "reviewer", paneId: "w1:p1", timeoutMs: 1000, traexArgs: ["--model", "private model"] },
-      { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", validatedHerdrVersion: "0.7.5" },
+      { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", steeringOperationDir: "/home/user/.local/state/herdr-traex-shim/steering-operations", validatedHerdrVersion: "0.7.5" },
       {
         runHerdr: async (args) => {
           calls.push(args);
@@ -187,7 +206,7 @@ function processInfo(pid: number, name: string, argv: string[]): object {
   return { process_info: { shell_pid: 10, foreground_processes: [{ pid, name, argv }] } };
 }
 function startInput() { return { name: "reviewer", paneId: "w1:p1", timeoutMs: 5, traexArgs: [] }; }
-function startConfig() { return { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", validatedHerdrVersion: "0.7.5" }; }
+function startConfig() { return { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", steeringOperationDir: "/home/user/.local/state/herdr-traex-shim/steering-operations", validatedHerdrVersion: "0.7.5" }; }
 function fakeStartDependencies(runHerdr: (args: string[]) => Promise<{ stdout: string; stderr: string }>, onWrite = () => undefined) {
   return { runHerdr, writeRequest: async () => { onWrite(); return "abc"; }, removeRequest: async () => undefined, processExecutable: async () => null, processStartTicks: async () => null, startReporter: () => undefined, sleep: async () => undefined, now: (() => { let now = 0; return () => ++now; })(), generateSessionId: () => "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
 }

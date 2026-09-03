@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexStart, type TraexLaunchConfig, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
+import { findTraexSessionPeer } from "../runtime/traex-session-peer.js";
+import { steerTraexTurn } from "../runtime/traex-native-steering.js";
 
 async function main(): Promise<void> {
   const configPath = process.env.HERDR_TRAEX_SHIM_CONFIG;
@@ -18,6 +20,23 @@ async function main(): Promise<void> {
     if (stdout) process.stdout.write(stdout);
     if (delegated.stderr) process.stderr.write(delegated.stderr);
     process.exitCode = delegated.exitCode;
+    return;
+  }
+  if (invocation.kind === "steer-traex") {
+    const rawTarget = parseAgent((await run(config.realHerdr, ["agent", "get", invocation.target], invocation.timeoutMs)).stdout);
+    const target = projectTraexAgentJson(rawTarget) as typeof rawTarget;
+    const session = target.agent_session;
+    if (target.display_agent !== "traex" || !session || session.source !== "herdr-traex-shim" || session.kind !== "id" || typeof session.value !== "string") {
+      throw Object.assign(new Error("Target does not expose a shim-managed TraeX native session"), { code: "agent_steer_unsupported" });
+    }
+    if (session.source !== invocation.agentSession.source || target.agent !== invocation.agentSession.agent || session.kind !== invocation.agentSession.kind || session.value !== invocation.agentSession.value) {
+      process.stdout.write(`${JSON.stringify({ id: "cli:agent:steer", result: { type: "agent_steered", status: "not-active", reason: "Agent session identity changed" } })}\n`);
+      return;
+    }
+    const peer = await findTraexSessionPeer(config.sessionPeersDir, session.value);
+    if (!peer) throw Object.assign(new Error("TraeX native session peer is unavailable"), { code: "agent_steer_unsupported" });
+    const result = await steerTraexTurn({ peer, expectedTurnId: invocation.turnId, text: invocation.text, idempotencyKey: invocation.idempotencyKey }, { operationDir: config.steeringOperationDir, timeoutMs: invocation.timeoutMs });
+    process.stdout.write(`${JSON.stringify({ id: "cli:agent:steer", result: { type: "agent_steered", ...result } })}\n`);
     return;
   }
   if (invocation.kind !== "start-traex") throw new Error("Shim entrypoint accepts only managed TraeX commands");
@@ -73,9 +92,15 @@ async function processStartTicks(pid: number): Promise<string | null> {
 function parseConfig(value: unknown): TraexLaunchConfig {
   if (!value || typeof value !== "object") throw new Error("Invalid TraeX shim config");
   const record = value as Record<string, unknown>;
-  const keys = ["realHerdr", "traex", "launcher", "reporter", "requestDir", "sessionPeersDir", "validatedHerdrVersion"] as const;
+  const keys = ["realHerdr", "traex", "launcher", "reporter", "requestDir", "sessionPeersDir", "steeringOperationDir", "validatedHerdrVersion"] as const;
   for (const key of keys) if (typeof record[key] !== "string" || !record[key]) throw new Error(`Invalid TraeX shim config field: ${key}`);
   return Object.fromEntries(keys.map((key) => [key, record[key]])) as unknown as TraexLaunchConfig;
+}
+
+function parseAgent(stdout: string): Record<string, unknown> & { agent_session?: { source?: unknown; kind?: unknown; value?: unknown } } {
+  const envelope = JSON.parse(stdout) as { result?: { agent?: unknown } };
+  if (!envelope.result?.agent || typeof envelope.result.agent !== "object") throw new Error("Official Herdr returned an invalid Agent response");
+  return envelope.result.agent as Record<string, unknown> & { agent_session?: { source?: unknown; kind?: unknown; value?: unknown } };
 }
 
 if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {

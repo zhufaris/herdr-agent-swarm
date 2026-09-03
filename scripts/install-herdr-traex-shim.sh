@@ -65,7 +65,7 @@ path_index() {
 
 write_config() {
   local output=$1 real_herdr=$2 traex=$3 version=$4 release=$5 session_peers_dir=$6
-  node -e 'const fs=require("fs"); const [p,r,t,v,b,d,q,s]=process.argv.slice(1); fs.writeFileSync(p, JSON.stringify({realHerdr:r,traex:t,validatedHerdrVersion:v,releaseDir:b,binDir:d,launcher:b+"/pane-launcher",reporter:b+"/cli/herdr-traex-reporter.js",requestDir:q,sessionPeersDir:s},null,2)+"\n",{mode:0o600})' "$output" "$real_herdr" "$traex" "$version" "$release" "$bin_dir" "$request_dir" "$session_peers_dir"
+  node -e 'const fs=require("fs"); const [p,r,t,v,b,d,q,s,o]=process.argv.slice(1); fs.writeFileSync(p, JSON.stringify({realHerdr:r,traex:t,validatedHerdrVersion:v,releaseDir:b,binDir:d,launcher:b+"/pane-launcher",reporter:b+"/cli/herdr-traex-reporter.js",requestDir:q,sessionPeersDir:s,steeringOperationDir:o},null,2)+"\n",{mode:0o600})' "$output" "$real_herdr" "$traex" "$version" "$release" "$bin_dir" "$request_dir" "$session_peers_dir" "$state_root/steering-operations"
 }
 
 read_config() { node -e 'const c=require(process.argv[1]); console.log(c[process.argv[2]] ?? "")' "$config_path" "$1"; }
@@ -97,19 +97,19 @@ case $action in
       (( owned )) || fail "refusing to replace unrelated $target"
     fi
     [[ ${HERDR_TRAEX_SKIP_BUILD:-0} == 1 ]] || (cd "$source_root" && npm run build)
-    for file in dist/cli/herdr-traex-shim.js dist/cli/herdr-traex-reporter.js dist/runtime/herdr-traex-shim.js dist/runtime/herdr-traex-reporter.js dist/runtime/traex-session-peer.js scripts/herdr-traex-command-shim.sh scripts/herdr-traex-pane-launcher.sh; do
+    for file in dist/cli/herdr-traex-shim.js dist/cli/herdr-traex-reporter.js dist/runtime/herdr-traex-shim.js dist/runtime/herdr-traex-reporter.js dist/runtime/traex-session-peer.js dist/runtime/traex-native-steering.js scripts/herdr-traex-command-shim.sh scripts/herdr-traex-pane-launcher.sh; do
       [[ -f $source_root/$file ]] || fail "missing built shim asset: $file"
     done
     herdr_version=$($real_herdr --version | sed -E 's/^[^0-9]*//')
     traex_version=$($traex --version | sed -E 's/^[^0-9]*//')
     [[ -n $herdr_version && -n $traex_version ]] || fail "could not determine Herdr or TraeX version"
     validate_contract "$real_herdr"
-    build_id=$(sha256sum "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/traex-session-peer.js" "$source_root/scripts/herdr-traex-command-shim.sh" "$source_root/scripts/herdr-traex-pane-launcher.sh" | sha256sum | cut -c1-16)
+    build_id=$(sha256sum "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/traex-session-peer.js" "$source_root/dist/runtime/traex-native-steering.js" "$source_root/scripts/herdr-traex-command-shim.sh" "$source_root/scripts/herdr-traex-pane-launcher.sh" | sha256sum | cut -c1-16)
     release=$data_root/releases/$build_id
-    mkdir -p "$release/cli" "$release/runtime" "$config_root" "$request_dir" "$bin_dir"
-    chmod 700 "$config_root" "$request_dir"
+    mkdir -p "$release/cli" "$release/runtime" "$config_root" "$request_dir" "$state_root/steering-operations" "$bin_dir"
+    chmod 700 "$config_root" "$request_dir" "$state_root/steering-operations"
     cp "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$release/cli/"
-    cp "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/traex-session-peer.js" "$release/runtime/"
+    cp "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/traex-session-peer.js" "$source_root/dist/runtime/traex-native-steering.js" "$release/runtime/"
     cp "$source_root/scripts/herdr-traex-command-shim.sh" "$release/herdr"
     cp "$source_root/scripts/herdr-traex-pane-launcher.sh" "$release/pane-launcher"
     printf '{"type":"module"}\n' > "$release/package.json"

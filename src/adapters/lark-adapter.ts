@@ -2,7 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { z } from "zod";
-import type { LarkPort } from "../domain/ports.js";
+import type { LarkPort } from "../domain/ports/external.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/types.js";
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";

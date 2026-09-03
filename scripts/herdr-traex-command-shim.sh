@@ -21,6 +21,7 @@ if [[ ${1:-} == agent && ${2:-} == start ]]; then
     fi
   done
 fi
+if [[ ${1:-} == agent && ${2:-} == steer ]]; then intercept=1; fi
 
 project=0
 if [[ ${1:-} == api && ${2:-} == snapshot ]]; then project=1; fi
@@ -29,7 +30,7 @@ if [[ ${1:-} == agent && ${2:-} =~ ^(list|get|prompt|wait|focus|rename)$ ]]; the
 
 if (( intercept || project )); then
   if (( intercept )) && [[ $current_version != "$validated_herdr_version" ]]; then
-    echo "herdr-traex-shim: TraeX start refused because current Herdr is not validated" >&2
+    echo "herdr-traex-shim: managed TraeX command refused because current Herdr is not validated" >&2
     exit 1
   fi
   HERDR_TRAEX_SHIM_CONFIG=$shim_config exec "$node_bin" "$shim_entrypoint" "$@"

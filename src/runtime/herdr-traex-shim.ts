@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 export type HerdrShimInvocation =
   | { kind: "delegate"; argv: string[] }
   | { kind: "project"; argv: string[] }
+  | { kind: "steer-traex"; target: string; text: string; turnId: string; idempotencyKey: string; agentSession: { source: string; agent: string; kind: "id" | "path"; value: string }; timeoutMs: number }
   | { kind: "start-traex"; name: string; paneId: string; timeoutMs: number; traexArgs: string[] };
 
 export interface TraexStartInput {
@@ -19,6 +20,7 @@ export interface TraexLaunchConfig {
   reporter: string;
   requestDir: string;
   sessionPeersDir: string;
+  steeringOperationDir: string;
   validatedHerdrVersion: string;
 }
 
@@ -43,6 +45,7 @@ export class TraexStartError extends Error {
 
 export function parseHerdrShimInvocation(argv: readonly string[]): HerdrShimInvocation {
   const delegated = { kind: "delegate" as const, argv: [...argv] };
+  if (argv[0] === "agent" && argv[1] === "steer") return parseTraexSteer(argv.slice(2));
   if (projectsAgentJson(argv)) return { kind: "project", argv: [...argv] };
   if (argv[0] !== "agent" || argv[1] !== "start") return delegated;
 
@@ -84,6 +87,44 @@ export function parseHerdrShimInvocation(argv: readonly string[]): HerdrShimInvo
   if (!seenKind) throw new Error("TraeX agent start requires --kind traex");
   if (!paneId) throw new Error("TraeX agent start requires --pane");
   return { kind: "start-traex", name, paneId, timeoutMs, traexArgs };
+}
+
+function parseTraexSteer(args: readonly string[]): Extract<HerdrShimInvocation, { kind: "steer-traex" }> {
+  const target = args[0];
+  const text = args[1];
+  if (!target || target.startsWith("-")) throw new Error("TraeX steer requires an Agent target");
+  if (!text || !text.trim()) throw new Error("TraeX steer requires non-empty text");
+  let turnId: string | undefined;
+  let idempotencyKey: string | undefined;
+  let agentSession: Extract<HerdrShimInvocation, { kind: "steer-traex" }>["agentSession"] | undefined;
+  let timeoutMs = 10_000;
+  for (let index = 2; index < args.length; index += 1) {
+    const option = args[index];
+    if (!["--turn-id", "--idempotency-key", "--agent-session", "--timeout"].includes(option ?? "")) throw new Error(`Unknown TraeX steer option: ${option}`);
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`Missing value for ${option}`);
+    index += 1;
+    if (option === "--turn-id") { if (turnId) throw new Error("Duplicate --turn-id option"); turnId = value; }
+    else if (option === "--idempotency-key") { if (idempotencyKey) throw new Error("Duplicate --idempotency-key option"); idempotencyKey = value; }
+    else if (option === "--agent-session") {
+      if (agentSession) throw new Error("Duplicate --agent-session option");
+      let decoded: unknown;
+      try { decoded = JSON.parse(value); } catch { throw new Error("TraeX steer --agent-session must be valid JSON"); }
+      if (!decoded || typeof decoded !== "object") throw new Error("TraeX steer --agent-session is invalid");
+      const record = decoded as Record<string, unknown>;
+      if (typeof record.source !== "string" || typeof record.agent !== "string" || !["id", "path"].includes(String(record.kind)) || typeof record.value !== "string" || !record.value) throw new Error("TraeX steer --agent-session is invalid");
+      agentSession = { source: record.source, agent: record.agent, kind: record.kind as "id" | "path", value: record.value };
+    }
+    else {
+      if (!/^[0-9]+$/.test(value)) throw new Error("TraeX steer timeout must be an integer");
+      timeoutMs = Number(value);
+      if (timeoutMs < 1 || timeoutMs > 300_000) throw new Error("TraeX steer timeout must be between 1 and 300000 milliseconds");
+    }
+  }
+  if (!turnId) throw new Error("TraeX steer requires --turn-id");
+  if (!idempotencyKey) throw new Error("TraeX steer requires --idempotency-key");
+  if (!agentSession) throw new Error("TraeX steer requires --agent-session");
+  return { kind: "steer-traex", target, text, turnId, idempotencyKey, agentSession, timeoutMs };
 }
 
 function projectsAgentJson(argv: readonly string[]): boolean {

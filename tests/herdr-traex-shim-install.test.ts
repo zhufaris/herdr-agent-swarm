@@ -30,11 +30,13 @@ describe("Herdr TraeX shim installer", () => {
       launcher: expect.stringMatching(/releases\/[^/]+\/pane-launcher$/),
       reporter: expect.stringMatching(/releases\/[^/]+\/cli\/herdr-traex-reporter\.js$/),
       requestDir: join(fixture.runtime, "herdr-traex-shim/run"),
-      sessionPeersDir: join(fixture.home, ".trae/cli/session-peers")
+      sessionPeersDir: join(fixture.home, ".trae/cli/session-peers"),
+      steeringOperationDir: join(fixture.state, "herdr-traex-shim/steering-operations")
     });
     const peerResolver = await readFile(join(config.releaseDir, "runtime/traex-session-peer.js"), "utf8");
     expect(peerResolver).toContain("export");
     expect(peerResolver).not.toMatch(/from ["'](?!node:|\.)/);
+    expect(await readFile(join(config.releaseDir, "runtime/traex-native-steering.js"), "utf8")).toContain("export");
 
     const status = await install(fixture, ["status"]);
     expect(status).toMatchObject({ code: 0 });
@@ -133,7 +135,7 @@ async function createFixture(options: { shimAfterReal?: boolean; missingAgentSes
   ].join("\n"));
   await executable(traex, '#!/usr/bin/env bash\necho "traex 0.201.6"\n');
   for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js", "traex-native-steering.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
   const repo = process.cwd();
   await writeFile(join(source, "scripts/herdr-traex-command-shim.sh"), await readFile(join(repo, "scripts/herdr-traex-command-shim.sh")));
   await writeFile(join(source, "scripts/herdr-traex-pane-launcher.sh"), await readFile(join(repo, "scripts/herdr-traex-pane-launcher.sh")));

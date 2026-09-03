@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { HerdrPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { SteerReceipt } from "../domain/agent-runtime.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 
@@ -21,11 +22,20 @@ const snapshotPaneSchema = paneSchema.extend({
   display_agent: z.string().nullish(),
   agent_session: agentSessionSchema.nullish(),
   revision: z.number().int().nullish(),
-  state_change_seq: z.number().int().nullish()
+  state_change_seq: z.number().int().nullish(),
+  steering_capability: z.enum(["native", "terminal-input", "unsupported"]).optional(),
+  active_turn_id: z.string().nullish()
 });
 const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
+const steerResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("delivered"), operationId: z.string(), turnId: z.string() }),
+  z.object({ status: z.literal("not-active"), reason: z.string() }),
+  z.object({ status: z.literal("blocked"), reason: z.string() }),
+  z.object({ status: z.literal("unsupported"), reason: z.string() }),
+  z.object({ status: z.literal("delivery-uncertain"), operationId: z.string(), reason: z.string() })
+]);
 const PROCESS_INFO_CONCURRENCY = 4;
 
 interface HerdrNativeRequestClient {
@@ -237,6 +247,17 @@ export class HerdrCliAdapter implements HerdrPort {
     await this.runner.run(this.executable, ["agent", "send-keys", paneId, "esc"], this.commandTimeoutMs);
   }
 
+  async steerAgent(input: { paneId: string; agentSession: import("../domain/types.js").HerdrAgentSession; runtimeTurnId: string; text: string; idempotencyKey: string }): Promise<SteerReceipt> {
+    const { stdout } = await this.runner.run(this.executable, [
+      "agent", "steer", input.paneId, input.text,
+      "--turn-id", input.runtimeTurnId, "--idempotency-key", input.idempotencyKey,
+      "--agent-session", JSON.stringify(input.agentSession),
+      "--timeout", String(this.commandTimeoutMs)
+    ], this.commandTimeoutMs + 1_000);
+    const { type: _type, ...result } = z.object({ type: z.literal("agent_steered") }).and(steerResultSchema).parse(envelopeSchema.parse(JSON.parse(stdout)).result);
+    return result;
+  }
+
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> {
     const pane = options?.tabTitle ? await this.getPane(paneId) : null;
     await this.runner.run(this.executable, ["pane", "rename", paneId, title], this.commandTimeoutMs);
@@ -332,6 +353,8 @@ export class HerdrCliAdapter implements HerdrPort {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
       ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,
       agentKind: kind, agentSession, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
+      steeringCapability: agent?.steering_capability ?? raw.steering_capability ?? (agentSession?.source === "herdr-traex-shim" ? "native" : "unsupported"),
+      activeTurnId: agent?.active_turn_id ?? raw.active_turn_id ?? null,
       agentState: agent?.agent_status ?? raw.agent_status ?? "unknown", foregroundExecutables
     };
   }
