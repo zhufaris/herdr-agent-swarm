@@ -15,8 +15,8 @@ describe("WorkerTurnCardView", () => {
   it("creates a queued projection with stable delivery identity", () => {
     expect(queued()).toEqual({
       turnId: "turn-a", instanceId: "worker-1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null,
-      rootMessageId: "root-1", messageId: null, cardId: null, elementId: "worker_turn_turn_a_0",
-      phase: "queued", requestText: "Review the transaction boundary", answer: "", queuePosition: 2,
+      rootMessageId: "root-1", messageId: null, cardId: null, elementId: "worker_turn_turn_a_0", progressSequence: 0,
+      phase: "queued", requestText: "Review the transaction boundary", answer: "", statusTitle: null, progressEvents: [], progressSummary: { total: 0, stepTotal: 0, stepDone: 0 }, queuePosition: 2,
       startedAt: null, finishedAt: null, notice: null, resultCapture: "pending", pageIndex: 0, pageStart: 0,
       sequence: 0, viewVersion: 1, deliveredVersion: 0, createdAt, updatedAt: createdAt
     });

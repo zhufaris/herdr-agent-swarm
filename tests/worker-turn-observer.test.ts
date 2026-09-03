@@ -60,6 +60,32 @@ describe("WorkerTurnObserver", () => {
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted final", resultCapture: "captured" });
   });
 
+  it("persists and publishes visible progress only for the exact owned transcript", async () => {
+    const { observer } = setup();
+    await observer.observe("turn-1", {
+      turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "",
+      mainStatus: { statusTitle: "Inspecting transaction boundaries", planSteps: [{ key: "inspect", label: "Read the store", state: "active" }] },
+      toolActivities: [{ key: "tool:read", kind: "read", label: "Read src/store/sqlite-store.ts", state: "done" }],
+      turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt }
+    });
+
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({
+      phase: "running", statusTitle: "Inspecting transaction boundaries",
+      progressEvents: expect.arrayContaining([
+        expect.objectContaining({ key: "plan:inspect", kind: "step", state: "active" }),
+        expect.objectContaining({ key: "tool:read", kind: "read", state: "done" })
+      ])
+    });
+    expect(JSON.stringify(store!.listPendingOutboundReplies())).toContain("Inspecting transaction boundaries");
+
+    await observer.observe("turn-1", {
+      turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "",
+      mainStatus: { statusTitle: "Foreign progress" },
+      turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt }
+    });
+    expect(store!.loadWorkerTurnCard("turn-1")!.statusTitle).toBe("Inspecting transaction boundaries");
+  });
+
   it("ignores missing identity and stale instance generations", async () => {
     const { observer, worker } = setup();
     await observer.observe("turn-1", { answerDelta: "unowned" });

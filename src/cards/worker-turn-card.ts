@@ -1,4 +1,4 @@
-import { workerTurnStreamContent, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
+import { workerTurnProgressElementId, workerTurnStreamContent, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import { normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
@@ -31,6 +31,7 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
     { tag: "markdown", content: metadata },
     { tag: "markdown", content: `**请求**\n\n${truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(view.requestText)), REQUEST_PREVIEW_LIMIT)}` }
   ];
+  elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view) });
   if (view.parentTurnId) elements.push({ tag: "markdown", content: `**承接任务**  \`${escapeCode(view.parentTurnId)}\`` });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
@@ -63,6 +64,15 @@ function workerTurnStatusContent(view: WorkerTurnCardView): string {
   if (view.phase === "dispatch-uncertain") return "⚠️ 无法确认任务是否已到达 Worker；为避免重复执行，系统不会自动重放。";
   if (view.phase === "blocked") return "⚠️ Worker 正在等待 Herdr 中的本地操作。";
   return view.phase === "queued" ? "⏳ 任务已进入 Worker FIFO 队列。" : "⏳ 等待 Worker 输出，本卡片会持续更新。";
+}
+
+export function workerTurnProgressContent(view: WorkerTurnCardView): string {
+  const status = view.statusTitle ? `**进度**  ${normalizeLarkPreview(redactSecrets(view.statusTitle))}` : "**进度**";
+  const steps = view.progressEvents.map((event) => {
+    const icon = event.state === "done" ? "✅" : event.state === "active" ? "▶️" : event.state === "failed" ? "❌" : "◌";
+    return `${icon} ${normalizeLarkPreview(redactSecrets(event.label))}`;
+  });
+  return steps.length > 0 ? [status, ...steps].join("\n") : `${status}\n\n等待 Worker 更新。`;
 }
 
 function callout(type: "orange" | "red", content: string): object {

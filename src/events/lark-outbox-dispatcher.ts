@@ -7,7 +7,7 @@ import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { classifyDeliveryError } from "./delivery-error-classifier.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMessageTarget } from "./outbound-target-validation.js";
+import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMessageTarget, assertWorkerProgressTarget } from "./outbound-target-validation.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
@@ -248,8 +248,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.workerTurnId && decoded.stream) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, (reply.viewVersion ?? 0) + 1);
       } else if (reply.kind === "stream_content") {
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
-        const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number };
-        if (reply.workerTurnId) assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId);
+        const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number; pageIndex: number; workerElement?: "progress" };
+        if (reply.workerTurnId) {
+          if (payload.workerElement === "progress") assertWorkerProgressTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId, payload.pageIndex);
+          else assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId);
+        }
         else assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
         if (payload.content) await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
         else this.logger.info({ event: "lark-outbox-empty-answer-content-skipped", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: payload.sequence, outcome: "checkpointed" }, "checkpointed an empty legacy Answer update without sending it to Lark");

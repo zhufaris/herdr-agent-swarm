@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { WorkerTurnCardWorkflow } from "../src/coordinator/worker-turn-card-workflow.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { workerTurnProgressElementId } from "../src/domain/worker-turn-card-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 function setup(turnId = "turn-1") {
@@ -15,6 +16,17 @@ function setup(turnId = "turn-1") {
 }
 
 describe("WorkerTurnCardWorkflow", () => {
+  it("patches visible progress on its own ordered element without consuming the answer lane", async () => {
+    const { store, worker } = setup();
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "worker-message-1", "worker-card-1");
+    expect(store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-03T00:00:01.000Z", answer: "", statusTitle: "Checking files", progressEvents: [{ key: "tool:1", kind: "tool", label: "rg source", state: "active", occurredAt: "2026-09-03T00:00:01.000Z" }] }, render: renderWorkerTurnCard })).not.toBeNull();
+    await new WorkerTurnCardWorkflow(store, () => {}, pino({ enabled: false })).converge("turn-1");
+
+    const [progress] = store.listPendingOutboundReplies();
+    expect(progress).toMatchObject({ workerTurnId: "turn-1", kind: "stream_content", selectionId: "worker-progress", rootMessageId: "worker-card-1" });
+    expect(JSON.parse(progress!.payload)).toMatchObject({ workerElement: "progress", elementId: workerTurnProgressElementId("turn-1", 0) });
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(progress!.id)).toEqual({ lane_key: "worker-progress:turn-1" });
+  });
   it("coalesces the latest state into an undelivered initial card", async () => {
     const { store, worker } = setup();
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "running", occurredAt: "2026-09-01T00:00:01.000Z" }, render: renderWorkerTurnCard });

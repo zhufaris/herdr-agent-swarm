@@ -122,7 +122,8 @@ export class InstanceInteractionWorkflow {
       const name = form.name?.trim() ?? "";
       if (!name || !agentKind) return { toast: { type: "error", content: "请填写有效的 Worker 名和 Agent。" } };
       try {
-        const result = await this.options.control.createWorker({ actor, projectId, name, agentKind, model: form.model?.trim() || null, start: form.start === "true" });
+        const bindingId = conversationKey.startsWith("binding:") ? conversationKey.slice("binding:".length) : null;
+        const result = await this.options.control.createWorker({ actor, projectId, name, agentKind, model: form.model?.trim() || null, start: form.start === "true", bindingId });
         if (result.status === "created-start-failed") return { toast: { type: "warning", content: `Worker ${result.instance.name} 已创建，但启动失败：${result.error}` }, card: this.detailCard(result.instance, conversationKey) };
         return { toast: { type: "success", content: `Worker ${result.instance.name} 已创建。` }, card: this.detailCard(result.instance, conversationKey) };
       } catch (error) { return failed(error); }

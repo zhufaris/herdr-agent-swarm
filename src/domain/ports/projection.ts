@@ -20,7 +20,7 @@ export interface AnswerPageStore {
   reserveStaticAnswerReplacement(input: { promptId: string; previousPageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
 }
 
-export type WorkerTurnCardStore = Pick<InstanceStore, "getWorkerTurnCardDeliveryFacts" | "listWorkerTurnCardPages" | "loadWorkerTurnCard" | "reserveWorkerTurnContent" | "reserveWorkerTurnContinuation" | "reserveWorkerTurnFinish"> & {
+export type WorkerTurnCardStore = Pick<InstanceStore, "getWorkerTurnCardDeliveryFacts" | "listWorkerTurnCardPages" | "loadWorkerTurnCard" | "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnContinuation" | "reserveWorkerTurnFinish"> & {
   listPendingOutboundReplies(): OutboundReply[];
 };
 

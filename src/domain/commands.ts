@@ -6,7 +6,7 @@ export type ControlActor =
   | { kind: "thread-primary"; projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string };
 
 export interface CreateWorkerCommand {
-  actor: ControlActor; projectId: string; name: string; agentKind: AgentKind; model: string | null; start: boolean;
+  actor: ControlActor; projectId: string; name: string; agentKind: AgentKind; model: string | null; start: boolean; bindingId?: string | null;
 }
 
 const MAX_TOPIC_TITLE_LENGTH = 80;

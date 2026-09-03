@@ -195,10 +195,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       this.database.prepare(`
         INSERT INTO agent_instances(
-          id, project_id, name, role, agent_kind, model, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
           , provisioning_checkpoint, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.desiredState, input.workspace.id, timestamp, timestamp);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
@@ -216,10 +216,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (count.count >= maxWorkers) { this.database.exec("COMMIT"); return { outcome: "limit-reached" }; }
       this.database.prepare(`
         INSERT INTO agent_instances(
-          id, project_id, name, role, agent_kind, model, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
           provisioning_checkpoint, last_error
-        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.desiredState, input.workspace.id, timestamp, timestamp);
+        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
@@ -458,7 +458,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (row.kind === "stream_card_create" && row.state === "pending" && Number((payload.stream as Record<string, unknown> | undefined)?.pageIndex) === pageIndex + 1) continuationPending = true;
       if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
       if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
-      if (row.kind === "stream_content" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null };
+      if (row.kind === "stream_content" && payload.workerElement !== "progress" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null };
     }
     return { latestContent, finishPending, continuationPending };
   }
@@ -471,6 +471,21 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
       this.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:stream:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sourceEnd: input.sourceEnd, sequence }) });
+      return "reserved";
+    });
+  }
+  reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
+    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
+      if (page.cardId !== input.cardId) return "stale";
+      const view = this.loadWorkerTurnCard(input.turnId);
+      if (!view) return "stale";
+      const rows = this.database.prepare("SELECT payload, state FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND state IN ('pending', 'delivered', 'dead_letter') ORDER BY delivery_order DESC").all(input.turnId) as Array<{ payload: string; state: OutboundReplyState }> ;
+      const latest = rows.map((row) => ({ ...row, payload: parseJsonRecord(row.payload) })).find((row) => row.payload.workerElement === "progress" && Number(row.payload.pageIndex) === input.pageIndex);
+      if (latest?.state === "pending" || latest?.state === "dead_letter" || latest?.payload.content === input.content) return "waiting";
+      const sequence = view.progressSequence + 1;
+      const changed = this.database.prepare("UPDATE worker_turn_cards SET progress_sequence = ?, updated_at = ? WHERE turn_id = ? AND progress_sequence = ?").run(sequence, now(), input.turnId, view.progressSequence);
+      if (changed.changes !== 1) return "stale";
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:progress:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, selectionId: "worker-progress", viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ workerElement: "progress", pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sequence }) });
       return "reserved";
     });
   }
@@ -517,7 +532,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const next = reduceWorkerTurnCard(current, input.change);
       if (next !== current) {
         this.saveWorkerTurnCard(next);
-        if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: next.messageId ? `worker-turn:update:${next.turnId}:${next.viewVersion}` : `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId ?? next.rootMessageId, kind: next.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(next.messageId ? input.render(next) : { card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
+        if (!next.messageId) this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
+        else if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(input.render(next)) });
       }
       this.database.exec("COMMIT"); return next;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
@@ -536,7 +552,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const next = reduceWorkerTurnCard(currentView, input.change);
       if (next !== currentView) {
         this.saveWorkerTurnCard(next);
-        if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: next.messageId ? `worker-turn:update:${next.turnId}:${next.viewVersion}` : `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId ?? next.rootMessageId, kind: next.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(next.messageId ? input.render(next) : { card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
+        if (!next.messageId) this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
+        else if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(input.render(next)) });
       }
       if (["completed", "failed", "cancelled"].includes(input.state)) {
         const queued = this.database.prepare("SELECT c.* FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE t.instance_id = ? AND t.instance_generation = ? AND t.state = 'queued' ORDER BY t.created_at, t.rowid").all(current.instanceId, input.expectedGeneration) as Array<Record<string, unknown>>;
@@ -554,8 +571,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
   private saveWorkerTurnCard(view: WorkerTurnCardView): void {
-    this.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, phase, request_text, answer, queue_position, started_at, finished_at, notice, result_capture, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET message_id=excluded.message_id, card_id=excluded.card_id, phase=excluded.phase, answer=excluded.answer, queue_position=excluded.queue_position, started_at=excluded.started_at, finished_at=excluded.finished_at, notice=excluded.notice, result_capture=excluded.result_capture, page_index=excluded.page_index, page_start=excluded.page_start, sequence=excluded.sequence, view_version=excluded.view_version, delivered_version=excluded.delivered_version, updated_at=excluded.updated_at`)
-      .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.phase, view.requestText, view.answer, view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, progress_sequence, phase, request_text, answer, status_title, progress_json, queue_position, started_at, finished_at, notice, result_capture, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET message_id=excluded.message_id, card_id=excluded.card_id, phase=excluded.phase, answer=excluded.answer, status_title=excluded.status_title, progress_json=excluded.progress_json, queue_position=excluded.queue_position, started_at=excluded.started_at, finished_at=excluded.finished_at, notice=excluded.notice, result_capture=excluded.result_capture, page_index=excluded.page_index, page_start=excluded.page_start, sequence=excluded.sequence, view_version=excluded.view_version, delivered_version=excluded.delivered_version, updated_at=excluded.updated_at`)
+      .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.progressSequence, view.phase, view.requestText, view.answer, view.statusTitle, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
   }
   private getInstanceTurnByKey(key: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
   listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } {
@@ -823,7 +840,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     const binding = this.getBinding(bindingId);
     if (!binding?.projectId) return null;
     return {
-      id: `legacy:${binding.id}`, projectId: binding.projectId, name: binding.title, role: "worker", agentKind: "traex", model: null,
+      id: `legacy:${binding.id}`, projectId: binding.projectId, name: binding.title, role: "worker", agentKind: "traex", model: null, sourcePrimaryPaneLabel: null,
       desiredState: binding.state === "archived" ? "stopped" : "running",
       observedState: binding.state === "failed" ? "failed" : binding.state === "archived" ? "stopped" : binding.lastAgentState === "done" ? "idle" : binding.lastAgentState === "unknown" ? "detached" : binding.lastAgentState,
       workspaceLeaseId: `legacy:${binding.id}:workspace`, generation: binding.generation,
@@ -3295,7 +3312,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       );
       CREATE TABLE IF NOT EXISTS agent_instances(
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
-        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT,
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT,
         desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
         observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
         workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
@@ -3324,7 +3341,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       CREATE INDEX IF NOT EXISTS instance_turns_instance_history ON instance_turns(instance_id, created_at, id);
       CREATE TABLE IF NOT EXISTS worker_turn_cards(
         turn_id TEXT PRIMARY KEY REFERENCES instance_turns(id) ON DELETE CASCADE, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, worker_name TEXT NOT NULL, parent_turn_id TEXT, root_message_id TEXT NOT NULL,
-        message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, queue_position INTEGER NOT NULL,
+        message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, status_title TEXT, progress_json TEXT NOT NULL DEFAULT '[]', queue_position INTEGER NOT NULL,
         started_at TEXT, finished_at TEXT, notice TEXT, result_capture TEXT NOT NULL CHECK(result_capture IN ('pending','captured','unavailable')), page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, sequence INTEGER NOT NULL, view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS worker_turn_card_pages(
@@ -3487,6 +3504,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureOutboundDeliveryOrder();
     this.ensureWorkerTurnCards();
     this.ensureWorkerTurnCardPageStates();
+    this.ensureWorkerTurnCardProgress();
+    this.ensureWorkerTurnProgressSequence();
+    this.ensureWorkerSourcePrimaryPaneLabel();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
@@ -3984,7 +4004,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         CREATE INDEX IF NOT EXISTS instance_turns_runtime_turn ON instance_turns(runtime_turn_id) WHERE runtime_turn_id IS NOT NULL;
         CREATE TABLE IF NOT EXISTS worker_turn_cards(
           turn_id TEXT PRIMARY KEY REFERENCES instance_turns(id) ON DELETE CASCADE, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, worker_name TEXT NOT NULL, parent_turn_id TEXT, root_message_id TEXT NOT NULL,
-          message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, queue_position INTEGER NOT NULL,
+          message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, progress_sequence INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, status_title TEXT, progress_json TEXT NOT NULL DEFAULT '[]', queue_position INTEGER NOT NULL,
           started_at TEXT, finished_at TEXT, notice TEXT, result_capture TEXT NOT NULL CHECK(result_capture IN ('pending','captured','unavailable')), page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, sequence INTEGER NOT NULL, view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS worker_turn_cards_instance ON worker_turn_cards(instance_id, created_at, turn_id);
@@ -4013,6 +4033,44 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       `);
       this.database.exec("CREATE INDEX IF NOT EXISTS worker_turn_card_pages_turn ON worker_turn_card_pages(turn_id, page_index)");
       this.database.prepare("INSERT INTO schema_migrations(version) VALUES (9)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerTurnCardProgress(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 11").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("status_title")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN status_title TEXT");
+      if (!columns.has("progress_json")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_json TEXT NOT NULL DEFAULT '[]'");
+      if (!columns.has("progress_sequence")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0");
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (11)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerTurnProgressSequence(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 12").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("progress_sequence")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0");
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (12)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerSourcePrimaryPaneLabel(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 13").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("source_primary_pane_label")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN source_primary_pane_label TEXT");
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (13)").run();
       this.database.exec("COMMIT");
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
@@ -4346,12 +4404,23 @@ function mapWorkerTurnCard(row: Record<string, unknown> | undefined): WorkerTurn
   return row ? {
     turnId: String(row.turn_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), workerName: String(row.worker_name),
     parentTurnId: row.parent_turn_id === null ? null : String(row.parent_turn_id), rootMessageId: String(row.root_message_id),
-    messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id), elementId: String(row.element_id),
-    phase: String(row.phase) as WorkerTurnCardView["phase"], requestText: String(row.request_text), answer: String(row.answer), queuePosition: Number(row.queue_position),
+    messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id), elementId: String(row.element_id), progressSequence: Number(row.progress_sequence ?? 0),
+    phase: String(row.phase) as WorkerTurnCardView["phase"], requestText: String(row.request_text), answer: String(row.answer), statusTitle: row.status_title === null || row.status_title === undefined ? null : String(row.status_title), progressEvents: parseWorkerProgress(row.progress_json), progressSummary: summarizeWorkerProgress(parseWorkerProgress(row.progress_json)), queuePosition: Number(row.queue_position),
     startedAt: row.started_at === null ? null : String(row.started_at), finishedAt: row.finished_at === null ? null : String(row.finished_at), notice: row.notice === null ? null : String(row.notice),
     resultCapture: String(row.result_capture) as WorkerTurnCardView["resultCapture"], pageIndex: Number(row.page_index), pageStart: Number(row.page_start), sequence: Number(row.sequence),
     viewVersion: Number(row.view_version), deliveredVersion: Number(row.delivered_version), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
   } : null;
+}
+function parseWorkerProgress(value: unknown): import("../domain/run-card-view.js").RunProgressEvent[] {
+  try {
+    const parsed = JSON.parse(typeof value === "string" ? value : "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is import("../domain/run-card-view.js").RunProgressEvent => isRecord(entry) && typeof entry.key === "string" && typeof entry.label === "string" && typeof entry.kind === "string" && typeof entry.state === "string" && typeof entry.occurredAt === "string") : [];
+  } catch { return []; }
+}
+function summarizeWorkerProgress(events: readonly import("../domain/run-card-view.js").RunProgressEvent[]): import("../domain/run-card-view.js").RunProgressSummary {
+  let stepTotal = 0; let stepDone = 0;
+  for (const event of events) if (event.kind === "step") { stepTotal += 1; if (event.state === "done") stepDone += 1; }
+  return { total: events.length, stepTotal, stepDone };
 }
 
 function mapWorkerTurnCardPage(row: Record<string, unknown>): WorkerTurnCardPage {

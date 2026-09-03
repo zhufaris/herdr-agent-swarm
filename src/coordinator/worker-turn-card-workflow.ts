@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
-import { workerTurnElementId, workerTurnStreamContent } from "../domain/worker-turn-card-view.js";
+import { renderWorkerTurnCard, workerTurnProgressContent } from "../cards/worker-turn-card.js";
+import { workerTurnElementId, workerTurnProgressElementId, workerTurnStreamContent } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnCardStore } from "../domain/ports/projection.js";
 import { renderLarkMarkdownPage } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
@@ -32,6 +32,15 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
     }
     const page = this.store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view.pageIndex && candidate.state === "active");
     if (!page?.cardId) return;
+    if (view.statusTitle || view.progressEvents.length > 0) {
+      const progress = workerTurnProgressContent(view);
+      const progressOutcome = this.store.reserveWorkerTurnProgress({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: workerTurnProgressElementId(turnId, page.pageIndex), content: progress });
+      if (progressOutcome === "reserved") {
+        this.wakeOutbound();
+        return;
+      }
+      if (progressOutcome === "stale") return;
+    }
     const content = redactSecrets(workerTurnStreamContent(view));
     const rendered = renderLarkMarkdownPage(content, page.pageStart, PAGE_LIMIT);
     const facts = this.store.getWorkerTurnCardDeliveryFacts(turnId, page.pageIndex);

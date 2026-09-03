@@ -52,6 +52,29 @@ describe("InstanceControlWorkflow", () => {
     expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base-sha", state: "ready" });
   });
 
+  it("persists the source Primary pane label in the Worker pane title across restart", async () => {
+    const { workflow, paneHost } = setup();
+    store!.createPendingBinding({ id: "binding-1", workspaceId: "herdr-a", chatId: "chat-1", topicId: "topic-1", rootMessageId: "root-1", title: "Primary task" });
+    store!.updateBinding("binding-1", { paneId: "primary-pane-id" });
+    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === "primary-pane-id"
+      ? { ...pane, paneId, cwd: "/repo", label: "primary-task" }
+      : { ...pane, paneId, cwd: "/repo/.worktree/reviewer", label: null });
+
+    const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", "/repo/.worktree/reviewer", expect.objectContaining({ title: "lark_task-primary-task-reviewer" }));
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ sourcePrimaryPaneLabel: "primary-task" });
+
+    await workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id });
+    await workflow.start({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id });
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", "/repo/.worktree/reviewer", expect.objectContaining({ title: "lark_task-primary-task-reviewer" }));
+  });
+
+  it("uses the explicit unbound fallback instead of a pane id", async () => {
+    const { workflow, paneHost } = setup();
+    await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
+    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo/.worktree/reviewer", expect.objectContaining({ title: "lark_task-unbound-reviewer" }));
+  });
+
   it("persists the workspace checkpoint when runtime launch fails", async () => {
     const { workflow } = setup({ start: async () => { throw new Error("launch failed Bearer live-secret"); } });
     await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true })).resolves.toMatchObject({ status: "created-start-failed", error: "launch failed Bearer [REDACTED]", instance: { observedState: "failed", lastError: "launch failed Bearer [REDACTED]" } });

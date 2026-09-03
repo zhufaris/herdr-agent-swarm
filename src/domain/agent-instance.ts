@@ -26,6 +26,7 @@ export interface AgentInstance {
   role: InstanceRole;
   agentKind: AgentKind;
   model: string | null;
+  sourcePrimaryPaneLabel: string | null;
   desiredState: DesiredInstanceState;
   observedState: ObservedInstanceState;
   workspaceLeaseId: string;
@@ -69,6 +70,7 @@ export interface CreateAgentInstanceInput {
   role: InstanceRole;
   agentKind: AgentKind;
   model: string | null;
+  sourcePrimaryPaneLabel?: string | null;
   desiredState: DesiredInstanceState;
   workspace: Omit<WorkspaceLease, "projectId" | "instanceId" | "state" | "generation">;
 }

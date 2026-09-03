@@ -1,4 +1,5 @@
 import { stableElementId } from "./stable-element-id.js";
+import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, type RunProgressEvent, type RunProgressSummary } from "./run-card-view.js";
 
 export type WorkerTurnCardPhase =
   | "queued"
@@ -22,9 +23,13 @@ export interface WorkerTurnCardView {
   messageId: string | null;
   cardId: string | null;
   elementId: string;
+  progressSequence: number;
   phase: WorkerTurnCardPhase;
   requestText: string;
   answer: string;
+  statusTitle: string | null;
+  progressEvents: RunProgressEvent[];
+  progressSummary: RunProgressSummary;
   queuePosition: number;
   startedAt: string | null;
   finishedAt: string | null;
@@ -58,7 +63,7 @@ export type WorkerTurnCardChange =
   | { type: "preparing"; occurredAt: string }
   | { type: "running"; occurredAt: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answer: string }
+  | { type: "output"; occurredAt: string; answer: string; statusTitle?: string | null; progressEvents?: RunProgressEvent[] }
   | { type: "completed"; occurredAt: string; answer: string }
   | { type: "completed-without-output"; occurredAt: string; notice: string }
   | { type: "failed" | "cancelled" | "dispatch-uncertain"; occurredAt: string; notice: string };
@@ -78,8 +83,8 @@ export function createQueuedWorkerTurnCard(input: {
   return {
     turnId: input.turnId, instanceId: input.instanceId, instanceGeneration: input.instanceGeneration,
     workerName: input.workerName, parentTurnId: input.parentTurnId, rootMessageId: input.rootMessageId,
-    messageId: null, cardId: null, elementId: workerTurnElementId(input.turnId, 0), phase: "queued",
-    requestText: input.requestText, answer: "", queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
+    messageId: null, cardId: null, elementId: workerTurnElementId(input.turnId, 0), progressSequence: 0, phase: "queued",
+    requestText: input.requestText, answer: "", statusTitle: null, progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
     notice: null, resultCapture: input.resultCapture ?? "pending", pageIndex: 0, pageStart: 0, sequence: 0,
     viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
@@ -87,6 +92,11 @@ export function createQueuedWorkerTurnCard(input: {
 
 export function workerTurnElementId(turnId: string, pageIndex: number): string {
   return stableElementId(`worker-turn-${turnId}-${pageIndex}`);
+}
+
+/** A distinct, stable CardKit element for the live Worker progress snapshot. */
+export function workerTurnProgressElementId(turnId: string, pageIndex: number): string {
+  return stableElementId(`worker-progress-${turnId}-${pageIndex}`);
 }
 
 export function workerTurnStreamContent(view: WorkerTurnCardView): string {
@@ -115,8 +125,12 @@ export function reduceWorkerTurnCard(state: WorkerTurnCardView, change: WorkerTu
       patch = { phase: "blocked", startedAt: state.startedAt ?? change.occurredAt, notice: change.notice };
       break;
     case "output":
-      if (state.answer === change.answer) return state;
-      patch = { answer: change.answer };
+      {
+        const progress = mergeRecentProgress(state.progressEvents, state.progressSummary, change.progressEvents ?? []);
+        const statusTitle = change.statusTitle === undefined ? state.statusTitle : change.statusTitle;
+        if (state.answer === change.answer && state.statusTitle === statusTitle && sameProgress(state.progressEvents, progress.events)) return state;
+        patch = { answer: change.answer, statusTitle, progressEvents: progress.events, progressSummary: progress.summary };
+      }
       break;
     case "completed":
       if (state.phase === "completed" && state.answer === change.answer && state.resultCapture === "captured") return state;
@@ -137,4 +151,11 @@ export function reduceWorkerTurnCard(state: WorkerTurnCardView, change: WorkerTu
       break;
   }
   return { ...state, ...patch, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
+}
+
+function sameProgress(left: readonly RunProgressEvent[], right: readonly RunProgressEvent[]): boolean {
+  return left.length === right.length && left.every((event, index) => {
+    const other = right[index];
+    return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state;
+  });
 }

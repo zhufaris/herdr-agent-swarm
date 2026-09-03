@@ -2,7 +2,7 @@ import type { AgentInstance, AgentKind, AgentRuntimeRef, DesiredInstanceState, I
 import type { SqlValue } from "./sqlite-records.js";
 
 export type AgentInstanceRow = Record<string, SqlValue> & {
-  id: string; project_id: string; name: string; role: string; agent_kind: string; model: string | null;
+  id: string; project_id: string; name: string; role: string; agent_kind: string; model: string | null; source_primary_pane_label: string | null;
   desired_state: string; observed_state: string; workspace_lease_id: string; generation: number;
   herdr_workspace_id: string | null; pane_id: string | null; native_session_id: string | null;
   provisioning_checkpoint: string; last_error: string | null; pending_herdr_workspace_id: string | null; pending_pane_id: string | null;
@@ -22,7 +22,7 @@ export function mapAgentInstance(row: AgentInstanceRow): AgentInstance {
     ? { herdrWorkspaceId: row.pending_herdr_workspace_id, paneId: row.pending_pane_id, generation } : null;
   return {
     id: row.id, projectId: row.project_id, name: row.name, role: row.role as InstanceRole, agentKind: row.agent_kind as AgentKind,
-    model: row.model, desiredState: row.desired_state as DesiredInstanceState, observedState: row.observed_state as ObservedInstanceState,
+    model: row.model, sourcePrimaryPaneLabel: row.source_primary_pane_label, desiredState: row.desired_state as DesiredInstanceState, observedState: row.observed_state as ObservedInstanceState,
     workspaceLeaseId: row.workspace_lease_id, generation, runtimeRef, pendingRuntimeRef, provisioningCheckpoint: row.provisioning_checkpoint as AgentInstance["provisioningCheckpoint"], lastError: row.last_error
   };
 }

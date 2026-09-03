@@ -34,6 +34,18 @@ describe("instance cards", () => {
 
     expect(JSON.stringify(renderWorkerTurnCard(completed))).toContain("无法获取可信的结构化输出");
   });
+  it("renders Worker live status and bounded trusted progress", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-live", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const running = reduceWorkerTurnCard(queued, { type: "output", occurredAt: "2026-09-01T00:00:01.000Z", answer: "", statusTitle: "Checking durable state", progressEvents: [
+      { key: "plan:one", kind: "step", label: "Inspect schema", state: "active", occurredAt: "now" },
+      { key: "tool:read", kind: "read", label: "Read store", state: "done", occurredAt: "now" }
+    ] });
+    const text = JSON.stringify(renderWorkerTurnCard(running));
+
+    expect(text).toContain("Checking durable state");
+    expect(text).toContain("Inspect schema");
+    expect(text).toContain("Read store");
+  });
   it("renders the current thread as Primary and counts only Workers", () => {
     const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries: [{ instance, workspace, capabilities, queueDepth: 3 }], target: { kind: "instance", instanceId: "i1" }, primary });
     const text = JSON.stringify(card);
