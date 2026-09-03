@@ -5,6 +5,7 @@ import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { classifyContinuation } from "../domain/continuation-classifier.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
+import { formatPromptTitle } from "../domain/prompt-title.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
@@ -103,7 +104,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     const classification = classifyContinuation({ text: body, hasUnsupportedContent: message.hasUnsupportedContent ?? false });
     if (!classification.eligible && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
     const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
-    const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: requestTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
+    const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
     const result = this.options.store.acceptClassifiedPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }), steeringView: createQueuedRunCard({ ...common, conversionParentPromptId: null, queuePosition: 0 }), rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: null, activeAfter: new Date(Date.parse(acceptedAt) - 5 * 60_000).toISOString(), acceptedAt, answerCardFor: renderRequestAnswerCard });
     this.options.logger.info({ event: "auto-steering-classified", bindingId: binding.id, messageId: message.messageId, outcome: result.decision, reason: classification.eligible ? result.fallbackReason : classification.reason }, "classified continuation message");
     if (result.decision === "queue_full") { await this.reject(message, "This topic's prompt queue is full"); return false; }
@@ -121,7 +122,6 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
 }
 
 function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> { const result = new Map<string, BridgeConfig["projects"][number] | null>(); for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project); return result; }
-function requestTitle(body: string): string { const normalized = body.replace(/\s+/g, " " ).trim(); return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request"; }
 function requiresAdministrator(kind: NonNullable<ReturnType<typeof parseCommand>>["kind"]): boolean {
   return ["new", "projects", "stop", "steer", "model", "reset", "attach", "rename", "close", "pane_close_request", "pane_close_confirm", "reattach", "replace", "resume"].includes(kind);
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
+import { formatPromptTitle } from "../domain/prompt-title.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
@@ -183,7 +184,7 @@ export class ExternalTurnObserver {
       if (!startedAt) return "ignored";
       const externalPromptId = this.idFactory();
       const externalView = createQueuedRunCard({
-        promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: requestTitle(observation.requestText),
+        promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(observation.requestText),
         sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: observation.requestText, queuePosition: 0, occurredAt: startedAt
       });
       const result = this.options.store.adoptExternalTurn({
@@ -267,5 +268,3 @@ function sessionFor(binding: Binding) {
 function hasObservation(value: TraexTranscriptObservation): boolean {
   return Boolean(value.freshTurnStart || value.requestText !== undefined || value.answerDelta || value.toolActivities?.length || value.mainStatus || value.turnLifecycle?.state === "completed" || value.turnLifecycle?.state === "aborted");
 }
-
-function requestTitle(body: string): string { const normalized = body.replace(/\s+/g, " " ).trim(); return normalized.length > 64 ? normalized.slice(0, 63) + "…" : normalized || "TraeX request"; }
