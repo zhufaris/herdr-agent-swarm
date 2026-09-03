@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { renderProjectEntryCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { PromptRunStore } from "../domain/ports/prompt.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
@@ -15,6 +15,7 @@ import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { TurnSupervisor } from "./turn-supervisor.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, decidePromptExecutionFailure, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
 import { decidePromptSafetyScan, decidePromptSafetyScanFailure } from "./prompt-safety-scan-policy.js";
+import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 
 export interface ActiveTurnSnapshot {
   promptId: string;
@@ -650,22 +651,21 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   private retainOwnedObservation(source: TurnOutputSource, observation: TraexTranscriptObservation): void {
     if (source.mode !== "typed") return;
-    if (observation.turnLifecycle?.state === "completed" || observation.turnLifecycle?.state === "aborted") source.terminalLifecycle = observation.turnLifecycle;
-    if (observation.answerDelta) {
-      source.chunks.push(observation.answerDelta);
-      source.emitted = true;
-    }
+    const projection = projectOwnedTranscriptOutput({ state: source, observation });
+    source.emitted = projection.state.emitted;
+    source.chunks = [...projection.state.chunks];
+    if (projection.state.terminalLifecycle) source.terminalLifecycle = projection.state.terminalLifecycle;
   }
 
   private async publishTypedObservation(bindingId: string, promptId: string, observation: TraexTranscriptObservation, startedAt: number): Promise<void> {
-    const mainStatus = observation.mainStatus && Number.isFinite(startedAt) ? toMainStatus(observation.mainStatus, startedAt) : undefined;
-    if (!observation.answerDelta && !observation.toolActivities?.length && !mainStatus) return;
+    const projection = projectOwnedTranscriptOutput({
+      state: { emitted: false, chunks: [] }, observation,
+      ...(Number.isFinite(startedAt) ? { elapsedSeconds: Math.floor((Date.now() - startedAt) / 1_000) } : {})
+    });
+    if (!projection.observation) return;
     await this.publish(bindingId, "TurnOutputObserved", "herdr", {
       promptId,
-      observation: {
-        answer: { snapshot: observation.answerDelta, update: "append", toolActivities: observation.toolActivities ?? [] },
-        main: { ...(mainStatus ? { status: mainStatus } : {}) }
-      }
+      observation: projection.observation
     });
   }
 
@@ -686,15 +686,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
   }
-}
-
-function toMainStatus(status: TraexTranscriptMainStatus, startedAt: number): NonNullable<Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["observation"]["main"]["status"]> {
-  return {
-    ...(status.statusTitle ? { statusTitle: status.statusTitle } : {}),
-    ...(status.planSteps ? { planSteps: status.planSteps.map((step) => ({ ...step, kind: "step" as const })) } : {}),
-    elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)),
-    ...(status.tokenCount !== undefined ? { tokenCount: status.tokenCount } : {})
-  };
 }
 
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
