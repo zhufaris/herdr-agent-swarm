@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Herdr Agent Swarm Architecture",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 850],
+    "views": [
+      { "id": "request", "label": "Request path", "focus": ["lark-user", "lark", "inbound", "workflows", "agents"], "note": "Controlled Lark input to a Herdr Agent" },
+      { "id": "durability", "label": "Durability", "focus": ["sqlite", "projector", "outbox", "lark"], "note": "SQLite state and retryable delivery intent" },
+      { "id": "convergence", "label": "Convergence", "focus": ["herdr", "reconciler", "sqlite", "systemd"], "note": "Herdr facts converge into durable state" }
+    ]
+  },
+  "components": [
+    { "id": "lark-user", "type": "external", "label": "Operator", "sublabel": "Lark messages and cards", "pos": [45, 290], "size": [155, 72] },
+    { "id": "lark", "type": "external", "label": "Lark / CardKit", "sublabel": "Visible messages and cards", "pos": [255, 290], "size": [170, 72] },
+    { "id": "inbound", "type": "backend", "label": "Lark Adapter + InboundRouter", "sublabel": "Normalize, persist, route", "pos": [490, 290], "size": [205, 72] },
+    { "id": "workflows", "type": "backend", "label": "Coordinator Workflows", "sublabel": "FIFO prompts, instances, sessions", "pos": [775, 290], "size": [195, 72] },
+    { "id": "agents", "type": "backend", "label": "Agent Driver Registry", "sublabel": "TraeX, Codex, Claude Code, Pi", "pos": [1000, 290], "size": [175, 72] },
+    { "id": "herdr", "type": "external", "label": "Herdr Workspace", "sublabel": "Pane and Agent authority", "pos": [1205, 290], "size": [145, 72] },
+    { "id": "sqlite", "type": "database", "label": "SQLite Binding Store", "sublabel": "Bindings, FIFO, outbox, lease", "pos": [770, 605], "size": [210, 76] },
+    { "id": "reconciler", "type": "backend", "label": "Runtime Reconciler", "sublabel": "Snapshots and Socket wake-up hints", "pos": [1040, 605], "size": [220, 76] },
+    { "id": "projector", "type": "backend", "label": "Projection + Card Rendering", "sublabel": "Lifecycle to Topic, Run, Worker cards", "pos": [370, 605], "size": [225, 76] },
+    { "id": "outbox", "type": "messagebus", "label": "Durable Lark Outbox", "sublabel": "Ordered retry; no prompt replay", "pos": [80, 605], "size": [210, 76] },
+    { "id": "systemd", "type": "cloud", "label": "user systemd + Health", "sublabel": "Lifecycle, lease, health endpoints", "pos": [1085, 85], "size": [225, 72] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Standalone Bridge Service", "wraps": ["inbound", "workflows", "agents", "sqlite", "reconciler", "projector", "outbox", "systemd"], "pad": 35 },
+    { "kind": "security-group", "label": "Durable workflow authority", "wraps": ["sqlite", "projector", "outbox"], "pad": 26 }
+  ],
+  "connections": [
+    { "id": "operator-message", "from": "lark-user", "to": "lark", "label": "messages / card actions", "labelDy": 60, "variant": "emphasis" },
+    { "id": "lark-inbound", "from": "lark", "to": "inbound", "label": "long-connection callback", "labelDy": 60, "variant": "emphasis" },
+    { "id": "accept-intent", "from": "inbound", "to": "workflows", "label": "persist, then schedule", "labelDy": 60 },
+    { "id": "dispatch-agent", "from": "workflows", "to": "agents", "label": "single-binding FIFO / exact steering", "labelDy": 60 },
+    { "id": "agent-command", "from": "agents", "to": "herdr", "label": "CLI / Socket RPC", "labelDy": -30, "variant": "security" },
+    { "id": "durable-acceptance", "from": "workflows", "to": "sqlite", "label": "atomic transition", "fromSide": "bottom", "toSide": "top", "labelAt": [868, 440] },
+    { "id": "herdr-snapshot", "from": "herdr", "to": "reconciler", "label": "authoritative snapshot + event hint", "fromSide": "bottom", "toSide": "top" },
+    { "id": "reconcile-state", "from": "reconciler", "to": "sqlite", "label": "identity-fenced convergence", "labelDy": 62 },
+    { "id": "lifecycle-projection", "from": "sqlite", "to": "projector", "label": "durable lifecycle state" },
+    { "id": "write-outbox", "from": "projector", "to": "outbox", "label": "record delivery intent", "labelDy": 62, "variant": "dashed" },
+    { "id": "outbox-delivery", "from": "outbox", "to": "lark", "label": "ordered CardKit retry delivery", "fromSide": "top", "toSide": "bottom", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Safe execution", "items": ["One ordinary turn per binding", "Never auto-replay a prompt that may have reached TraeX", "High-risk approval stays local to Herdr"] },
+    { "dot": "violet", "title": "Recoverable delivery", "items": ["Persist workflow intent before Lark delivery", "Lark retries never resubmit an Agent prompt", "Socket events wake; snapshots converge truth"] }
+  ]
+}

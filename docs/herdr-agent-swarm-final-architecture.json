@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Herdr Agent Swarm · Final DDD / Clean Architecture",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1310, 710],
+    "views": [
+      {
+        "id": "durable-request",
+        "label": "Durable request path",
+        "focus": ["lark", "inbound", "inbound-dispatcher", "workflows", "ports", "sqlite", "outbox", "dispatcher"],
+        "note": "Follow Lark input through atomic SQLite state and ordered CardKit delivery."
+      },
+      {
+        "id": "dependency-rule",
+        "label": "Dependency rule",
+        "focus": ["inbound", "workflows", "domain", "ports", "sqlite"],
+        "note": "Workflows depend on narrow capability ports; SQLite implements them within one transaction boundary."
+      },
+      {
+        "id": "runtime-recovery",
+        "label": "Runtime convergence",
+        "focus": ["systemd", "runtime", "herdr", "sqlite", "outbox"],
+        "note": "Herdr owns live pane state; SQLite owns durable workflow state; uncertain work is observed, never replayed."
+      }
+    ]
+  },
+  "components": [
+    { "id": "lark", "type": "external", "label": "Lark / CardKit", "sublabel": "human input and visible cards", "pos": [40, 125], "size": [190, 78] },
+    { "id": "herdr", "type": "external", "label": "Herdr / TraeX", "sublabel": "live pane + agent state", "pos": [40, 305], "size": [190, 78] },
+    { "id": "systemd", "type": "external", "label": "user systemd + main.ts", "sublabel": "lease · fence · lifecycle owner", "pos": [40, 500], "size": [190, 78] },
+    { "id": "adapters", "type": "backend", "label": "Composition factory + adapters", "sublabel": "object graph · Lark SDK · Herdr CLI", "pos": [300, 210], "size": [230, 92] },
+    { "id": "inbound", "type": "backend", "label": "InboundRouter", "sublabel": "Lark facade · startup / shutdown only", "pos": [600, 55], "size": [240, 82] },
+    { "id": "inbound-dispatcher", "type": "messagebus", "label": "InboundMessageDispatcher", "sublabel": "durable inbox · claim/release · retry", "pos": [600, 175], "size": [240, 82] },
+    { "id": "workflows", "type": "backend", "label": "Application workflows", "sublabel": "message routing · prompt · session · pane", "pos": [600, 290], "size": [240, 92] },
+    { "id": "domain", "type": "backend", "label": "Domain model + policies", "sublabel": "Binding · Prompt · Turn · FIFO / no-replay", "pos": [600, 430], "size": [240, 92] },
+    { "id": "ports", "type": "backend", "label": "Narrow capability ports", "sublabel": "prompt · projection · binding · workflow", "pos": [600, 555], "size": [240, 82] },
+    { "id": "sqlite", "type": "database", "label": "SqliteBindingStore", "sublabel": "one implementation · atomic transitions", "pos": [970, 365], "size": [260, 92] },
+    { "id": "outbox", "type": "messagebus", "label": "Projections + durable outbox", "sublabel": "Run / Topic / Worker cards", "pos": [970, 105], "size": [260, 92] },
+    { "id": "dispatcher", "type": "messagebus", "label": "LarkOutboxDispatcher", "sublabel": "ordered delivery · retry · dead letter", "pos": [1050, 215], "size": [205, 92] },
+    { "id": "runtime", "type": "backend", "label": "Reconciliation + Observers", "sublabel": "identity-fenced convergence", "pos": [970, 510], "size": [260, 92] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "External authorities", "wraps": ["lark", "herdr", "systemd"], "pad": 28 },
+    { "kind": "region", "label": "Infrastructure + adapters", "wraps": ["adapters", "sqlite", "outbox", "dispatcher", "runtime"], "pad": 28 },
+    { "kind": "region", "label": "Application layer", "wraps": ["inbound", "inbound-dispatcher", "workflows"], "pad": 28 },
+    { "kind": "region", "label": "Domain core", "wraps": ["domain", "ports"], "pad": 28 }
+  ],
+  "connections": [
+    { "id": "lark-adapters", "from": "lark", "to": "adapters", "variant": "emphasis" },
+    { "id": "adapters-inbound", "from": "adapters", "to": "inbound", "label": "normalized message / action", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "id": "inbound-dispatch", "from": "inbound", "to": "inbound-dispatcher", "label": "persist input / drive lifecycle", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [720, 155] },
+    { "id": "dispatcher-workflows", "from": "inbound-dispatcher", "to": "workflows", "label": "accepted durable input", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [720, 275] },
+    { "id": "workflows-domain", "from": "workflows", "to": "domain", "label": "use cases + invariants", "fromSide": "bottom", "toSide": "top", "labelAt": [720, 410] },
+    { "id": "domain-ports", "from": "domain", "to": "ports", "label": "consumer contracts", "fromSide": "bottom", "toSide": "top", "labelAt": [720, 540] },
+    { "id": "workflows-ports", "from": "workflows", "to": "ports", "label": "minimal capability dependency", "variant": "emphasis", "fromSide": "right", "toSide": "right", "via": [[875, 336], [875, 596]], "labelAt": [850, 417] },
+    { "id": "ports-sqlite", "from": "ports", "to": "sqlite", "label": "one implementation, one transaction owner", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[930, 596], [930, 480], [950, 480], [950, 411]], "labelAt": [1070, 625] },
+    { "id": "workflows-outbox", "from": "workflows", "to": "outbox", "label": "project state + persist delivery intent", "variant": "dashed", "fromSide": "right", "toSide": "left", "labelAt": [1050, 360] },
+    { "id": "outbox-dispatcher", "from": "outbox", "to": "dispatcher", "label": "ordered lanes", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [1130, 325] },
+    { "id": "dispatcher-lark", "from": "dispatcher", "to": "lark", "label": "CardKit delivery", "variant": "dashed", "fromSide": "right", "toSide": "top", "via": [[1280, 261], [1280, 25], [135, 25], [135, 110]], "labelAt": [950, 15] },
+    { "id": "runtime-herdr", "from": "runtime", "to": "herdr", "label": "snapshot + exact transcript observation", "variant": "dashed", "fromSide": "left", "toSide": "bottom", "via": [[940, 556], [940, 680], [10, 680], [10, 400], [135, 400]], "labelAt": [500, 665] },
+    { "id": "runtime-sqlite", "from": "runtime", "to": "sqlite", "label": "fenced convergence", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "systemd-runtime", "from": "systemd", "to": "runtime", "label": "start / stop / lease lifecycle", "variant": "dashed", "fromSide": "right", "toSide": "left", "via": [[270, 539], [270, 700], [940, 700], [940, 556]], "labelAt": [700, 695] },
+    { "id": "adapters-herdr", "from": "adapters", "to": "herdr", "label": "CLI / socket / pane control", "variant": "dashed", "fromSide": "left", "toSide": "right", "via": [[270, 256], [270, 400], [250, 400], [250, 344]], "labelAt": [280, 397] }
+  ]
+}
