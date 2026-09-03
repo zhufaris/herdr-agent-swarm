@@ -13,6 +13,7 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { decidePaneCreatedCheckpoint, decideSelectedCheckpoint, provisioningRecoveryMessage } from "./binding-provisioning-policy.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
@@ -313,28 +314,38 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       let pane = current.paneId ? await herdr.getPane(current.paneId) : null;
       if (current.paneId && !pane) throw new ProvisionedPaneMissingError(current.paneId);
       if (pane && current.traexSessionId && pane.terminalId && current.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${current.paneId}`);
-      if (current.provisioningCheckpoint === "selected") {
-        if (!allowPaneCreation) throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
+      const selectedDecision = decideSelectedCheckpoint(current.provisioningCheckpoint, allowPaneCreation);
+      if (selectedDecision === "manual_attach") throw new Error("Interrupted while creating the Herdr pane; inspect the Space and attach the surviving pane with /swarm attach <space> <pane>");
+      if (selectedDecision === "create_pane") {
         const tools = this.options.primaryTools.issueBinding(current.id, current.generation);
         pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation, project.id, paneTitle, tools));
         current = store.updateBindingMetadata(current.id, paneIdentityPatch(pane)); current = store.transitionBinding(current.id, { type: "pane_created" });
       }
       if (!pane && current.paneId) pane = await herdr.getPane(current.paneId);
       if (!pane) throw new Error(`Provisioning checkpoint ${current.provisioningCheckpoint} has no Herdr pane`);
-      if (current.provisioningCheckpoint === "pane_created") {
-        if (!store.hasBindingPrimaryToolCapability(current.id, current.generation)) {
+      const hasPrimaryToolCapability = store.hasBindingPrimaryToolCapability(current.id, current.generation);
+      const paneObservation = current.provisioningCheckpoint === "pane_created" && hasPrimaryToolCapability
+        ? await herdr.observeRuntime(pane.paneId)
+        : null;
+      const paneCreatedDecision = decidePaneCreatedCheckpoint({
+        checkpoint: current.provisioningCheckpoint,
+        hasPrimaryToolCapability,
+        traexProcess: paneObservation?.traexProcess ?? false,
+        composerReady: paneObservation?.composerReady ?? false
+      });
+      if (paneCreatedDecision === "reject_missing_capability") {
           await this.publish(current.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
           throw new Error("Primary tool credential provenance is unavailable; use /swarm reset or /swarm replace");
-        }
-        const observation = await herdr.observeRuntime(pane.paneId);
-        if (observation?.traexProcess && !observation.composerReady) {
-          const replacementTitle = randomPaneName();
-          const tools = this.options.primaryTools.issueBinding(current.id, current.generation + 1);
-          const replacement = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation + 1, project.id, replacementTitle, tools));
-          current = store.replaceProvisioningPane({ bindingId: current.id, expectedPaneId: pane.paneId, expectedGeneration: current.generation, pane: replacement });
-          pane = replacement;
-          logger.warn({ event: "project-provisioning-pane-replaced", selectionId: selection.id, bindingId: current.id, retainedPaneId: observation.pane?.paneId ?? null, paneId: pane.paneId, generation: current.generation, outcome: "replacement_created" }, "replaced an occupied provisioning pane that lacked structured Agent readiness");
-        }
+      }
+      if (paneCreatedDecision === "replace_pane") {
+        const replacementTitle = randomPaneName();
+        const tools = this.options.primaryTools.issueBinding(current.id, current.generation + 1);
+        const replacement = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation + 1, project.id, replacementTitle, tools));
+        current = store.replaceProvisioningPane({ bindingId: current.id, expectedPaneId: pane.paneId, expectedGeneration: current.generation, pane: replacement });
+        pane = replacement;
+        logger.warn({ event: "project-provisioning-pane-replaced", selectionId: selection.id, bindingId: current.id, retainedPaneId: paneObservation?.pane?.paneId ?? null, paneId: pane.paneId, generation: current.generation, outcome: "replacement_created" }, "replaced an occupied provisioning pane that lacked structured Agent readiness");
+      }
+      if (paneCreatedDecision === "start_runtime" || paneCreatedDecision === "replace_pane") {
         const tools = this.options.primaryTools.configurationForBinding(current.id, current.generation);
         await herdr.startTraex(pane.paneId, config.traex.executable, primaryToolAgentArgs(tools));
         pane = await this.requireStartedPane(project, pane.paneId, current.traexSessionId);
@@ -456,7 +467,6 @@ function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSe
 
 function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function provisioningRecoveryMessage(error: unknown): string { const detail = errorMessage(error); return detail.includes("/swarm attach") ? `创建结果无法自动确认。请先检查对应 Space：若 Pane 已存在，发送 \`/swarm attach <space> <pane>\`；若不存在，再发送 \`/swarm new\`。${detail}` : `创建已停在可恢复检查点，bridge 会安全重试。${detail}`; }
 
 class ProvisionedPaneMissingError extends Error {
   constructor(paneId: string | null) { super(`Provisioned Herdr pane ${paneId ?? "unknown"} no longer exists`); this.name = "ProvisionedPaneMissingError"; }
