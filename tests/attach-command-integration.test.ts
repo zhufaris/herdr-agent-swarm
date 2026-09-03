@@ -348,7 +348,7 @@ describe("attach existing pane command", () => {
 
 function config(): BridgeConfig {
   return {
-    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
     herdr: { workspaceId: "w5", workspaceCwd: "/repo", executable: "herdr" },
     projects: [{ id: "analytics", displayName: "Analytics", spaceName: "datasage_semantic_knowledge", description: "Data project", workspaceId: "w5", cwd: "/repo" }],
     defaultProjectId: "analytics", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:",

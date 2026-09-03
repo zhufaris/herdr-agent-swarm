@@ -78,7 +78,7 @@ describe("service lifecycle", () => {
     const standaloneState = join(fixture.root, "standalone-state");
     mkdirSync(standaloneConfig);
     writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
-    writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
+    writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "LARK_ALLOWED_OPEN_IDS=ou_user", "LARK_ADMIN_OPEN_IDS=ou_user"].join("\n") + "\n");
     const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState };
 
     await expect(runServiceLifecycle("install", environment)).resolves.toBe(0);
@@ -98,7 +98,7 @@ describe("service lifecycle", () => {
     mkdirSync(join(fixture.root, "legacy"));
     writeFileSync(legacyDatabase, "fixture");
     writeFileSync(join(standaloneConfig, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
-    writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "BRIDGE_DATABASE_PATH=" + legacyDatabase].join("\n") + "\n");
+    writeFileSync(join(standaloneConfig, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "LARK_ALLOWED_OPEN_IDS=ou_user", "LARK_ADMIN_OPEN_IDS=ou_user", "BRIDGE_DATABASE_PATH=" + legacyDatabase].join("\n") + "\n");
     const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: standaloneConfig, SWARM_STATE_DIR: standaloneState };
 
     await runServiceLifecycle("install", environment);
@@ -114,7 +114,7 @@ describe("service lifecycle", () => {
     const config = join(xdgConfig, "herdr-agent-swarm");
     mkdirSync(config, { recursive: true });
     writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: fixture.root }] }));
-    writeFileSync(join(config, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot"].join("\n") + "\n");
+    writeFileSync(join(config, ".env"), ["LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "LARK_ALLOWED_OPEN_IDS=ou_user", "LARK_ADMIN_OPEN_IDS=ou_user"].join("\n") + "\n");
     const environment = { ...fixture.environment, HERDR_PLUGIN_ROOT: undefined, HERDR_PLUGIN_CONFIG_DIR: undefined, HERDR_PLUGIN_STATE_DIR: undefined, SWARM_ROOT: fixture.root, SWARM_CONFIG_DIR: undefined, SWARM_STATE_DIR: undefined, XDG_CONFIG_HOME: xdgConfig, XDG_STATE_HOME: xdgState };
 
     await expect(runServiceLifecycle("install", environment)).resolves.toBe(0);
@@ -1037,7 +1037,7 @@ function createFixture(options: { active?: boolean; activeStatus?: "unknown"; st
   for (const directory of [config, state, dist, units, bin]) mkdirSync(directory);
   writeFileSync(join(config, "projects.json"), JSON.stringify({ defaultProjectId: "test", projects: [{ id: "test", displayName: "Test", description: "Test", workspaceId: "w1", cwd: root }] }));
   writeFileSync(join(config, ".env"), [
-    "LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot",
+    "LARK_APP_ID=app", "LARK_APP_SECRET=secret", "LARK_CHAT_ID=chat", "LARK_BOT_OPEN_ID=bot", "LARK_ALLOWED_OPEN_IDS=ou_user", "LARK_ADMIN_OPEN_IDS=ou_user",
     `BRIDGE_HTTP_PORT=${options.port ?? 39001}`, `BRIDGE_HTTP_HOST=${options.host ?? "127.0.0.1"}`
   ].join("\n") + "\n");
   writeFileSync(join(dist, "main.js"), "// fixture\n");

@@ -38,7 +38,7 @@ export class CardActionRouter implements CardActionRouterPort {
 
   async handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
     if (action.chatId !== this.options.chatId) return;
-    if (!this.options.allowedOpenIds.includes(action.operatorOpenId)) return { toast: { type: "error", content: "你没有访问权限。" } };
+    if (!(this.options.allowedOpenIds ?? []).includes(action.operatorOpenId)) return { toast: { type: "error", content: "你没有访问权限。" } };
     const instanceInteraction = await this.options.instanceInteractions?.handleCardAction(action);
     if (instanceInteraction) return instanceInteraction;
     const interaction = await this.options.cardInteractions.handle(action);
@@ -86,7 +86,7 @@ export class CardActionRouter implements CardActionRouterPort {
     return Boolean(binding && binding.chatId === action.chatId && (binding.creatorOpenId === null || binding.creatorOpenId === action.operatorOpenId));
   }
 
-  private isAdmin(action: IncomingLarkCardAction): boolean { return this.options.adminOpenIds.includes(action.operatorOpenId); }
+  private isAdmin(action: IncomingLarkCardAction): boolean { return (this.options.adminOpenIds ?? []).includes(action.operatorOpenId); }
 }
 
 function parseOpenThreadAction(value: unknown): { bindingId: string } | null { if (!value || typeof value !== "object") return null; const item = value as Record<string, unknown>; return item.action === "open_project_thread" && typeof item.bindingId === "string" ? { bindingId: item.bindingId } : null; }

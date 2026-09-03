@@ -52,11 +52,12 @@ The milestone's requirement-by-requirement evidence is recorded in the
 ## Security model
 
 A message accepted from the configured Lark chat is submitted to a real TraeX
-process as the host user that runs the service. That means **every member of the
-configured chat can run commands and edit files on the host with that user's
-privileges**, and the agent's output is posted back into the chat. Treat the chat
-as an authorization boundary: use a dedicated, tightly-scoped group, a least-
-privilege service account, and a non-critical host or container.
+process as the host user that runs the service. The service accepts no user by
+default: `LARK_ALLOWED_OPEN_IDS` is required for prompts and session access, and
+`LARK_ADMIN_OPEN_IDS` is a required subset for topology-changing or destructive
+actions. Treat both allowlists as a high-trust authorization boundary. Use a
+dedicated, tightly-scoped group, a least-privilege service account, and an
+isolated container, VM, or non-critical host.
 
 TraeX is launched with `--permission-mode $TRAEX_PERMISSION_MODE` (default
 `auto`). This keeps approval handling in TraeX while allowing auto-review for
@@ -64,8 +65,9 @@ eligible requests. Use `bypass_permissions` only when every chat member is
 trusted to act as the host user. The bridge intentionally has no remote
 approve/stop action.
 
-Inbound messages are accepted only from the configured chat ID and from user
-(not bot) senders; card-action callbacks must also originate from that chat.
+Inbound messages are accepted only from the configured chat ID, configured
+allowed Open IDs, and user (not bot) senders; card-action callbacks enforce the
+same rule.
 Logger, command-runner, and terminal-parser redaction strip known credential
 shapes before persistence or delivery, but redaction is best-effort and is not a
 substitute for the trust boundary above.
@@ -113,9 +115,10 @@ In the Lark developer console:
    (`ou_...`). The open ID is available from the bot's contact entry or the
    event-subscription test console.
 
-The bridge accepts messages only from the configured chat ID. Set
-`LARK_OPERATOR_OPEN_IDS` to a comma-separated owner allowlist for instance
-management; leaving it empty preserves the existing configured-chat behavior.
+Set `LARK_ALLOWED_OPEN_IDS` to every authorized user's comma-separated Open IDs.
+Set `LARK_ADMIN_OPEN_IDS` to the administrative subset. Both are required; the
+service refuses to start if either list is empty or an administrator is not also
+an allowed user.
 
 ## Install from source
 
@@ -203,31 +206,6 @@ The forced restart detaches observers and recovers the existing durable work
 without replay; it is not a general-purpose way to bypass workload safety. The
 restart succeeds only after the replacement process reports the expected build
 identity and readiness.
-
-### Build the private offline bundle
-
-Private Linux x86-64 releases can be built from a clean committed checkout. The
-builder requires the original Herdr binary explicitly because the active
-`herdr` command may be the generated TraeX shim:
-
-```bash
-npm ci
-npm run release:private -- --herdr-bin /absolute/path/to/original/herdr
-```
-
-The supplied binary must be Herdr 0.7.5 with SHA-256
-`3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253`.
-The command creates
-`release/herdr-agent-swarm-<version>-linux-x64.tar.gz` and the adjacent
-`.tar.gz.sha256`. It compiles the current commit, installs only production Node
-dependencies in isolated staging, generates the payload manifest, extracts the
-archive under a fresh path, and runs its packaged verifier.
-
-The artifact is for authorized private distribution. It includes the original
-Herdr binary and compiled Swarm runtime, but does not include Node.js, TraeX,
-credentials, configuration, databases, logs, sessions, project source, or
-repository tests. Target installation and operation are documented in the
-archive's `README.md`.
 
 ## Install as a standalone service
 

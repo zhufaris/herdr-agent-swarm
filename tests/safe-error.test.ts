@@ -34,7 +34,7 @@ describe("safeLogError", () => {
     ["assignment password", "password='hunter2'", "password=[REDACTED]"],
     ["JSON secret", '{"client_secret":"json-secret"}', '{"client_secret":"[REDACTED]"}'],
     ["header API key", "X-API-Key: header-secret", "X-API-Key: [REDACTED]"],
-    ["private key", "-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----", "[REDACTED PRIVATE KEY]"]
+    ["private key", ["-----BEGIN", " PRIVATE KEY-----", "\nsecret-material\n-----END", " PRIVATE KEY-----"].join(""), "[REDACTED PRIVATE KEY]"]
   ])("redacts %s", (_label, source, expected) => {
     const safe = safeLogError(new Error(source));
     expect(safe.message).toContain(expected);

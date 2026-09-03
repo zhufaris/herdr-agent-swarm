@@ -197,7 +197,7 @@ describe("project selection flow", () => {
       async startTraex(paneId, _executable, args) { started.push([paneId, args]); }, async runPrompt(_pane, text) { prompts.push(text); return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "wH", workspaceCwd: "/work/bridge", executable: "herdr" },
       projects: [
         { id: "bridge", displayName: "Bridge", spaceName: "herdr-lark-bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge" },
@@ -430,7 +430,7 @@ describe("project selection flow", () => {
 
 function configForTests(): BridgeConfig {
   return {
-    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
     herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" },
     projects: [{ id: "alpha", displayName: "Alpha", description: "Alpha project", workspaceId: "w1", cwd: "/work/alpha" }],
     defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" },

@@ -19,6 +19,15 @@ The bridge is a durable workflow coordinator, not a message relay. It does not
 assume that a Lark API call, a Herdr snapshot, or a runtime event is a complete
 transaction by itself.
 
+### Lark authorization
+
+The configured chat is necessary but not sufficient for access.
+`LARK_ALLOWED_OPEN_IDS` is a mandatory prompt and card-action allowlist.
+`LARK_ADMIN_OPEN_IDS` is a mandatory subset that gates Worker lifecycle and
+session-topology changes. Unauthorized inbound messages are discarded before
+durable ingress; unauthorized card callbacks return a generic denial. Per-thread
+creator and generation checks remain additional fences for stateful operations.
+
 ## Ownership and authority
 
 | Concern | Authority | Why |

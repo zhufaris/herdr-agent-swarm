@@ -29,7 +29,7 @@ describe("Herdr discovery", () => {
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -81,7 +81,7 @@ describe("Herdr discovery", () => {
       }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -142,7 +142,7 @@ describe("Herdr discovery", () => {
       }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -187,7 +187,7 @@ describe("Herdr discovery", () => {
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/work/repo", executable: "herdr" },
       projects: [{ id: "repo", displayName: "Repo", spaceName: "configured-space", description: "Test project", workspaceId: "w1", cwd: "/work/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -227,7 +227,7 @@ describe("Herdr discovery", () => {
       async renamePane(paneId, title, options) { renamed.push([paneId, title, options]); }
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/work/my-project", executable: "herdr" },
       projects: [{ id: "my-project", displayName: "My project", spaceName: "my-space", description: "Test project", workspaceId: "w1", cwd: "/work/my-project" }], defaultProjectId: "my-project", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -276,7 +276,7 @@ describe("Herdr discovery", () => {
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -319,7 +319,7 @@ describe("Herdr discovery", () => {
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -357,7 +357,7 @@ describe("Herdr discovery", () => {
       async runPrompt() { output = `${output}\n◆ thread reply\n────────`; return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -419,7 +419,7 @@ describe("Herdr discovery", () => {
       }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -478,7 +478,7 @@ describe("Herdr discovery", () => {
       }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",
@@ -524,7 +524,7 @@ describe("Herdr discovery", () => {
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
       projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" },
       databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent",

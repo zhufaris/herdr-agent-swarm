@@ -53,7 +53,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   async handle(message: IncomingLarkMessage): Promise<void> {
     const instanceCommand = parseInstanceCommand(message.text);
     const command = parseCommand(message.text); const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
-    if (command && requiresAdministrator(command.kind) && !this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) {
+    if (command && requiresAdministrator(command.kind) && !(this.options.config.lark.adminOpenIds ?? []).includes(message.actorOpenId)) {
       await this.reject(message, "你没有管理权限。");
       this.options.logger.warn({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, actorOpenId: message.actorOpenId, route: command.kind, reason: "administrator_required" }, "rejected unauthorized Lark management command");
       return;

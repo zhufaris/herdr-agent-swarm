@@ -1079,7 +1079,7 @@ function message(index: number) {
 
 function config(): BridgeConfig {
   return {
-    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
     herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex", permissionMode: "auto", sessionsRoot: "/tmp/traex-sessions" }, databasePath: ":memory:",

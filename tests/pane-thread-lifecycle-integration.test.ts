@@ -682,7 +682,7 @@ function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, sh
 
 function config(): BridgeConfig {
   return {
-    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+    lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
     herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" },
     projects: [{ id: "repo", displayName: "Repo", spaceName: "repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "repo", projectsConfigPath: "test", traex: { executable: "traex" },
     databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500

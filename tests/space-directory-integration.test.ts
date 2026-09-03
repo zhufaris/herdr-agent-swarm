@@ -37,7 +37,7 @@ describe("space directory command", () => {
       async runPrompt() { return "done"; }, async renamePane() {}
     };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
       herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" },
       projects: [
         { id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" },
@@ -86,7 +86,7 @@ describe("space directory command", () => {
       : Promise.resolve([]));
     const herdr: HerdrPort = { async assertWorkspace() {}, listPanes, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
     const config = {
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/one", executable: "herdr" },
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/one", executable: "herdr" },
       projects: [{ id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" }, { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }],
       defaultProjectId: "one", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
@@ -161,7 +161,7 @@ describe("space directory command", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter({
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
     }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     expose = true;
@@ -196,7 +196,7 @@ describe("space directory command", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter({
-      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
+      lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/work/alpha", executable: "herdr" }, projects: [{ id: "alpha", displayName: "Alpha", spaceName: "space-a", description: "A", workspaceId: "w1", cwd: "/work/alpha" }], defaultProjectId: "alpha", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, instanceLease: { ttlMs: 15_000, heartbeatMs: 5_000 }, maxQueueDepth: 20, larkMessageChunkSize: 3500
     }, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
