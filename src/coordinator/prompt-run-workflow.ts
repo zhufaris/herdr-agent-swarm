@@ -13,6 +13,7 @@ import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { TurnSupervisor } from "./turn-supervisor.js";
+import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, decidePromptExecutionFailure, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
 
 export interface ActiveTurnSnapshot {
   promptId: string;
@@ -337,7 +338,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (stateBeforeReturn !== state) await this.publish(bindingId, "AgentStateChanged", "herdr", { state, queueDepth, promptId: prompt.id });
         outputSource = await this.drainAvailableTranscript(outputSource, binding, prompt, startedAt);
         if (outputSource.mode === "typed" && outputSource.terminalLifecycle?.state === "aborted") {
-          const reason = abortedTurnNotice(outputSource.terminalLifecycle.reason);
+          const reason = abortedPromptNotice(outputSource.terminalLifecycle.reason);
           this.options.store.failPrompt({ promptId: prompt.id, error: reason, occurredAt: new Date().toISOString() });
           await this.publish(bindingId, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(bindingId) });
           this.options.logger.info({ event: "turn-aborted", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed_without_replay" }, "TraeX turn was explicitly aborted");
@@ -353,12 +354,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (attachedTranscriptObserver) await attachedTranscriptObserver;
         attachedTranscriptObserver = null;
         if (!this.isBindingActive(bindingId)) { observerDetached = true; return; }
-        if (dispatched) {
+        const failure = decidePromptExecutionFailure({ dispatched, stopping: this.stopping, observerAborted: abortController.signal.aborted, error: errorMessage(error) });
+        if (failure.kind === "detach") {
           await turnStartedPublication;
           outputSource = await this.drainAvailableTranscript(outputSource, binding, prompt, startedAt);
-          const notice = this.stopping ? "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。" : `TraeX 请求已尝试投递，但 Bridge 无法确认最终结果：${errorMessage(error)}；不会自动重发。`;
           observerDetached = true;
-          this.options.store.markPromptObservationDetached(prompt.id, notice);
+          this.options.store.markPromptObservationDetached(prompt.id, failure.notice);
           this.options.logger.warn({ event: "turn-observer-detached", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "detached_without_replay" }, "detached Bridge waiter from possibly in-flight TraeX turn");
           const detachedPrompt = this.options.store.getPrompt(prompt.id);
           if (!this.stopping && detachedPrompt?.transcriptTurnId && detachedPrompt.transcriptTurnStartedAt) {
@@ -366,9 +367,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           }
           return;
         }
-        if (abortController.signal.aborted && this.stopping) { observerDetached = true; return; }
-        this.options.store.failPrompt({ promptId: prompt.id, error: errorMessage(error), occurredAt: new Date().toISOString() });
-        await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: errorMessage(error), queueDepth: this.options.store.countPendingPrompts(bindingId) });
+        if (failure.kind === "ignore") { observerDetached = true; return; }
+        this.options.store.failPrompt({ promptId: prompt.id, error: failure.error, occurredAt: new Date().toISOString() });
+        await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: failure.error, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
         if (binding.lastAgentState === "blocked") return;
       } finally {
@@ -449,7 +450,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         this.turns.updateState(binding.id, prompt.id, state);
         const typed = await this.readTypedDelta(outputSource, binding, prompt.id);
         outputSource = typed.source;
-        if (this.isLaterConflictingTurn(prompt, typed.observation) && this.options.observeSupersedingExternalTurn) {
+        if (isLaterConflictingTranscriptTurn(prompt, typed.observation) && this.options.observeSupersedingExternalTurn) {
           const handoff = await this.options.observeSupersedingExternalTurn(binding, prompt, typed.observation);
           if (handoff === "completed") return;
           if (handoff === "pending" || handoff === "observing") {
@@ -465,25 +466,21 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           const startedAt = prompt.transcriptTurnStartedAt ? Date.parse(prompt.transcriptTurnStartedAt) : Number.NaN;
           await this.publishTypedObservation(binding.id, prompt.id, owned.observation, startedAt);
         }
-        const lifecycle = owned.owned ? owned.observation.turnLifecycle : undefined;
-        const lifecycleCompletesOwnedTurn = lifecycle?.state === "completed"
-          && lifecycle.turnId === prompt.transcriptTurnId
-          && lifecycle.startedAt === prompt.transcriptTurnStartedAt;
-        if (observation.traexProcess && lifecycleCompletesOwnedTurn) {
+        const terminal = owned.owned
+          ? decideDetachedTurnTerminalOutcome(prompt, owned.observation, observation.traexProcess)
+          : { kind: "pending" as const };
+        if (terminal.kind === "completed") {
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
-          const sourceAnswer = lifecycle.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
+          const sourceAnswer = terminal.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
           const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
           this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: true });
           await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;
         }
-        const lifecycleAbortsOwnedTurn = lifecycle?.state === "aborted"
-          && lifecycle.turnId === prompt.transcriptTurnId
-          && lifecycle.startedAt === prompt.transcriptTurnStartedAt;
-        if (observation.traexProcess && lifecycleAbortsOwnedTurn) {
+        if (terminal.kind === "aborted") {
           this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
-          const reason = abortedTurnNotice(lifecycle.reason);
+          const reason = abortedPromptNotice(terminal.reason);
           this.options.store.failPrompt({ promptId: prompt.id, error: reason, occurredAt: new Date().toISOString() });
           await this.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-aborted", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "failed_without_replay" }, "observed explicit abort of an existing TraeX turn");
@@ -497,15 +494,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       this.options.store.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
       this.options.logger.warn({ event: "detached-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId, outcome: "uncertain" }, "could not observe existing TraeX turn");
     }
-  }
-
-  private isLaterConflictingTurn(prompt: PromptJob, observation: TraexTranscriptObservation): boolean {
-    if (!prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt || !observation.turnId || observation.turnId === prompt.transcriptTurnId) return false;
-    const observedStartedAt = observation.turnLifecycle?.startedAt;
-    if (!observedStartedAt) return false;
-    const observedMs = Date.parse(observedStartedAt);
-    const ownedMs = Date.parse(prompt.transcriptTurnStartedAt);
-    return Number.isFinite(observedMs) && Number.isFinite(ownedMs) && observedMs > ownedMs;
   }
 
   private isBindingActive(bindingId: string): boolean {
@@ -742,4 +730,3 @@ function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void>
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function abortedTurnNotice(reason?: string): string { return reason === "interrupted" ? "TraeX turn was interrupted by a human operator" : `TraeX turn was aborted${reason ? `: ${reason}` : ""}`; }
