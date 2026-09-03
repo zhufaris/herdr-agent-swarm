@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { PaneControlStore } from "../domain/ports/pane-operations.js";
 import type { Binding, IncomingLarkMessage, PaneControlOperation } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
+import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 
-interface Options { store: Pick<OperationsStore, "acceptPaneControlOperation" | "audit" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getBinding" | "listBindings" | "listRecoverablePaneControlOperations">; herdr: Pick<HerdrPort, "sendEscape">; outbound: Pick<OutboundIntentPort, "enqueueCard">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
+interface Options { store: PaneControlStore; herdr: Pick<HerdrPort, "sendEscape">; outbound: Pick<OutboundIntentPort, "enqueueCard">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: Pick<TurnControlWorkflow, "steer" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
 export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean>; }
 
 export class PaneControlWorkflow implements PaneControlWorkflowPort {
@@ -14,8 +17,9 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
 
   async recover(): Promise<void> {
     await this.options.model.recover();
+    await this.options.turnControl.recover();
     for (const operation of this.options.store.listRecoverablePaneControlOperations()) {
-      if (operation.kind === "steer") this.options.store.finishPaneControlOperation(operation.id, "rejected", "Steering is unsupported; text was not injected");
+      if (operation.kind === "steer") this.options.store.finishPaneControlOperation(operation.id, operation.state === "accepted" ? "rejected" : "uncertain", operation.state === "accepted" ? "Legacy steering was retired before dispatch" : "Legacy steering may have reached the runtime and was not replayed");
       else if (operation.kind !== "model") this.options.store.finishPaneControlOperation(operation.id, "uncertain", "Bridge restarted after pane input may have been sent; operation was not replayed");
     }
     for (const binding of this.options.store.listBindings()) this.options.scheduler.wake({ kind: "control-ready", bindingId: binding.id });
@@ -38,9 +42,15 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
   }
 
   async steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean> {
-    void binding; void text; void expectedParentPromptId;
-    await this.reject(message, "当前 Agent 不支持 steering。`/swarm steer` 未进入任务队列，也不会写入 terminal。");
-    return false;
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。`/swarm steer` 未进入任务队列。"); return false; }
+    try {
+      if (expectedParentPromptId) {
+        const active = this.options.activeTurn(binding.id);
+        if (active && active.promptId !== expectedParentPromptId) { await this.reject(message, "目标 turn 已变化。`/swarm steer` 未进入任务队列。"); return false; }
+      }
+      const result = await this.options.turnControl.steer({ owner: { kind: "binding", id: binding.id }, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, text, idempotencyKey: `message:${message.messageId}:steer`, sourceMessageId: message.messageId, resultTargetMessageId: message.rootMessageId ?? message.messageId });
+      return result.operation.state === "delivered";
+    } catch (error) { await this.reject(message, `Steer 未发送：${errorMessage(error)}`); return false; }
   }
 
   private async drainOnce(bindingId: string): Promise<void> {

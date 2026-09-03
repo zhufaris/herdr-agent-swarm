@@ -619,6 +619,117 @@ describe("SQLite store", () => {
     expect(store.getInstanceTurn("uncertain-turn")).toMatchObject({ state: "dispatching" });
   });
 
+  it("persists and fences exact-turn control operations without replaying dispatching work", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const input = { id: "control-1", idempotencyKey: "message-1:steer", kind: "steer" as const, target, actor: { kind: "human" as const, userId: "u1" }, payload: "change direction", sourceMessageId: "message-1" };
+
+    expect(store.acceptTurnControlOperation(input)).toMatchObject({ inserted: true, operation: { state: "accepted", target } });
+    expect(store.acceptTurnControlOperation(input)).toMatchObject({ inserted: false, operation: { id: "control-1" } });
+    expect(() => store!.acceptTurnControlOperation({ ...input, id: "control-2", payload: "different" })).toThrow(/Idempotency key/);
+    expect(store.claimTurnControlOperation("control-1")).toMatchObject({ state: "dispatching" });
+    expect(store.claimTurnControlOperation("control-1")).toBeNull();
+
+    expect(store.recoverTurnControlOperations()).toMatchObject({ accepted: [], uncertain: [{ id: "control-1", state: "uncertain" }] });
+    expect(store.finishTurnControlOperation({ id: "control-1", state: "delivered", result: { status: "delivered" } })).toBeNull();
+    expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "uncertain", result: { reason: expect.stringContaining("restarted") } });
+  });
+
+  it("atomically projects one durable operation-result card through pending and delivered states", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "secret steering text", result: { targetMessageId: "root", card: { state: "accepted" } } });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result", targetRole: "operation_result", kind: "card_reply", payload: JSON.stringify({ state: "accepted" }) })]);
+    store.claimTurnControlOperation("control-1");
+    store.finishTurnControlOperation({ id: "control-1", state: "delivered", result: { status: "delivered" }, card: { state: "delivered" } });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result", payload: JSON.stringify({ state: "delivered" }) })]);
+    expect(store.listPendingOutboundReplies()[0]!.payload).not.toContain("secret steering text");
+
+    const initial = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(initial.id, "operation-card", "card-id");
+    store.database.prepare("UPDATE turn_control_operations SET state = 'dispatching' WHERE id = ?").run("control-1");
+    store.finishTurnControlOperation({ id: "control-1", state: "uncertain", result: { status: "delivery-uncertain" }, card: { state: "uncertain" } });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result:uncertain", kind: "card_update", rootMessageId: "operation-card", payload: JSON.stringify({ state: "uncertain" }) })]);
+  });
+
+  it("projects restart uncertainty into the existing operation-result intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation); store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "change", result: { targetMessageId: "root", card: { state: "accepted" } } });
+    store.claimTurnControlOperation("control-1");
+
+    store.recoverTurnControlOperations((operation) => ({ state: operation.state }));
+
+    expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "uncertain", result: { status: "delivery-uncertain" } });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ payload: JSON.stringify({ state: "uncertain" }) })]);
+  });
+
+  it("rolls back a turn-control terminal state when its result card cannot be serialized", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation); store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "change", result: { targetMessageId: "root", card: { state: "accepted" } } });
+    store.claimTurnControlOperation("control-1");
+    const circular: Record<string, unknown> = {}; circular.self = circular;
+
+    expect(() => store!.finishTurnControlOperation({ id: "control-1", state: "delivered", result: { status: "delivered" }, card: circular })).toThrow(/circular/i);
+    expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "dispatching", result: null });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ payload: JSON.stringify({ state: "accepted" }) })]);
+  });
+
+  it("rejects an exact-turn control claim after its runtime fence changes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target: { owner: { kind: "instance", id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" }, actor: { kind: "human", userId: "u1" }, payload: "change" });
+    store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, expectedRuntimeTurnId: "runtime-1", state: "completed", eventKind: "turn.completed" });
+
+    expect(store.claimTurnControlOperation("control-1")).toBeNull();
+    expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "accepted" });
+  });
+
+  it("adds durable turn control operations to an existing database", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-turn-control-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.database.exec("DROP TABLE turn_control_operations; DELETE FROM schema_migrations WHERE version = 10");
+    store.close(); store = undefined;
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 10").get()).toEqual({ version: 10 });
+    expect(store.database.prepare("PRAGMA table_info(turn_control_operations)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "owner_kind", notnull: 1 }), expect.objectContaining({ name: "logical_turn_id", notnull: 1 }), expect.objectContaining({ name: "runtime_turn_id", notnull: 1 })
+    ]));
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
   it("scopes active turn fencing to the current runtime generation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

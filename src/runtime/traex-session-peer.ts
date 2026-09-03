@@ -12,7 +12,16 @@ interface TraexSessionPeerRecord {
   threadName: string;
   threadId: string;
   location: "local";
+  socketPath: string;
   pid: number;
+  startedAtMs: number;
+}
+
+export interface TraexSessionPeer {
+  threadId: string;
+  socketPath: string;
+  pid: number;
+  startedAtMs: number;
 }
 
 export type TraexSessionPeerResolution =
@@ -23,6 +32,18 @@ export type TraexSessionPeerResolution =
 export interface TraexSessionPeerOptions {
   maxBytes?: number;
   maxEntries?: number;
+}
+
+export async function findTraexSessionPeer(
+  peersDir: string,
+  threadId: string,
+  options: Pick<TraexSessionPeerOptions, "maxBytes"> = {}
+): Promise<TraexSessionPeer | null> {
+  if (!SESSION_ID.test(threadId)) return null;
+  const path = join(peersDir, `${threadId.replaceAll("-", "").toLowerCase()}.json`);
+  const peer = await readPeer(path, options.maxBytes ?? DEFAULT_MAX_BYTES);
+  if (!peer || peer.threadId.toLowerCase() !== threadId.toLowerCase()) return null;
+  return { threadId: peer.threadId, socketPath: peer.socketPath, pid: peer.pid, startedAtMs: peer.startedAtMs };
 }
 
 export async function resolveTraexSessionPeer(
@@ -84,7 +105,12 @@ function isPeerRecord(value: unknown): value is TraexSessionPeerRecord {
     && peer.location === "local"
     && typeof peer.threadName === "string"
     && typeof peer.threadId === "string"
+    && typeof peer.socketPath === "string"
+    && peer.socketPath.startsWith("/")
     && typeof peer.pid === "number"
     && Number.isInteger(peer.pid)
-    && peer.pid > 0;
+    && peer.pid > 0
+    && typeof peer.startedAtMs === "number"
+    && Number.isSafeInteger(peer.startedAtMs)
+    && peer.startedAtMs > 0;
 }

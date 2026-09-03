@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { HerdrPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
 import type { HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, WorkspaceCacheStatus } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
 
@@ -146,6 +146,10 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   async sendEscape(paneId: string): Promise<void> {
     if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");
     await this.delegate.sendEscape(paneId);
+  }
+  async steerAgent(input: Parameters<NonNullable<HerdrPort["steerAgent"]>>[0]): Promise<import("../domain/agent-runtime.js").SteerReceipt> {
+    if (!this.delegate.steerAgent) return { status: "unsupported", reason: "Herdr adapter does not support native steering" };
+    return this.delegate.steerAgent(input);
   }
 
   async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {

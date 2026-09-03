@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { HerdrPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
 import type { AgentState, HerdrCircuitBreakerStatus, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import { CommandError } from "../infra/command-runner.js";
 import { safeLogError } from "./safe-error.js";
@@ -69,6 +69,10 @@ export class HerdrCircuitBreaker implements HerdrPort {
   async sendEscape(paneId: string): Promise<void> {
     if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");
     await this.call("command", () => this.delegate.sendEscape!(paneId));
+  }
+  async steerAgent(input: Parameters<NonNullable<HerdrPort["steerAgent"]>>[0]): Promise<import("../domain/agent-runtime.js").SteerReceipt> {
+    if (!this.delegate.steerAgent) return { status: "unsupported", reason: "Herdr adapter does not support native steering" };
+    return this.call("command", () => this.delegate.steerAgent!(input));
   }
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> { await this.call("command", () => this.delegate.renamePane(paneId, title, options)); }
   async closePane(paneId: string): Promise<void> { await this.call("command", () => this.delegate.closePane(paneId)); }

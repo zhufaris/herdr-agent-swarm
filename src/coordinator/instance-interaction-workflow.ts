@@ -1,6 +1,7 @@
 import type { AgentInstance } from "../domain/agent-instance.js";
 import type { InstanceCommand, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, ProjectConfig } from "../domain/types.js";
-import type { InstanceStore, OutboundIntentPort } from "../domain/ports.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { InstanceControlWorkflow } from "./instance-control-workflow.js";
 import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
@@ -40,7 +41,11 @@ export class InstanceInteractionWorkflow {
       await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor, projectId, targetInstanceId: instance.id, content: { kind: "turn", text: command.text }, source: { messageId: message.messageId, rootMessageId: message.rootMessageId ?? message.messageId } });
       return;
     }
-    if (command.kind === "steer_instance") { const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: instance.id, text: command.text }); return this.reply(message, statusCard(`Steer: ${result.status}`)); }
+    if (command.kind === "steer_instance") {
+      const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: instance.id, text: command.text, resultTargetMessageId: message.rootMessageId ?? message.messageId });
+      if (result.durableResult === false) await this.reply(message, statusCard(`Steer: ${result.status}`));
+      return;
+    }
     const result = await this.options.messaging.interrupt({ idempotencyKey: `lark:${message.messageId}:interrupt`, actor, targetInstanceId: instance.id });
     return this.reply(message, statusCard(`Interrupt: ${result.status}`));
   }
@@ -72,8 +77,8 @@ export class InstanceInteractionWorkflow {
     const { turn } = matched;
     const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
     if (["running", "blocked"].includes(turn.state)) {
-      const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: turn.instanceId, targetTurnId: turn.id, text: message.text });
-      if (result.status !== "delivered") await this.reply(message, statusCard(`Steer: ${result.status}`));
+      const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: turn.instanceId, targetTurnId: turn.id, text: message.text, resultTargetMessageId: message.rootMessageId ?? message.messageId });
+      if (result.durableResult === false) await this.reply(message, statusCard(`Steer: ${result.status}`));
       return true;
     }
     if (["completed", "failed", "cancelled"].includes(turn.state)) {
@@ -156,7 +161,7 @@ export class InstanceInteractionWorkflow {
       const text = action.formValues?.steer_text?.trim() ?? "";
       if (!text) return { toast: { type: "error", content: "Steer 内容不能为空。" } };
       try {
-        const result = await this.options.messaging.steer({ idempotencyKey: `card:${action.messageId}:steer:${instance.generation}`, actor, targetInstanceId: instance.id, text });
+        const result = await this.options.messaging.steer({ idempotencyKey: `card:${action.messageId}:steer:${instance.generation}`, actor, targetInstanceId: instance.id, text, resultTargetMessageId: action.messageId });
         return { toast: { type: result.status === "delivered" ? "success" : "warning", content: `Steer: ${result.status}` } };
       } catch (error) { return failed(error); }
     }

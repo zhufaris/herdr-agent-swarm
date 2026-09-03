@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import { renderProjectEntryCard } from "../cards/run-card.js";
-import type { MainCardStore } from "../domain/ports.js";
+import type { MainCardStore } from "../domain/ports/projection.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 
 export interface MainCardWorkflowPort {

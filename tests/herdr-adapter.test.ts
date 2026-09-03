@@ -57,6 +57,22 @@ describe("Herdr adapter structured control", () => {
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });
 
+  it.each([
+    [{ status: "delivered", operationId: "op-1", turnId: "turn-1" }],
+    [{ status: "not-active", reason: "turn changed" }],
+    [{ status: "blocked", reason: "approval is active" }],
+    [{ status: "unsupported", reason: "native steering unavailable" }],
+    [{ status: "delivery-uncertain", operationId: "op-1", reason: "connection lost" }]
+  ])("preserves native steering result %j", async (result) => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) { calls.push(args); return json({ type: "agent_steered", ...result }); } };
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerAgent({
+      paneId: "w1:p1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" },
+      runtimeTurnId: "turn-1", text: "private steer", idempotencyKey: "message:1"
+    })).resolves.toEqual(result);
+    expect(calls).toEqual([["agent", "steer", "w1:p1", "private steer", "--turn-id", "turn-1", "--idempotency-key", "message:1", "--agent-session", '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"session-1"}', "--timeout", "1000"]]);
+  });
+
   it("verifies a newly started TraeX agent through targeted agent get when the snapshot is stale", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

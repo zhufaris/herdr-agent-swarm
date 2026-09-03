@@ -26,11 +26,12 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
   const drivers = new AgentDriverRegistry([driver]);
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
-  const workflow = new InstanceMessagingWorkflow({ store, drivers, paneHost: { interruptPane: vi.fn(async () => undefined) } as unknown as PaneHost, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
+  const turnControl = { steer: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "delivered" } }, duplicate: false })) };
+  const workflow = new InstanceMessagingWorkflow({ store, drivers, paneHost: { interruptPane: vi.fn(async () => undefined) } as unknown as PaneHost, turnControl: turnControl as never, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
   let scheduler!: InstanceWorkScheduler;
   const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound }) : undefined;
   scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound });
-  return { create, workflow, scheduler, wake, wakeOutbound, submit, driver };
+  return { create, workflow, scheduler, wake, wakeOutbound, submit, driver, turnControl };
 }
 
 describe("instance messaging", () => {
@@ -81,20 +82,23 @@ describe("instance messaging", () => {
   });
 
   it("keeps explicit unsupported steering out of the ordinary queue", async () => {
-    const { create, workflow } = setup({ steering: "unsupported" });
+    const { create, workflow, turnControl } = setup({ steering: "unsupported" });
     const worker = create("worker");
+    turnControl.steer.mockResolvedValueOnce({ operation: { state: "rejected", result: { status: "unsupported" } }, duplicate: false } as never);
     await expect(workflow.steer({ idempotencyKey: "s1", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "unsupported" });
     expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
   });
 
   it("steers only an active runtime and never falls back to a queued turn", async () => {
-    const { create, workflow, driver } = setup();
+    const { create, workflow, driver, turnControl } = setup();
     const worker = create("worker");
-    await expect(workflow.steer({ idempotencyKey: "s1", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "not-active" });
+    turnControl.steer.mockRejectedValueOnce(new Error("Agent instance has no exact active runtime turn"));
+    await expect(workflow.steer({ idempotencyKey: "s1", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toMatchObject({ status: "not-active" });
     expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
     store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "working" });
     await expect(workflow.steer({ idempotencyKey: "s2", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "delivered" });
-    expect(driver.steer).toHaveBeenCalledWith(worker.runtimeRef, "change");
+    expect(turnControl.steer).toHaveBeenCalledWith(expect.objectContaining({ owner: { kind: "instance", id: worker.id }, text: "change" }));
+    expect(driver.steer).not.toHaveBeenCalled();
     expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
   });
 
@@ -110,16 +114,17 @@ describe("instance messaging", () => {
   });
 
   it("deduplicates steering before repeating the external effect", async () => {
-    const { create, workflow, driver } = setup(); const worker = create("worker");
+    const { create, workflow, driver, turnControl } = setup(); const worker = create("worker");
     store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "working" });
     const input = { idempotencyKey: "steer-once", actor: { kind: "human" as const, userId: "u1" }, targetInstanceId: worker.id, text: "change" };
     await expect(workflow.steer(input)).resolves.toEqual({ status: "delivered" });
     await expect(workflow.steer(input)).resolves.toEqual({ status: "delivered" });
-    expect(driver.steer).toHaveBeenCalledTimes(1);
+    expect(turnControl.steer).toHaveBeenCalledTimes(2);
+    expect(driver.steer).not.toHaveBeenCalled();
   });
 
   it("steers only the exact current-generation active turn and deduplicates the reply event", async () => {
-    const { create, workflow, driver } = setup();
+    const { create, workflow, driver, turnControl } = setup();
     const worker = create("worker");
     store!.acceptInstanceTurn({ id: "active-turn", idempotencyKey: "active-turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
     store!.claimNextInstanceTurn(worker.id, worker.generation);
@@ -131,8 +136,9 @@ describe("instance messaging", () => {
     await expect(workflow.steer(input)).resolves.toEqual({ status: "delivered" });
     await expect(workflow.steer(input)).resolves.toEqual({ status: "delivered" });
 
-    expect(driver.steer).toHaveBeenCalledTimes(1);
-    expect(driver.steer).toHaveBeenCalledWith(worker.runtimeRef, "focus");
+    expect(turnControl.steer).toHaveBeenCalledTimes(2);
+    expect(turnControl.steer).toHaveBeenCalledWith(expect.objectContaining({ owner: { kind: "instance", id: worker.id }, text: "focus" }));
+    expect(driver.steer).not.toHaveBeenCalled();
   });
 
   it("does not let a stale generation write a turn result", () => {

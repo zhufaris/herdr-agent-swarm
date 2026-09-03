@@ -38,6 +38,14 @@ describe("command error redaction", () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
+  it("never exposes native steering content through error fields", () => {
+    const secret = "private steering instruction";
+    const error = new CommandError("herdr", ["agent", "steer", "w1:p1", secret, "--turn-id", "turn-1"], `failed to submit ${secret}`, false);
+    expect(error.args[3]).toBe("[REDACTED]");
+    expect(error.message).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
+  });
+
   it("never exposes the Primary tool capability from pane environment arguments", () => {
     const capability = "b".repeat(64);
     const environment = "SWARM_PRIMARY_CAPABILITY=" + capability;

@@ -1,5 +1,6 @@
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
-import type { InstanceStore, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
+import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 
 interface Options {

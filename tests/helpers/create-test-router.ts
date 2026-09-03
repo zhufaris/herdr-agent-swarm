@@ -1,10 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../../src/config.js";
 import { BindingProvisioningWorkflow } from "../../src/coordinator/binding-provisioning-workflow.js";
 import { CardInteractionWorkflow } from "../../src/coordinator/card-interaction-workflow.js";
 import { HerdrRuntimeReconciler } from "../../src/coordinator/herdr-runtime-reconciler.js";
 import { InboundRouter } from "../../src/coordinator/inbound-router.js";
+import { InboundMessageDispatcher } from "../../src/coordinator/inbound-message-dispatcher.js";
+import { CardActionRouter } from "../../src/coordinator/card-action-router.js";
+import { InboundMessageRoutingWorkflow } from "../../src/coordinator/inbound-message-routing-workflow.js";
 import { ModelSelectionWorkflow } from "../../src/coordinator/model-selection-workflow.js";
 import { PaneControlWorkflow } from "../../src/coordinator/pane-control-workflow.js";
 import { OperationsQueryWorkflow } from "../../src/coordinator/operations-query-workflow.js";
@@ -16,6 +19,8 @@ import { PaneClosureWorkflow } from "../../src/coordinator/pane-closure-workflow
 import { PromptRunWorkflow } from "../../src/coordinator/prompt-run-workflow.js";
 import { RetiredPaneCleanupWorkflow } from "../../src/coordinator/retired-pane-cleanup-workflow.js";
 import { StartupViewConverger } from "../../src/coordinator/startup-view-converger.js";
+import { StartupRecoveryWorkflow } from "../../src/coordinator/startup-recovery-workflow.js";
+import { TurnControlWorkflow } from "../../src/coordinator/turn-control-workflow.js";
 import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
@@ -66,7 +71,8 @@ export function createTestRouter(
   };
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
-  const paneControl = new PaneControlWorkflow({ store, herdr, outbound: writer, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
+  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID });
+  const paneControl = new PaneControlWorkflow({ store, herdr, outbound: writer, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, logger });
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
@@ -78,8 +84,11 @@ export function createTestRouter(
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
     isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns
   });
-  return new InboundRouter({
-    config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, inboundWork,
-    promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, sessionOperations, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews: new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger)
-  });
+  const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, store, inboundWork, logger });
+  const messageRouting = new InboundMessageRoutingWorkflow({ config, store, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, promptRun, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure });
+  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
+  const startupViews = new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger);
+  const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, reconciler, retiredPaneCleanup, startupViews });
+  const router = new InboundRouter({ lark, modelSelection, promptRun, reconciler, retiredPaneCleanup, sessionOperations, inboundDispatcher, cardActionRouter, startupRecovery });
+  return router;
 }

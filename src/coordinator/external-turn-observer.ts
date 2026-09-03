@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
-import type { BindingStorePort, TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports.js";
+import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
+import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, ExternalTurnSupersessionFence, PromptJob } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -10,7 +11,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-type ExternalTurnStore = Pick<BindingStorePort, "adoptExternalTurn" | "completeTurn" | "countPendingPrompts" | "failPrompt" | "findBindingByPane" | "getActiveExternalPrompt" | "getBinding" | "getPrompt" | "listBindingsByState">;
+type ExternalTurnStore = ExternalTurnObservationStore;
 
 interface ExternalTurnObserverOptions {
   store: ExternalTurnStore;

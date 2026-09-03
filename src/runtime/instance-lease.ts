@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { LeaseStore } from "../domain/ports.js";
+import type { LeaseStore } from "../domain/ports/health.js";
 import type { InstanceLeaseStatus } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
 

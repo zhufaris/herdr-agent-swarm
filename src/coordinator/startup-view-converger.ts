@@ -1,6 +1,8 @@
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
-import type { AnswerPageStore, MainCardStore, OutboundIntentPort, PromptAcceptanceStore } from "../domain/ports.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
+import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
 import type { AnswerPageWorkflowPort } from "./answer-page-workflow.js";
 import { AnswerPageWorkflow } from "./answer-page-workflow.js";
 import { initialTopicView, mirrorRunCardToTopic, updateTopicView } from "../domain/topic-view.js";
@@ -75,7 +77,8 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       const activeRun = runCards.find((view) => view.phase === "running" || view.phase === "blocked")
         ?? (reconciledTopicView.activePromptId ? runCards.find((view) => view.promptId === reconciledTopicView.activePromptId) : null);
       const latestRun = activeRun ?? runCards.at(-1);
-      const finalTopic = latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
+      const terminal = binding.lifecycle === "draining" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed";
+      const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
       await this.mainCardWorkflow.project(finalTopic);
   }
 

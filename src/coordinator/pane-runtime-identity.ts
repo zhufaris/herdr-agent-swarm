@@ -1,4 +1,4 @@
-import type { HerdrPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
 import type { Binding, HerdrPane, ProjectConfig } from "../domain/types.js";
 
 export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime">, projectsById: ReadonlyMap<string, ProjectConfig>, binding: Binding, paneId: string): Promise<HerdrPane> {

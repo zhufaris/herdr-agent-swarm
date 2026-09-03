@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveTraexSessionPeer } from "../src/runtime/traex-session-peer.js";
+import { findTraexSessionPeer, resolveTraexSessionPeer } from "../src/runtime/traex-session-peer.js";
 
 const roots: string[] = [];
 const correlationId = "4dd3d4d7-c92b-4ce0-aa1f-179cd703b5c6";
@@ -24,6 +24,18 @@ describe("TraeX session peer resolution", () => {
     const root = await fixture();
     await peer(root, threadId, { protocolVersion: 1, threadName: correlationId, threadId, location: "local", socketPath: "/tmp/peer.sock", pid: 44, startedAtMs: 10 });
     await expect(resolveTraexSessionPeer(root, 44, correlationId)).resolves.toEqual({ status: "resolved", threadId });
+  });
+
+  it("resolves the exact session peer including its native socket", async () => {
+    const root = await fixture();
+    await peer(root, threadId, { protocolVersion: 1, threadName: correlationId, threadId, location: "local", socketPath: "/tmp/peer.sock", pid: 44, startedAtMs: 10 });
+    await expect(findTraexSessionPeer(root, threadId)).resolves.toEqual({ threadId, socketPath: "/tmp/peer.sock", pid: 44, startedAtMs: 10 });
+  });
+
+  it("rejects a session peer without an absolute socket path", async () => {
+    const root = await fixture();
+    await peer(root, threadId, { protocolVersion: 1, threadName: correlationId, threadId, location: "local", socketPath: "relative.sock", pid: 44, startedAtMs: 10 });
+    await expect(findTraexSessionPeer(root, threadId)).resolves.toBeNull();
   });
 
   it.each([
@@ -73,5 +85,5 @@ async function fixture(): Promise<string> {
 }
 
 async function peer(root: string, id: string, value: object): Promise<void> {
-  await writeFile(join(root, id.replaceAll("-", "") + ".json"), JSON.stringify(value), { mode: constants.S_IRUSR | constants.S_IWUSR });
+  await writeFile(join(root, id.replaceAll("-", "") + ".json"), JSON.stringify({ socketPath: "/tmp/peer.sock", startedAtMs: 10, ...value }), { mode: constants.S_IRUSR | constants.S_IWUSR });
 }

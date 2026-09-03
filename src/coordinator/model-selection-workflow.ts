@@ -3,12 +3,14 @@ import type { Logger } from "pino";
 import { renderModelResultCard } from "../cards/model-card.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
-import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { ModelSelectionStore } from "../domain/ports/workflow.js";
 import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation, ProjectConfig } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 
-interface Options { config: BridgeConfig; store: OperationsStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
+interface Options { config: BridgeConfig; store: ModelSelectionStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
 const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。";
 

@@ -2,7 +2,9 @@ import type { BridgeConfig } from "../config.js";
 import { projectSpaceName } from "../config.js";
 import { renderMessageRejectedCard, renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
-import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { SessionAdministrationStore } from "../domain/ports/workflow.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
@@ -13,7 +15,7 @@ import { requireMatchingPane } from "./pane-runtime-identity.js";
 
 interface Options {
   config: BridgeConfig;
-  store: Pick<OperationsStore, "audit" | "cancelQueuedPromptsWithProjection" | "countPendingPrompts" | "loadTopicView" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBindingMetadata">;
+  store: SessionAdministrationStore;
   herdr: Pick<HerdrPort, "observeRuntime" | "renamePane">;
   lifecycleEvents: LifecycleEventPublisher;
   outbound: Pick<OutboundIntentPort, "enqueueCard">;

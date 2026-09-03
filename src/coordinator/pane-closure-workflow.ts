@@ -3,11 +3,14 @@ import { renderPaneCloseConfirmationCard, renderPaneCloseResultCard } from "../c
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
-import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { PaneCloseStore } from "../domain/ports/pane-operations.js";
 import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
+import { evaluatePaneClosureSafety } from "../domain/pane-retention-policy.js";
 
-interface Options { config: BridgeConfig; store: Pick<OperationsStore, "audit" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest" | "finishPaneCloseRequest" | "getBinding" | "listUnresolvedPaneCloseOperations" | "transitionBinding">; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; isBindingBusy(bindingId: string): boolean; }
+interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; isBindingBusy(bindingId: string): boolean; }
 export interface PaneClosureWorkflowPort { recover(): Promise<void>; requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>; }
 
 export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
@@ -49,8 +52,8 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
     if (expectedPaneId !== undefined && binding.paneId !== expectedPaneId) { await this.reject(message, "Pane identity 已变化，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" }); return null; }
     if (this.options.isBindingBusy(binding.id) || store.countPendingPrompts(binding.id) > 0) { await this.reject(message, "当前 Pane 正在执行任务或仍有排队请求，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "busy" }); return null; }
     const pane = await herdr.getPane(binding.paneId); if (!pane) { const orphaned = store.transitionBinding(binding.id, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 1 }); await this.publish(orphaned.id, "BindingOrphaned", "herdr", { reason: "Herdr pane " + binding.paneId + " no longer exists" }); await this.reject(message, "Pane " + binding.paneId + " 已不存在，绑定已标记为 orphaned。"); return null; }
-    if (pane.workspaceId !== binding.workspaceId || binding.traexSessionId === null || pane.terminalId !== binding.traexSessionId) { await this.reject(message, "Pane identity 已变化，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: "identity_changed" }); return null; }
-    if (pane.agentState !== "idle" && pane.agentState !== "done") { await this.reject(message, "Pane 当前状态为 " + pane.agentState + "，不能关闭；仅 idle/done 状态允许关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: pane.agentState }); return null; } return { binding, pane };
+    const safety = evaluatePaneClosureSafety({ binding, pane, busy: this.options.isBindingBusy(binding.id), pendingWork: store.countPendingPrompts(binding.id) > 0, ...(expectedPaneId !== undefined ? { expectedPaneId } : {}) });
+    if (!safety.allowed) { await this.reject(message, safety.reason === "pane runtime state is idle" || safety.reason === "pane runtime state is done" ? "Pane 状态不允许关闭。" : safety.reason === "pane runtime identity changed" ? "Pane identity 已变化，不能关闭。" : "当前 Pane 正在执行任务或仍有排队请求，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: safety.reason }); return null; } return { binding, pane };
   }
   private spaceNameFor(binding: Binding): string { const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; return project ? projectSpaceName(project) : "legacy/unresolved"; }
   private async reply(message: IncomingLarkMessage, card: object): Promise<void> { const root = message.rootMessageId ?? message.messageId; await this.options.outbound.enqueueCard(root, "standalone:" + root + ":" + JSON.stringify(card), card); }

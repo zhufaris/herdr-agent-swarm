@@ -1,4 +1,4 @@
-import type { OutboxStore } from "../domain/ports.js";
+import type { OutboxStore } from "../domain/ports/outbox.js";
 import { answerElementId } from "../domain/run-card-view.js";
 import { workerTurnElementId } from "../domain/worker-turn-card-view.js";
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { OutboundIntentPort, OutboundIntentStore } from "../domain/ports.js";
+import type { OutboundIntentPort, OutboundIntentStore } from "../domain/ports/outbox.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { assertAnswerCardTarget, assertAnswerStreamTarget } from "./outbound-target-validation.js";
 

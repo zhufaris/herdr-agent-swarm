@@ -1,68 +1,15 @@
 import pino from "pino";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import { HerdrCliAdapter } from "./adapters/herdr-adapter.js";
-import { LarkSdkAdapter } from "./adapters/lark-adapter.js";
 import { loadConfig, validateProjectDirectories } from "./config.js";
-import { InboundRouter } from "./coordinator/inbound-router.js";
-import { BindingProvisioningWorkflow } from "./coordinator/binding-provisioning-workflow.js";
-import { CardInteractionWorkflow } from "./coordinator/card-interaction-workflow.js";
-import { HerdrRuntimeReconciler } from "./coordinator/herdr-runtime-reconciler.js";
-import { ModelSelectionWorkflow } from "./coordinator/model-selection-workflow.js";
-import { PaneControlWorkflow } from "./coordinator/pane-control-workflow.js";
-import { OperationsQueryWorkflow } from "./coordinator/operations-query-workflow.js";
-import { SessionAdministrationWorkflow } from "./coordinator/session-administration-workflow.js";
-import { SessionOperationWorkflow } from "./coordinator/session-operation-workflow.js";
-import { DeliveryRecoveryWorkflow } from "./coordinator/delivery-recovery-workflow.js";
-import { PaneClosureWorkflow } from "./coordinator/pane-closure-workflow.js";
-import { PromptRunWorkflow } from "./coordinator/prompt-run-workflow.js";
-import { ExternalTurnObserver } from "./coordinator/external-turn-observer.js";
-import { RetiredPaneCleanupWorkflow } from "./coordinator/retired-pane-cleanup-workflow.js";
-import { StartupViewConverger } from "./coordinator/startup-view-converger.js";
-import { BridgeEventBus } from "./events/bridge-event-bus.js";
-import { InProcessPromptWorkScheduler } from "./events/prompt-work-scheduler.js";
-import { InProcessInboundWorkNotifier } from "./events/inbound-work-notifier.js";
-import { ConversationViewProjector } from "./events/conversation-view-projector.js";
-import { QueueFeedbackProjector } from "./events/queue-feedback-projector.js";
-import { LarkOutboxDispatcher } from "./events/lark-outbox-dispatcher.js";
-import { OutboundIntentWriter } from "./events/outbound-intent-writer.js";
-import { InProcessOutboundWorkNotifier } from "./events/outbound-work-notifier.js";
 import { startHealthServer } from "./health/server.js";
 import { ExecFileCommandRunner } from "./infra/command-runner.js";
 import { BridgeRuntimeShutdown, cleanupStartupFailure } from "./runtime/shutdown.js";
 import { InstanceLeaseController } from "./runtime/instance-lease.js";
-import { WorkspaceSnapshotCache } from "./runtime/workspace-snapshot-cache.js";
-import { HerdrCircuitBreaker } from "./runtime/herdr-circuit-breaker.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
-import { HerdrSocketSubscriber } from "./runtime/herdr-socket-subscriber.js";
-import { HerdrEventRouter } from "./runtime/herdr-event-router.js";
-import type { HerdrRuntimeHint } from "./runtime/herdr-event-hint.js";
-import { OutboxRetentionMaintainer } from "./runtime/outbox-retention-maintainer.js";
-import { SqliteIntegrityAuditor } from "./runtime/sqlite-integrity-auditor.js";
-import { WorkerDatabaseIntegrityStore } from "./runtime/sqlite-integrity-worker.js";
-import { AnswerPageWorkflow } from "./coordinator/answer-page-workflow.js";
-import { MainCardWorkflow } from "./coordinator/main-card-workflow.js";
-import { WorktreeNameResolver } from "./runtime/worktree-name-resolver.js";
-import { WorktreeManager } from "./runtime/worktree-manager.js";
-import { HerdrPaneHost } from "./runtime/herdr/pane-host.js";
-import { AgentDriverRegistry } from "./runtime/agents/agent-driver.js";
-import { TraexDriver } from "./runtime/agents/traex-driver.js";
-import { CodexDriver } from "./runtime/agents/codex-driver.js";
-import { ClaudeCodeDriver } from "./runtime/agents/claude-code-driver.js";
-import { PiDriver } from "./runtime/agents/pi-driver.js";
 import { detectAgentRuntimeAvailability } from "./runtime/agents/agent-availability.js";
-import { InstanceControlWorkflow } from "./coordinator/instance-control-workflow.js";
-import { InstanceMessagingWorkflow } from "./coordinator/instance-messaging-workflow.js";
-import { InstanceWorkScheduler } from "./events/instance-work-scheduler.js";
-import { InstanceInteractionWorkflow } from "./coordinator/instance-interaction-workflow.js";
-import { InstanceRuntimeReconciler } from "./coordinator/instance-runtime-reconciler.js";
-import { InstanceTurnSupervisor } from "./coordinator/instance-turn-supervisor.js";
-import { WorkerTurnObserver } from "./coordinator/worker-turn-observer.js";
-import { randomUUID } from "node:crypto";
 import { safeLogError } from "./runtime/safe-error.js";
-import { TraexTranscriptReader } from "./runtime/traex-transcript.js";
-import { PrimaryToolGateway } from "./runtime/primary-tool-gateway.js";
 import { SqliteBindingStore } from "./store/sqlite-store.js";
+import { createBridgeRuntime } from "./composition/create-bridge-runtime.js";
 
 const buildIdentity = loadBuildIdentity(fileURLToPath(new URL("./build-info.json", import.meta.url)), process.env.BRIDGE_EXPECTED_BUILD_ID);
 const config = loadConfig();
@@ -74,108 +21,14 @@ const logger = pino({ level: config.logLevel, serializers: { err: safeLogError }
 const startupStartedAt = Date.now();
 const store = new SqliteBindingStore(config.databasePath);
 const lease = new InstanceLeaseController(store, config.instanceLease, logger);
-const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
-const worktreeNameResolver = new WorktreeNameResolver(runner, config.commandTimeoutMs);
-let rawHerdr!: HerdrCliAdapter;
-let herdrCircuitBreaker!: HerdrCircuitBreaker;
-let herdr!: WorkspaceSnapshotCache;
-let instanceRuntime!: InstanceRuntimeReconciler;
-let herdrEventRouter!: HerdrEventRouter;
-const herdrSocketSubscriber = process.env.HERDR_SOCKET_PATH
-  ? new HerdrSocketSubscriber(
-      process.env.HERDR_SOCKET_PATH,
-      async () => {
-        const configuredWorkspaceIds = new Set(config.projects.map((project) => project.workspaceId));
-        return (await herdr.listAllPanes()).filter((pane) => configuredWorkspaceIds.has(pane.workspaceId)).map((pane) => pane.paneId);
-      },
-      async (hint: HerdrRuntimeHint) => herdrEventRouter.handle(hint),
-      logger
-    )
-  : null;
-rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
-herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
-herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, config.runtimeTuning.herdrSnapshotCacheTtlMs, logger);
-const paneHost = new HerdrPaneHost(herdr);
-const [codexAvailable, claudeAvailable, piAvailable] = await Promise.all([
-  detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
-  detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
-  detectAgentRuntimeAvailability({ runner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
+const availabilityRunner = new ExecFileCommandRunner(config.commandTimeoutMs);
+const [codex, claude, pi] = await Promise.all([
+  detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
+  detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
+  detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
 ]);
-const agentDrivers = new AgentDriverRegistry([
-  new TraexDriver(herdr, config.traex.executable, config.turnTimeoutMs),
-  new CodexDriver(herdr, config.agents.codex, config.turnTimeoutMs, codexAvailable),
-  new ClaudeCodeDriver(herdr, config.agents.claudeCode, config.turnTimeoutMs, claudeAvailable),
-  new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, piAvailable)
-]);
-const worktrees = new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs });
-const lark = new LarkSdkAdapter(config.lark, logger);
-const bus = new BridgeEventBus(logger);
-const scheduler = new InProcessPromptWorkScheduler(logger);
-const inboundWork = new InProcessInboundWorkNotifier();
-const outboundWork = new InProcessOutboundWorkNotifier(logger);
-const outbound = new OutboundIntentWriter(store, outboundWork);
-const transcriptReader = new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot });
-let instanceWork!: InstanceWorkScheduler;
-const workerTurns = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake() });
-instanceWork = new InstanceWorkScheduler({ store, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), logger });
-const instanceTurns = new InstanceTurnSupervisor({ store, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), logger });
-instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), logger });
-const instanceMessaging = new InstanceMessagingWorkflow({ store, drivers: agentDrivers, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
-const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("./cli/primary-tools-mcp.js", import.meta.url))], store, instanceMessaging, logger);
-const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
-const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, operatorOpenIds: config.lark.operatorOpenIds, store, control: instanceControl, messaging: instanceMessaging, drivers: agentDrivers, outbound });
-const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
-const answerPages = new AnswerPageWorkflow(store, () => { outboundWork.wake(); }, logger);
-const mainCards = new MainCardWorkflow(store, () => { outboundWork.wake(); }, logger);
-const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
-const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
-const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cardUpdateDebounceMs });
-const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork, logger });
-channelPublisher.connectPromptScheduler(scheduler);
-let promptRun!: PromptRunWorkflow;
-const externalTurns = new ExternalTurnObserver({
-  store, transcriptReader, bus, outboundWork, logger,
-  isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
-  wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
-});
-promptRun = new PromptRunWorkflow({
-  store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, transcriptReader,
-  handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId),
-  observeSupersedingExternalTurn: (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation),
-  recoverExternalTurns: (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt)
-});
-const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store, herdr, logger });
-const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
-const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
-const paneControl = new PaneControlWorkflow({ store, herdr, outbound, scheduler, model: modelSelection, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
-const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound, logger });
-const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound, outboundWork, logger });
-const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
-const cardInteractions = new CardInteractionWorkflow({ store, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
-const reconciler = new HerdrRuntimeReconciler({
-  projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger,
-  wakeOutbound: () => outboundWork.wake(),
-  convergeAnswer: (promptId) => answerPages.converge(promptId),
-  discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
-  isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
-  externalTurnObserver: externalTurns,
-  worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd)
-});
-herdrEventRouter = new HerdrEventRouter({
-  invalidateWorkspace: (workspaceId) => herdr.invalidate(workspaceId),
-  reconcileBindings: async (scope) => {
-    if (scope?.paneIds) await reconciler.requestPaneReconciliation(scope.paneIds);
-    else await reconciler.requestReconciliation(scope?.workspaceIds);
-  },
-  reconcileInstances: (scope) => instanceRuntime.requestReconciliation(scope),
-  observeInstanceTurns: (paneIds) => paneIds ? instanceTurns.requestObservationByPane(paneIds) : instanceTurns.reconcile(),
-  retryRetiredPanes: (paneIds) => paneIds ? retiredPaneCleanup.requestPanes(paneIds) : retiredPaneCleanup.requestScan(),
-  logger
-});
-const startupViews = new StartupViewConverger(config, store, outbound, outboundWork, answerPages, mainCards, logger);
-const coordinator = new InboundRouter({ config, store, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, inboundWork, promptRun, provisioning, cardInteractions, modelSelection, paneControl, operationsQuery, sessionAdministration, sessionOperations, deliveryRecovery, paneClosure, reconciler, retiredPaneCleanup, startupViews, instanceInteractions });
+const runtime = createBridgeRuntime(config, store, logger, { codex, claude, pi });
+const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, lark, bus, sessionOperations, reconciler, promptRun } = runtime;
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 try {
   lease.acquire();
@@ -191,14 +44,11 @@ try {
   await sqliteIntegrity.run();
   await instanceRuntime.reconcile();
   await instanceTurns.reconcile();
-  const instanceWorker = { snapshot() {
-    const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot();
-    return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure };
-  } };
   const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() }, sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
   runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, projector, publisher: channelPublisher, healthServer, lease, store, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => {
+    await paneRetention.stop();
     outboxRetention.stop();
     const result = await shutdown.shutdown(signal);
     if (result.outcome === "ownership_retained") process.exitCode = 1;
@@ -213,6 +63,8 @@ try {
   process.once("SIGTERM", () => { void stopRuntime("SIGTERM"); });
   logger.info({ event: "bridge-startup-started", projectCount: config.projects.length, workspaceIds: [...new Set(config.projects.map((project) => project.workspaceId))], databasePath: config.databasePath, http: config.http, logLevel: config.logLevel }, "bridge startup started");
   await coordinator.start();
+  await paneRetention.scan();
+  paneRetention.start(config.reconcileIntervalMs);
   externalTurns.start();
   instanceRuntime.start(config.reconcileIntervalMs);
   instanceTurns.start(config.reconcileIntervalMs);

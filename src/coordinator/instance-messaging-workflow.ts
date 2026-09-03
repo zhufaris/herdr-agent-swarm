@@ -3,12 +3,13 @@ import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js"
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceTurn } from "../domain/instance-turn.js";
 import { createQueuedWorkerTurnCard, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
-import type { InstanceStore } from "../domain/ports.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
+import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 
-interface Options { store: InstanceStore; drivers: AgentDriverRegistry; paneHost: PaneHost; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; maxQueueDepth?: number }
+interface Options { store: InstanceStore; drivers: AgentDriverRegistry; paneHost: PaneHost; turnControl: Pick<TurnControlWorkflow, "steer">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; maxQueueDepth?: number }
 export interface InstanceConversationView { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] }
 
 export class InstanceMessagingWorkflow {
@@ -18,36 +19,37 @@ export class InstanceMessagingWorkflow {
     const target = this.authorize(input.actor, input.projectId, input.targetInstanceId);
     if (!target.runtimeRef || target.desiredState !== "running") throw new Error("Target instance is not running");
     const queueDepth = this.options.store.countPendingInstanceTurns(target.id);
-    if (queueDepth >= (this.options.maxQueueDepth ?? 20)) throw new Error("Target instance queue is full");
     const id = this.options.idFactory();
     if (input.source) {
       const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: target.id, instanceGeneration: target.generation, workerName: target.name, parentTurnId: input.source.parentTurnId ?? null, rootMessageId: input.source.rootMessageId, requestText: input.content.text, queuePosition: queueDepth + 1, occurredAt: new Date().toISOString() });
-      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, card: renderWorkerTurnCard(view) });
+      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, card: renderWorkerTurnCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20 });
       if (result.inserted) { this.options.wakeOutbound?.(); this.options.wake(target.id); }
       return { accepted: true, ...result, card: result.view };
     }
-    const result = this.options.store.acceptInstanceTurn({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text });
+    const result = this.options.store.acceptInstanceTurn({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, maxQueueDepth: this.options.maxQueueDepth ?? 20 });
     if (result.inserted) this.options.wake(target.id);
     return { accepted: true, ...result, card: null };
   }
 
-  async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; text: string }): Promise<SteerReceipt> {
+  async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; text: string; resultTargetMessageId?: string }): Promise<SteerReceipt & { durableResult?: boolean }> {
     const target = this.authorize(input.actor, undefined, input.targetInstanceId);
     if (input.targetTurnId) {
       const turn = this.options.store.getInstanceTurn(input.targetTurnId);
-      if (!turn || turn.instanceId !== target.id || turn.instanceGeneration !== target.generation || !["running", "blocked"].includes(turn.state)) return { status: "not-active" };
+      if (!turn || turn.instanceId !== target.id || turn.instanceGeneration !== target.generation || !["running", "blocked"].includes(turn.state)) return { status: "not-active", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
       const active = this.options.store.getActiveInstanceTurn(target.id, target.generation);
-      if (!active || active.id !== turn.id) return { status: "not-active" };
+      if (!active || active.id !== turn.id) return { status: "not-active", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
     }
-    const driver = this.options.drivers.get(target.agentKind);
-    if (!driver || driver.describe().steering === "unsupported" || !driver.steer) return { status: "unsupported" };
-    if (!target.runtimeRef || !["working", "blocked"].includes(target.observedState)) return { status: "not-active" };
-    const accepted = this.options.store.acceptInstanceOperation({ id: this.options.idFactory(), idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: target.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: "steer", payload: input.text });
-    const claimed = this.options.store.claimInstanceOperation(accepted.operation.id, target.generation);
-    if (!claimed) return accepted.operation.state === "accepted" || accepted.operation.state === "running" ? { status: "failed", reason: "Steering operation is already in progress" } : operationSteerReceipt(accepted.operation.result);
-    const result = await driver.steer(target.runtimeRef, input.text);
-    this.options.store.updateInstanceOperation({ id: accepted.operation.id, expectedGeneration: target.generation, state: result.status === "delivered" ? "succeeded" : result.status === "not-active" || result.status === "unsupported" ? "rejected" : "failed", result: JSON.stringify(result) });
-    return result;
+    try {
+      const { operation } = await this.options.turnControl.steer({ owner: { kind: "instance", id: target.id }, actor: input.actor, text: input.text, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
+      return { ...turnControlSteerReceipt(operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const durable = input.resultTargetMessageId ? { durableResult: false as const } : {};
+      if (/no exact active runtime turn|not active/i.test(reason)) return { status: "not-active", reason, ...durable };
+      if (/unsupported/i.test(reason)) return { status: "unsupported", reason, ...durable };
+      if (/blocked/i.test(reason)) return { status: "blocked", reason, ...durable };
+      return { status: "failed", reason, ...durable };
+    }
   }
 
   async interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string }): Promise<InterruptReceipt> {
@@ -95,5 +97,8 @@ export class InstanceMessagingWorkflow {
   }
 }
 
-function operationSteerReceipt(result: string | null): SteerReceipt { try { return JSON.parse(result ?? "{}") as SteerReceipt; } catch { return { status: "failed", reason: "Stored steering result is invalid" }; } }
+function turnControlSteerReceipt(state: import("../domain/turn-control.js").TurnControlState, result: Record<string, unknown> | null): SteerReceipt {
+  if (result && typeof result.status === "string") return result as SteerReceipt;
+  return state === "uncertain" ? { status: "delivery-uncertain", operationId: "unknown", reason: "Stored steering result is unavailable" } : { status: "failed", reason: "Stored steering result is invalid" };
+}
 function operationInterruptReceipt(result: string | null): InterruptReceipt { try { return JSON.parse(result ?? "{}") as InterruptReceipt; } catch { return { status: "failed", reason: "Stored interrupt result is invalid" }; } }

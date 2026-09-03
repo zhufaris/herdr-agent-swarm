@@ -1,4 +1,4 @@
-import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
+import { stableElementId } from "./stable-element-id.js";
 import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
@@ -89,7 +89,7 @@ export function createQueuedRunCard(input: {
 }
 
 export function answerElementId(promptId: string, pageIndex: number): string {
-  return normalizeLarkElementId(`answer-content-${promptId}-${pageIndex}`);
+  return stableElementId(`answer-content-${promptId}-${pageIndex}`);
 }
 
 export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCardView {

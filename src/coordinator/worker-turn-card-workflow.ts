@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import { workerTurnElementId, workerTurnStreamContent } from "../domain/worker-turn-card-view.js";
-import type { WorkerTurnCardStore } from "../domain/ports.js";
+import type { WorkerTurnCardStore } from "../domain/ports/projection.js";
 import { renderLarkMarkdownPage } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 

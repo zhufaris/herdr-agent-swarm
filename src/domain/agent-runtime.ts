@@ -17,7 +17,13 @@ export type DispatchReceipt =
   | { status: "confirmed-delivered"; runtimeCursor?: string }
   | { status: "not-delivered"; reason: string }
   | { status: "delivery-uncertain"; reason: string };
-export type SteerReceipt = { status: "delivered" } | { status: "unsupported" } | { status: "not-active" } | { status: "failed"; reason: string };
+export type SteerReceipt =
+  | { status: "delivered"; operationId?: string; turnId?: string }
+  | { status: "unsupported"; reason?: string }
+  | { status: "not-active"; reason?: string }
+  | { status: "blocked"; reason: string }
+  | { status: "delivery-uncertain"; operationId: string; reason: string }
+  | { status: "failed"; reason: string };
 export type InterruptReceipt = { status: "interrupted" } | { status: "not-active" } | { status: "failed"; reason: string };
 export interface AgentDispatchHooks {
   onDispatched?(): void | Promise<void>;

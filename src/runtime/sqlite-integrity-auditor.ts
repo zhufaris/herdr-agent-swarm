@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { DatabaseIntegrityStore } from "../domain/ports.js";
+import type { DatabaseIntegrityStore } from "../domain/ports/health.js";
 import type { SqliteIntegrityDiagnostics } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
 import type { ShutdownContext } from "./shutdown-context.js";

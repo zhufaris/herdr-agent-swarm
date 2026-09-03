@@ -9,27 +9,104 @@ describe("application composition boundaries", () => {
     expect(reconciler).not.toContain('scheduler.wake({ kind: "prompt-ready", bindingId: binding.id })');
   });
 
-  it("keeps concrete workflow and adapter construction in the composition root", () => {
+  it("keeps concrete workflow and adapter construction in the composition factory", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-    expect(router).not.toMatch(/new (?:PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger)/);
+    const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
-    for (const component of ["PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger"]) {
-      expect(main).toContain(`new ${component}`);
+    for (const component of ["InboundMessageDispatcher", "CardActionRouter", "PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger", "StartupRecoveryWorkflow"]) {
+      expect(factory).toContain(`new ${component}`);
+      expect(main).not.toContain(`new ${component}`);
     }
+    expect(main).toContain("createBridgeRuntime(config, store, logger, { codex, claude, pi })");
+    expect(factory).not.toContain("lease.acquire(");
+    expect(factory).not.toContain("activateWriteFence(");
+    expect(factory).not.toContain("startHealthServer(");
+  });
+
+  it("keeps ordered startup recovery and diagnostics outside the inbound facade", () => {
+    const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
+    const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");
+    expect(router).toContain("StartupRecoveryWorkflowPort");
+    expect(router).not.toContain("view-convergence");
+    expect(router).not.toContain("runStage(");
+    expect(recovery).toContain("view-convergence");
+    expect(recovery).toContain("runtime-reconciliation");
+    expect(recovery).toContain("startup-recovery-stage-failed");
+  });
+
+  it("keeps periodic scheduling mechanics in the runtime runner", () => {
+    const retention = readFileSync(new URL("../src/coordinator/pane-retention-workflow.ts", import.meta.url), "utf8");
+    const cleanup = readFileSync(new URL("../src/coordinator/retired-pane-cleanup-workflow.ts", import.meta.url), "utf8");
+    const runner = readFileSync(new URL("../src/runtime/periodic-workflow-runner.ts", import.meta.url), "utf8");
+    expect(retention).toContain("PeriodicWorkflowRunner");
+    expect(cleanup).toContain("PeriodicWorkflowRunner");
+    expect(retention).not.toContain("setInterval(");
+    expect(cleanup).not.toContain("setInterval(");
+    expect(runner).toContain("setInterval(");
+    expect(runner).toContain("async stop()");
+  });
+
+  it("keeps reconciliation metrics behind one runtime module", () => {
+    const herdrReconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
+    const instanceReconciler = readFileSync(new URL("../src/coordinator/instance-runtime-reconciler.ts", import.meta.url), "utf8");
+    const metrics = readFileSync(new URL("../src/runtime/reconciliation-run-metrics.ts", import.meta.url), "utf8");
+    expect(herdrReconciler).toContain("ReconciliationRunMetrics");
+    expect(instanceReconciler).toContain("ReconciliationRunMetrics");
+    expect(herdrReconciler).not.toContain("private runCount");
+    expect(instanceReconciler).not.toContain("private runCount");
+    expect(metrics).toContain("async measure<T>");
+    expect(metrics).toContain("markCoalesced");
+  });
+
+  it("keeps per-binding projection serialization in the runtime queue", () => {
+    const conversation = readFileSync(new URL("../src/events/conversation-view-projector.ts", import.meta.url), "utf8");
+    const queueFeedback = readFileSync(new URL("../src/events/queue-feedback-projector.ts", import.meta.url), "utf8");
+    const queue = readFileSync(new URL("../src/runtime/keyed-serial-work-queue.ts", import.meta.url), "utf8");
+    expect(conversation).toContain("KeyedSerialWorkQueue");
+    expect(queueFeedback).toContain("KeyedSerialWorkQueue");
+    expect(conversation).not.toContain("bindingTails");
+    expect(queueFeedback).not.toContain("bindingTails");
+    expect(queue).toContain("previous.catch(() => undefined).then(work)");
+    expect(queue).toContain("async stop()");
+  });
+
+  it("keeps durable inbound persistence and retry mechanics outside message routing", () => {
+    const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/coordinator/inbound-message-dispatcher.ts", import.meta.url), "utf8");
+    expect(router).toContain("InboundMessageDispatcherPort");
+    expect(router).not.toContain("claimNextInboundMessage");
+    expect(router).not.toContain("scheduleRetry");
+    expect(dispatcher).toContain("claimNextInboundMessage");
+    expect(dispatcher).toContain("scheduleRetry");
+  });
+
+  it("keeps card action parsing and authorization outside message routing", () => {
+    const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
+    const cardActions = readFileSync(new URL("../src/coordinator/card-action-router.ts", import.meta.url), "utf8");
+    expect(router).toContain("CardActionRouterPort");
+    expect(router).not.toContain("parseModelSelectionAction");
+    expect(router).not.toContain("parsePaneClaimAction");
+    expect(cardActions).toContain("parseModelSelectionAction");
+    expect(cardActions).toContain("parsePaneClaimAction");
   });
 
   it("routes query and session administration through dedicated workflow seams", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
-    expect(router).toContain("OperationsQueryWorkflowPort");
-    expect(router).toContain("SessionAdministrationWorkflowPort");
-    expect(router).toContain("ModelSelectionWorkflowPort");
-    expect(router).toContain("PaneControlWorkflowPort");
-    expect(router).toContain("PaneClosureWorkflowPort");
-    expect(router).toContain("DeliveryRecoveryWorkflowPort");
-    expect(router).toContain("operationsQuery.listSpaces");
-    expect(router).toContain("sessionAdministration.archive");
+    const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");
+    expect(router).toContain("StartupRecoveryWorkflowPort");
+    expect(router).not.toContain("operationsQuery.listSpaces");
+    expect(routing).toContain("OperationsQueryWorkflowPort");
+    expect(routing).toContain("SessionAdministrationWorkflowPort");
+    expect(routing).toContain("ModelSelectionWorkflowPort");
+    expect(routing).toContain("PaneControlWorkflowPort");
+    expect(routing).toContain("PaneClosureWorkflowPort");
+    expect(recovery).toContain("InboundMessageRoutingWorkflowPort");
+    expect(routing).toContain("operationsQuery.listSpaces");
+    expect(routing).toContain("sessionAdministration.archive");
   });
 
   it("keeps lifecycle publishers and subscribers behind their ports", () => {

@@ -11,7 +11,8 @@ const projectSchema = z.object({
   description: z.string().trim().min(1),
   workspaceId: z.string().trim().min(1),
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
-  maxInstances: z.number().int().min(1).max(64).default(8)
+  maxInstances: z.number().int().min(1).max(64).default(8),
+  paneRetention: z.object({ mode: z.enum(["persistent", "ephemeral"]), idleAfterMs: z.number().int().positive().optional(), graceMs: z.number().int().positive().optional() }).strict().optional()
 }).strict();
 const projectRegistrySchema = z.object({
   defaultProjectId: z.string().min(1),

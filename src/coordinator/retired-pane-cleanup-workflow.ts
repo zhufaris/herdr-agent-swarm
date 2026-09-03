@@ -1,7 +1,9 @@
 import type { Logger } from "pino";
-import type { HerdrPort, RetiredPaneCleanupStore } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { RetiredPaneCleanupStore } from "../domain/ports/binding.js";
 import type { RetiredPaneCleanupOperation, RuntimeObservation } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { PeriodicWorkflowRunner } from "../runtime/periodic-workflow-runner.js";
 
 export interface RetiredPaneCleanupWorkflowPort {
   recover(): Promise<void>;
@@ -18,12 +20,12 @@ interface Options {
 }
 
 export class RetiredPaneCleanupWorkflow implements RetiredPaneCleanupWorkflowPort {
-  private scan: Promise<void> | null = null;
   private pendingPaneIds: Set<string> | null | undefined;
-  private stopping = false;
-  private timer: NodeJS.Timeout | null = null;
+  private readonly runner: PeriodicWorkflowRunner;
 
-  constructor(private readonly options: Options) {}
+  constructor(private readonly options: Options) {
+    this.runner = new PeriodicWorkflowRunner({ run: () => this.drain(), onError: (error) => this.logFailure(error) });
+  }
 
   recover(): Promise<void> { return this.requestScan(); }
 
@@ -35,34 +37,26 @@ export class RetiredPaneCleanupWorkflow implements RetiredPaneCleanupWorkflowPor
   }
 
   private request(paneIds?: readonly string[]): Promise<void> {
-    if (this.stopping) return Promise.resolve();
+    if (this.runner.isStopping) return Promise.resolve();
     this.enqueue(paneIds);
-    if (this.scan) return this.scan;
-    const scan = this.drain();
-    this.scan = scan;
-    return scan.finally(() => { if (this.scan === scan) this.scan = null; });
+    return this.runner.request();
   }
 
   start(intervalMs: number): void {
-    if (this.stopping || this.timer) return;
-    this.timer = setInterval(() => void this.requestScan().catch((error) => this.logFailure(error)), intervalMs);
-    this.timer.unref();
+    this.runner.start(intervalMs);
   }
 
   async stop(): Promise<void> {
-    this.stopping = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    if (this.scan) await this.scan;
+    await this.runner.stop();
   }
 
   private async drain(): Promise<void> {
-    while (this.pendingPaneIds !== undefined && !this.stopping) {
+    while (this.pendingPaneIds !== undefined && !this.runner.isStopping) {
       const requestedPaneIds = this.pendingPaneIds;
       this.pendingPaneIds = undefined;
       const operations = this.options.store.listRetiredPaneCleanupOperations();
       for (const operation of requestedPaneIds === null ? operations : operations.filter(({ paneId }) => requestedPaneIds.has(paneId))) {
-        if (this.stopping) return;
+        if (this.runner.isStopping) return;
         try { await this.process(operation); }
         catch (error) { this.logFailure(error, operation); }
       }

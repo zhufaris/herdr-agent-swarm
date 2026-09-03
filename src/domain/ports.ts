@@ -1,4 +1,5 @@
 import type { AgentState, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, InstanceLease, LarkCardActionResult, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservation, RuntimeObservationApplication, RuntimeTurnObservation, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, StaleOutboxQuarantineRecovery, TranscriptTurnClaimOutcome } from "./types.js";
+import type { SteerReceipt } from "./agent-runtime.js";
 import type { TopicViewState } from "./topic-view.js";
 import type { RunCardView, RunProgressEvent } from "./run-card-view.js";
 import type { SessionTransition } from "./pane-thread-lifecycle.js";
@@ -6,11 +7,25 @@ import type { BridgeEvent } from "./events.js";
 import type { PaneControlOutcome } from "./pane-control-lifecycle.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "./agent-instance.js";
 import type { ControlActor } from "./commands.js";
-import type { InstanceEvent, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "./instance-turn.js";
+import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "./instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "./approval-policy.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "./worker-turn-card-view.js";
+import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState } from "./turn-control.js";
+import type { HerdrPort, LarkPort, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort, TraexTranscriptUnavailableReason } from "./ports/external.js";
+import type { AcceptInstanceTurnWithCardInput, InstanceStore } from "./ports/instance.js";
+import type { TurnControlStore } from "./ports/turn-control.js";
+import type { PromptAcceptanceStore, PromptRunStore } from "./ports/prompt.js";
+import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "./ports/projection.js";
+import type { BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore } from "./ports/binding.js";
+import type { PaneCloseStore, PaneControlStore } from "./ports/pane-operations.js";
+import type { ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, OutboundIntentPort, OutboundIntentStore, OutboxDispatcherControl, OutboxStore } from "./ports/outbox.js";
+import type { DatabaseIntegrityStore, HealthStore, LeaseStore } from "./ports/health.js";
+import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "./ports/workflow.js";
+export type { HerdrPort, LarkPort, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort, TraexTranscriptUnavailableReason, AcceptInstanceTurnWithCardInput, InstanceStore, TurnControlStore, PromptAcceptanceStore, PromptRunStore, AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore, BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore, PaneCloseStore, PaneControlStore, ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, OutboundIntentPort, OutboundIntentStore, OutboxDispatcherControl, OutboxStore, DatabaseIntegrityStore, HealthStore, LeaseStore, CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore };
 
-export interface AcceptInstanceTurnWithCardInput {
+
+
+interface LegacyAcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
   kind: InstanceTurn["kind"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; card: object;
 }
@@ -42,7 +57,8 @@ export type ClassifiedPromptAcceptance = {
   fallbackReason: ClassifiedPromptFallbackReason;
 };
 
-export interface InstanceStore {
+/* InstanceStore moved to ports/instance.ts. */
+/*
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   getBinding(id: string): Binding | null;
   createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest;
@@ -68,8 +84,8 @@ export interface InstanceStore {
   getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null;
   consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
-  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string }): { turn: InstanceTurn; inserted: boolean };
-  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
+  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean };
+  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
   getInstanceTurn(id: string): InstanceTurn | null;
   claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
@@ -80,7 +96,7 @@ export interface InstanceStore {
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
+  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   listRecentInstanceTurnSummaries(instanceId: string, limit?: number): InstanceTurnSummary[];
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
@@ -94,7 +110,7 @@ export interface InstanceStore {
   listObservableInstanceTurns(): InstanceTurn[];
   listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[];
   getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number };
-  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: string }): InstanceTurn | null;
+  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind }): InstanceTurn | null;
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
   listInstanceEvents(instanceId: string, afterId?: number): InstanceEvent[];
   countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number;
@@ -105,98 +121,9 @@ export interface InstanceStore {
   setConversationTarget(input: { chatId: string; projectId: string; target: import("./agent-instance.js").InstanceTarget }): void;
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
 }
+*/
 
-export interface LarkPort {
-  start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<LarkCardActionResult | void>): Promise<void>;
-  stop(): Promise<void>;
-  isReady(): boolean;
-  createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }>;
-  replyText(rootMessageId: string, text: string, idempotencyKey?: string): Promise<{ messageId: string }>;
-  replyCard(rootMessageId: string, card: object, idempotencyKey?: string): Promise<{ messageId: string }>;
-  replyStreamingCard?(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }>;
-  createStreamingCard?(card: object): Promise<{ cardId: string }>;
-  replyStreamingCardReference?(rootMessageId: string, cardId: string, idempotencyKey: string): Promise<{ messageId: string }>;
-  streamCardContent?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
-  finishStreamingCard?(cardId: string, sequence: number, summary: string): Promise<void>;
-  shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }>;
-  updateCard(messageId: string, card: object): Promise<void>;
-  updateCardKit?(messageId: string, card: object, sequence: number): Promise<void>;
-}
-
-export interface HerdrPort {
-  assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void>;
-  listAllPanes?(): Promise<HerdrPane[]>;
-  listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
-  getPane(paneId: string): Promise<HerdrPane | null>;
-  observeRuntime(paneId: string): Promise<RuntimeObservation>;
-  waitForRuntimeChange?(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void>;
-  createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane>;
-  startTraex(paneId: string, executable: string, args?: string[]): Promise<void>;
-  startAgent?(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void>;
-  runPrompt(
-    paneId: string,
-    text: string,
-    timeoutMs: number,
-    onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
-    signal?: AbortSignal,
-    onDispatched?: () => void | Promise<void>
-  ): Promise<AgentState>;
-  sendEscape?(paneId: string): Promise<void>;
-  renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;
-  closePane(paneId: string): Promise<void>;
-}
-
-export interface TraexTranscriptCursorPort {
-  readDelta(): Promise<string>;
-  readObservation?(): Promise<TraexTranscriptObservation>;
-}
-
-export interface TraexTranscriptPlanStep {
-  key: string;
-  label: string;
-  state: "pending" | "active" | "done";
-}
-
-export interface TraexTranscriptMainStatus {
-  statusTitle?: string;
-  planSteps?: TraexTranscriptPlanStep[];
-  tokenCount?: number;
-}
-
-export interface TraexTranscriptObservation {
-  turnId?: string;
-  freshTurnStart?: boolean;
-  requestText?: string;
-  answerDelta: string;
-  toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
-  mainStatus?: TraexTranscriptMainStatus;
-  turnLifecycle?: {
-    turnId: string;
-    state: "active" | "completed" | "aborted";
-    startedAt: string;
-    finalAnswer?: string;
-    reason?: string;
-  };
-}
-
-export type TraexTranscriptUnavailableReason =
-  | "missing_session_identity"
-  | "unsupported_session_identity"
-  | "transcript_not_found"
-  | "ambiguous_transcript"
-  | "turn_boundary_not_found"
-  | "turn_boundary_incomplete"
-  | "transcript_validation_failed";
-
-export type TraexTranscriptOpenResult =
-  | { mode: "typed"; cursor: TraexTranscriptCursorPort }
-  | { mode: "unavailable"; reason: TraexTranscriptUnavailableReason };
-
-export interface TraexTranscriptReaderPort {
-  open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
-  openAtTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
-  openAfterTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
-}
+/* External adapter contracts live in ports/external.ts. */
 
 export interface BindingStorePort {
   close(): void;
@@ -249,12 +176,12 @@ export interface BindingStorePort {
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
   createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void;
+  createAutomaticPaneCloseOperation(input: { id: string; bindingId: string; paneId: string; now: string }): void;
   consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }):
     | { outcome: "consumed"; operationId: string; paneId: string }
     | { outcome: "invalid" | "unauthorized" | "expired" | "stale" };
   finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail?: string): void;
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[];
-  updateBinding(id: string, patch: Partial<Binding>): Binding;
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding;
   replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding;
   transitionBinding(id: string, transition: SessionTransition): Binding;
@@ -370,124 +297,4 @@ export interface BindingStorePort {
   loadRunCard(promptId: string): RunCardView | null;
   listRunCards(bindingId: string): RunCardView[];
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
-}
-
-export type InboundStore = Pick<BindingStorePort,
-  | "claimNextInboundMessage" | "findBindingByLarkScope" | "isBridgeMessage" | "markInboundMessageAccepted"
-  | "recordInboundMessage" | "recoverProcessingInboundMessages" | "releaseInboundMessage" | "listCompletedProjectSelectionsWithInitialPrompt" | "getBinding"
->;
-
-export type LeaseStore = Pick<BindingStorePort,
-  | "acquireInstanceLease" | "renewInstanceLease" | "releaseInstanceLease"
->;
-
-export type HealthStore = Pick<BindingStorePort, "getOperationalSummary" | "listBindings">;
-export interface DatabaseIntegrityStore { inspectIntegrity(limit: number, signal?: AbortSignal): SqliteIntegrityInspection | Promise<SqliteIntegrityInspection> }
-
-export type PromptAcceptanceStore = Pick<BindingStorePort,
-  | "acceptPrompt" | "acceptClassifiedPrompt" | "audit" | "countPendingPrompts" | "ensureAnswerCard" | "getOperationalSummary" | "hasPendingAnswerContinuation"
-  | "listBindings" | "listRunCards" | "loadTopicView" | "recoverLegacyElementIdDeadLetters" | "recoverStaleOutboxQuarantines" | "reserveMainCard" | "saveRunCard" | "saveTopicView"
->;
-
-export type PromptRunStore = Pick<BindingStorePort,
-  | "recoverRunningPrompts"
-  | "listDetachedPrompts"
-  | "scanDurablePromptWork"
-  | "getBinding"
-  | "getPrompt"
-  | "claimNextDispatchablePrompt"
-  | "claimNextReadySteering"
-  | "markPromptDispatched"
-  | "claimPromptTranscriptTurn"
-  | "markPromptObservationDetached"
-  | "failQueuedSteering"
-  | "updatePrompt"
-  | "completeTurn"
-  | "failPrompt"
-  | "completeSteering"
-  | "updateBindingMetadata"
-  | "transitionBinding"
-  | "countPendingPrompts"
-  | "listQueuedTurnRunCards"
-  | "loadRunCard"
-  | "loadTopicView"
-  | "transitionBindingWithOutbox"
->;
-
-export type RuntimeReconciliationStore = Pick<BindingStorePort,
-  | "applyRuntimeObservation"
-  | "reconcileBindingTitleWithProjection"
-  | "degradeBindingWithProjection"
-  | "countPendingPrompts"
-  | "findBindingByPane"
-  | "loadTopicView"
-  | "listBindingsByState"
-  | "orphanBindingWithProjection"
-  | "recoverOrphanBindingWithProjection"
-  | "transitionBinding"
-  | "updateBindingMetadata"
->;
-
-export type BindingProvisioningStore = Pick<BindingStorePort,
-  | "attachBindingPane" | "audit" | "claimProjectSelection" | "completeProjectSelection"
-  | "countPendingPrompts" | "createPendingBinding" | "createProjectSelection" | "failProjectSelection" | "findBindingByLarkScope"
-  | "findBindingByPane" | "getBinding" | "linkProjectSelectionBinding" | "listBindingsByState"
-  | "hasBindingPrimaryToolCapability" | "revokeBindingPrimaryToolCapability"
-  | "listProcessingProjectSelections" | "loadTopicView" | "pauseProjectSelection" | "recordBridgeMessage"
-  | "createResetCandidate" | "cutoverResetCandidate" | "replaceProvisioningPane" | "saveTopicView" | "transitionBinding" | "updateBindingMetadata"
->;
-
-export type RetiredPaneCleanupStore = Pick<BindingStorePort,
-  | "claimRetiredPaneCleanup" | "completeRetiredPaneCleanup" | "countPendingPrompts" | "getBinding"
-  | "listRetiredPaneCleanupOperations" | "updateRetiredPaneCleanup"
->;
-
-export type OperationsStore = Pick<BindingStorePort,
-  | "audit" | "cancelQueuedPromptsWithProjection" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest"
-  | "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "finishPaneControlWithResult" | "getPaneControlOperation" | "listRecoverablePaneControlOperations"
-  | "claimAppliedPaneControlOperation" | "rejectAppliedPaneControlOperation"
-  | "dismissDeadLetter" | "findBindingByPane" | "finishPaneCloseRequest" | "getBinding" | "listBindings"
-  | "listFailures" | "listRunCardsByPhases" | "listSessions" | "listUnresolvedPaneCloseOperations" | "loadTopicView"
-  | "retryDeadLetter" | "transitionBinding" | "transitionBindingWithOutbox" | "updateBindingMetadata"
->;
-
-export type AnswerPageStore = Pick<BindingStorePort, "getActiveAnswerPage" | "getAnswerPageDeliveryFacts" | "getBinding" | "listAnswerPages" | "loadRunCard" | "reserveAnswerContent" | "reserveAnswerContinuation" | "reserveAnswerFinish" | "reserveAnswerRebuild" | "reserveFinalAnswerCardUpdate" | "reserveClosedAnswerCardUpdate" | "reserveStaticAnswerCardUpdate" | "reserveStaticAnswerReplacement">;
-export type WorkerTurnCardStore = Pick<BindingStorePort, "listPendingOutboundReplies"> & Pick<InstanceStore, "getWorkerTurnCardDeliveryFacts" | "listWorkerTurnCardPages" | "loadWorkerTurnCard" | "reserveWorkerTurnContent" | "reserveWorkerTurnContinuation" | "reserveWorkerTurnFinish">;
-export type MainCardStore = Pick<BindingStorePort, "getBinding" | "loadTopicView" | "reserveMainCard" | "saveTopicView">;
-
-export type ProjectionStore = Pick<BindingStorePort, "getBinding" | "loadRunCard" | "loadTopicView" | "saveRunCard" | "saveTopicView">;
-export type QueueFeedbackStore = Pick<BindingStorePort, "listBindings" | "loadQueueFeedbackInputs" | "projectQueuedRunCards">;
-
-export type OutboxStore = Pick<BindingStorePort,
-  | "checkpointOutboundReplyCard" | "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "getNextOutboundLaneHeadAttemptAt" | "getPrompt"
-  | "listOutboundLaneHeads" | "loadRunCard" | "markOutboundReplyDelivered" | "markOutboundReplyFailedWithQuarantine"
-  | "recoverEligibleDeadLetters" | "recordBridgeMessage" | "dismissSupersededAnswerStream"
-> & Pick<InstanceStore, "findWorkerTurnByCardMessage" | "listWorkerTurnCardPages" | "loadWorkerTurnCard">;
-export type OutboundIntentStore = Pick<BindingStorePort, "enqueueOutboundReply" | "getActiveAnswerPage" | "getBinding" | "loadRunCard">;
-
-export interface OutboundIntentPort {
-  enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId?: string | null, targetRole?: OutboundReply["targetRole"]): Promise<void>;
-  enqueueCardUpdate(bindingId: string | null, messageId: string, eventId: string, card: object): Promise<void>;
-  enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object): Promise<void>;
-  enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
-  enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void>;
-  enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void>;
-}
-
-export interface OutboundCheckpointSubscriber {
-  onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void;
-  onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void;
-  onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void;
-  requestScan(force?: boolean): Promise<void>;
-}
-
-export interface ImmediateOutboundDispatcher {
-  requestScan(force?: boolean): Promise<void>;
-}
-
-export interface OutboxDispatcherControl {
-  start(): () => void;
-  stop(): Promise<void>;
-  requestScan(force?: boolean): Promise<void>;
-  snapshot(): OutboxDispatcherDiagnostics;
 }

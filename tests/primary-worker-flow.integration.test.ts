@@ -43,7 +43,7 @@ describe("Primary to Worker product flow", () => {
       }
     } }; } }, wakeInstance: (instanceId) => scheduler?.wake(instanceId), wakeOutbound: () => {} });
     scheduler = new InstanceWorkScheduler({ store, drivers, observer: workerTurns });
-    const messaging = new InstanceMessagingWorkflow({ store, drivers, paneHost: {} as never, wake: (id) => scheduler!.wake(id), idFactory: () => "worker-turn" });
+    const messaging = new InstanceMessagingWorkflow({ store, drivers, paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: (id) => scheduler!.wake(id), idFactory: () => "worker-turn" });
     const socketPath = join(directory, "primary-tools.sock"); gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
     const launch = gateway.issueBinding("binding", 1); await gateway.start();
     const invoke = async (name: string, args: Record<string, unknown>) => {

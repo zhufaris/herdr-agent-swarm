@@ -1,12 +1,14 @@
 import type { Logger } from "pino";
 import { renderFailureCards } from "../cards/operations-card.js";
-import type { LarkPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
+import type { LarkPort } from "../domain/ports/external.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { DeliveryRecoveryStore } from "../domain/ports/workflow.js";
 import type { IncomingLarkCardAction } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 interface Options {
-  store: Pick<OperationsStore, "audit" | "dismissDeadLetter" | "getBinding" | "listFailures" | "retryDeadLetter">;
+  store: DeliveryRecoveryStore;
   lark: Pick<LarkPort, "replyText" | "shareThread">;
   outbound: Pick<OutboundIntentPort, "enqueueCardUpdate">;
   outboundWork: OutboundWorkNotifier;

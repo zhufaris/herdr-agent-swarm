@@ -1,4 +1,4 @@
-import type { InstanceStore } from "../domain/ports.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { Logger } from "pino";
@@ -76,7 +76,7 @@ export class InstanceWorkScheduler {
     } catch (error) { this.recordFailure(error, instanceId, this.inFlight.get(instanceId)?.turnId); }
     finally { this.active.delete(instanceId); this.inFlight.delete(instanceId); }
   }
-  private transition(turnId: string, generation: number, state: Parameters<InstanceStore["updateInstanceTurn"]>[0]["state"], eventKind: string, change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
+  private transition(turnId: string, generation: number, state: Parameters<InstanceStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<InstanceStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
       const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: renderWorkerTurnCard });
       if (projected) this.options.wakeOutbound?.();

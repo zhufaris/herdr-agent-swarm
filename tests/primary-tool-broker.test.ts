@@ -21,7 +21,7 @@ function setup() {
     return { projectId, bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent" };
   };
   const driver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }), steer: async () => ({ status: "delivered" as const }), interrupt: async () => ({ status: "interrupted" as const }) } satisfies AgentRuntimeDriver;
-  const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, wake: () => undefined, idFactory: () => "turn-1" });
+  const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "turn-1" });
   return { create, primary, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string }) => new PrimaryToolBroker(identity, messaging) };
 }
 

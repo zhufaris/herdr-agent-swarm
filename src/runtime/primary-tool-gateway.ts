@@ -3,8 +3,8 @@ import { chmod, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import type { Logger } from "pino";
 import { z } from "zod";
-import type { InstanceStore } from "../domain/ports.js";
-import type { InstanceMessagingWorkflow } from "../coordinator/instance-messaging-workflow.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
+import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
 import { PrimaryToolBroker } from "./primary-tool-broker.js";
 import { safeLogError } from "./safe-error.js";
 
@@ -24,7 +24,7 @@ export class PrimaryToolGateway {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
 
-  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: InstanceMessagingWorkflow, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}) {}
+  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}) {}
 
   issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolLaunch {
     const capability = randomBytes(32).toString("hex");

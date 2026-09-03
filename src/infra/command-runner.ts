@@ -55,7 +55,7 @@ export class CommandError extends Error {
 
 function redactCommandArgs(args: string[]): string[] {
   const safe = [...args];
-  if (safe[0] === "agent" && safe[1] === "prompt" && safe.length > 3) safe[3] = "[REDACTED]";
+  if (safe[0] === "agent" && ["prompt", "steer"].includes(safe[1] ?? "") && safe.length > 3) safe[3] = "[REDACTED]";
   for (let index = 0; index < safe.length - 1; index += 1) {
     if (safe[index] !== "--env") continue;
     const secret = /^(SWARM_PRIMARY_CAPABILITY)=/.exec(safe[index + 1]!);
@@ -66,7 +66,7 @@ function redactCommandArgs(args: string[]): string[] {
 
 function sensitiveCommandArgValues(args: string[]): string[] {
   const values: string[] = [];
-  if (args[0] === "agent" && args[1] === "prompt" && args.length > 3) values.push(args[3]!);
+  if (args[0] === "agent" && ["prompt", "steer"].includes(args[1] ?? "") && args.length > 3) values.push(args[3]!);
   for (let index = 0; index < args.length - 1; index += 1) {
     if (args[index] !== "--env") continue;
     const match = /^SWARM_PRIMARY_CAPABILITY=(.*)$/.exec(args[index + 1]!);

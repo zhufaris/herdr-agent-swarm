@@ -1,4 +1,4 @@
-import type { HerdrPort } from "../../domain/ports.js";
+import type { HerdrPort } from "../../domain/ports/external.js";
 import type { HerdrPane, HerdrPaneCreationOptions } from "../../domain/types.js";
 
 export interface PaneHost {

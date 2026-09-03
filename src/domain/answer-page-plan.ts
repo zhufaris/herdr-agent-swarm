@@ -1,7 +1,12 @@
 import type { RunCardView } from "./run-card-view.js";
 import { answerElementId } from "./run-card-view.js";
 import type { AnswerPage, AnswerPageDeliveryFacts } from "./types.js";
-import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
+
+export interface AnswerPagePlanningPort {
+  answerStreamContent(view: RunCardView): string;
+  renderAnswerStreamPage(content: string, pageStart: number, limit: number): { page: string; nextPageStart: number | null };
+  pageLimit: number;
+}
 
 export type AnswerPagePlan =
   | { type: "wait" }
@@ -10,10 +15,10 @@ export type AnswerPagePlan =
   | { type: "rebuild"; currentSummary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; initialContent: string }
   | { type: "continue"; currentSummary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; initialContent: string };
 
-export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: AnswerPageDeliveryFacts): AnswerPagePlan {
+export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: AnswerPageDeliveryFacts, planning: AnswerPagePlanningPort): AnswerPagePlan {
   if (page.state !== "active") return { type: "wait" };
-  const content = answerStreamContent(view);
-  const rendered = renderAnswerStreamPage(content, page.sourceStart, ANSWER_STREAM_PAGE_LIMIT);
+  const content = planning.answerStreamContent(view);
+  const rendered = planning.renderAnswerStreamPage(content, page.sourceStart, planning.pageLimit);
   if (facts.continuationPending) return { type: "wait" };
   if (facts.latestContent?.state === "pending") return { type: "wait" };
   if (facts.latestContent?.state === "dead_letter") return { type: "wait" };
@@ -29,7 +34,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
     return {
       type: "continue", currentSummary: `回答将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex,
       nextPageStart: facts.latestContent.sourceEnd, nextElementId: answerElementId(view.promptId, nextPageIndex),
-      initialContent: renderAnswerStreamPage(content, facts.latestContent.sourceEnd, ANSWER_STREAM_PAGE_LIMIT).page
+      initialContent: planning.renderAnswerStreamPage(content, facts.latestContent.sourceEnd, planning.pageLimit).page
     };
   }
   if (!rendered.page) {
@@ -46,7 +51,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
     return {
       type: "continue", currentSummary: `回答将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex,
       nextPageStart: rendered.nextPageStart, nextElementId: answerElementId(view.promptId, nextPageIndex),
-      initialContent: renderAnswerStreamPage(content, rendered.nextPageStart, ANSWER_STREAM_PAGE_LIMIT).page
+      initialContent: planning.renderAnswerStreamPage(content, rendered.nextPageStart, planning.pageLimit).page
     };
   }
   if (view.phase === "completed" || view.phase === "failed") {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { BindingStorePort } from "../domain/ports.js";
+import type { SessionOperationStore } from "../domain/ports/workflow.js";
 import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, SessionOperation, SessionOperationDispatcherDiagnostics, SessionOperationKind } from "../domain/types.js";
 import { UNSUPPORTED_RUNTIME_MODEL_MESSAGE } from "../domain/session-operation-policy.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -10,9 +10,7 @@ import type { SessionAdministrationWorkflowPort } from "./session-administration
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 
-type Store = Pick<BindingStorePort,
-  "acceptSessionOperation" | "claimNextSessionOperation" | "finishSessionOperation" | "getBinding" | "listRecoverableSessionOperations"
->;
+type Store = SessionOperationStore;
 
 interface Options {
   store: Store;

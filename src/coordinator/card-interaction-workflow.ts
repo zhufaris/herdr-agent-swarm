@@ -2,14 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard } from "../cards/interaction-card.js";
-import type { BindingStorePort } from "../domain/ports.js";
+import type { CardInteractionStore } from "../domain/ports/workflow.js";
 import type { IncomingLarkCardAction, LarkCardActionResult } from "../domain/types.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 
 interface Options {
-  store: Pick<BindingStorePort, "createCardInteraction" | "getCardInteraction" | "convertFailedSteeringToTurn" | "getBinding" | "getPrompt" | "loadRunCard" | "countPendingPrompts" | "loadTopicView">;
+  store: CardInteractionStore;
   sessionAdministration: Pick<SessionAdministrationWorkflowPort, "emitStatus">;
   sessionOperations: Pick<SessionOperationWorkflowPort, "accept">;
   wakePrompt(bindingId: string): void;

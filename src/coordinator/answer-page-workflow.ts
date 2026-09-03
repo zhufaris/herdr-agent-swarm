@@ -1,9 +1,9 @@
 import type { Logger } from "pino";
 import { renderFinalAnswerCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
-import { planAnswerPage } from "../domain/answer-page-plan.js";
+import { planAnswerPage, type AnswerPagePlanningPort } from "../domain/answer-page-plan.js";
 import { answerElementId } from "../domain/run-card-view.js";
-import type { AnswerPageStore } from "../domain/ports.js";
+import type { AnswerPageStore } from "../domain/ports/projection.js";
 
 export interface AnswerPageWorkflowPort { converge(promptId: string): Promise<void>; }
 
@@ -12,7 +12,8 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
   constructor(
     private readonly store: AnswerPageStore,
     private readonly wakeOutbound: () => void,
-    private readonly logger?: Logger
+    private readonly logger?: Logger,
+    private readonly planning: AnswerPagePlanningPort = { pageLimit: 9_000, answerStreamContent, renderAnswerStreamPage }
   ) {}
 
   converge(promptId: string): Promise<void> {
@@ -38,7 +39,7 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
     }
     if (!page.cardId) { this.reserveClosedAnswerCard(view); return; }
     if (page.deliveryMode === "static") { this.reserveStaticAnswerCard(view, page); return; }
-    const plan = planAnswerPage(view, page, this.store.getAnswerPageDeliveryFacts(promptId, page.pageIndex));
+    const plan = planAnswerPage(view, page, this.store.getAnswerPageDeliveryFacts(promptId, page.pageIndex), this.planning);
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
     if (plan.type === "stream-content") outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content });
     else if (plan.type === "finish-terminal") outcome = this.store.reserveAnswerFinish({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, summary: plan.summary });

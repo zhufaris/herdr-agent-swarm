@@ -1,6 +1,6 @@
 import type { AgentRuntimeRef } from "../../domain/agent-instance.js";
 import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
-import type { HerdrPort } from "../../domain/ports.js";
+import type { HerdrPort } from "../../domain/ports/external.js";
 import { safeLogError } from "../safe-error.js";
 
 export class TraexDriver implements AgentRuntimeDriver {

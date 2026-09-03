@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
-import type { HealthStore, HerdrPort, LarkPort } from "../domain/ports.js";
+import type { HerdrPort, LarkPort } from "../domain/ports/external.js";
+import type { HealthStore } from "../domain/ports/health.js";
 import type { HerdrCircuitBreakerStatus, InboundDispatcherDiagnostics, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, ReconciliationDiagnostics, SessionOperationDispatcherDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";

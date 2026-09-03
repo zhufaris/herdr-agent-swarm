@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
-import type { InstanceStore } from "../domain/ports.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";

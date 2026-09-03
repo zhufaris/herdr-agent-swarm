@@ -1,4 +1,4 @@
-import { normalizeLarkElementId } from "../runtime/lark-card-id.js";
+import { stableElementId } from "./stable-element-id.js";
 
 export type WorkerTurnCardPhase =
   | "queued"
@@ -86,7 +86,7 @@ export function createQueuedWorkerTurnCard(input: {
 }
 
 export function workerTurnElementId(turnId: string, pageIndex: number): string {
-  return normalizeLarkElementId(`worker-turn-${turnId}-${pageIndex}`);
+  return stableElementId(`worker-turn-${turnId}-${pageIndex}`);
 }
 
 export function workerTurnStreamContent(view: WorkerTurnCardView): string {

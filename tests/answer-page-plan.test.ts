@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { planAnswerPage } from "../src/domain/answer-page-plan.js";
+import { planAnswerPage as planAnswerPageWithPlanning } from "../src/domain/answer-page-plan.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { AnswerPage } from "../src/domain/types.js";
 import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
+const planning = { pageLimit: ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage };
+const planAnswerPage = (...args: Parameters<typeof planAnswerPageWithPlanning> extends infer P ? P extends readonly unknown[] ? P : never : never) => planAnswerPageWithPlanning(args[0] as never, args[1] as never, args[2] as never, planning);
 
 function fixture(answer: string, phase: "running" | "completed" = "running") {
   const view = { ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" }), answer, phase, answerCardId: "card-1", answerMessageId: "message-1" };

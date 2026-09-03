@@ -145,6 +145,7 @@ export interface ProjectConfig {
   workspaceId: string;
   cwd: string;
   maxInstances?: number;
+  paneRetention?: { mode: "persistent" | "ephemeral"; idleAfterMs?: number | undefined; graceMs?: number | undefined } | undefined;
 }
 
 export interface IncomingLarkCardAction {
@@ -504,6 +505,8 @@ export interface HerdrPane {
   terminalId?: string | null;
   agentSession?: HerdrAgentSession | null;
   agentKind?: string | null;
+  steeringCapability?: "native" | "terminal-input" | "unsupported";
+  activeTurnId?: string | null;
   outputRevision?: number | null;
   stateChangeSeq?: number | null;
   workspaceId: string;

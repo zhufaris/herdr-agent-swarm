@@ -2,11 +2,13 @@ import type { Logger } from "pino";
 import { renderFailureCards, renderSessionCards } from "../cards/operations-card.js";
 import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
-import type { HerdrPort, OperationsStore, OutboundIntentPort } from "../domain/ports.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { OperationsQueryStore } from "../domain/ports/workflow.js";
 import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { config: Pick<BridgeConfig, "projects">; store: Pick<OperationsStore, "listBindings" | "listFailures" | "listSessions">; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger; }
+interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQueryStore; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger; }
 
 export interface OperationsQueryWorkflowPort {
   listSpaces(message: IncomingLarkMessage): Promise<void>;
