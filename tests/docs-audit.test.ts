@@ -35,6 +35,15 @@ describe("superpowers documentation audit", () => {
     expect(audit(root, manifestPath)).toEqual({ ok: true, output: "Superpowers documentation archive audit passed.\n" });
   });
 
+  it("accepts the consolidated historical archive policy", () => {
+    const { root, manifestPath } = fixture([]);
+    writeFileSync(manifestPath, JSON.stringify({ version: 2, status: "historical", reason: "completed work" }));
+    const destination = join(root, "docs/archive/superpowers/specs/completed-design.md");
+    mkdirSync(dirname(destination), { recursive: true });
+    writeFileSync(destination, "# Completed\n");
+    expect(audit(root, manifestPath)).toEqual({ ok: true, output: "Superpowers documentation archive audit passed.\n" });
+  });
+
   it("reports missing archives, active conflicts, duplicate paths, root escapes, and stale links", () => {
     const escaped = { ...valid, source: "../escape.md", destination: "/tmp/escape.md" };
     const mismatchedSpec = { source: "docs/superpowers/specs/old-design.md", destination: "docs/archive/superpowers/specs/old-design.md", status: "superseded", reason: "replaced" };

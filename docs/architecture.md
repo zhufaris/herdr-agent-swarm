@@ -863,7 +863,7 @@ boundary change to fix.
 - Historical design and iteration records live in
   [archive/](archive/), including [archive/designs](archive/designs/) and
   [archive/superpowers](archive/superpowers/).
-- Archived plan/spec moves are declared in
-  [the archive manifest](superpowers/archive-manifest.json). Run
-  `npm run docs:audit` after a reviewed Git move; the command only reports
-  missing destinations, duplicate or unsafe paths, and stale active links.
+- The [archive manifest](superpowers/archive-manifest.json) declares the
+  archive policy. Run `npm run docs:audit` after a reviewed Git move to verify
+  that the historical archive exists and that active material does not present
+  it as current work.

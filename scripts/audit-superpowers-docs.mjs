@@ -10,6 +10,7 @@ export function auditSuperpowersDocs(repositoryRoot, manifestPath = join(reposit
   let manifest;
   try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); }
   catch (error) { return [`Cannot read archive manifest: ${error instanceof Error ? error.message : String(error)}`]; }
+  if (manifest?.version === 2) return auditArchivedTree(repositoryRoot, manifest);
   if (manifest?.version !== 1 || !Array.isArray(manifest.entries)) return ["Archive manifest must have version 1 and an entries array"];
 
   const sources = new Set();
@@ -46,6 +47,15 @@ export function auditSuperpowersDocs(repositoryRoot, manifestPath = join(reposit
     const content = readFileSync(markdownPath, "utf8");
     for (const source of sources) if (content.includes(source)) errors.push(`Active document ${relative(repositoryRoot, markdownPath)} links to archived source ${source}`);
   }
+  return errors;
+}
+
+function auditArchivedTree(repositoryRoot, manifest) {
+  const errors = [];
+  if (manifest.status !== "historical") return ["Version 2 archive manifest must declare status historical"];
+  if (typeof manifest.reason !== "string" || !manifest.reason.trim()) return ["Version 2 archive manifest must include a non-empty reason"];
+  const archived = listMarkdown(join(repositoryRoot, ARCHIVE_ROOT));
+  if (!archived.length) errors.push("Historical archive is empty");
   return errors;
 }
 

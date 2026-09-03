@@ -46,8 +46,8 @@ For the reliability model and exact behavioral
 constraints, see [Architecture](docs/architecture.md). For a maintainer-oriented
 map of the domain model, major modules, and end-to-end flows, see
 [Architecture reference](docs/architecture-reference.md).
-The milestone's requirement-by-requirement evidence is recorded in the
-[Herdr Agent Swarm completion audit](docs/superpowers/audits/2026-08-28-solo-agent-product.md).
+Completed milestone evidence and historical implementation records are retained
+in the [documentation archive](docs/archive/superpowers/).
 
 ## Security model
 
