@@ -14,6 +14,7 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { decidePaneCreatedCheckpoint, decideSelectedCheckpoint, provisioningRecoveryMessage } from "./binding-provisioning-policy.js";
+import { requireMatchingPane } from "./pane-runtime-identity.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
@@ -245,7 +246,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     if (existing) {
       if (this.isRecoverableFailedReset(existing, message, project)) { const recovered = await this.recoverFailedResetBinding(existing, pane, message.actorOpenId); await this.publishAttachSuccess(message, recovered, spaceName, false, false, true); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: recovered.id, outcome: "recovered_reset" }); return true; }
       if (existing.chatId === config.lark.chatId && existing.projectId === project.id && existing.attachment === "orphaned" && existing.topicId && existing.rootMessageId) {
-        const observedPane = await this.requireMatchingPane(existing, pane.paneId);
+        const observedPane = await requireMatchingPane(this.options.herdr, this.projectsById, existing, pane.paneId);
         const recovered = store.attachBindingPane(existing.id, observedPane, false);
         await this.publish(recovered.id, "BindingArchived", "lark", { reason: "Pane 已验证并恢复连接；为避免重放不确定任务，请进入原话题发送 `/swarm resume` 后再继续队列。" });
         await this.publishAttachSuccess(message, recovered, spaceName, true, true);
@@ -279,7 +280,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   async reattach(binding: Binding, paneId: string, actorOpenId: string): Promise<void> {
-    const pane = await this.requireMatchingPane(binding, paneId);
+    const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, paneId);
     const next = this.options.store.attachBindingPane(binding.id, pane, false);
     await this.publish(next.id, "BindingArchived", "lark", { reason: "Pane 已验证并连接；为避免重放不确定任务，发送 `/swarm resume` 后才继续队列。" });
     await this.publish(next.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
@@ -384,23 +385,8 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async recoverDiscoveredBinding(binding: Binding): Promise<void> {
     if (!binding.paneId || !binding.projectId) return;
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; if (!project) return;
-    try { this.options.store.revokeBindingPrimaryToolCapability(binding.id, binding.generation); const pane = await this.requireMatchingPane(binding, binding.paneId); const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId }); const unavailableEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE }); const view = reduceTopicView(reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent), unavailableEvent); const topic = await this.options.lark.createTopic(renderProjectEntryCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); this.options.store.saveTopicView({ ...view, deliveredVersion: view.viewVersion }); let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" }); await this.options.lifecycleEvents.publish(createdEvent); await this.options.lifecycleEvents.publish(unavailableEvent); await this.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning"); }
+    try { this.options.store.revokeBindingPrimaryToolCapability(binding.id, binding.generation); const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, binding.paneId); const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId }); const unavailableEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE }); const view = reduceTopicView(reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent), unavailableEvent); const topic = await this.options.lark.createTopic(renderProjectEntryCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); this.options.store.saveTopicView({ ...view, deliveredVersion: view.viewVersion }); let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" }); await this.options.lifecycleEvents.publish(createdEvent); await this.options.lifecycleEvents.publish(unavailableEvent); await this.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning"); }
     catch (error) { this.options.logger.error({ event: "discovered-binding-recovery-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "retry_on_restart" }, "discovered-pane provisioning remains recoverable"); }
-  }
-
-  private async requireMatchingPane(binding: Binding, paneId: string): Promise<HerdrPane> {
-    let pane = (await this.options.herdr.observeRuntime(paneId)).pane;
-    if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
-    if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
-    const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
-    if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`);
-    if (hasNativeAgentSession(binding)) {
-      if (pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${paneId}`);
-    }
-    if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr pane identity changed for ${paneId}`);
-    if (hasNativeAgentSession(binding) && !pane.agentSession) pane = { ...pane, agentSession: persistedAgentSession(binding) };
-    if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`);
-    return pane;
   }
 
   private async requireStartedPane(project: ProjectConfig, paneId: string, expectedTerminalId: string | null): Promise<HerdrPane> {
@@ -457,14 +443,6 @@ function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSess
     agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
   };
 }
-function hasNativeAgentSession(binding: Binding): boolean { return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue); }
-function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {
-  return Boolean(pane.agentSession && binding.agentSessionSource === pane.agentSession.source && binding.agentSessionAgent === pane.agentSession.agent && binding.agentSessionKind === pane.agentSession.kind && binding.agentSessionValue === pane.agentSession.value);
-}
-function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSession"]> {
-  return { source: binding.agentSessionSource!, agent: binding.agentSessionAgent!, kind: binding.agentSessionKind!, value: binding.agentSessionValue! };
-}
-
 function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
