@@ -25,11 +25,6 @@ export type { HerdrPort, LarkPort, TraexTranscriptCursorPort, TraexTranscriptMai
 
 
 
-interface LegacyAcceptInstanceTurnWithCardInput {
-  id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
-  kind: InstanceTurn["kind"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; card: object;
-}
-
 export interface ClassifiedPromptInput {
   prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin">;
   ordinaryView: RunCardView;
@@ -56,74 +51,6 @@ export type ClassifiedPromptAcceptance = {
   decision: "queue_full";
   fallbackReason: ClassifiedPromptFallbackReason;
 };
-
-/* InstanceStore moved to ports/instance.ts. */
-/*
-  findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
-  getBinding(id: string): Binding | null;
-  createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest;
-  resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
-  consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch";
-  createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
-  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" };
-  getAgentInstance(id: string): AgentInstance | null;
-  findAgentInstanceByPane(paneId: string): AgentInstance | null;
-  listAgentInstances(projectId: string): AgentInstance[];
-  setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
-  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
-  checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
-  updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
-  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null;
-  reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
-  finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null;
-  rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null;
-  detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null;
-  getWorkspaceLease(id: string): WorkspaceLease | null;
-  updateWorkspaceLease(input: { id: string; expectedGeneration: number; state: WorkspaceLeaseState; cwd?: string; branch?: string | null; baseCommit?: string }): WorkspaceLease | null;
-  createInstanceRemovalPlan(plan: InstanceRemovalPlan): InstanceRemovalPlan;
-  getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null;
-  consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
-  removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
-  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean };
-  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
-  getInstanceTurn(id: string): InstanceTurn | null;
-  claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;
-  loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
-  findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
-  listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
-  getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;
-  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
-  reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
-  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
-  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
-  listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
-  listRecentInstanceTurnSummaries(instanceId: string, limit?: number): InstanceTurnSummary[];
-  getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
-  setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
-  verifyBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean;
-  hasBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
-  revokeBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
-  getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null;
-  claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
-  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] };
-  listObservableInstanceTurns(): InstanceTurn[];
-  listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[];
-  getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number };
-  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind }): InstanceTurn | null;
-  completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null;
-  listInstanceEvents(instanceId: string, afterId?: number): InstanceEvent[];
-  countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number;
-  acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean };
-  claimInstanceOperation(id: string, expectedGeneration: number): InstanceOperation | null;
-  updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null;
-  getConversationTarget(chatId: string): { projectId: string; target: import("./agent-instance.js").InstanceTarget } | null;
-  setConversationTarget(input: { chatId: string; projectId: string; target: import("./agent-instance.js").InstanceTarget }): void;
-  projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
-}
-*/
-
-/* External adapter contracts live in ports/external.ts. */
 
 export interface BindingStorePort {
   close(): void;
