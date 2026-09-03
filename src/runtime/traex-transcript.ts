@@ -3,9 +3,9 @@ import { homedir } from "node:os";
 import { basename, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HerdrAgentSession } from "../domain/types.js";
-import type { TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort } from "../domain/ports/external.js";
-import { projectToolCall, projectToolResult, projectToolResultState, type ToolActivityDescriptor } from "./tool-activity-projector.js";
+import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { redactSecrets } from "./redact-secrets.js";
+import { TraexTranscriptProjector } from "./traex-transcript-projector.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
@@ -25,33 +25,6 @@ const envelopeSchema = z.object({
   payload: z.unknown()
 }).passthrough();
 const sessionMetaSchema = z.object({ id: z.string() }).passthrough();
-const historyMutationSchema = z.object({
-  operation: z.literal("append"),
-  items: z.array(z.unknown())
-}).passthrough();
-const messageItemSchema = z.object({
-  type: z.literal("message"),
-  id: z.string().min(1),
-  role: z.string(),
-  content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough())
-}).passthrough();
-const functionCallSchema = z.object({
-  type: z.literal("function_call"),
-  id: z.string().min(1),
-  call_id: z.string().min(1),
-  name: z.string(),
-  arguments: z.string()
-}).passthrough();
-const functionOutputSchema = z.object({
-  type: z.literal("function_call_output"),
-  id: z.string().min(1),
-  call_id: z.string().min(1),
-  output: z.unknown()
-}).passthrough();
-const reasoningEventSchema = z.object({
-  type: z.literal("agent_reasoning_raw_content"),
-  text: z.string()
-}).passthrough();
 const tokenCountEventSchema = z.object({
   type: z.literal("token_count"),
   info: z.object({ total_token_usage: z.object({ total_tokens: z.number().int().nonnegative() }).passthrough() }).passthrough()
@@ -71,16 +44,6 @@ const turnAbortedEventSchema = z.object({
   type: z.literal("turn_aborted"),
   turn_id: z.string().regex(SESSION_ID),
   reason: z.string().min(1).optional()
-}).passthrough();
-const userMessageEventSchema = z.object({
-  type: z.literal("user_message"),
-  message: z.string()
-}).passthrough();
-const planArgumentsSchema = z.object({
-  plan: z.array(z.object({
-    step: z.string(),
-    status: z.enum(["pending", "in_progress", "completed"])
-  })).max(100)
 }).passthrough();
 export interface TraexTranscriptReaderOptions {
   sessionsRoot?: string;
@@ -242,8 +205,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
 }
 
 class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
-  private readonly emittedItemIds = new Set<string>();
-  private readonly callsById = new Map<string, ToolActivityDescriptor>();
+  private readonly projector = new TraexTranscriptProjector();
   private pendingLines: string[] = [];
 
   constructor(
@@ -290,68 +252,9 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     }
     const batchLength = this.nextBatchLength();
     const lines = this.pendingLines.splice(0, batchLength);
-    const blocks: string[] = [];
-    const toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]> = [];
-    let statusTitle: string | undefined;
-    let planSteps: TraexTranscriptPlanStep[] | undefined;
-    let tokenCount: number | undefined;
-    let observationTurnId = this.turnLifecycle?.state === "active" ? this.turnLifecycle.turnId : undefined;
-    let freshTurnStart = false;
-    let requestText: string | undefined;
-    for (const line of lines) {
-      const envelope = parseEnvelope(line);
-      if (!envelope) continue;
-      if (envelope.type === "event_msg") {
-        const started = taskStartedEventSchema.safeParse(envelope.payload);
-        if (started.success) {
-          observationTurnId = started.data.turn_id;
-          freshTurnStart = true;
-          this.callsById.clear();
-        }
-        this.turnLifecycle = reduceTurnLifecycle(this.turnLifecycle, envelope, this.maxRenderedDeltaChars);
-        const userMessage = userMessageEventSchema.safeParse(envelope.payload);
-        if (userMessage.success && observationTurnId && this.turnLifecycle?.turnId === observationTurnId) {
-          requestText = boundMarkdown(redactSecrets(userMessage.data.message), this.maxRenderedDeltaChars);
-        }
-        const reasoning = reasoningEventSchema.safeParse(envelope.payload);
-        if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
-        const tokens = tokenCountEventSchema.safeParse(envelope.payload);
-        if (tokens.success && this.tokenBaseline !== null && tokens.data.info.total_token_usage.total_tokens >= this.tokenBaseline) {
-          tokenCount = tokens.data.info.total_token_usage.total_tokens - this.tokenBaseline;
-        }
-        continue;
-      }
-      if (envelope.type !== "history_mutation") continue;
-      const mutation = historyMutationSchema.safeParse(envelope.payload);
-      if (!mutation.success) continue;
-      for (const item of mutation.data.items) {
-        const plan = parsePlanSnapshot(item);
-        if (plan) {
-          planSteps = plan;
-          const call = functionCallSchema.safeParse(item);
-          if (call.success) this.emittedItemIds.add(call.data.id);
-          continue;
-        }
-        const rendered = this.renderItem(item, toolActivities);
-        if (rendered) blocks.push(rendered);
-      }
-    }
-    const mainStatus: TraexTranscriptMainStatus = {
-      ...(statusTitle ? { statusTitle } : {}),
-      ...(planSteps ? { planSteps } : {}),
-      ...(tokenCount !== undefined ? { tokenCount } : {})
-    };
-    const observation = {
-      ...(observationTurnId ? { turnId: observationTurnId } : {}),
-      ...(freshTurnStart ? { freshTurnStart: true } : {}),
-      ...(requestText !== undefined ? { requestText } : {}),
-      answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), this.maxRenderedDeltaChars),
-      ...(toolActivities.length ? { toolActivities } : {}),
-      ...(Object.keys(mainStatus).length ? { mainStatus } : {}),
-      ...(observationTurnId && this.turnLifecycle?.turnId === observationTurnId ? { turnLifecycle: this.turnLifecycle } : {})
-    };
-    if (this.turnLifecycle?.state === "completed" || this.turnLifecycle?.state === "aborted") this.callsById.clear();
-    return observation;
+    const projected = this.projector.project({ lines, initialLifecycle: this.turnLifecycle, tokenBaseline: this.tokenBaseline, maxRenderedDeltaChars: this.maxRenderedDeltaChars });
+    this.turnLifecycle = projected.lifecycle;
+    return projected.observation;
   }
 
   private nextBatchLength(): number {
@@ -376,36 +279,6 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     return this.pendingLines.length;
   }
 
-  private renderItem(item: unknown, toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]>): string {
-    const message = messageItemSchema.safeParse(item);
-    if (message.success) {
-      if (message.data.role !== "assistant" || this.emittedItemIds.has(message.data.id)) return "";
-      const output = message.data.content
-        .filter((part) => part.type === "output_text" && part.text !== undefined)
-        .map((part) => part.text!.trim())
-        .filter(Boolean)
-        .join("\n\n");
-      if (!output) return "";
-      this.emittedItemIds.add(message.data.id);
-      return output;
-    }
-    const call = functionCallSchema.safeParse(item);
-    if (call.success) {
-      if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
-      const projected = projectToolCall(call.data.name, call.data.arguments);
-      this.emittedItemIds.add(call.data.id);
-      if (call.data.name === "update_plan") return "";
-      this.callsById.set(call.data.call_id, projected.descriptor);
-      toolActivities.push(projectActivity(call.data.call_id, projected.descriptor, "active"));
-      return projected.entry;
-    }
-    const result = functionOutputSchema.safeParse(item);
-    if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
-    this.emittedItemIds.add(result.data.id);
-    const descriptor = this.callsById.get(result.data.call_id)!;
-    toolActivities.push(projectActivity(result.data.call_id, descriptor, projectToolResultState(result.data.output)));
-    return projectToolResult(descriptor, result.data.output);
-  }
 }
 
 function parseEnvelope(line: string): z.infer<typeof envelopeSchema> | null {
@@ -415,20 +288,6 @@ function parseEnvelope(line: string): z.infer<typeof envelopeSchema> | null {
   } catch {
     return null;
   }
-}
-
-function projectActivity(
-  callId: string,
-  descriptor: ToolActivityDescriptor,
-  state: "active" | "done" | "failed"
-): NonNullable<TraexTranscriptObservation["toolActivities"]>[number] {
-  const kind = descriptor.category === "Read" ? "read"
-    : descriptor.category === "Search" ? "search"
-      : descriptor.category === "Edit" ? "edit"
-        : descriptor.category === "Command" && /(?:^|\s)(?:npm|npx|pnpm|yarn|bun|uv|pytest|cargo|go)\b.*\btest(?:s|ing)?\b|\b(?:vitest|jest|pytest)\b/i.test(descriptor.target) ? "test"
-          : "step";
-  const target = descriptor.target || "未提供目标";
-  return { key: `tool:${callId}`, kind, label: `${descriptor.category} · ${target}`, state };
 }
 
 function reduceTurnLifecycle(
@@ -468,48 +327,6 @@ function reduceTurnLifecycle(
 
 function eventTime(epochSeconds: number): string {
   return new Date(epochSeconds * 1_000).toISOString();
-}
-
-function extractStatusTitle(text: string): string | null {
-  const match = /^\s*\*\*([^*\n]+)\*\*/.exec(text);
-  if (!match) return null;
-  const title = match[1]!.replace(/\s+/g, " " ).trim();
-  if (!title) return null;
-  return title.slice(0, 160);
-}
-
-function parsePlanSnapshot(item: unknown): TraexTranscriptPlanStep[] | null {
-  const call = functionCallSchema.safeParse(item);
-  if (!call.success) return null;
-  try {
-    const outer = JSON.parse(call.data.arguments) as unknown;
-    const parsed = call.data.name === "update_plan"
-      ? planArgumentsSchema.safeParse(outer)
-      : call.data.name === "exec" ? parseWrappedPlan(outer) : null;
-    if (!parsed) return null;
-    if (!parsed.success) return null;
-    const states = { pending: "pending", in_progress: "active", completed: "done" } as const;
-    return parsed.data.plan.map((step, index) => ({
-      key: `plan:${index}`,
-      label: step.step.replace(/\s+/g, " " ).trim().slice(0, 300) || "未命名步骤",
-      state: states[step.status]
-    }));
-  } catch {
-    return null;
-  }
-}
-
-function parseWrappedPlan(value: unknown): ReturnType<typeof planArgumentsSchema.safeParse> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const input = (value as Record<string, unknown>).input;
-  if (typeof input !== "string" || !/tools\.update_plan\s*\(/.test(input)) return null;
-  const steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> = [];
-  const pattern = /step\s*:\s*("(?:\\.|[^"\\])*")\s*,\s*status\s*:\s*"(pending|in_progress|completed)"/g;
-  for (const match of input.matchAll(pattern)) {
-    try { steps.push({ step: JSON.parse(match[1]!) as string, status: match[2]! as "pending" | "in_progress" | "completed" }); }
-    catch { return null; }
-  }
-  return steps.length ? planArgumentsSchema.safeParse({ plan: steps }) : null;
 }
 
 interface TranscriptBaseline {
