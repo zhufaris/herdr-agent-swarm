@@ -13,6 +13,7 @@ import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
 import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
+import { mergeReconciliationScope, reconciliationCooldownCovers, reconciliationScopeCovers, type ReconciliationScope } from "./reconciliation-scope-policy.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -46,8 +47,8 @@ export interface HerdrRuntimeReconcilerPort {
 
 export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private reconciliation: Promise<void> | null = null;
-  private pendingReconciliation: Set<string> | null | undefined;
-  private activeReconciliation: Set<string> | null | undefined;
+  private pendingReconciliation: ReconciliationScope | undefined;
+  private activeReconciliation: ReconciliationScope | undefined;
   private stopping = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
@@ -131,22 +132,18 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private enqueueReconciliation(workspaceIds?: readonly string[]): void {
-    if (workspaceIds === undefined || this.pendingReconciliation === null) { this.pendingReconciliation = null; return; }
-    this.pendingReconciliation ??= new Set<string>();
-    for (const workspaceId of workspaceIds) this.pendingReconciliation.add(workspaceId);
+    this.pendingReconciliation = mergeReconciliationScope(this.pendingReconciliation, workspaceIds);
   }
 
   private activeReconciliationCovers(workspaceIds?: readonly string[]): boolean {
-    if (this.activeReconciliation === undefined) return false;
-    if (this.activeReconciliation === null) return true;
-    if (workspaceIds === undefined) return false;
-    return workspaceIds.every((workspaceId) => this.activeReconciliation!.has(workspaceId));
+    return reconciliationScopeCovers(this.activeReconciliation, workspaceIds);
   }
 
   private recentReconciliationCovers(workspaceIds?: readonly string[]): boolean {
-    const cutoff = performance.now() - EVENT_RECONCILIATION_COOLDOWN_MS;
-    const requested = workspaceIds ?? [...this.configuredWorkspaceIds];
-    return requested.length > 0 && requested.every((workspaceId) => (this.lastReconciledAt.get(workspaceId) ?? -Infinity) >= cutoff);
+    return reconciliationCooldownCovers({
+      ...(workspaceIds ? { requestedWorkspaceIds: workspaceIds } : {}), configuredWorkspaceIds: this.configuredWorkspaceIds,
+      lastReconciledAt: this.lastReconciledAt, now: performance.now(), cooldownMs: EVENT_RECONCILIATION_COOLDOWN_MS
+    });
   }
 
   private async drainReconciliations(): Promise<void> {
