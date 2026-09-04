@@ -4,6 +4,7 @@ import type { InboundDispatcherDiagnostics, IncomingLarkMessage } from "../domai
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import { CoalescingDrain } from "../runtime/coalescing-drain.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { isPermanentInboundMessageRejection } from "../domain/permanent-inbound-message-rejection.js";
 
 const INBOUND_RETRY_INITIAL_MS = 250;
 const INBOUND_RETRY_MAX_MS = 30_000;
@@ -134,6 +135,12 @@ export class InboundMessageDispatcher implements InboundMessageDispatcherPort {
         this.options.store.markInboundMessageAccepted(message.eventId);
         this.lastAcceptedAt = new Date().toISOString();
       } catch (error) {
+        if (isPermanentInboundMessageRejection(error)) {
+          this.options.store.markInboundMessageAccepted(message.eventId);
+          this.lastAcceptedAt = new Date().toISOString();
+          this.options.logger.info({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, reason: error.message, outcome: "accepted" }, "inbound message was permanently rejected");
+          continue;
+        }
         this.options.store.releaseInboundMessage(message.eventId, errorMessage(error));
         this.recordFailure(error);
         this.options.logger.error({ event: "lark-message-acceptance-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, outcome: "retry" }, "inbound message acceptance failed; retained for retry");

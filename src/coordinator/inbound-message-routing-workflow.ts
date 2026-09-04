@@ -17,6 +17,7 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { PermanentInboundMessageRejection } from "../domain/permanent-inbound-message-rejection.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
@@ -87,7 +88,16 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) disposition = "prompt_queued";
       else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
       else { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
-    } catch (error) { this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed"); throw error; }
+    } catch (error) {
+      const rejection = this.options.instanceInteractions ? permanentInstanceCommandRejection(error) : null;
+      if (rejection) {
+        await this.reject(message, rejection);
+        this.options.logger.info({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, route: decision, reason: rejection, outcome: "accepted" }, "rejected unavailable instance command");
+        throw new PermanentInboundMessageRejection(rejection);
+      }
+      this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed");
+      throw error;
+    }
     this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");
   }
 
@@ -124,4 +134,13 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
 function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> { const result = new Map<string, BridgeConfig["projects"][number] | null>(); for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project); return result; }
 function requiresAdministrator(kind: NonNullable<ReturnType<typeof parseCommand>>["kind"]): boolean {
   return ["new", "projects", "stop", "steer", "model", "reset", "attach", "rename", "close", "pane_close_request", "pane_close_confirm", "reattach", "replace", "resume"].includes(kind);
+}
+
+function permanentInstanceCommandRejection(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    "Target instance is not running",
+    "Target instance not found",
+    "Target instance is not in the requested project"
+  ].includes(message) ? message : null;
 }
