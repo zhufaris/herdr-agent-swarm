@@ -25,8 +25,8 @@ export class InstanceControlWorkflow {
     const id = this.options.idFactory();
     const workspaceId = this.options.idFactory();
     const workspace = { id: workspaceId, kind: "git-worktree" as const, cwd: join(project.cwd, ".worktree", command.name), branch: `swarm/${command.name}`, baseCommit: "HEAD" };
-    const sourcePrimaryPaneLabel = await this.resolvePrimaryPaneLabel(command.bindingId);
-    const created = this.options.store.createWorkerAgentInstance({ id, projectId: project.id, name: command.name, role: "worker", agentKind: command.agentKind, model: command.model, sourcePrimaryPaneLabel, desiredState: command.start ? "running" : "stopped", workspace }, project.maxInstances ?? 8);
+    const parent = await this.resolveWorkerParent(project, command.bindingId);
+    const created = this.options.store.createWorkerAgentInstance({ id, projectId: project.id, name: command.name, role: "worker", agentKind: command.agentKind, model: command.model, sourcePrimaryPaneLabel: parent.label, parent: parent.identity, desiredState: command.start ? "running" : "stopped", workspace }, project.maxInstances ?? 8);
     if (created.outcome === "limit-reached") throw new Error("Project Worker limit reached");
     const instance = created.instance;
     if (!command.start) return { status: "created", instance };
@@ -42,13 +42,17 @@ export class InstanceControlWorkflow {
     this.requireHuman(input.actor);
     let instance = this.requireInstance(input.instanceId);
     this.requireWorker(instance);
+    if (instance.workerSessionLifecycle !== "active" || !instance.parent) throw new Error("Worker session is not startable");
+    const parent = instance.parent;
     if (instance.runtimeRef && instance.observedState !== "stopped") return instance;
+    if (instance.provisioningCheckpoint === "verified" && !instance.runtimeRef) throw new Error("Worker session cannot be restarted in a replacement pane");
     if (instance.desiredState !== "running") {
       const starting = this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "running", observedState: "starting" });
       if (!starting) throw new Error("Instance generation changed while starting");
       instance = starting;
     }
     const project = this.requireProject(instance.projectId);
+    await this.requireLiveParent(project, parent);
     const driver = this.options.drivers.get(instance.agentKind);
     if (!driver?.describe().available) throw new Error(`Agent adapter is unavailable: ${instance.agentKind}`);
     let workspace = this.requireWorkspace(instance.workspaceLeaseId);
@@ -158,11 +162,23 @@ export class InstanceControlWorkflow {
   private requireWorker(instance: AgentInstance): void { if (instance.role !== "worker") throw new Error("Only Worker instances can be controlled"); }
   private requireWorkspace(id: string): WorkspaceLease { const value = this.options.store.getWorkspaceLease(id); if (!value) throw new Error(`Workspace lease not found: ${id}`); return value; }
   private requireUpdatedWorkspace(input: Parameters<InstanceStore["updateWorkspaceLease"]>[0]): WorkspaceLease { const value = this.options.store.updateWorkspaceLease(input); if (!value) throw new Error("Workspace lease generation changed"); return value; }
-  private async resolvePrimaryPaneLabel(bindingId: string | null | undefined): Promise<string | null> {
-    if (!bindingId) return null;
+  private async resolveWorkerParent(project: ProjectConfig, bindingId: string | null | undefined): Promise<{ identity: NonNullable<AgentInstance["parent"]>; label: string | null }> {
+    if (!bindingId) throw new Error("Worker creation requires an active Primary pane");
     const binding = this.options.store.getBinding(bindingId);
-    if (!binding?.paneId) return null;
-    return (await this.options.paneHost.inspectPane(binding.paneId))?.label ?? null;
+    if (!binding || binding.projectId !== project.id || binding.workspaceId !== project.workspaceId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || !binding.paneId) throw new Error("Worker parent binding is not active");
+    const pane = await this.options.paneHost.inspectPane(binding.paneId);
+    if (!pane || pane.workspaceId !== project.workspaceId || pane.cwd !== project.cwd) throw new Error("Worker parent pane could not be verified");
+    const nativeSessionId = pane.agentSession?.value ?? pane.terminalId ?? null;
+    if (binding.traexSessionId && nativeSessionId !== binding.traexSessionId) throw new Error("Worker parent pane identity changed");
+    return { identity: { bindingId: binding.id, paneId: pane.paneId, nativeSessionId }, label: pane.label };
+  }
+  private async requireLiveParent(project: ProjectConfig, parent: NonNullable<AgentInstance["parent"]>): Promise<void> {
+    const binding = this.options.store.getBinding(parent.bindingId);
+    if (!binding || binding.projectId !== project.id || binding.workspaceId !== project.workspaceId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== parent.paneId) throw new Error("Worker parent binding is no longer active");
+    const pane = await this.options.paneHost.inspectPane(parent.paneId);
+    if (!pane || pane.workspaceId !== project.workspaceId || pane.cwd !== project.cwd) throw new Error("Worker parent pane could not be verified");
+    const nativeSessionId = pane.agentSession?.value ?? pane.terminalId ?? null;
+    if (parent.nativeSessionId && parent.nativeSessionId !== nativeSessionId) throw new Error("Worker parent pane identity changed");
   }
   private requireCheckpoint(instance: AgentInstance, checkpoint: AgentInstance["provisioningCheckpoint"], observedState: AgentInstance["observedState"], pendingPaneId?: string, pendingWorkspaceId?: string): AgentInstance {
     const value = this.options.store.checkpointAgentInstance({ instanceId: instance.id, expectedGeneration: instance.generation, checkpoint, observedState, ...(pendingPaneId ? { pendingPaneId } : {}), ...(pendingWorkspaceId ? { pendingWorkspaceId } : {}) });
@@ -172,10 +188,10 @@ export class InstanceControlWorkflow {
 }
 
 function workerPaneTitle(instance: AgentInstance): string {
-  const primary = paneTitleSegment(instance.sourcePrimaryPaneLabel ?? "unbound");
+  const primary = paneTitleSegment(instance.sourcePrimaryPaneLabel ?? instance.parent?.paneId ?? "parent");
   return `lark_task-${primary}-${paneTitleSegment(instance.name)}`;
 }
 
 function paneTitleSegment(value: string): string {
-  return value.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || "unbound";
+  return value.trim().replace(/^task[-_]+/i, "").replace(/\s+/g, "-").replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || "unbound";
 }

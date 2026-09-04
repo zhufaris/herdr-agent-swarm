@@ -12,13 +12,14 @@ afterEach(() => { store?.close(); store = undefined; });
 
 const project = { id: "project-a", displayName: "Project A", description: "A", workspaceId: "herdr-a", cwd: "/repo", maxInstances: 4 };
 const pane = { paneId: "herdr-a:p1", workspaceId: "herdr-a", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term-1" };
+const primaryPane = { ...pane, paneId: "herdr-a:primary", label: "primary-task" };
 
 function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManager["prepare"]; primaryTools?: { issue: ReturnType<typeof vi.fn>; configuration: ReturnType<typeof vi.fn> }; agentKind?: AgentKind } = {}) {
   store = new SqliteBindingStore(":memory:");
   let allocatedPane = pane;
   const paneHost = {
     ensureWorkspace: vi.fn(async () => undefined), allocatePane: vi.fn(async (_workspace: string, cwd: string) => { allocatedPane = { ...pane, cwd }; return allocatedPane; }),
-    inspectPane: vi.fn(async () => allocatedPane), releasePane: vi.fn(async () => undefined)
+    inspectPane: vi.fn(async (paneId: string) => paneId === primaryPane.paneId ? primaryPane : allocatedPane), releasePane: vi.fn(async () => undefined)
   } as unknown as PaneHost;
   const driver: AgentRuntimeDriver = {
     kind: overrides.agentKind ?? "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }),
@@ -28,21 +29,25 @@ function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManag
     prepare: vi.fn(overrides.prepare ?? (async (input) => ({ cwd: input.targetPath, branch: input.branch, baseCommit: "base-sha", headCommit: "base-sha" }))),
     planRemoval: vi.fn(async (input) => ({ ...input, safe: true, reason: "clean" as const, fingerprint: "fingerprint-1", inspection: null })), release: vi.fn(async () => undefined)
   } as unknown as WorktreeManager;
+  store.createPendingBinding({ id: "binding-1", projectId: "project-a", workspaceId: "herdr-a", chatId: "chat-1", topicId: "topic-1", rootMessageId: "root-1", title: "Primary task" });
+  store.updateBinding("binding-1", { paneId: primaryPane.paneId, traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached" });
   const workflow = new InstanceControlWorkflow({ projects: [project], store, paneHost, drivers: new AgentDriverRegistry([driver]), worktrees, idFactory: (() => { let n = 0; return () => `id-${++n}`; })(), ...(overrides.primaryTools ? { primaryTools: overrides.primaryTools } : {}) });
+  const createWorker = workflow.createWorker.bind(workflow);
+  workflow.createWorker = (command) => createWorker({ ...command, bindingId: command.bindingId ?? "binding-1" });
   return { workflow, paneHost, driver, worktrees };
 }
 
 describe("InstanceControlWorkflow", () => {
   it("accepts Herdr's canonical claude kind for a Claude Code instance", async () => {
     const { workflow, paneHost } = setup({ agentKind: "claude-code" });
-    vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "claude", foregroundExecutables: ["claude"] });
-    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "claude-code", model: null, start: true })).resolves.toMatchObject({ status: "created", instance: { agentKind: "claude-code", observedState: "idle" } });
+    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? primaryPane : { ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "claude", foregroundExecutables: ["claude"] });
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "claude-code", model: null, start: true, bindingId: "binding-1" })).resolves.toMatchObject({ status: "created", instance: { agentKind: "claude-code", observedState: "idle" } });
   });
 
   it("accepts Herdr's codex label for the TraeCode distribution", async () => {
     const { workflow, paneHost } = setup();
-    vi.mocked(paneHost.inspectPane).mockResolvedValue({ ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "codex", foregroundExecutables: ["traex"] });
-    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true })).resolves.toMatchObject({ status: "created", instance: { agentKind: "traex", observedState: "idle" } });
+    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? primaryPane : { ...pane, cwd: "/repo/.worktree/reviewer", agentKind: "codex", foregroundExecutables: ["traex"] });
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" })).resolves.toMatchObject({ status: "created", instance: { agentKind: "traex", observedState: "idle" } });
   });
 
   it("allocates a named branch and isolated worktree for an explicit worker", async () => {
@@ -52,27 +57,25 @@ describe("InstanceControlWorkflow", () => {
     expect(workflow.inspect(instance.id).workspace).toMatchObject({ kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base-sha", state: "ready" });
   });
 
-  it("persists the source Primary pane label in the Worker pane title across restart", async () => {
+  it("persists the source Primary pane label in the first Worker pane title", async () => {
     const { workflow, paneHost } = setup();
-    store!.createPendingBinding({ id: "binding-1", workspaceId: "herdr-a", chatId: "chat-1", topicId: "topic-1", rootMessageId: "root-1", title: "Primary task" });
-    store!.updateBinding("binding-1", { paneId: "primary-pane-id" });
+    store!.updateBinding("binding-1", { paneId: "primary-pane-id", traexSessionId: "term-1" });
     vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === "primary-pane-id"
       ? { ...pane, paneId, cwd: "/repo", label: "primary-task" }
       : { ...pane, paneId, cwd: "/repo/.worktree/reviewer", label: null });
 
     const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
     expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", "/repo/.worktree/reviewer", expect.objectContaining({ title: "lark_task-primary-task-reviewer" }));
-    expect(store!.getAgentInstance(instance.id)).toMatchObject({ sourcePrimaryPaneLabel: "primary-task" });
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ sourcePrimaryPaneLabel: "primary-task", parent: { bindingId: "binding-1", paneId: "primary-pane-id" } });
 
     await workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id });
-    await workflow.start({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id });
-    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", "/repo/.worktree/reviewer", expect.objectContaining({ title: "lark_task-primary-task-reviewer" }));
+    await expect(workflow.start({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id })).rejects.toThrow(/cannot be restarted/);
   });
 
-  it("uses the explicit unbound fallback instead of a pane id", async () => {
-    const { workflow, paneHost } = setup();
-    await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
-    expect(paneHost.allocatePane).toHaveBeenCalledWith("herdr-a", "/repo/.worktree/reviewer", expect.objectContaining({ title: "lark_task-unbound-reviewer" }));
+  it("requires a parent binding when the caller does not provide a binding context", async () => {
+    const { workflow } = setup();
+    const direct = Object.getPrototypeOf(workflow).createWorker.bind(workflow);
+    await expect(direct({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true })).rejects.toThrow(/requires an active Primary pane/);
   });
 
   it("persists the workspace checkpoint when runtime launch fails", async () => {
@@ -137,14 +140,13 @@ describe("InstanceControlWorkflow", () => {
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", runtimeRef: { paneId: "herdr-a:p1" }, lastError: "close failed" });
   });
 
-  it("starts a stopped instance in a fresh pane generation while retaining its workspace", async () => {
+  it("does not restart a stopped Worker in a replacement pane", async () => {
     const { workflow, paneHost, worktrees } = setup();
     const { instance: created } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
     await workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: created.id });
-    const restarted = await workflow.start({ actor: { kind: "human", userId: "u1" }, instanceId: created.id });
-    expect(restarted).toMatchObject({ desiredState: "running", observedState: "idle", generation: 3, provisioningCheckpoint: "verified" });
+    await expect(workflow.start({ actor: { kind: "human", userId: "u1" }, instanceId: created.id })).rejects.toThrow(/cannot be restarted/);
     expect(worktrees.prepare).toHaveBeenCalledTimes(1);
-    expect(paneHost.allocatePane).toHaveBeenCalledTimes(2);
+    expect(paneHost.allocatePane).toHaveBeenCalledTimes(1);
   });
 
   it("persists a removal plan and removes a stopped worker only after matching confirmation", async () => {
