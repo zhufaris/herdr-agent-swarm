@@ -590,7 +590,7 @@ npm run smoke:headless-multi-agent
 To perform real read-only turns, run the same command with `-- --execute` from a
 Herdr pane. The acceptance path uses a TraeX Primary and TraeX Worker, creates
 temporary panes and a temporary Git repository, exercises a real Primary-to-
-Worker tool call plus restart/no-replay and safety assertions, reports bounded
+Worker tool call plus pane-scoped lifecycle/no-replay and safety assertions, reports bounded
 evidence, and cleans up only those temporary resources. Adapter contract tests
 cover TraeX, Codex, Claude Code, and Pi independently. Executable discovery does
 not prove that an adapter is authenticated: on this host TraeX is live-verified,
@@ -634,10 +634,14 @@ but does not kill TraeX or delete Lark history.
 To close the actual pane, send `/swarm pane close` from its bound topic, then
 send the generated `/swarm pane close confirm <code>` command within 60
 seconds as the same Lark user. The bridge rechecks the binding identity, queue,
-active workers, and current Herdr agent state immediately before closing. Only
-an explicit `idle` or `done` state is accepted; `working`, `blocked`, and
-`unknown` are rejected. A successful result is reported only after Herdr no
-longer returns the pane.
+and current Primary Herdr agent state immediately before closing. Only an
+explicit `idle` or `done` Primary is accepted; `working`, `blocked`, and
+`unknown` are rejected. Confirmation terminalizes exact child Worker sessions
+without replaying their work, closes their recorded panes before the parent pane,
+and retains their worktrees for explicit safe removal. A restart observes an
+unfinished close rather than repeating either a pane-close command or a Worker
+prompt. A successful result is reported only after Herdr no longer returns the
+parent pane.
 If a pane becomes orphaned, `reattach` verifies the original pane identity and
 `replace` creates a new generation. Both leave the session archived until an
 explicit `resume`, so uncertain work is never replayed automatically.

@@ -817,18 +817,27 @@ and credentials.
 
 ## Multi-agent ownership and recovery
 
-SQLite owns project selection, Primary/Worker roles, desired state, instance
-generation, queues, approval identity, and workspace leases. Herdr owns whether
-the recorded pane and expected agent process actually exist. Git inspection owns
-dirty, conflict, branch-head, and worktree removal facts. Feishu cards are only
-controls and projections.
+SQLite owns project selection, Primary/Worker roles, immutable Worker parent
+identity, desired state, instance generation, queues, approval identity, and
+workspace leases. A Worker is a derived session of one exact Primary binding and
+pane; its worktree may outlive the session but cannot rehydrate it. Herdr owns
+whether the recorded pane and expected agent process actually exist. Git
+inspection owns dirty, conflict, branch-head, and worktree removal facts. Feishu
+cards are only controls and projections.
 
 `InstanceRuntimeReconciler` is the single startup, periodic, and event-woken
 convergence path. It updates only recorded instance/pane identities and never
-adopts an unrecorded pane. Missing or mismatched runtimes become detached behind
-a generation fence. Queued work that provably never started remains queued for
-an explicit restart; claimed, dispatching, running, blocked, and already
-uncertain work remains uncertain and is never automatically replayed.
+adopts an unrecorded pane. A missing or mismatched Worker pane terminalizes that
+Worker behind a generation fence: queued work is cancelled, work that may have
+been dispatched remains uncertain, and the Worker cannot be restarted in a
+replacement pane.
+
+Confirming a Primary-pane close creates durable child close steps for Workers
+whose immutable parent binding/pane identity exactly matches the captured parent.
+The service terminalizes those child sessions before external effects, closes each
+recorded child pane before the parent pane, and preserves child worktrees. A
+restart probes unresolved child close steps and records success or uncertainty;
+it never replays `closePane` or a Worker turn.
 
 Approval policy has fixed `routine`, `remote-confirmation`, and `local-only`
 tiers. Remote grants are persisted and bind the actor, project, instance

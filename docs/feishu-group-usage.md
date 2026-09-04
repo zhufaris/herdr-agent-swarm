@@ -31,10 +31,13 @@ Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以 Herdr L
 ```
 
 项目配置中的 `maxInstances` 只限制可持久化的 Worker 数量；`projects.json` 不再配置
-Primary 或 Worker 模板。当前飞书 Thread 本身就是该 Thread 的 Primary。
+Primary 或 Worker 模板。当前飞书 Thread 本身就是该 Thread 的 Primary。每个 Worker
+从这个 Primary 的确切 Herdr pane/session 派生，拥有专属 pane 和 worktree；它不是可跨
+pane 复活的项目级 Agent。
 
-在实例目录点击“创建 Worker”，填写名称、Agent 和是否立即启动。可写 Worker 默认获得
-独立 branch/worktree；Primary 由当前 Thread 的 binding 提供，不作为实例创建或提升。
+在实例目录点击“创建 Worker”，填写名称、Agent 和是否立即启动。创建操作必须在
+active 的项目 Thread 中完成，以便验证父 Primary pane。可写 Worker 默认获得独立
+branch/worktree；Primary 由当前 Thread 的 binding 提供，不作为实例创建或提升。
 创建后可用以下命令查看和发任务：
 
 ```text
@@ -356,10 +359,16 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 ```
 
 第一条命令生成 60 秒一次性确认码，第二条必须由同一飞书用户在同一话题中
-发送。Bridge 会在确认时重新检查 Pane identity、队列和运行状态，仅允许关闭
-Herdr 明确报告为 `idle` 或 `done` 的 Pane；`working`、`blocked` 和 `unknown`
-都会被拒绝。关闭成功后，Bridge 还会验证 Pane 已从 Herdr 消失，再归档话题。
-确认码只可使用一次，服务重启不会自动重放关闭操作。
+发送。Bridge 会在确认时重新检查父 Primary 的 Pane identity、队列和运行状态，仅允许关闭
+Herdr 明确报告为 `idle` 或 `done` 的 Primary；`working`、`blocked` 和 `unknown`
+都会被拒绝。确认后的关闭会先终态化这个 Primary 派生的所有 Worker：未开始任务会取消，
+可能已投递的任务会标为 `dispatch-uncertain` 而不会重放；随后先关闭这些 Worker pane，
+再关闭父 Primary pane。其他 Thread 或其他父 pane 的 Worker 不会受影响。
+
+Worker pane 若被单独关闭或在 Herdr 中消失，也会终态化；原 worktree 可以保留并按
+安全删除流程处理，但不能在新 pane 中恢复为同一个 Worker session。关闭成功后，Bridge
+会验证父 pane 已从 Herdr 消失，再归档话题。确认码只可使用一次；服务重启只观察未决
+Worker/pane 关闭步骤，绝不会自动重放关闭命令或 Agent 任务。
 
 ## 常见问题
 

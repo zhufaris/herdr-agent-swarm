@@ -31,7 +31,7 @@ import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControl
 const FENCED_TABLES = [
   "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
-  "project_selections", "card_interactions", "session_operations", "pane_close_requests", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
+  "project_selections", "card_interactions", "session_operations", "pane_close_requests", "worker_pane_close_steps", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
