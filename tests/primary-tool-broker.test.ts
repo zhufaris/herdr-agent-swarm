@@ -11,7 +11,7 @@ afterEach(() => { store?.close(); store = undefined; });
 
 function setup() {
   store = new SqliteBindingStore(":memory:");
-  const create = (id: string, projectId: string) => { store!.createAgentInstance({ id, projectId, name: id, role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }); return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w", paneId: `${id}:pane`, nativeSessionId: null })!; };
+  const create = (id: string, projectId: string) => { store!.createAgentInstance({ id, projectId, name: id, role: "worker", agentKind: "traex", model: null, parent: projectId === "p1" ? { bindingId: "binding", paneId: "primary:pane", nativeSessionId: null } : { bindingId: "other-binding", paneId: "other-primary:pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }); return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w", paneId: `${id}:pane`, nativeSessionId: null })!; };
   const primary = (projectId = "p1") => {
     store!.createPendingBinding({ id: "binding", projectId, workspaceId: "w", chatId: "c", topicId: "t", rootMessageId: "root", title: "Primary" });
     store!.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane" });

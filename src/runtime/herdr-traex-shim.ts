@@ -142,7 +142,9 @@ export function projectTraexAgentJson(value: unknown): unknown {
     const session = projected.agent_session;
     if (session && typeof session === "object" && !Array.isArray(session)) {
       const record = session as Record<string, unknown>;
-      if (record.agent === "codex") projected.agent_session = { ...record, agent: "traex" };
+      if (record.source === "herdr:codex" && record.agent === "codex") {
+        projected.agent_session = { ...record, source: "herdr-traex-shim", agent: "traex" };
+      }
     }
   }
   return projected;

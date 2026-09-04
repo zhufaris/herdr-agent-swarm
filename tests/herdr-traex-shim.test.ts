@@ -63,9 +63,9 @@ describe("Herdr TraeX shim invocation", () => {
     ] } });
   });
 
-  it("projects the native session agent only for shim-marked TraeX records", () => {
+  it("projects Herdr's native Codex session identity into the shim-owned TraeX identity", () => {
     expect(projectTraexAgentJson({ result: { agents: [
-      { agent: "codex", display_agent: "traex", agent_session: { source: "herdr-traex-shim", agent: "codex", kind: "id", value: "session-1" } },
+      { agent: "codex", display_agent: "traex", agent_session: { source: "herdr:codex", agent: "codex", kind: "id", value: "session-1" } },
       { agent: "codex", agent_session: { source: "codex-hook", agent: "codex", kind: "id", value: "session-2" } }
     ] } })).toEqual({ result: { agents: [
       { agent: "traex", display_agent: "traex", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } },
