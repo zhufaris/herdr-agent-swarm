@@ -42,6 +42,52 @@ describe("Lark pane close", () => {
     await fixture.close();
   });
 
+  it("cascades an exact parent pane close to its Worker pane without touching siblings", async () => {
+    const fixture = await setup("idle");
+    const child = fixture.store.createWorkerAgentInstance({
+      id: "child", projectId: "default", name: "child", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: fixture.bindingId, paneId: "w1:p1", nativeSessionId: "term-1" }, workspace: { id: "ws-child", kind: "shared-read-only", cwd: "/repo/child", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const active = fixture.store.attachAgentInstanceRuntime({ instanceId: child.id, expectedGeneration: child.generation, herdrWorkspaceId: "w1", paneId: "w1:child", nativeSessionId: "term-child" })!;
+    fixture.store.acceptInstanceTurn({ id: "child-queued", idempotencyKey: "child-queued", actor: { kind: "human", userId: "user" }, projectId: "default", instanceId: active.id, instanceGeneration: active.generation, kind: "turn", text: "work" });
+    const sibling = fixture.store.createWorkerAgentInstance({
+      id: "sibling", projectId: "default", name: "sibling", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "other-binding", paneId: "w1:other", nativeSessionId: null }, workspace: { id: "ws-sibling", kind: "shared-read-only", cwd: "/repo/sibling", branch: null, baseCommit: "base" }
+    }, 4).instance;
+
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
+
+    expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child", "w1:p1"]);
+    expect(fixture.store.getAgentInstance(child.id)).toMatchObject({ workerSessionLifecycle: "terminated", runtimeRef: null });
+    expect(fixture.store.getInstanceTurn("child-queued")).toMatchObject({ state: "cancelled" });
+    expect(fixture.store.getAgentInstance(sibling.id)).toMatchObject({ workerSessionLifecycle: "active", desiredState: "running" });
+    expect(JSON.stringify(fixture.cards.at(-1))).toContain("1 个 Worker Pane");
+    await fixture.close();
+  });
+
+  it("observes unresolved child close steps after restart without reissuing closePane", async () => {
+    const fixture = await setup("idle");
+    const child = fixture.store.createWorkerAgentInstance({
+      id: "child-recovery", projectId: "default", name: "child-recovery", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: fixture.bindingId, paneId: "w1:p1", nativeSessionId: "term-1" }, workspace: { id: "ws-child-recovery", kind: "shared-read-only", cwd: "/repo/child-recovery", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const active = fixture.store.attachAgentInstanceRuntime({ instanceId: child.id, expectedGeneration: child.generation, herdrWorkspaceId: "w1", paneId: "w1:child-recovery", nativeSessionId: null })!;
+    fixture.store.createPaneCloseRequest({ id: "close-recovery", bindingId: fixture.bindingId, paneId: "w1:p1", actorOpenId: "user", codeHash: "hash", expiresAt: "2999-01-01T00:00:00.000Z" });
+    const consumed = fixture.store.consumePaneCloseRequest({ bindingId: fixture.bindingId, paneId: "w1:p1", actorOpenId: "user", codeHash: "hash", now: "2026-09-04T00:00:00.000Z" });
+    if (consumed.outcome !== "consumed") throw new Error("fixture close request was not consumed");
+    fixture.store.beginWorkerPaneCloseCascade({ operationId: consumed.operationId, bindingId: fixture.bindingId, paneId: "w1:p1", reason: "closing" });
+    fixture.setPanePresent(false);
+
+    await fixture.coordinator.start();
+
+    expect(fixture.closePane).not.toHaveBeenCalled();
+    expect(fixture.store.database.prepare("SELECT state FROM worker_pane_close_steps WHERE operation_id = 'close-recovery'").get()).toEqual({ state: "succeeded" });
+    expect(fixture.store.getAgentInstance(active.id)).toMatchObject({ workerSessionLifecycle: "terminated" });
+    await fixture.close();
+  });
+
   it.each(["working", "blocked", "unknown"] as const)("rejects a close request while pane state is %s", async (state) => {
     const fixture = await setup(state);
     await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));

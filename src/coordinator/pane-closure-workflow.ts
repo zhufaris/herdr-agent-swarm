@@ -19,6 +19,12 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
 
   async recover(): Promise<void> {
     const { store, herdr } = this.options;
+    for (const step of store.listUnresolvedWorkerPaneCloseSteps()) {
+      try {
+        if (await herdr.getPane(step.paneId)) store.finishWorkerPaneCloseStep({ ...step, state: "uncertain", detail: "worker pane still present after restart; close was not replayed" });
+        else store.finishWorkerPaneCloseStep({ ...step, state: "succeeded", detail: "worker pane absence verified after restart" });
+      } catch (error) { store.finishWorkerPaneCloseStep({ ...step, state: "uncertain", detail: errorMessage(error) }); }
+    }
     for (const operation of store.listUnresolvedPaneCloseOperations()) {
       const binding = store.getBinding(operation.bindingId);
       if (binding?.lifecycle === "closed" && binding.paneId === operation.paneId) { store.finishPaneCloseRequest(operation.id, "succeeded", "binding was already closed before recovery"); continue; }
@@ -43,7 +49,14 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
     const outcome = store.consumePaneCloseRequest({ bindingId: binding.id, paneId: binding.paneId, actorOpenId: message.actorOpenId, codeHash: hashCode(code), now: new Date().toISOString() });
     if (outcome.outcome !== "consumed") { const reason = outcome.outcome === "unauthorized" ? "只有发起关闭请求的用户可以确认。" : outcome.outcome === "expired" ? "确认码已过期，请重新发送 /swarm pane close。" : outcome.outcome === "stale" ? "没有待确认的关闭请求，请重新发送 /swarm pane close。" : "确认码无效。"; await this.reject(message, reason); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: outcome.outcome }); return false; }
     const checked = await this.checkSafety(message, store.getBinding(binding.id), outcome.paneId); if (!checked) { store.finishPaneCloseRequest(outcome.operationId, "rejected", "safety_recheck_failed"); return false; }
-    try { await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: "Herdr pane " + checked.pane.paneId + " 已由飞书确认关闭。" }); await this.reply(message, renderPaneCloseResultCard({ paneId: checked.pane.paneId })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" }); return true; }
+    try {
+      const children = store.beginWorkerPaneCloseCascade({ operationId: outcome.operationId, bindingId: checked.binding.id, paneId: checked.pane.paneId, reason: `Parent pane ${checked.pane.paneId} closed` });
+      for (const child of children) {
+        try { await herdr.closePane(child.paneId); store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "succeeded", detail: "closed by parent pane cascade" }); }
+        catch (error) { store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "uncertain", detail: errorMessage(error) }); }
+      }
+      await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: "Herdr pane " + checked.pane.paneId + " 已由飞书确认关闭。" }); await this.reply(message, renderPaneCloseResultCard({ paneId: checked.pane.paneId, workerPaneCount: children.length })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" }); return true;
+    }
     catch (error) { store.finishPaneCloseRequest(outcome.operationId, "uncertain", errorMessage(error)); await this.reject(message, "Pane 关闭失败或无法验证：" + errorMessage(error)); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" }); return false; }
   }
 

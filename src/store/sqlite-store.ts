@@ -1280,6 +1280,30 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       .run(state, detail ?? null, now(), operationId);
   }
 
+  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; paneId: string; reason: string }): Array<{ workerId: string; paneId: string }> {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const workers = (this.database.prepare("SELECT id, generation, pane_id FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? AND worker_session_lifecycle = 'active' ORDER BY created_at, id").all(input.bindingId, input.paneId) as Array<{ id: string; generation: number; pane_id: string | null }>);
+      const timestamp = now();
+      for (const worker of workers) {
+        this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, worker.id, worker.generation);
+        this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, worker.id, worker.generation);
+        this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = generation + 1, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.reason, timestamp, worker.id, worker.generation);
+        if (worker.pane_id) this.database.prepare("INSERT OR IGNORE INTO worker_pane_close_steps(operation_id, binding_id, parent_pane_id, worker_id, pane_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'executing', ?, ?)").run(input.operationId, input.bindingId, input.paneId, worker.id, worker.pane_id, timestamp, timestamp);
+      }
+      this.database.exec("COMMIT");
+      return workers.filter((worker): worker is { id: string; generation: number; pane_id: string } => worker.pane_id !== null).map((worker) => ({ workerId: worker.id, paneId: worker.pane_id }));
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; state: "executing" | "uncertain" }> {
+    return (this.database.prepare("SELECT operation_id, binding_id, parent_pane_id, worker_id, pane_id, state FROM worker_pane_close_steps WHERE state IN ('executing','uncertain') ORDER BY created_at, worker_id").all() as Array<{ operation_id: string; binding_id: string; parent_pane_id: string; worker_id: string; pane_id: string; state: "executing" | "uncertain" }>).map((row) => ({ operationId: row.operation_id, bindingId: row.binding_id, parentPaneId: row.parent_pane_id, workerId: row.worker_id, paneId: row.pane_id, state: row.state }));
+  }
+
+  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "uncertain"; detail?: string }): void {
+    this.database.prepare("UPDATE worker_pane_close_steps SET state = ?, detail = ?, updated_at = ? WHERE operation_id = ? AND worker_id = ? AND pane_id = ? AND state IN ('executing','uncertain')").run(input.state, input.detail ?? null, now(), input.operationId, input.workerId, input.paneId);
+  }
+
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[] {
     return (this.database.prepare("SELECT id, binding_id, pane_id, state FROM pane_close_requests WHERE state IN ('executing','uncertain') ORDER BY created_at, id").all() as Array<{ id: string; binding_id: string; pane_id: string; state: PaneCloseOperation["state"] }>)
       .map((row) => ({ id: row.id, bindingId: row.binding_id, paneId: row.pane_id, state: row.state }));
@@ -3437,6 +3461,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         state TEXT NOT NULL CHECK(state IN ('pending','consumed','executing','succeeded','rejected','uncertain','expired','cancelled')), detail TEXT, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
+      CREATE TABLE IF NOT EXISTS worker_pane_close_steps(
+        operation_id TEXT NOT NULL REFERENCES pane_close_requests(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, parent_pane_id TEXT NOT NULL, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, pane_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('executing','succeeded','uncertain')), detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(operation_id, worker_id, pane_id)
+      );
+      CREATE INDEX IF NOT EXISTS worker_pane_close_steps_unresolved ON worker_pane_close_steps(state, created_at);
       CREATE TABLE IF NOT EXISTS pane_control_operations(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, terminal_id TEXT, binding_generation INTEGER NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('stop','steer','model')), payload TEXT, parent_prompt_id TEXT,
@@ -3532,6 +3561,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerTurnProgressSequence();
     this.ensureWorkerSourcePrimaryPaneLabel();
     this.ensureWorkerParentIdentity();
+    this.ensureWorkerPaneCloseSteps();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
@@ -4112,6 +4142,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (!columns.has("worker_session_lifecycle")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN worker_session_lifecycle TEXT");
       this.database.exec("UPDATE agent_instances SET worker_session_lifecycle = 'legacy' WHERE role = 'worker' AND worker_session_lifecycle IS NULL");
       this.database.prepare("INSERT INTO schema_migrations(version) VALUES (14)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerPaneCloseSteps(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 15").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS worker_pane_close_steps(
+          operation_id TEXT NOT NULL REFERENCES pane_close_requests(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, parent_pane_id TEXT NOT NULL, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, pane_id TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('executing','succeeded','uncertain')), detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(operation_id, worker_id, pane_id)
+        );
+        CREATE INDEX IF NOT EXISTS worker_pane_close_steps_unresolved ON worker_pane_close_steps(state, created_at);
+      `);
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (15)").run();
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }

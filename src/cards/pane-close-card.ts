@@ -14,12 +14,12 @@ export function renderPaneCloseConfirmationCard(input: { spaceName: string; pane
   };
 }
 
-export function renderPaneCloseResultCard(input: { paneId: string }): object {
+export function renderPaneCloseResultCard(input: { paneId: string; workerPaneCount?: number }): object {
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: `Pane ${input.paneId} 已关闭` } },
     header: { title: { tag: "plain_text", content: "✓ Herdr Pane 已关闭" }, template: "green" },
-    body: { elements: [{ tag: "markdown", content: `Pane \`${input.paneId}\` 已关闭并完成消失验证。当前飞书话题已归档。` }] }
+    body: { elements: [{ tag: "markdown", content: `Pane \`${input.paneId}\` 已关闭并完成消失验证。${input.workerPaneCount ? `已级联关闭 ${input.workerPaneCount} 个 Worker Pane。` : ""}当前飞书话题已归档。` }] }
   };
 }
 

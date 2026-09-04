@@ -22,6 +22,9 @@ export interface PaneOperationsStore {
   rejectAppliedPaneControlOperation(id: string, detail: string): PaneControlOperation | null;
   findBindingByPane(paneId: string): Binding | null;
   finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail?: string): void;
+  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; paneId: string; reason: string }): Array<{ workerId: string; paneId: string }>;
+  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; state: "executing" | "uncertain" }>;
+  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "uncertain"; detail?: string }): void;
   getBinding(id: string): Binding | null;
   listBindings(): Binding[];
   listSessions(chatId: string): SessionSummary[];
@@ -33,4 +36,4 @@ export interface PaneOperationsStore {
 }
 
 export interface PaneControlStore extends Pick<PaneOperationsStore, "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getPaneControlOperation" | "listRecoverablePaneControlOperations" | "audit" | "getBinding" | "listBindings"> {}
-export interface PaneCloseStore extends Pick<PaneOperationsStore, "audit" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest" | "createAutomaticPaneCloseOperation" | "finishPaneCloseRequest" | "getBinding" | "listBindings" | "listUnresolvedPaneCloseOperations" | "transitionBinding"> {}
+export interface PaneCloseStore extends Pick<PaneOperationsStore, "audit" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest" | "createAutomaticPaneCloseOperation" | "finishPaneCloseRequest" | "beginWorkerPaneCloseCascade" | "listUnresolvedWorkerPaneCloseSteps" | "finishWorkerPaneCloseStep" | "getBinding" | "listBindings" | "listUnresolvedPaneCloseOperations" | "transitionBinding"> {}
