@@ -171,6 +171,24 @@ describe("instance messaging", () => {
     expect(store!.listInstanceEvents(worker.id).map(({ kind }) => kind)).toContain("turn.dispatch-uncertain");
   });
 
+  it("shows a neutral confirmation notice while a stalled Herdr prompt is being recovered", async () => {
+    const { create, workflow, scheduler, driver } = setup();
+    const worker = create("worker");
+    vi.mocked(driver.submit).mockResolvedValueOnce({
+      status: "delivery-uncertain",
+      reason: "Command failed: herdr agent prompt w:p [REDACTED] --wait\n{\"error\":{\"code\":\"agent_prompt_stalled\"}}"
+    });
+
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "report progress" }, source: { messageId: "m1", rootMessageId: "root-1" } });
+    await scheduler.drain(worker.id);
+
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({
+      phase: "dispatch-uncertain",
+      notice: "正在确认 Worker 是否已接收任务；系统不会自动重放。"
+    });
+  });
+
   it("completes unstructured dispatches without inventing output and drains FIFO", async () => {
     const { create, workflow, scheduler, submit } = setup({ structuredEvents: false });
     const worker = create("worker");

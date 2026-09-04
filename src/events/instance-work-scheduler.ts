@@ -69,7 +69,10 @@ export class InstanceWorkScheduler {
           this.options.store.updateAgentInstanceLifecycle({ instanceId: instance.id, expectedGeneration: instance.generation, desiredState: "running", observedState: "idle" });
           continue;
         }
-        else if (receipt.status === "delivery-uncertain") this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: receipt.reason }, receipt.reason);
+        else if (receipt.status === "delivery-uncertain") {
+          const notice = dispatchUncertainNotice(receipt.reason);
+          this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, receipt.reason);
+        }
         else this.transition(turn.id, turn.instanceGeneration, "failed", "turn.failed", { type: "failed", occurredAt: new Date().toISOString(), notice: receipt.reason }, receipt.reason);
         return;
       }
@@ -102,6 +105,12 @@ export class InstanceWorkScheduler {
     this.lastFailureAt = new Date().toISOString(); this.lastFailure = safeLogError(error).message;
     this.options.logger?.error({ event: "instance-turn-dispatch-failed", err: safeLogError(error), instanceId, ...(turnId ? { turnId } : {}), outcome: "dispatch_uncertain" }, "instance turn dispatch failed");
   }
+}
+
+function dispatchUncertainNotice(reason: string): string {
+  return reason.includes("agent_prompt_stalled")
+    ? "正在确认 Worker 是否已接收任务；系统不会自动重放。"
+    : "Worker 指令的投递状态仍在确认中；系统不会自动重放。";
 }
 
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number, signal: AbortSignal): Promise<boolean> {
