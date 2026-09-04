@@ -27,7 +27,8 @@ describe("Primary to Worker product flow", () => {
     store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane", lastAgentState: "idle" });
     const view = createQueuedRunCard({ promptId: "primary-prompt", bindingId: "binding", title: "coordinate", workspaceId: "herdr", paneId: "primary:pane", requestText: "ask Worker", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "primary-prompt", bindingId: "binding", larkMessageId: "message", actorOpenId: "operator", body: "ask Worker" }, view, rootMessageId: "root", answerCard: {} });
-    store.createAgentInstance({ id: "worker", projectId: "project", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store.createAgentInstance({ id: "worker", projectId: "project", name: "worker", role: "worker", agentKind: "traex", model: null, parent: { bindingId: "binding", paneId: "primary:pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store.createAgentInstance({ id: "sibling-worker", projectId: "project", name: "sibling", role: "worker", agentKind: "traex", model: null, parent: { bindingId: "other-binding", paneId: "other-primary:pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "stopped", workspace: { id: "sibling-worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     const workerSessionId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     const worker = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "herdr", paneId: "worker:pane", nativeSessionId: workerSessionId })!;
     let workerSubmitCount = 0; const driver: AgentRuntimeDriver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: vi.fn(async (_runtime, _text, hooks) => { workerSubmitCount += 1; await hooks?.onDispatched?.(); return { status: "confirmed-delivered" }; }) };
@@ -56,6 +57,8 @@ describe("Primary to Worker product flow", () => {
     const primaryHerdr = {
       async runPrompt(_paneId: string, _text: string, _timeoutMs: number, _onObservation?: unknown, _signal?: AbortSignal, onDispatched?: () => void) {
         onDispatched?.();
+        expect(await invoke("list_instances", {})).toMatchObject([{ id: worker.id }]);
+        expect(await invoke("prompt_instance", { instanceId: "sibling-worker", task: "must reject", idempotencyKey: "cross-primary" })).toBeUndefined();
         expect(await invoke("prompt_instance", { instanceId: worker.id, task: "Reply WORKER_OK", idempotencyKey: "child" })).toMatchObject({ inserted: true });
         await vi.waitFor(() => expect(store!.getInstanceTurn("worker-turn")?.state).toBe("completed"));
         const inspected = await invoke("inspect_instance", { instanceId: worker.id }) as { turns: Array<{ result: string | null }> };

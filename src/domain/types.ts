@@ -609,6 +609,7 @@ export interface HerdrPaneCreationOptions {
   projectId: string;
   placement?: "split" | "dedicated-tab";
   title?: string;
+  titlePolicy?: "lark-prefixed" | "complete";
   environment?: Record<string, string>;
 }
 

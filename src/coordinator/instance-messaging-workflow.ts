@@ -72,7 +72,11 @@ export class InstanceMessagingWorkflow {
   }
 
   list(actor: ControlActor, projectId: string): AgentInstance[] {
-    if (actor.kind === "thread-primary") this.requireCurrentPrimary(actor, projectId);
+    if (actor.kind === "thread-primary") {
+      const binding = this.requireCurrentPrimary(actor, projectId);
+      if (!binding.paneId) return [];
+      return this.options.store.listWorkerInstancesByParent({ bindingId: binding.id, paneId: binding.paneId });
+    }
     return this.options.store.listAgentInstances(projectId).filter(({ role }) => role === "worker");
   }
 
@@ -84,16 +88,17 @@ export class InstanceMessagingWorkflow {
     const projectId = requestedProjectId ?? target.projectId;
     if (target.projectId !== projectId) throw new Error("Target instance is not in the requested project");
     if (actor.kind === "thread-primary") {
-      this.requireCurrentPrimary(actor, projectId);
-      if (target.role !== "worker") throw new Error("Primary tools can target only same-project workers");
+      const binding = this.requireCurrentPrimary(actor, projectId);
+      if (target.role !== "worker" || !binding.paneId || target.parent?.bindingId !== binding.id || target.parent.paneId !== binding.paneId) throw new Error("Primary tools can target only Workers owned by this Primary pane");
     }
     return target;
   }
 
-  private requireCurrentPrimary(actor: Extract<ControlActor, { kind: "thread-primary" }>, projectId: string): void {
+  private requireCurrentPrimary(actor: Extract<ControlActor, { kind: "thread-primary" }>, projectId: string): import("../domain/types.js").Binding {
     const binding = this.options.store.getBinding(actor.bindingId);
     const prompt = this.options.store.getActiveOrdinaryPrompt(actor.bindingId, actor.bindingGeneration);
     if (!binding || binding.projectId !== actor.projectId || binding.projectId !== projectId || binding.generation !== actor.bindingGeneration || prompt?.id !== actor.parentPromptId) throw new Error("Caller is not the authorized current thread Primary");
+    return binding;
   }
 }
 

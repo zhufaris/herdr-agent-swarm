@@ -135,7 +135,7 @@ export class HerdrCliAdapter implements HerdrPort {
     if (options?.placement === "dedicated-tab") {
       const result = await this.json([
         "tab", "create", "--workspace", workspaceId, "--cwd", cwd,
-        "--label", larkTabTitle(options.title), ...identityArgs, "--no-focus"
+        "--label", paneCreationTitle(options), ...identityArgs, "--no-focus"
       ]);
       const candidate = findPaneRecord(result);
       if (!candidate) throw new Error("Herdr tab create response did not contain a root pane");
@@ -471,7 +471,12 @@ function findAgentState(value: unknown): AgentState | null {
 }
 
 function larkTabTitle(title: string | undefined): string {
-  return `lark_${normalizePaneTitle(title)}`;
+  const normalized = normalizePaneTitle(title).replace(/^(?:lark_)+/i, "");
+  return `lark_${normalized}`;
+}
+
+function paneCreationTitle(options: HerdrPaneCreationOptions): string {
+  return options.titlePolicy === "complete" ? normalizePaneTitle(options.title) : larkTabTitle(options.title);
 }
 
 function normalizePaneTitle(title: string | undefined): string {

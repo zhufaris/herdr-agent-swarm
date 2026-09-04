@@ -319,6 +319,19 @@ describe("Herdr adapter structured control", () => {
     expect(calls[0]).toContain("--no-focus");
     expect(calls[0]).toContain("lark_task");
   });
+
+  it("does not duplicate the Lark tab prefix when a Worker title already has it", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "tab") return json({ root_pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1", cwd: "/repo" } });
+      if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
+      return { stdout: "", stderr: "" };
+    } };
+    await new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo", { bindingId: "b1", generation: 1, projectId: "repo", placement: "dedicated-tab", title: "lark_primary-reviewer", titlePolicy: "complete" });
+    expect(calls[0]).toContain("lark_primary-reviewer");
+    expect(calls[0]).not.toContain("lark_lark_primary-reviewer");
+  });
 });
 
 function json(result: unknown) { return Promise.resolve({ stdout: JSON.stringify({ id: "test", result }), stderr: "" }); }

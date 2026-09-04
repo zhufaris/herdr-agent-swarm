@@ -208,13 +208,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } {
+  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } | { outcome: "duplicate-name" } {
     if (!input.parent) throw new Error("Worker parent identity is required");
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const count = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE project_id = ? AND role = 'worker'").get(input.projectId) as { count: number };
       if (count.count >= maxWorkers) { this.database.exec("COMMIT"); return { outcome: "limit-reached" }; }
+      const duplicate = this.database.prepare("SELECT 1 FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? AND name = ? LIMIT 1").get(input.parent.bindingId, input.parent.paneId, input.name);
+      if (duplicate) { this.database.exec("COMMIT"); return { outcome: "duplicate-name" }; }
       this.database.prepare(`
         INSERT INTO agent_instances(
           id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
@@ -3365,9 +3367,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
         workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
         provisioning_checkpoint TEXT NOT NULL DEFAULT 'recorded', last_error TEXT, pending_herdr_workspace_id TEXT, pending_pane_id TEXT,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, name)
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
+      CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_worker_parent_name ON agent_instances(parent_binding_id, parent_pane_id, name) WHERE role = 'worker' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS agent_instances_project_state ON agent_instances(project_id, observed_state, created_at);
       CREATE TABLE IF NOT EXISTS workspace_leases(
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, instance_id TEXT NOT NULL UNIQUE REFERENCES agent_instances(id) ON DELETE RESTRICT,
@@ -3561,6 +3564,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerTurnProgressSequence();
     this.ensureWorkerSourcePrimaryPaneLabel();
     this.ensureWorkerParentIdentity();
+    this.ensurePrimaryScopedWorkerNames();
     this.ensureWorkerPaneCloseSteps();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
@@ -4144,6 +4148,45 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("INSERT INTO schema_migrations(version) VALUES (14)").run();
       this.database.exec("COMMIT");
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensurePrimaryScopedWorkerNames(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 16").get();
+    if (migrated) return;
+    const schema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_instances'").get() as { sql: string } | undefined;
+    if (!schema?.sql) throw new Error("agent_instances schema is unavailable");
+    if (/UNIQUE\s*\(\s*project_id\s*,\s*name\s*\)/i.test(schema.sql)) {
+      this.database.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        CREATE TABLE agent_instances_next(
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
+          agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')),
+          desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
+          observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
+          workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
+          provisioning_checkpoint TEXT NOT NULL DEFAULT 'recorded', last_error TEXT, pending_herdr_workspace_id TEXT, pending_pane_id TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO agent_instances_next(
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle,
+          desired_state, observed_state, workspace_lease_id, generation, herdr_workspace_id, pane_id, native_session_id, provisioning_checkpoint, last_error, pending_herdr_workspace_id, pending_pane_id, created_at, updated_at
+        ) SELECT
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle,
+          desired_state, observed_state, workspace_lease_id, generation, herdr_workspace_id, pane_id, native_session_id, provisioning_checkpoint, last_error, pending_herdr_workspace_id, pending_pane_id, created_at, updated_at
+        FROM agent_instances;
+        DROP TABLE agent_instances;
+        ALTER TABLE agent_instances_next RENAME TO agent_instances;
+        CREATE UNIQUE INDEX agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
+        CREATE INDEX agent_instances_project_state ON agent_instances(project_id, observed_state, created_at);
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+      `);
+      const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+      if (violation) throw new Error(`Worker-scope migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
+    }
+    this.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_worker_parent_name ON agent_instances(parent_binding_id, parent_pane_id, name) WHERE role = 'worker' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL");
+    this.database.prepare("INSERT INTO schema_migrations(version) VALUES (16)").run();
   }
 
   private ensureWorkerPaneCloseSteps(): void {

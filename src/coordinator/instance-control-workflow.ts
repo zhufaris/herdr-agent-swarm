@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
@@ -22,12 +23,14 @@ export class InstanceControlWorkflow {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(command.name)) throw new Error("Invalid instance name");
     const driver = this.options.drivers.get(command.agentKind);
     if (!driver?.describe().available) throw new Error(`Agent adapter is unavailable: ${command.agentKind}`);
+    const parent = await this.resolveWorkerParent(project, command.bindingId);
     const id = this.options.idFactory();
     const workspaceId = this.options.idFactory();
-    const workspace = { id: workspaceId, kind: "git-worktree" as const, cwd: join(project.cwd, ".worktree", command.name), branch: `swarm/${command.name}`, baseCommit: "HEAD" };
-    const parent = await this.resolveWorkerParent(project, command.bindingId);
+    const resourceName = workerResourceName(parent.identity, command.name);
+    const workspace = { id: workspaceId, kind: "git-worktree" as const, cwd: join(project.cwd, ".worktree", resourceName), branch: `swarm/${resourceName}`, baseCommit: "HEAD" };
     const created = this.options.store.createWorkerAgentInstance({ id, projectId: project.id, name: command.name, role: "worker", agentKind: command.agentKind, model: command.model, sourcePrimaryPaneLabel: parent.label, parent: parent.identity, desiredState: command.start ? "running" : "stopped", workspace }, project.maxInstances ?? 8);
     if (created.outcome === "limit-reached") throw new Error("Project Worker limit reached");
+    if (created.outcome === "duplicate-name") throw new Error(`Worker already exists in this Primary: ${command.name}`);
     const instance = created.instance;
     if (!command.start) return { status: "created", instance };
     try {
@@ -69,7 +72,7 @@ export class InstanceControlWorkflow {
       }
       if (instance.provisioningCheckpoint === "workspace-ready") {
         await this.options.paneHost.ensureWorkspace(project.workspaceId);
-        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: workerPaneTitle(instance) });
+        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: workerPaneTitle(instance), titlePolicy: "complete" });
         instance = this.requireCheckpoint(instance, "pane-allocated", "starting", pane.paneId, project.workspaceId);
       }
       const pending = instance.pendingRuntimeRef;
@@ -155,6 +158,7 @@ export class InstanceControlWorkflow {
     return { instance, workspace: this.requireWorkspace(instance.workspaceLeaseId) };
   }
   listWorkers(projectId: string): AgentInstance[] { return this.options.store.listAgentInstances(projectId).filter(({ role }) => role === "worker"); }
+  listWorkersForParent(parent: { bindingId: string; paneId: string }): AgentInstance[] { return this.options.store.listWorkerInstancesByParent(parent); }
 
   private requireHuman(actor: ControlActor): void { if (actor.kind !== "human") throw new Error("Instance topology changes require a human actor"); }
   private requireProject(id: string): ProjectConfig { const value = this.projects.get(id); if (!value) throw new Error(`Project not found: ${id}`); return value; }
@@ -189,9 +193,14 @@ export class InstanceControlWorkflow {
 
 function workerPaneTitle(instance: AgentInstance): string {
   const primary = paneTitleSegment(instance.sourcePrimaryPaneLabel ?? instance.parent?.paneId ?? "parent");
-  return `lark_task-${primary}-${paneTitleSegment(instance.name)}`;
+  return `lark_${primary}-${paneTitleSegment(instance.name)}`;
 }
 
 function paneTitleSegment(value: string): string {
-  return value.trim().replace(/^task[-_]+/i, "").replace(/\s+/g, "-").replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || "unbound";
+  return value.trim().replace(/^(?:(?:lark|task)[-_]+)+/i, "").replace(/\s+/g, "-").replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || "parent";
+}
+
+function workerResourceName(parent: NonNullable<AgentInstance["parent"]>, workerName: string): string {
+  const scope = createHash("sha256").update(`${parent.bindingId}\0${parent.paneId}`).digest("hex").slice(0, 10);
+  return `lark-${scope}-${paneTitleSegment(workerName).slice(0, 32)}`;
 }

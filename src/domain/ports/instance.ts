@@ -18,7 +18,7 @@ export interface InstanceStore {
   resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
   consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch";
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
-  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" };
+  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } | { outcome: "duplicate-name" };
   getAgentInstance(id: string): AgentInstance | null;
   findAgentInstanceByPane(paneId: string): AgentInstance | null;
   listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[];

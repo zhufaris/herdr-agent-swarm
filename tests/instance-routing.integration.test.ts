@@ -10,7 +10,7 @@ let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 const project = { id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" };
 const secondProject = { id: "p2", displayName: "Project Two", description: "second project", workspaceId: "w2", cwd: "/repo-two" };
-const message = (text: string, messageId = text): IncomingLarkMessage => ({ eventId: messageId, messageId, parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "u1", text, mentionsBot: true, isRootMessage: false });
+const message = (text: string, messageId = text): IncomingLarkMessage => ({ eventId: messageId, messageId, parentMessageId: null, chatId: "chat", topicId: "topic-default", rootMessageId: "root", actorOpenId: "u1", text, mentionsBot: true, isRootMessage: false });
 function callbackValue(card: unknown, action: string): Record<string, unknown> {
   const visit = (value: unknown): Record<string, unknown> | null => {
     if (!value || typeof value !== "object") return null;
@@ -26,16 +26,20 @@ function callbackValue(card: unknown, action: string): Record<string, unknown> {
   if (!found) throw new Error(`Missing card callback: ${action}`);
   return found;
 }
+const defaultBindingCard = { conversationKey: "binding:binding-default", bindingId: "binding-default", bindingGeneration: 1 };
 
 function setup(adminOpenIds: readonly string[] = ["u1"]) {
   store = new SqliteBindingStore(":memory:");
-  const create = (id: string, role: "primary" | "worker", projectId = "p1") => store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: projectId === "p1" ? "/repo" : "/repo-two", branch: null, baseCommit: "base" } });
+  store.createPendingBinding({ id: "binding-default", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-default", rootMessageId: "root", title: "default" });
+  store.updateBinding("binding-default", { paneId: "w1:primary-default", state: "active", lifecycle: "active", attachment: "attached" });
+  const create = (id: string, role: "primary" | "worker", projectId = "p1", bindingId = "binding-default", paneId = `w1:primary-${bindingId}`) => store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null, ...(role === "worker" ? { parent: { bindingId, paneId: bindingId === "binding-default" ? "w1:primary-default" : paneId, nativeSessionId: null }, workerSessionLifecycle: "active" as const } : {}), desiredState: "stopped", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: projectId === "p1" ? "/repo" : "/repo-two", branch: null, baseCommit: "base" } });
   const outbound = { enqueueCard: vi.fn(async () => undefined) };
   const messaging = { submit: vi.fn(async () => ({ accepted: true })), steer: vi.fn(), interrupt: vi.fn(), inspect: vi.fn() };
   const control = {
     listWorkers: (projectId: string) => store!.listAgentInstances(projectId).filter(({ role }) => role === "worker"),
+    listWorkersForParent: (parent: { bindingId: string; paneId: string }) => store!.listWorkerInstancesByParent(parent),
     inspect: (id: string) => { const instance = store!.getAgentInstance(id)!; return { instance, workspace: store!.getWorkspaceLease(instance.workspaceLeaseId)! }; },
-    createWorker: vi.fn(async (input) => ({ status: "created" as const, instance: create(input.name, "worker") })), start: vi.fn(), stop: vi.fn(),
+    createWorker: vi.fn(async (input) => { const binding = store!.getBinding(input.bindingId)!; return { status: "created" as const, instance: create(input.name, "worker", input.projectId, binding.id, binding.paneId!) }; }), start: vi.fn(), stop: vi.fn(),
     planRemoval: vi.fn(async ({ instanceId }) => { const instance = store!.getAgentInstance(instanceId)!; const workspace = store!.getWorkspaceLease(instance.workspaceLeaseId)!; return store!.createInstanceRemovalPlan({ id: "plan-1", instanceId, instanceGeneration: instance.generation, workspaceGeneration: workspace.generation, worktreeFingerprint: "clean-fp", safe: true, reason: "clean", state: "pending", createdAt: "now" }); }),
     confirmRemoval: vi.fn(async () => true)
   };
@@ -128,8 +132,10 @@ describe("instance routing", () => {
     const second = create("second", "worker");
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "one" });
     store!.createPendingBinding({ id: "binding-2", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-2", rootMessageId: "root-2", title: "two" });
-    store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached" });
-    store!.updateBinding("binding-2", { state: "active", lifecycle: "active", attachment: "attached" });
+    store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached" });
+    store!.updateBinding("binding-2", { paneId: "w1:primary-two", state: "active", lifecycle: "active", attachment: "attached" });
+    store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", first.id);
+    store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-2", "w1:primary-two", second.id);
 
     await workflow.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: first.id, generation: first.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } });
     await workflow.handleCardAction({ messageId: "card-2", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: second.id, generation: second.generation, conversationKey: "binding:binding-2", bindingId: "binding-2", bindingGeneration: 1 } });
@@ -162,7 +168,8 @@ describe("instance routing", () => {
     const { create, workflow, outbound } = setup();
     const worker = create("worker", "worker");
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "one" });
-    store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached", generation: 3 });
+    store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached", generation: 3 });
+    store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     await workflow.handleCommand({ ...message("/instances"), topicId: "topic-1" }, { kind: "instances" });
     const directory = JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2]);
     expect(directory).toContain('"bindingId":"binding-1"');
@@ -197,7 +204,7 @@ describe("instance routing", () => {
 
   it("renders an explicit unbound state after selecting a project outside a binding", async () => {
     const { workflow, outbound } = setup();
-    await workflow.handleCommand(message("/project p1"), { kind: "project", projectId: "p1" });
+    await workflow.handleCommand({ ...message("/project p1"), topicId: null, rootMessageId: "unbound-root" }, { kind: "project", projectId: "p1" });
     const card = JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2]);
     expect(card).toContain("未绑定 Thread");
     expect(card).not.toContain("当前 Thread");
@@ -230,6 +237,18 @@ describe("instance routing", () => {
     expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "second", content: { kind: "turn", text: "new task" } }));
     expect(messaging.steer).not.toHaveBeenCalled();
   });
+  it("routes the same Worker name only within the current Primary pane", async () => {
+    const { workflow, messaging } = setup();
+    store!.createPendingBinding({ id: "binding-sibling", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-sibling", rootMessageId: "root-sibling", title: "sibling" });
+    store!.updateBinding("binding-sibling", { paneId: "w1:primary-sibling", state: "active", lifecycle: "active", attachment: "attached" });
+    store!.createAgentInstance({ id: "reviewer-default", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, parent: { bindingId: "binding-default", paneId: "w1:primary-default", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "stopped", workspace: { id: "ws-reviewer-default", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store!.createAgentInstance({ id: "reviewer-sibling", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, parent: { bindingId: "binding-sibling", paneId: "w1:primary-sibling", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "stopped", workspace: { id: "ws-reviewer-sibling", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+
+    await workflow.handleCommand(message("/to reviewer default", "to-default"), { kind: "to", name: "reviewer", text: "default" });
+    await workflow.handleCommand({ ...message("/to reviewer sibling", "to-sibling"), topicId: "topic-sibling", rootMessageId: "root-sibling" }, { kind: "to", name: "reviewer", text: "sibling" });
+
+    expect(messaging.submit.mock.calls.map(([input]) => input.targetInstanceId)).toEqual(["reviewer-default", "reviewer-sibling"]);
+  });
   it("leaves symbolic Primary messages to the binding FIFO", async () => {
     const { workflow, messaging } = setup();
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "Project / task" });
@@ -249,7 +268,8 @@ describe("instance routing", () => {
     const worker = create("reviewer", "worker");
     const task = taskCard(worker.id, "completed", "turn-history");
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "Project / task" });
-    store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached" });
+    store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached" });
+    store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     const value = { action: "instance_turn_open", instanceId: worker.id, generation: worker.generation, turnId: task.turnId, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 };
 
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "reviewer · Task turn-his" } } } });
@@ -258,10 +278,10 @@ describe("instance routing", () => {
   });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
     const { workflow, control } = setup(["u1", "u2"]);
-    const form = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1" } });
+    const form = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", ...defaultBindingCard } });
     expect(JSON.stringify(form)).toContain("instance_create_submit");
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
+    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
+    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
     expect(store!.listAgentInstances("p1").find(({ name }) => name === "reviewer")).toBeDefined();
   });
@@ -272,7 +292,7 @@ describe("instance routing", () => {
       operator: { open_id: "u1" },
       action: {
         tag: "button", name: "instance_create_submit",
-        value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" },
+        value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard },
         form_value: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" }
       }
     } as never);
@@ -304,16 +324,17 @@ describe("instance routing", () => {
   });
   it("reloads the current instance before steering from an actor-bound form", async () => {
     const { create, workflow, messaging } = setup(); const worker = create("worker", "worker");
-    const opened = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation } });
+    const opened = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
     expect(JSON.stringify(opened)).toContain("instance_steer_submit");
     store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "p1", nativeSessionId: null });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_submit", instanceId: worker.id, generation: 1, requestedBy: "u1" }, formValues: { steer_text: "focus tests" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_submit", instanceId: worker.id, generation: 1, requestedBy: "u1", ...defaultBindingCard }, formValues: { steer_text: "focus tests" } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(messaging.steer).not.toHaveBeenCalled();
   });
   it("propagates a binding fence through steer form submission", async () => {
     const { create, workflow, messaging } = setup(); const worker = create("worker", "worker");
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "one" });
-    store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached", generation: 3 });
+    store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached", generation: 3 });
+    store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
     const opened = await workflow.handleCardAction({ messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
     const submit = callbackValue(opened, "instance_steer_submit");
@@ -326,26 +347,27 @@ describe("instance routing", () => {
   });
   it("reloads a removal plan and never confirms unsafe or stale evidence", async () => {
     const { create, workflow, control } = setup(); const worker = create("worker", "worker");
-    const planned = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation } });
+    const planned = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
     expect(JSON.stringify(planned)).toContain("instance_confirm_removal");
     store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "p1", nativeSessionId: null });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: 1, planId: "plan-1", requestedBy: "u1" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: 1, planId: "plan-1", requestedBy: "u1", ...defaultBindingCard } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(control.confirmRemoval).not.toHaveBeenCalled();
     const current = store!.getAgentInstance(worker.id)!; const currentWorkspace = store!.getWorkspaceLease(current.workspaceLeaseId)!;
     store!.createInstanceRemovalPlan({ id: "dirty-plan", instanceId: current.id, instanceGeneration: current.generation, workspaceGeneration: currentWorkspace.generation, worktreeFingerprint: "dirty-fp", safe: false, reason: "dirty", state: "pending", createdAt: "now" });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: current.id, generation: current.generation, planId: "dirty-plan", requestedBy: "u1" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: current.id, generation: current.generation, planId: "dirty-plan", requestedBy: "u1", ...defaultBindingCard } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(control.confirmRemoval).not.toHaveBeenCalled();
   });
   it("confirms a safe removal only while the persisted evidence is current", async () => {
     const { create, workflow, control } = setup(); const worker = create("worker", "worker");
-    await workflow.handleCardAction({ messageId: "plan-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation } });
-    await expect(workflow.handleCardAction({ messageId: "confirm-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: worker.generation, planId: "plan-1", requestedBy: "u1" } })).resolves.toEqual({ toast: { type: "success", content: "实例 worker 已删除。" } });
+    await workflow.handleCardAction({ messageId: "plan-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
+    await expect(workflow.handleCardAction({ messageId: "confirm-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: worker.generation, planId: "plan-1", requestedBy: "u1", ...defaultBindingCard } })).resolves.toEqual({ toast: { type: "success", content: "实例 worker 已删除。" } });
     expect(control.confirmRemoval).toHaveBeenCalledWith({ actor: { kind: "human", userId: "u1", channel: "feishu" }, planId: "plan-1" });
   });
   it("propagates a binding fence through removal confirmation", async () => {
     const { create, workflow, control } = setup(); const worker = create("worker", "worker");
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "one" });
-    store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2 });
+    store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached", generation: 2 });
+    store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     const planned = await workflow.handleCardAction({ messageId: "plan", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 2 } });
     const confirm = callbackValue(planned, "instance_confirm_removal");
     expect(confirm).toMatchObject({ bindingId: "binding-1", bindingGeneration: 2 });

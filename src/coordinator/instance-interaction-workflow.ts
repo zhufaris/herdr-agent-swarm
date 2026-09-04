@@ -34,7 +34,7 @@ export class InstanceInteractionWorkflow {
     const projectId = context.boundProjectId ?? current?.projectId;
     if (!projectId || !this.projects.has(projectId)) return this.reject(message, "请先使用 `/project <id>` 选择项目。");
     if (command.kind === "instances") return this.showDirectory(message, projectId, context.conversationKey);
-    const instance = this.findByName(projectId, command.name);
+    const instance = this.findByName(context.conversationKey, command.name);
     if (!instance) return this.reject(message, `实例不存在：${command.name}`);
     if (command.kind === "instance") return this.showDetail(message, instance, context.conversationKey);
     if (command.kind === "to") {
@@ -60,7 +60,7 @@ export class InstanceInteractionWorkflow {
     if (!this.isOperator(message.actorOpenId)) { await this.reject(message, "你没有 Agent 管理权限。"); return true; }
     if (!current || current.target.kind === "primary") return false;
     const selectedTarget = current.target;
-    const target = this.options.control.listWorkers(projectId).find(({ id }) => id === selectedTarget.instanceId) ?? null;
+    const target = this.listScopedWorkers(context.conversationKey).find(({ id }) => id === selectedTarget.instanceId) ?? null;
     if (!target) { await this.showDirectory(message, projectId, context.conversationKey); return true; }
     if (selectedTarget.expectedGeneration !== undefined && selectedTarget.expectedGeneration !== target.generation) {
       await this.reject(message, "当前目标实例已重新启动，请从实例目录重新选择。"); return true;
@@ -75,6 +75,10 @@ export class InstanceInteractionWorkflow {
     if (!message.mentionsBot) return false;
     if (!this.isOperator(message.actorOpenId)) { await this.reject(message, "你没有 Agent 管理权限。"); return true; }
     const { turn } = matched;
+    const context = this.resolveConversationContext(message);
+    if (!this.listScopedWorkers(context.conversationKey).some(({ id }) => id === turn.instanceId)) {
+      await this.reject(message, "任务不存在或不属于当前 Primary。"); return true;
+    }
     const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
     if (["running", "blocked"].includes(turn.state)) {
       const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: turn.instanceId, targetTurnId: turn.id, text: message.text, resultTargetMessageId: message.rootMessageId ?? message.messageId });
@@ -132,6 +136,7 @@ export class InstanceInteractionWorkflow {
     if (!instance || instance.generation !== Number(value.generation)) return { toast: { type: "warning", content: "实例状态已变化，请刷新后重试。" } };
     if (instance.role !== "worker") return warning("仅支持管理 Worker；当前 Thread 是唯一 Primary。");
     if (bindingContext && bindingContext !== instance.projectId) return warning("实例不属于当前话题项目。");
+    if (!this.workerBelongsToConversation(instance, conversationKey)) return warning("实例状态已变化，请刷新后重试。");
     if (value.action === "instance_open") return { card: this.detailCard(instance, conversationKey) };
     if (value.action === "instance_turn_open") {
       const turnId = typeof value.turnId === "string" ? value.turnId : "";
@@ -190,8 +195,8 @@ export class InstanceInteractionWorkflow {
 
   private async showDirectory(message: IncomingLarkMessage, projectId: string, conversationKey: string): Promise<void> {
     const project = this.projects.get(projectId)!; const selected = this.options.store.getConversationTarget(conversationKey); const target = selected?.projectId === projectId ? selected.target : { kind: "primary" as const };
-    const entries = this.options.control.listWorkers(projectId).map((instance) => ({ instance, workspace: this.options.control.inspect(instance.id).workspace, capabilities: this.options.drivers.describe(instance.agentKind), queueDepth: this.options.store.countPendingInstanceTurns(instance.id) }));
     const binding = conversationKey.startsWith("binding:") ? this.options.store.getBinding(conversationKey.slice("binding:".length)) : null;
+    const entries = binding?.paneId ? this.options.control.listWorkersForParent({ bindingId: binding.id, paneId: binding.paneId }).map((instance) => ({ instance, workspace: this.options.control.inspect(instance.id).workspace, capabilities: this.options.drivers.describe(instance.agentKind), queueDepth: this.options.store.countPendingInstanceTurns(instance.id) })) : [];
     const primary = binding ? { bindingId: binding.id, generation: binding.generation, paneId: binding.paneId, state: binding.state } : null;
     await this.reply(message, renderInstanceDirectoryCard({ project, entries, target, primary, conversationKey }));
   }
@@ -222,7 +227,16 @@ export class InstanceInteractionWorkflow {
     const binding = this.options.store.getBinding(bindingId);
     return Boolean(binding && binding.chatId === chatId && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && value.bindingId === binding.id && Number(value.bindingGeneration) === binding.generation);
   }
-  private findByName(projectId: string, name: string): AgentInstance | null { return this.options.control.listWorkers(projectId).find((item) => item.name === name) ?? null; }
+  private listScopedWorkers(conversationKey: string): AgentInstance[] {
+    if (!conversationKey.startsWith("binding:")) return [];
+    const binding = this.options.store.getBinding(conversationKey.slice("binding:".length));
+    if (!binding?.paneId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached") return [];
+    return this.options.control.listWorkersForParent({ bindingId: binding.id, paneId: binding.paneId });
+  }
+  private workerBelongsToConversation(instance: AgentInstance, conversationKey: string): boolean {
+    return this.listScopedWorkers(conversationKey).some(({ id }) => id === instance.id);
+  }
+  private findByName(conversationKey: string, name: string): AgentInstance | null { return this.listScopedWorkers(conversationKey).find((item) => item.name === name) ?? null; }
   private isOperator(openId: string): boolean { return this.options.adminOpenIds.includes(openId); }
   private reply(message: IncomingLarkMessage, card: object): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `instance:${message.messageId}:${JSON.stringify(card)}`, card); }
   private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.reply(message, renderMessageRejectedCard(reason)); }

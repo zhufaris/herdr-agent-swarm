@@ -579,6 +579,23 @@ describe("SQLite store", () => {
     expect(store.listAgentInstances("project-a").filter(({ role }) => role === "worker")).toHaveLength(1);
   });
 
+  it("scopes Worker name uniqueness to the exact Primary binding and pane", () => {
+    store = new SqliteBindingStore(":memory:");
+    const worker = (id: string, bindingId: string, paneId: string) => ({
+      id, projectId: "project-a", name: "reviewer", role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const,
+      parent: { bindingId, paneId, nativeSessionId: null },
+      workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" }
+    });
+
+    expect(store.createWorkerAgentInstance(worker("one", "binding-a", "w1:p1"), 4).outcome).toBe("created");
+    expect(store.createWorkerAgentInstance(worker("duplicate", "binding-a", "w1:p1"), 4)).toEqual({ outcome: "duplicate-name" });
+    expect(store.createWorkerAgentInstance(worker("sibling", "binding-b", "w1:p2"), 4).outcome).toBe("created");
+    expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:p1" }).map(({ id }) => id)).toEqual(["one"]);
+    expect(store.listWorkerInstancesByParent({ bindingId: "binding-b", paneId: "w1:p2" }).map(({ id }) => id)).toEqual(["sibling"]);
+    expect(String((store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_instances'").get() as { sql: string }).sql)).not.toMatch(/UNIQUE\s*\(\s*project_id\s*,\s*name\s*\)/i);
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
   it("rejects stale runtime attachment without changing the instance", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({
