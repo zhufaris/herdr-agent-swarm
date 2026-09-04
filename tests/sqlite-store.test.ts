@@ -562,7 +562,7 @@ describe("SQLite store", () => {
   it("atomically enforces the Worker limit while ignoring legacy Primary rows", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "legacy-primary", projectId: "project-a", name: "legacy", role: "primary", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-primary", kind: "main-checkout", cwd: "/repo", branch: null, baseCommit: "abc123" } });
-    const worker = (id: string) => ({ id, projectId: "project-a", name: id, role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const, workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" } });
+    const worker = (id: string) => ({ id, projectId: "project-a", name: id, role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const, parent: { bindingId: "binding-a", paneId: "w1:p1", nativeSessionId: null }, workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" } });
 
     expect(store.createWorkerAgentInstance(worker("one"), 1)).toMatchObject({ outcome: "created", instance: { id: "one", role: "worker" } });
     expect(store.createWorkerAgentInstance(worker("two"), 1)).toEqual({ outcome: "limit-reached" });
@@ -572,7 +572,7 @@ describe("SQLite store", () => {
 
   it("allows only one of two competing Worker inserts at the last slot", async () => {
     store = new SqliteBindingStore(":memory:");
-    const worker = (id: string) => ({ id, projectId: "project-a", name: id, role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const, workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" } });
+    const worker = (id: string) => ({ id, projectId: "project-a", name: id, role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const, parent: { bindingId: "binding-a", paneId: "w1:p1", nativeSessionId: null }, workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" } });
 
     const outcomes = await Promise.all(["one", "two"].map(async (id) => store!.createWorkerAgentInstance(worker(id), 1)));
     expect(outcomes.map(({ outcome }) => outcome).sort()).toEqual(["created", "limit-reached"]);
@@ -746,6 +746,28 @@ describe("SQLite store", () => {
     expect(store.claimNextInstanceTurn("i1", current.generation)).toMatchObject({ id: "new", state: "claimed" });
     expect(store.getInstanceTurn("old")).toMatchObject({ state: "dispatch-uncertain", instanceGeneration: first.generation });
     expect(store.getInstanceTurnDiagnostics()).toEqual({ queuedTurns: 0, activeTurns: 1, uncertainTurns: 0 });
+  });
+
+  it("stores exact Worker parent identity and terminalizes its turns without replay", () => {
+    store = new SqliteBindingStore(":memory:");
+    const created = store.createWorkerAgentInstance({
+      id: "child", projectId: "project-a", name: "child", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      sourcePrimaryPaneLabel: "primary", parent: { bindingId: "binding-a", paneId: "w1:primary", nativeSessionId: "session-primary" },
+      workspace: { id: "ws-child", kind: "shared-read-only", cwd: "/repo/child", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const active = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "w1:child", nativeSessionId: "session-child" })!;
+    const actor = { kind: "human" as const, userId: "u1" };
+    store.acceptInstanceTurn({ id: "active", idempotencyKey: "active-parent", actor, projectId: "project-a", instanceId: active.id, instanceGeneration: active.generation, kind: "turn", text: "possibly sent" });
+    store.claimNextInstanceTurn(active.id, active.generation);
+    store.updateInstanceTurn({ turnId: "active", expectedGeneration: active.generation, state: "running", eventKind: "turn.running" });
+    store.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued-parent", actor, projectId: "project-a", instanceId: active.id, instanceGeneration: active.generation, kind: "turn", text: "not started" });
+
+    expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:primary" })).toMatchObject([{ id: "child", parent: { nativeSessionId: "session-primary" }, workerSessionLifecycle: "active" }]);
+    expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:other" })).toEqual([]);
+    expect(store.terminateWorkerSession({ instanceId: active.id, expectedGeneration: active.generation, reason: "parent pane closed" })).toMatchObject({ cancelledTurnIds: ["queued"], uncertainTurnIds: ["active"], instance: { workerSessionLifecycle: "terminated", desiredState: "stopped", runtimeRef: null } });
+    expect(store.getInstanceTurn("queued")).toMatchObject({ state: "cancelled" });
+    expect(store.getInstanceTurn("active")).toMatchObject({ state: "dispatch-uncertain" });
+    expect(store.claimNextInstanceTurn(active.id, active.generation)).toBeNull();
   });
 
   it("reserves stop only when the current generation has no active or uncertain turn", () => {

@@ -195,10 +195,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       this.database.prepare(`
         INSERT INTO agent_instances(
-          id, project_id, name, role, agent_kind, model, source_primary_pane_label, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
           , provisioning_checkpoint, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.desiredState, input.workspace.id, timestamp, timestamp);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent?.bindingId ?? null, input.parent?.paneId ?? null, input.parent?.nativeSessionId ?? null, input.workerSessionLifecycle ?? (input.role === "worker" ? "legacy" : null), input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
@@ -209,6 +209,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } {
+    if (!input.parent) throw new Error("Worker parent identity is required");
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -216,10 +217,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (count.count >= maxWorkers) { this.database.exec("COMMIT"); return { outcome: "limit-reached" }; }
       this.database.prepare(`
         INSERT INTO agent_instances(
-          id, project_id, name, role, agent_kind, model, source_primary_pane_label, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
           provisioning_checkpoint, last_error
-        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.desiredState, input.workspace.id, timestamp, timestamp);
+        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, 'active', ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent.bindingId, input.parent.paneId, input.parent.nativeSessionId, input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
@@ -237,6 +238,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   findAgentInstanceByPane(paneId: string): AgentInstance | null {
     const row = this.database.prepare("SELECT * FROM agent_instances WHERE pane_id = ? ORDER BY created_at, id LIMIT 1").get(paneId) as AgentInstanceRow | undefined;
     return row ? mapAgentInstance(row) : null;
+  }
+
+  listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[] {
+    return (this.database.prepare("SELECT * FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? ORDER BY created_at, id").all(input.bindingId, input.paneId) as AgentInstanceRow[]).map(mapAgentInstance);
   }
 
   listAgentInstances(projectId: string): AgentInstance[] {
@@ -320,6 +325,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(nextGeneration, input.reason, now(), instance.id, input.expectedGeneration);
       this.database.exec("COMMIT");
       return changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const instance = this.getAgentInstance(input.instanceId);
+      if (!instance || instance.role !== "worker" || instance.generation !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      const turns = this.database.prepare("SELECT id, state FROM instance_turns WHERE instance_id = ? AND instance_generation = ? ORDER BY created_at, rowid").all(instance.id, instance.generation) as Array<{ id: string; state: string }> ;
+      const cancelledTurnIds = turns.filter(({ state }) => state === "queued").map(({ id }) => id);
+      const uncertainTurnIds = turns.filter(({ state }) => ["claimed", "dispatching", "running", "blocked"].includes(state)).map(({ id }) => id);
+      const timestamp = now();
+      this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, instance.id, instance.generation);
+      this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, instance.id, instance.generation);
+      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.reason, timestamp, instance.id, instance.generation);
+      this.database.exec("COMMIT");
+      return changed.changes === 1 ? { instance: this.getAgentInstance(instance.id)!, cancelledTurnIds, uncertainTurnIds } : null;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -841,6 +863,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     if (!binding?.projectId) return null;
     return {
       id: `legacy:${binding.id}`, projectId: binding.projectId, name: binding.title, role: "worker", agentKind: "traex", model: null, sourcePrimaryPaneLabel: null,
+      parent: null, workerSessionLifecycle: "legacy",
       desiredState: binding.state === "archived" ? "stopped" : "running",
       observedState: binding.state === "failed" ? "failed" : binding.state === "archived" ? "stopped" : binding.lastAgentState === "done" ? "idle" : binding.lastAgentState === "unknown" ? "detached" : binding.lastAgentState,
       workspaceLeaseId: `legacy:${binding.id}:workspace`, generation: binding.generation,
@@ -3312,7 +3335,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       );
       CREATE TABLE IF NOT EXISTS agent_instances(
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
-        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT,
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')),
         desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
         observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
         workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
@@ -3507,6 +3530,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerTurnCardProgress();
     this.ensureWorkerTurnProgressSequence();
     this.ensureWorkerSourcePrimaryPaneLabel();
+    this.ensureWorkerParentIdentity();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
@@ -4073,6 +4097,22 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("INSERT INTO schema_migrations(version) VALUES (13)").run();
       this.database.exec("COMMIT");
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerParentIdentity(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 14").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("parent_binding_id")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_binding_id TEXT");
+      if (!columns.has("parent_pane_id")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_pane_id TEXT");
+      if (!columns.has("parent_native_session_id")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_native_session_id TEXT");
+      if (!columns.has("worker_session_lifecycle")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN worker_session_lifecycle TEXT");
+      this.database.exec("UPDATE agent_instances SET worker_session_lifecycle = 'legacy' WHERE role = 'worker' AND worker_session_lifecycle IS NULL");
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (14)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
   private ensureOutboundCardCheckpoint(): void {

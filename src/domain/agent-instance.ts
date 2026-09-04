@@ -11,6 +11,13 @@ export type ObservedInstanceState =
   | "stopped"
   | "failed";
 export type InstanceProvisioningCheckpoint = "recorded" | "workspace-ready" | "pane-allocated" | "runtime-started" | "verified";
+export type WorkerSessionLifecycle = "active" | "legacy" | "terminated";
+
+export interface WorkerParentIdentity {
+  bindingId: string;
+  paneId: string;
+  nativeSessionId: string | null;
+}
 
 export interface AgentRuntimeRef {
   herdrWorkspaceId: string;
@@ -27,6 +34,8 @@ export interface AgentInstance {
   agentKind: AgentKind;
   model: string | null;
   sourcePrimaryPaneLabel: string | null;
+  parent: WorkerParentIdentity | null;
+  workerSessionLifecycle: WorkerSessionLifecycle | null;
   desiredState: DesiredInstanceState;
   observedState: ObservedInstanceState;
   workspaceLeaseId: string;
@@ -71,6 +80,8 @@ export interface CreateAgentInstanceInput {
   agentKind: AgentKind;
   model: string | null;
   sourcePrimaryPaneLabel?: string | null;
+  parent?: WorkerParentIdentity | null;
+  workerSessionLifecycle?: WorkerSessionLifecycle | null;
   desiredState: DesiredInstanceState;
   workspace: Omit<WorkspaceLease, "projectId" | "instanceId" | "state" | "generation">;
 }

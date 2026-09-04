@@ -21,6 +21,7 @@ export interface InstanceStore {
   createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" };
   getAgentInstance(id: string): AgentInstance | null;
   findAgentInstanceByPane(paneId: string): AgentInstance | null;
+  listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[];
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
@@ -31,6 +32,7 @@ export interface InstanceStore {
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null;
   rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null;
   detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null;
+  terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null;
   getWorkspaceLease(id: string): WorkspaceLease | null;
   updateWorkspaceLease(input: { id: string; expectedGeneration: number; state: WorkspaceLeaseState; cwd?: string; branch?: string | null; baseCommit?: string }): WorkspaceLease | null;
   createInstanceRemovalPlan(plan: InstanceRemovalPlan): InstanceRemovalPlan;

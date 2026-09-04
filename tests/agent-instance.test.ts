@@ -7,11 +7,17 @@ function instance(input: Partial<AgentInstance> & Pick<AgentInstance, "id" | "na
     projectId: "project-a",
     agentKind: "traex",
     model: null,
+    sourcePrimaryPaneLabel: null,
+    parent: null,
+    workerSessionLifecycle: input.role === "worker" ? "legacy" : null,
     desiredState: "running",
     observedState: "idle",
     workspaceLeaseId: `${input.id}-workspace`,
     generation: 1,
     runtimeRef: null,
+    pendingRuntimeRef: null,
+    provisioningCheckpoint: "verified",
+    lastError: null,
     ...input
   };
 }
