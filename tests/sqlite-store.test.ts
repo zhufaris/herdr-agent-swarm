@@ -21,6 +21,32 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-parent-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+      CREATE TABLE agent_instances(
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT,
+        desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
+        observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
+        workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
+        provisioning_checkpoint TEXT NOT NULL DEFAULT 'recorded', last_error TEXT, pending_herdr_workspace_id TEXT, pending_pane_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, name)
+      );
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+
+    const columns = (store.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name);
+    expect(columns).toEqual(expect.arrayContaining(["parent_binding_id", "parent_pane_id", "worker_session_lifecycle"]));
+    expect(store.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 16").get()).toEqual({ 1: 1 });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'agent_instances_worker_parent_name'").get()).toEqual({ name: "agent_instances_worker_parent_name" });
+  });
+
   it("atomically accepts a Worker turn with its initial card projection", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

@@ -3370,7 +3370,6 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
-      CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_worker_parent_name ON agent_instances(parent_binding_id, parent_pane_id, name) WHERE role = 'worker' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS agent_instances_project_state ON agent_instances(project_id, observed_state, created_at);
       CREATE TABLE IF NOT EXISTS workspace_leases(
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, instance_id TEXT NOT NULL UNIQUE REFERENCES agent_instances(id) ON DELETE RESTRICT,
