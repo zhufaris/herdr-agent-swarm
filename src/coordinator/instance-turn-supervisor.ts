@@ -100,7 +100,7 @@ export class InstanceTurnSupervisor {
     const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
     const pane = panesById ? panesById.get(instance.runtimeRef.paneId) ?? null : await this.options.paneHost.inspectPane(instance.runtimeRef.paneId);
     if (!pane || pane.workspaceId !== instance.runtimeRef.herdrWorkspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
-      this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${instance.runtimeRef.paneId} is missing or mismatched during turn recovery` });
+      this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${instance.runtimeRef.paneId} is missing or mismatched during turn recovery` });
       return;
     }
     if (turn.runtimeTurnId && turn.runtimeTurnStartedAt && this.options.observer) {

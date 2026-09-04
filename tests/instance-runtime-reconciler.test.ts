@@ -68,7 +68,7 @@ describe("instance runtime reconciliation", () => {
   it("fails closed when process identity or workspace facts mismatch", async () => {
     const { instance, reconciler } = setup([pane({ agentKind: "claude", foregroundExecutables: ["claude"] })]);
     await reconciler.reconcile();
-    expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", observedState: "detached", generation: instance.generation + 1, runtimeRef: null, lastError: expect.stringMatching(/identity mismatch/) });
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "stopped", observedState: "stopped", generation: instance.generation + 1, runtimeRef: null, workerSessionLifecycle: "terminated", lastError: expect.stringMatching(/identity mismatch/) });
   });
 
   it("reconciles a TraeX instance reported under Herdr's codex label", async () => {
@@ -78,12 +78,12 @@ describe("instance runtime reconciliation", () => {
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "idle", runtimeRef: { paneId: "herdr-w:p1" } });
   });
 
-  it("retains desired-running state when an idle pane is missing", async () => {
+  it("terminalizes queued work when a Worker pane is missing", async () => {
     const { instance, reconciler, wake } = setup([]);
     store!.acceptInstanceTurn({ id: "not-started", idempotencyKey: "not-started", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "safe to run after explicit restart" });
     await reconciler.reconcile();
-    expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", observedState: "detached", generation: instance.generation + 1, runtimeRef: null });
-    expect(store!.getInstanceTurn("not-started")).toMatchObject({ state: "queued", instanceGeneration: instance.generation + 1 });
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "stopped", observedState: "stopped", generation: instance.generation + 1, runtimeRef: null, workerSessionLifecycle: "terminated" });
+    expect(store!.getInstanceTurn("not-started")).toMatchObject({ state: "cancelled", instanceGeneration: instance.generation });
     expect(wake).not.toHaveBeenCalled();
   });
 
@@ -94,8 +94,8 @@ describe("instance runtime reconciliation", () => {
     store!.updateInstanceTurn({ turnId: "active", expectedGeneration: instance.generation, state: "dispatching", eventKind: "turn.dispatching" });
     await reconciler.reconcile();
     expect(store!.getInstanceTurn("active")).toMatchObject({ state: "dispatch-uncertain" });
-    expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "detached", runtimeRef: null });
-    expect(store!.claimNextInstanceTurn(instance.id, instance.generation + 1)).toBeNull();
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "stopped", runtimeRef: null, workerSessionLifecycle: "terminated" });
+    expect(store!.claimNextInstanceTurn(instance.id, instance.generation)).toBeNull();
     expect(wake).not.toHaveBeenCalled();
   });
 

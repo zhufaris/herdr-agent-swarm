@@ -91,10 +91,10 @@ export class InstanceRuntimeReconciler {
     const runtime = instance.runtimeRef;
     if (!runtime) return;
     const pane = panes.get(runtime.paneId);
-    if (!pane) { this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} is missing` }); return; }
+    if (!pane) { this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} is missing` }); return; }
     const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
     if (pane.workspaceId !== runtime.herdrWorkspaceId || pane.workspaceId !== project.workspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
-      this.options.store.detachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} identity mismatch` });
+      this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} identity mismatch` });
       return;
     }
     const observedState = normalizeState(pane);

@@ -337,9 +337,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const cancelledTurnIds = turns.filter(({ state }) => state === "queued").map(({ id }) => id);
       const uncertainTurnIds = turns.filter(({ state }) => ["claimed", "dispatching", "running", "blocked"].includes(state)).map(({ id }) => id);
       const timestamp = now();
+      const nextGeneration = instance.generation + 1;
       this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, instance.id, instance.generation);
       this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, instance.id, instance.generation);
-      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.reason, timestamp, instance.id, instance.generation);
+      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = ?, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(nextGeneration, input.reason, timestamp, instance.id, instance.generation);
       this.database.exec("COMMIT");
       return changed.changes === 1 ? { instance: this.getAgentInstance(instance.id)!, cancelledTurnIds, uncertainTurnIds } : null;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }

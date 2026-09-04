@@ -764,7 +764,7 @@ describe("SQLite store", () => {
 
     expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:primary" })).toMatchObject([{ id: "child", parent: { nativeSessionId: "session-primary" }, workerSessionLifecycle: "active" }]);
     expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:other" })).toEqual([]);
-    expect(store.terminateWorkerSession({ instanceId: active.id, expectedGeneration: active.generation, reason: "parent pane closed" })).toMatchObject({ cancelledTurnIds: ["queued"], uncertainTurnIds: ["active"], instance: { workerSessionLifecycle: "terminated", desiredState: "stopped", runtimeRef: null } });
+    expect(store.terminateWorkerSession({ instanceId: active.id, expectedGeneration: active.generation, reason: "parent pane closed" })).toMatchObject({ cancelledTurnIds: ["queued"], uncertainTurnIds: ["active"], instance: { workerSessionLifecycle: "terminated", desiredState: "stopped", generation: active.generation + 1, runtimeRef: null } });
     expect(store.getInstanceTurn("queued")).toMatchObject({ state: "cancelled" });
     expect(store.getInstanceTurn("active")).toMatchObject({ state: "dispatch-uncertain" });
     expect(store.claimNextInstanceTurn(active.id, active.generation)).toBeNull();
