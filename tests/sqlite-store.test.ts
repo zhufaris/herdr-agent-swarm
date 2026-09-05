@@ -32,6 +32,29 @@ describe("SQLite store", () => {
       { name: "card_context_invalidations" }, { name: "worker_main_views" }
     ]);
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 17").get()).toEqual({ version: 17 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 22").get()).toEqual({ version: 22 });
+  });
+
+  it("migrates pending Primary card updates onto generation-scoped lanes", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-card-context-lanes-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    const run = createQueuedRunCard({ promptId: "prompt-1", bindingId: "binding-1", bindingGeneration: 1, title: "Task", workspaceId: "w1", paneId: null, requestText: "request", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: run.promptId, bindingId: run.bindingId, larkMessageId: "request", actorOpenId: "u1", body: run.requestText }, view: run, rootMessageId: "root", answerCard: {} });
+    store.enqueueOutboundReply({ id: "main-update", idempotencyKey: "main-update", bindingId: "binding-1", viewVersion: 2, targetRole: "session_status", rootMessageId: "main", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "answer-update", idempotencyKey: "answer-update", bindingId: "binding-1", promptId: "prompt-1", viewVersion: 2, cardRole: "answer", rootMessageId: "answer", kind: "card_update", payload: "{}" });
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 22; UPDATE outbound_replies SET lane_key = CASE id WHEN 'main-update' THEN 'message:main' WHEN 'answer-update' THEN 'answer:prompt-1' ELSE lane_key END;");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies WHERE id IN ('main-update','answer-update') ORDER BY id").all()).toEqual([
+      { id: "answer-update", lane_key: "primary-answer:prompt-1:1" },
+      { id: "main-update", lane_key: "primary-main:binding-1:1" }
+    ]);
+    expect(store.database.prepare("SELECT lane_key FROM outbox_lane_heads WHERE reply_id IN ('main-update','answer-update') ORDER BY lane_key").all()).toEqual([
+      { lane_key: "primary-answer:prompt-1:1" },
+      { lane_key: "primary-main:binding-1:1" }
+    ]);
   });
 
   it("keeps Worker session generation stable across runtime replacement and freezes its persisted main view", () => {
@@ -97,6 +120,22 @@ describe("SQLite store", () => {
       expect.objectContaining({ lane_key: "worker-main:reviewer:1" }),
       { id: "task-update", lane_key: "worker-turn:turn-1" }
     ]);
+  });
+
+  it("keeps the running Worker task current when newer work is queued", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const running = createQueuedWorkerTurnCard({ turnId: "running", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Running task", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 2, occurredAt: "2026-09-05T00:00:01.000Z" });
+    for (const view of [running, queued]) store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, card: {} });
+    store.transitionInstanceTurnWithProjection({ turnId: running.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-05T00:00:02.000Z" }, render: renderWorkerTurnCard });
+
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running" }, queueCount: 1, nextTaskTitle: "Queued task" });
   });
 
   it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {
@@ -697,6 +736,25 @@ describe("SQLite store", () => {
     expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:p1" }).map(({ id }) => id)).toEqual(["one"]);
     expect(store.listWorkerInstancesByParent({ bindingId: "binding-b", paneId: "w1:p2" }).map(({ id }) => id)).toEqual(["sibling"]);
     expect(String((store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_instances'").get() as { sql: string }).sql)).not.toMatch(/UNIQUE\s*\(\s*project_id\s*,\s*name\s*\)/i);
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("allows a terminated Worker name to start a new durable session", () => {
+    store = new SqliteBindingStore(":memory:");
+    const worker = (id: string) => ({
+      id, projectId: "project-a", name: "reviewer", role: "worker" as const, agentKind: "traex" as const, model: null, desiredState: "stopped" as const,
+      parent: { bindingId: "binding-a", bindingGeneration: 3, paneId: "w1:p1", nativeSessionId: null },
+      workspace: { id: `ws-${id}`, kind: "git-worktree" as const, cwd: `/repo/.worktree/${id}`, branch: `swarm/${id}`, baseCommit: "abc123" }
+    });
+
+    const first = store.createWorkerAgentInstance(worker("reviewer-one"), 1);
+    expect(first).toMatchObject({ outcome: "created", instance: { workerSessionGeneration: 1 } });
+    if (first.outcome !== "created") throw new Error("expected first Worker");
+    expect(store.terminateWorkerSession({ instanceId: first.instance.id, expectedGeneration: first.instance.generation, reason: "done" })).not.toBeNull();
+    const replacement = store.createWorkerAgentInstance(worker("reviewer-two"), 1);
+
+    expect(replacement).toMatchObject({ outcome: "created", instance: { id: "reviewer-two", name: "reviewer", workerSessionGeneration: 1 } });
+    expect(store.listWorkerInstancesByParent({ bindingId: "binding-a", paneId: "w1:p1" }).map(({ id }) => id)).toEqual(["reviewer-two"]);
     expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
@@ -1451,7 +1509,7 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "pending")).toHaveLength(1);
     expect(store.listPendingOutboundReplies().find((reply) => reply.id === checkpointedCreate.id)).toMatchObject({ payload: checkpointedBefore.payload, viewVersion: checkpointedBefore.viewVersion, cardIdCheckpoint: "card-checkpointed" });
     expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ idempotencyKey: "run-card:update:delivered:answer:2", kind: "card_update", rootMessageId: "answer-delivered" }));
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "answer:delivered" });
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "primary-answer:delivered:1" });
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "card-target")).toEqual([]);
     expect(store.getOperationalSummary().prompts.cancelled).toBe(4);
     expect(store.countPendingPrompts("b1")).toBe(1);
@@ -1791,8 +1849,8 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("p2")).toMatchObject({ queuePosition: 2, viewVersion: views[1]!.viewVersion });
     expect(store.loadRunCard("p3")).toMatchObject({ queuePosition: 4, viewVersion: third.viewVersion + 1 });
     expect(store.database.prepare("SELECT idempotency_key, lane_key FROM outbound_replies WHERE kind = 'card_update' ORDER BY prompt_id").all()).toEqual([
-      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "answer:p1" },
-      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "answer:p3" }
+      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "primary-answer:p1:1" },
+      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "primary-answer:p3:1" }
     ]);
   });
 

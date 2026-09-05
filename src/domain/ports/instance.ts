@@ -7,6 +7,10 @@ import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../t
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 import type { WorkerMainView } from "../worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../card-context-invalidation.js";
+import type { PrimaryWorkerActivitySummary, PrimaryWorkerSummary } from "../card-context-summary.js";
+import type { WorkerMainProjectionSource } from "../worker-main-selector.js";
+import type { TopicViewState } from "../topic-view.js";
+import type { RunCardView } from "../run-card-view.js";
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
@@ -47,11 +51,16 @@ export interface InstanceStore {
   claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
   loadWorkerMainView(workerId: string, workerSessionGeneration: number): WorkerMainView | null;
+  loadTopicView(bindingId: string): TopicViewState | null;
+  loadRunCard(promptId: string): RunCardView | null;
   saveWorkerMainView(view: WorkerMainView): WorkerMainView | null;
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null;
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[];
   listPendingCardContextInvalidations(limit?: number): CardContextInvalidation[];
   markCardContextProjected(target: CardContextTarget, dependencyRevision: number): boolean;
+  loadWorkerMainProjectionSource(workerId: string, workerSessionGeneration: number): WorkerMainProjectionSource | null;
+  loadPrimaryWorkerSummaries(bindingId: string, bindingGeneration: number): PrimaryWorkerSummary[];
+  loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): PrimaryWorkerActivitySummary[];
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;

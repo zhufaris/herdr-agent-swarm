@@ -315,14 +315,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   }
 }
 
-function deliveryTargetKey(reply: OutboundReply): string {
-  if (reply.workerId && reply.workerSessionGeneration !== null) return `worker-main:${reply.workerId}:${reply.workerSessionGeneration}`;
-  if (reply.workerTurnId) return `worker-turn:${reply.workerTurnId}`;
-  if (reply.cardRole === "answer" && reply.promptId) return `answer:${reply.promptId}`;
-  return reply.kind === "stream_content" || reply.kind === "stream_finish"
-    ? `stream:${reply.rootMessageId}`
-    : `message:${reply.rootMessageId}`;
-}
+function deliveryTargetKey(reply: OutboundReply): string { return reply.laneKey; }
 
 function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" } } {
   const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown; deliveryMode?: unknown } };

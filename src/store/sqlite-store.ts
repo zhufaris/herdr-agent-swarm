@@ -9,7 +9,7 @@ import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome,
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
-import { answerElementId, reduceRunCard } from "../domain/run-card-view.js";
+import { answerElementId, freezeRunCardWorkerContext, reduceRunCard } from "../domain/run-card-view.js";
 import { initialTopicView, mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { BridgeEvent } from "../domain/events.js";
 import { transitionSession, type AttachmentState, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
@@ -23,9 +23,13 @@ import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type Worksp
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
-import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
+import { reduceWorkerTurnCard, updateWorkerTurnCardTargets, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../domain/worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
+import { selectPrimaryWorkerActivity, selectPrimaryWorkerSummaries } from "../domain/card-context-summary.js";
+import { selectWorkerMainView } from "../domain/worker-main-selector.js";
+import { updateTopicWorkerContext } from "../domain/topic-view.js";
+import { updateRunCardWorkerContext } from "../domain/run-card-view.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
@@ -215,9 +219,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const count = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE project_id = ? AND role = 'worker'").get(input.projectId) as { count: number };
+      const count = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE project_id = ? AND role = 'worker' AND worker_session_lifecycle = 'active'").get(input.projectId) as { count: number };
       if (count.count >= maxWorkers) { this.database.exec("COMMIT"); return { outcome: "limit-reached" }; }
-      const duplicate = this.database.prepare("SELECT 1 FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? AND name = ? LIMIT 1").get(input.parent.bindingId, input.parent.paneId, input.name);
+      const duplicate = this.database.prepare("SELECT 1 FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? AND parent_pane_id = ? AND name = ? LIMIT 1").get(input.parent.bindingId, input.parent.paneId, input.name);
       if (duplicate) { this.database.exec("COMMIT"); return { outcome: "duplicate-name" }; }
       this.database.prepare(`
         INSERT INTO agent_instances(
@@ -229,8 +233,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
       `).run(input.workspace.id, input.projectId, input.id, input.workspace.kind, input.workspace.cwd, input.workspace.branch, input.workspace.baseCommit, timestamp, timestamp);
+      const instance = this.getAgentInstance(input.id)!;
+      this.invalidateWorkerInstanceContexts(instance, "worker.created");
       this.database.exec("COMMIT");
-      return { outcome: "created", instance: this.getAgentInstance(input.id)! };
+      return { outcome: "created", instance };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -279,7 +285,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     if (targets.length === 0) return [];
     const timestamp = now();
-    this.database.exec("BEGIN IMMEDIATE");
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
       const statement = this.database.prepare(`
         INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
@@ -289,9 +296,28 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       `);
       for (const target of targets) statement.run(target.targetKind, target.targetId, target.targetGeneration, target.reason, timestamp, timestamp);
       const invalidations = targets.map((target) => this.loadCardContextInvalidation(target)!).filter(Boolean);
-      this.database.exec("COMMIT");
+      if (ownsTransaction) this.database.exec("COMMIT");
       return invalidations;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    } catch (error) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void {
+    const instance = this.getAgentInstance(view.instanceId);
+    const targets: Array<CardContextTarget & { reason: string }> = [
+      { targetKind: "worker-turn", targetId: view.turnId, targetGeneration: view.instanceGeneration, reason },
+      { targetKind: "worker-session", targetId: view.instanceId, targetGeneration: view.workerSessionGeneration, reason }
+    ];
+    if (instance?.parent?.bindingGeneration) targets.push({ targetKind: "primary-session", targetId: instance.parent.bindingId, targetGeneration: instance.parent.bindingGeneration, reason });
+    if (view.primaryAnswer) targets.push({ targetKind: "primary-turn", targetId: view.primaryAnswer.aggregateId, targetGeneration: view.primaryAnswer.generation, reason });
+    this.invalidateCardContexts(targets);
+  }
+
+  private invalidateWorkerInstanceContexts(instance: AgentInstance, reason: string): void {
+    if (instance.role !== "worker" || !instance.parent?.bindingGeneration) return;
+    this.invalidateCardContexts([
+      { targetKind: "worker-session", targetId: instance.id, targetGeneration: instance.workerSessionGeneration, reason },
+      { targetKind: "primary-session", targetId: instance.parent.bindingId, targetGeneration: instance.parent.bindingGeneration, reason }
+    ]);
   }
 
   listPendingCardContextInvalidations(limit = 100): CardContextInvalidation[] {
@@ -304,9 +330,104 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return this.database.prepare(`UPDATE card_context_invalidations SET projected_dependency_revision = MAX(projected_dependency_revision, MIN(requested_dependency_revision, ?)), updated_at = ? WHERE target_kind = ? AND target_id = ? AND target_generation = ?`).run(dependencyRevision, now(), target.targetKind, target.targetId, target.targetGeneration).changes === 1;
   }
 
+  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const currentInvalidation = this.loadCardContextInvalidation(invalidation);
+      if (!currentInvalidation || currentInvalidation.projectedDependencyRevision >= invalidation.requestedDependencyRevision) { this.database.exec("COMMIT"); return "current"; }
+      let reserved = false;
+      if (invalidation.targetKind === "worker-session") {
+        const source = this.loadWorkerMainProjectionSource(invalidation.targetId, invalidation.targetGeneration);
+        if (!source) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        const previous = this.loadWorkerMainView(invalidation.targetId, invalidation.targetGeneration);
+        const next = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
+        const binding = this.getBinding(source.parentBindingId);
+        if (!binding?.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
+      } else if (invalidation.targetKind === "worker-turn") {
+        const previous = this.loadWorkerTurnCard(invalidation.targetId);
+        if (!previous || previous.instanceGeneration !== invalidation.targetGeneration) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        const main = this.loadWorkerMainView(previous.instanceId, previous.workerSessionGeneration);
+        const answer = previous.primaryAnswer ? this.loadRunCard(previous.primaryAnswer.aggregateId) : null;
+        const workerMain = { ...previous.workerMain, messageId: main?.messageId ?? null };
+        const primaryAnswer = previous.primaryAnswer ? { ...previous.primaryAnswer, messageId: answer?.answerMessageId ?? null } : null;
+        const next = updateWorkerTurnCardTargets(previous, workerMain, primaryAnswer, now());
+        if (next !== previous) this.saveWorkerTurnCard(next);
+        if (next.messageId && next.viewVersion > next.deliveredVersion) {
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(renderers.workerTask(next)) });
+          reserved = true;
+        }
+      } else if (invalidation.targetKind === "primary-session") {
+        const binding = this.getBinding(invalidation.targetId);
+        const previous = this.loadTopicView(invalidation.targetId);
+        if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
+        const next = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
+        this.saveTopicView(next);
+        reserved = this.reserveMainCardInTransaction(next, binding.rootMessageId, renderers.primaryMain(next)) === "reserved";
+      } else if (invalidation.targetKind === "primary-turn") {
+        const previous = this.loadRunCard(invalidation.targetId);
+        const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;
+        if (!previous || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null || page?.state === "frozen" || page?.state === "finished") { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        const activity = selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(previous.promptId, invalidation.targetGeneration));
+        const next = updateRunCardWorkerContext(previous, activity, invalidation.requestedDependencyRevision, now());
+        if (next !== previous) this.saveRunCard(next);
+        if (next.answerMessageId && next.viewVersion > next.answerDeliveredVersion) {
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(renderers.primaryAnswer(next)) });
+          reserved = true;
+        }
+      }
+      this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
+      this.database.exec("COMMIT");
+      return reserved ? "reserved" : "current";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   private loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {
     const row = this.database.prepare("SELECT * FROM card_context_invalidations WHERE target_kind = ? AND target_id = ? AND target_generation = ?").get(target.targetKind, target.targetId, target.targetGeneration) as Record<string, unknown> | undefined;
     return row ? mapCardContextInvalidation(row) : null;
+  }
+
+  loadWorkerMainProjectionSource(workerId: string, workerSessionGeneration: number): import("../domain/worker-main-selector.js").WorkerMainProjectionSource | null {
+    const instance = this.getAgentInstance(workerId);
+    if (!instance || instance.role !== "worker" || instance.workerSessionGeneration !== workerSessionGeneration || !instance.parent?.bindingGeneration) return null;
+    const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
+    if (!lease) return null;
+    const cards = (this.database.prepare("SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? ORDER BY created_at DESC, turn_id DESC").all(workerId, workerSessionGeneration) as Array<Record<string, unknown>>).map(mapWorkerTurnCard).filter((value): value is WorkerTurnCardView => value !== null);
+    const active = ["blocked", "running", "preparing", "dispatch-uncertain"]
+      .flatMap((phase) => cards.filter((card) => card.phase === phase))
+      .at(0) ?? cards.filter(({ phase }) => phase === "queued").at(-1) ?? null;
+    const summary = (view: WorkerTurnCardView): import("../domain/worker-main-view.js").WorkerMainTaskSummary => ({
+      turnId: view.turnId, title: summarizeTaskTitle(view.requestText), phase: view.phase, durationSeconds: durationSeconds(view.startedAt, view.finishedAt),
+      taskCard: { aggregateKind: "worker-turn", aggregateId: view.turnId, generation: view.instanceGeneration, messageId: view.messageId }, updatedAt: view.updatedAt
+    });
+    const binding = this.getBinding(instance.parent.bindingId);
+    return {
+      workerId, workerSessionGeneration, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
+      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, ownerName: binding?.title ?? "Primary",
+      workspace: lease.cwd, branch: lease.branch, currentTask: active ? summary(active) : null, queueCount: cards.filter(({ phase }) => phase === "queued").length, nextTaskTitle: cards.filter(({ phase }) => phase === "queued").reverse().map(({ requestText }) => summarizeTaskTitle(requestText))[0] ?? null,
+      recentTasks: cards.filter(({ phase }) => ["completed", "failed", "cancelled", "dispatch-uncertain"].includes(phase)).slice(0, 5).map(summary), createdAt: cards.at(-1)?.createdAt ?? now()
+    };
+  }
+
+  loadPrimaryWorkerSummaries(bindingId: string, bindingGeneration: number): import("../domain/card-context-summary.js").PrimaryWorkerSummary[] {
+    const binding = this.getBinding(bindingId);
+    if (!binding || binding.generation !== bindingGeneration || !binding.paneId) return [];
+    return this.listWorkerInstancesByParent({ bindingId, paneId: binding.paneId }).filter((worker) => worker.parent?.bindingGeneration === bindingGeneration).flatMap((worker) => {
+      const source = this.loadWorkerMainProjectionSource(worker.id, worker.workerSessionGeneration ?? 1);
+      const main = this.loadWorkerMainView(worker.id, worker.workerSessionGeneration ?? 1);
+      if (!source) return [];
+      return [{ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration ?? 1, name: worker.name, state: worker.observedState, currentTaskTitle: source.currentTask?.title ?? null, queueCount: source.queueCount, workerMain: { aggregateKind: "worker-session" as const, aggregateId: worker.id, generation: worker.workerSessionGeneration ?? 1, messageId: main?.messageId ?? null }, createdAt: source.createdAt }];
+    });
+  }
+
+  loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): import("../domain/card-context-summary.js").PrimaryWorkerActivitySummary[] {
+    const run = this.loadRunCard(promptId);
+    if (!run || run.bindingGeneration !== bindingGeneration) return [];
+    const rows = this.database.prepare("SELECT c.* FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary' AND json_extract(t.actor_json, '$.parentPromptId') = ? ORDER BY c.updated_at DESC, c.turn_id").all(promptId) as Array<Record<string, unknown>>;
+    const grouped = new Map<string, WorkerTurnCardView[]>();
+    for (const row of rows) { const view = mapWorkerTurnCard(row); if (view) grouped.set(`${view.instanceId}:${view.workerSessionGeneration}`, [...(grouped.get(`${view.instanceId}:${view.workerSessionGeneration}`) ?? []), view]); }
+    return [...grouped.values()].map((cards) => { const latest = cards[0]!; return { workerId: latest.instanceId, workerSessionGeneration: latest.workerSessionGeneration, name: latest.workerName, latestPhase: latest.phase, taskCount: cards.length, latestTaskTitle: summarizeTaskTitle(latest.requestText), latestTaskCard: { aggregateKind: "worker-turn", aggregateId: latest.turnId, generation: latest.instanceGeneration, messageId: latest.messageId }, updatedAt: latest.updatedAt }; });
   }
 
   findAgentInstanceByPane(paneId: string): AgentInstance | null {
@@ -315,7 +436,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[] {
-    return (this.database.prepare("SELECT * FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? ORDER BY created_at, id").all(input.bindingId, input.paneId) as AgentInstanceRow[]).map(mapAgentInstance);
+    return (this.database.prepare("SELECT * FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? AND parent_pane_id = ? ORDER BY created_at, id").all(input.bindingId, input.paneId) as AgentInstanceRow[]).map(mapAgentInstance);
   }
 
   listAgentInstances(projectId: string): AgentInstance[] {
@@ -337,28 +458,52 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null {
     const nextGeneration = input.expectedGeneration + 1;
-    const result = this.database.prepare(`
-      UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, generation = ?, observed_state = 'idle', provisioning_checkpoint = 'verified', last_error = NULL, updated_at = ?
-      WHERE id = ? AND generation = ?
-    `).run(input.herdrWorkspaceId, input.paneId, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
-    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, generation = ?, observed_state = 'idle', provisioning_checkpoint = 'verified', last_error = NULL, updated_at = ?
+        WHERE id = ? AND generation = ?
+      `).run(input.herdrWorkspaceId, input.paneId, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
+      const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+      if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.runtime-attached");
+      this.database.exec("COMMIT");
+      return instance;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null {
-    const result = this.database.prepare(`UPDATE agent_instances SET provisioning_checkpoint = ?, observed_state = COALESCE(?, observed_state), pending_pane_id = COALESCE(?, pending_pane_id), pending_herdr_workspace_id = COALESCE(?, pending_herdr_workspace_id), last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
-      .run(input.checkpoint, input.observedState ?? null, input.pendingPaneId ?? null, input.pendingWorkspaceId ?? null, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
-    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`UPDATE agent_instances SET provisioning_checkpoint = ?, observed_state = COALESCE(?, observed_state), pending_pane_id = COALESCE(?, pending_pane_id), pending_herdr_workspace_id = COALESCE(?, pending_herdr_workspace_id), last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+        .run(input.checkpoint, input.observedState ?? null, input.pendingPaneId ?? null, input.pendingWorkspaceId ?? null, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
+      const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+      if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.provisioning-changed");
+      this.database.exec("COMMIT");
+      return instance;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null {
-    const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
-      .run(input.desiredState, input.observedState, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
-    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+        .run(input.desiredState, input.observedState, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
+      const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+      if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.lifecycle-changed");
+      this.database.exec("COMMIT");
+      return instance;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null {
-    const result = this.database.prepare("UPDATE agent_instances SET observed_state = ?, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.observedState, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
-    return result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare("UPDATE agent_instances SET observed_state = ?, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.observedState, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
+      const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+      if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.runtime-observed");
+      this.database.exec("COMMIT");
+      return instance;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
@@ -376,8 +521,14 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null {
-    const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);
-    return result.changes === 1 ? this.getAgentInstance(instanceId) : null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);
+      const instance = result.changes === 1 ? this.getAgentInstance(instanceId) : null;
+      if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.stopped");
+      this.database.exec("COMMIT");
+      return instance;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null {
@@ -397,8 +548,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(nextGeneration, now(), instance.id, input.expectedGeneration);
       const changed = this.database.prepare(`UPDATE agent_instances SET generation = ?, observed_state = 'detached', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
         .run(nextGeneration, input.reason, now(), instance.id, input.expectedGeneration);
+      const detached = changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
+      if (detached) this.invalidateWorkerInstanceContexts(detached, "worker.runtime-detached");
       this.database.exec("COMMIT");
-      return changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
+      return detached;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -415,8 +568,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, instance.id, instance.generation);
       this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, instance.id, instance.generation);
       const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = ?, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(nextGeneration, input.reason, timestamp, instance.id, instance.generation);
+      const terminated = changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
+      if (terminated) this.invalidateWorkerInstanceContexts(terminated, "worker.terminated");
       this.database.exec("COMMIT");
-      return changed.changes === 1 ? { instance: this.getAgentInstance(instance.id)!, cancelledTurnIds, uncertainTurnIds } : null;
+      return terminated ? { instance: terminated, cancelledTurnIds, uncertainTurnIds } : null;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -502,6 +657,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         this.saveWorkerTurnCard(input.view);
         this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
         this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id, viewVersion: input.view.viewVersion, rootMessageId: input.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: 0, pageStart: 0, elementId: input.view.elementId } }) });
+        this.invalidateWorkerCardContexts(input.view, "turn.accepted");
       }
       const view = this.loadWorkerTurnCard(turn.id);
       if (!view) throw new Error("Accepted Worker turn card could not be loaded");
@@ -629,6 +785,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const next = reduceWorkerTurnCard(current, input.change);
       if (next !== current) {
         this.saveWorkerTurnCard(next);
+        this.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
         if (!next.messageId) this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
         else if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(input.render(next)) });
       }
@@ -649,6 +806,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const next = reduceWorkerTurnCard(currentView, input.change);
       if (next !== currentView) {
         this.saveWorkerTurnCard(next);
+        this.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
         if (!next.messageId) this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
         else if (input.change.type !== "output" && input.change.type !== "completed") this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(input.render(next)) });
       }
@@ -2351,7 +2509,12 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private persistTerminalRunCard(promptId: string, change: Parameters<typeof reduceRunCard>[1]): void {
     const current = this.loadRunCard(promptId);
     if (!current) throw new Error(`Run card missing for prompt: ` + promptId);
-    const next = reduceRunCard(current, change);
+    let next = reduceRunCard(current, change);
+    if (next.phase === "completed" || next.phase === "failed") {
+      const invalidation = this.loadCardContextInvalidation({ targetKind: "primary-turn", targetId: next.promptId, targetGeneration: next.bindingGeneration });
+      const revision = Math.max(next.workerDependencyRevision, invalidation?.requestedDependencyRevision ?? 0);
+      next = freezeRunCardWorkerContext(updateRunCardWorkerContext(next, selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(next.promptId, next.bindingGeneration)), revision, change.occurredAt), change.occurredAt);
+    }
     if (next !== current) this.saveRunCard(next);
     const prompt = this.getPrompt(promptId);
     if (prompt?.dispatchKind === "steering") return;
@@ -2396,9 +2559,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "laneKey" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
     const timestamp = now();
-    const laneKey = outboundLaneKey(input);
+    const bindingGeneration = input.promptId ? this.loadRunCard(input.promptId)?.bindingGeneration ?? null : input.bindingId ? this.getBinding(input.bindingId)?.generation ?? null : null;
+    const laneKey = outboundLaneKey({ ...input, bindingGeneration });
     const ownsTransaction = !this.database.isTransaction;
     if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -2543,6 +2707,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
             if (row.kind === "stream_finish") {
               const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
               this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, pendingContinuation ? "frozen" : "finished", now(), row.prompt_id, pageIndex, pageIndex);
+              if (!pendingContinuation) {
+                const run = this.loadRunCard(row.prompt_id);
+                if (run) this.saveRunCard(freezeRunCardWorkerContext(run, now()));
+              }
             }
           }
         } else if (row.kind === "card_reply") this.database.prepare("UPDATE run_cards SET lark_message_id = ?, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(messageId, row.view_version ?? 0, now(), row.prompt_id);
@@ -2559,6 +2727,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
             if (pageIndex > 0) this.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, pageIndex);
             this.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'")
               .run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, pageIndex);
+            const task = this.loadWorkerTurnCard(row.worker_turn_id);
+            if (task) this.invalidateWorkerCardContexts(task, "worker-task.delivered");
           }
         } else {
           this.database.prepare("UPDATE worker_turn_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ?")
@@ -2583,6 +2753,22 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
               updated_at = ?
           WHERE worker_id = ? AND worker_session_generation = ?
         `).run(row.view_version ?? 0, messageCheckpoint, cardCheckpoint, row.view_version ?? 0, messageCheckpoint, cardCheckpoint, now(), row.worker_id, row.worker_session_generation);
+        if (messageCheckpoint) {
+          const main = this.loadWorkerMainView(row.worker_id, row.worker_session_generation);
+          if (main) {
+            const taskRows = this.database.prepare("SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ?").all(row.worker_id, row.worker_session_generation) as Array<Record<string, unknown>>;
+            for (const taskRow of taskRows) {
+              const task = mapWorkerTurnCard(taskRow);
+              if (!task) continue;
+              this.invalidateCardContexts([{ targetKind: "worker-turn", targetId: task.turnId, targetGeneration: task.instanceGeneration, reason: "worker-main.delivered" }]);
+            }
+            this.invalidateCardContexts([{ targetKind: "primary-session", targetId: main.parentBindingId, targetGeneration: main.parentBindingGeneration, reason: "worker-main.delivered" }]);
+          }
+        }
+      }
+      if (row?.prompt_id && row.card_role === "answer" && (row.kind === "card_reply" || row.kind === "stream_card_create")) {
+        const taskRows = this.database.prepare("SELECT c.turn_id, c.instance_generation FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary' AND json_extract(t.actor_json, '$.parentPromptId') = ?").all(row.prompt_id) as Array<{ turn_id: string; instance_generation: number }>;
+        this.invalidateCardContexts(taskRows.map((task) => ({ targetKind: "worker-turn" as const, targetId: task.turn_id, targetGeneration: Number(task.instance_generation), reason: "primary-answer.delivered" })));
       }
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       if (row?.binding_id && row.target_role === "session_status") {
@@ -2635,7 +2821,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const before = this.getOutboundReply(id);
       if (!before) { this.database.exec("COMMIT"); return null; }
       if (before.state === "dead_letter") {
-        const existing = this.database.prepare("SELECT lane_class, action FROM outbox_lane_quarantines WHERE lane_key = ? AND failed_reply_id = ?").get(outboundLaneKey(before), id) as { lane_class: OutboxLaneClass; action: OutboundFailureTransition["action"] } | undefined;
+        const existing = this.database.prepare("SELECT lane_class, action FROM outbox_lane_quarantines WHERE lane_key = ? AND failed_reply_id = ?").get(before.laneKey, id) as { lane_class: OutboxLaneClass; action: OutboundFailureTransition["action"] } | undefined;
         if (existing) {
           this.database.exec("COMMIT");
           return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
@@ -2664,11 +2850,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         this.database.prepare(`UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static', updated_at = ?
           WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND card_id = ?`).run(timestamp, failed.promptId, pageIndex, failed.rootMessageId);
         this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Dismissed after Lark closed the Answer stream', updated_at = ?
-          WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
+          WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, failed.laneKey, this.outboundDeliveryOrder(id));
         action = "rebuild_answer"; quarantineState = "released";
       } else if (laneClass === "answer_stream" && failed.promptId) {
         this.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ?
-          WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, outboundLaneKey(failed), this.outboundDeliveryOrder(id));
+          WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, failed.laneKey, this.outboundDeliveryOrder(id));
         // A failed cumulative stream update is an unconfirmed content boundary.
         // Keep it quarantined instead of creating another page from the same
         // source offset, which would skip or duplicate canonical content.
@@ -2696,7 +2882,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       } else if (laneClass === "main_card" || laneClass === "replaceable_card") {
         action = "released_newer_snapshot"; quarantineState = "released";
       }
-      const laneKey = outboundLaneKey(failed);
+      const laneKey = failed.laneKey;
       this.database.prepare(`INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(lane_key) DO UPDATE SET failed_reply_id = excluded.failed_reply_id, lane_class = excluded.lane_class, failure_class = excluded.failure_class, state = excluded.state, action = excluded.action, reason = excluded.reason, updated_at = excluded.updated_at, released_at = excluded.released_at`)
@@ -3159,8 +3345,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     const ownsTransaction = !this.database.isTransaction;
     if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, steering_origin = ?, steering_failure_kind = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, session_title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, progress_summary_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
-        .run(view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
+      this.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, steering_origin = ?, steering_failure_kind = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, session_title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, progress_summary_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, worker_activity_json = ?, worker_dependency_revision = ?, worker_context_frozen_at = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
+        .run(view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
       const result = this.loadRunCard(view.promptId)!;
       if (ownsTransaction) this.database.exec("COMMIT");
       return result;
@@ -3381,7 +3567,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       });
       this.database.prepare("UPDATE answer_pages SET delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'")
         .run(now(), input.promptId, input.nextPageIndex);
-      this.refreshOutboxLaneHead(outboundLaneKey(replacement));
+      this.refreshOutboxLaneHead(replacement.laneKey);
       this.database.exec("COMMIT"); return "reserved";
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
@@ -3402,8 +3588,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   private insertRunCard(view: RunCardView): void {
-    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, steering_origin, steering_failure_kind, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, progress_summary_json, queue_position, started_at, finished_at, notice, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, steering_origin, steering_failure_kind, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, progress_summary_json, queue_position, started_at, finished_at, notice, worker_activity_json, worker_dependency_revision, worker_context_frozen_at, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.steeringOrigin, view.steeringFailureKind, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
     this.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'streaming', ?, ?)")
       .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
   }
@@ -3594,7 +3780,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       CREATE TABLE IF NOT EXISTS run_cards(
         prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL DEFAULT 1, conversion_parent_prompt_id TEXT, steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain')), queue_feedback_json TEXT, lark_message_id TEXT, answer_message_id TEXT, answer_card_id TEXT, answer_element_id TEXT NOT NULL DEFAULT '', answer_sequence INTEGER NOT NULL DEFAULT 0, answer_page_index INTEGER NOT NULL DEFAULT 0, answer_page_start INTEGER NOT NULL DEFAULT 0,
         phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, session_title TEXT, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, space_name TEXT NOT NULL DEFAULT 'unknown', pane_id TEXT,
-        answer TEXT NOT NULL, answer_segments_json TEXT NOT NULL DEFAULT '[]', answer_draft TEXT NOT NULL DEFAULT '', answer_draft_transient INTEGER NOT NULL DEFAULT 0, progress_events_json TEXT NOT NULL, progress_summary_json TEXT NOT NULL DEFAULT '{"total":0,"stepTotal":0,"stepDone":0}', queue_position INTEGER NOT NULL, started_at TEXT, finished_at TEXT, notice TEXT, activity_at TEXT NOT NULL,
+        answer TEXT NOT NULL, answer_segments_json TEXT NOT NULL DEFAULT '[]', answer_draft TEXT NOT NULL DEFAULT '', answer_draft_transient INTEGER NOT NULL DEFAULT 0, progress_events_json TEXT NOT NULL, progress_summary_json TEXT NOT NULL DEFAULT '{"total":0,"stepTotal":0,"stepDone":0}', queue_position INTEGER NOT NULL, started_at TEXT, finished_at TEXT, notice TEXT, worker_activity_json TEXT NOT NULL DEFAULT '[]', worker_dependency_revision INTEGER NOT NULL DEFAULT 0, worker_context_frozen_at TEXT, activity_at TEXT NOT NULL,
         view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, answer_delivered_version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS run_cards_binding ON run_cards(binding_id, created_at);
@@ -3653,13 +3839,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerParentIdentity();
     this.ensurePrimaryScopedWorkerNames();
     this.ensureCardContextProjectionTables();
+    this.ensureActiveWorkerScopedNames();
     this.ensureWorkerTurnContextReferences();
     this.ensureWorkerMainOutboxIdentity();
+    this.ensurePrimaryCardContextColumns();
     this.ensureWorkerPaneCloseSteps();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
     this.ensureOutboxLaneHeads();
     this.ensureIndependentReplyLanes();
+    this.ensureCardContextOutboxLanes();
     this.ensureOutboundFailureMetadata();
     this.ensurePaneCloseOperationState();
     this.ensurePaneControlOperationState();
@@ -4310,6 +4499,22 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
+  private ensureActiveWorkerScopedNames(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 21").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        DROP INDEX IF EXISTS agent_instances_worker_parent_name;
+        CREATE UNIQUE INDEX agent_instances_worker_parent_name
+          ON agent_instances(parent_binding_id, parent_pane_id, name)
+          WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL;
+      `);
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (21)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   private ensureWorkerTurnContextReferences(): void {
     const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 18").get();
     if (migrated) return;
@@ -4333,6 +4538,14 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (19)").run();
       this.database.exec("COMMIT");
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensurePrimaryCardContextColumns(): void {
+    const names = new Set((this.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!names.has("worker_activity_json")) this.database.exec("ALTER TABLE run_cards ADD COLUMN worker_activity_json TEXT NOT NULL DEFAULT '[]'");
+    if (!names.has("worker_dependency_revision")) this.database.exec("ALTER TABLE run_cards ADD COLUMN worker_dependency_revision INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("worker_context_frozen_at")) this.database.exec("ALTER TABLE run_cards ADD COLUMN worker_context_frozen_at TEXT");
+    this.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (20)").run();
   }
 
   private ensureWorkerPaneCloseSteps(): void {
@@ -4496,6 +4709,56 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     }
   }
 
+  private ensureCardContextOutboxLanes(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 22").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        UPDATE outbound_replies
+        SET lane_key = 'worker-main:' || worker_id || ':' || worker_session_generation
+        WHERE worker_id IS NOT NULL AND worker_session_generation IS NOT NULL;
+
+        UPDATE outbound_replies
+        SET lane_key = 'primary-answer:' || prompt_id || ':' || (
+          SELECT binding_generation FROM run_cards WHERE run_cards.prompt_id = outbound_replies.prompt_id
+        )
+        WHERE kind = 'card_update' AND card_role = 'answer' AND prompt_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM run_cards WHERE run_cards.prompt_id = outbound_replies.prompt_id);
+
+        UPDATE outbound_replies
+        SET lane_key = 'primary-main:' || binding_id || ':' || (
+          SELECT generation FROM bindings WHERE bindings.id = outbound_replies.binding_id
+        )
+        WHERE kind = 'card_update' AND target_role = 'session_status' AND binding_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM bindings WHERE bindings.id = outbound_replies.binding_id);
+
+        UPDATE OR REPLACE outbox_lane_quarantines
+        SET lane_key = (
+          SELECT lane_key FROM outbound_replies WHERE outbound_replies.id = outbox_lane_quarantines.failed_reply_id
+        ), updated_at = datetime('now')
+        WHERE EXISTS (
+          SELECT 1 FROM outbound_replies
+          WHERE outbound_replies.id = outbox_lane_quarantines.failed_reply_id
+            AND outbound_replies.lane_key != outbox_lane_quarantines.lane_key
+        );
+
+        DELETE FROM outbox_lane_heads;
+        INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
+          SELECT pending.lane_key, pending.id, pending.delivery_order, pending.next_attempt_at, pending.created_at
+          FROM outbound_replies pending
+          WHERE pending.state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = pending.lane_key AND q.state = 'active')
+            AND pending.delivery_order = (
+              SELECT MIN(candidate.delivery_order) FROM outbound_replies candidate
+              WHERE candidate.state = 'pending' AND candidate.lane_key = pending.lane_key
+            );
+        INSERT INTO schema_migrations(version) VALUES (22);
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   private ensureOutboundFailureMetadata(): void {
     const names = new Set((this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!names.has("failure_class")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown'))");
@@ -4573,7 +4836,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       CREATE VIEW run_cards_view AS SELECT *, json_object(
         'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'sessionTitle', session_title, 'requestText', request_text,
         'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END, 'progressEvents', json(progress_events_json), 'progressSummary', json(progress_summary_json),
-        'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'activityAt', activity_at,
+        'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'workerActivity', json(worker_activity_json), 'workerDependencyRevision', worker_dependency_revision, 'workerContextFrozenAt', worker_context_frozen_at, 'activityAt', activity_at,
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'answerDeliveredVersion', answer_delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
       ) AS state_json FROM run_cards;
     `);
@@ -4586,7 +4849,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return [
       "binding_generation", "conversion_parent_prompt_id", "steering_origin", "steering_failure_kind", "queue_feedback_json",
       "answer_message_id", "answer_card_id", "answer_element_id", "answer_sequence", "answer_page_index", "answer_page_start",
-      "request_text", "space_name", "session_title", "answer_segments_json", "answer_draft", "answer_draft_transient", "progress_summary_json", "activity_at", "answer_delivered_version"
+      "request_text", "space_name", "session_title", "answer_segments_json", "answer_draft", "answer_draft_transient", "progress_summary_json", "worker_activity_json", "worker_dependency_revision", "worker_context_frozen_at", "activity_at", "answer_delivered_version"
     ].some((column) => !columns.has(column));
   }
 
@@ -4620,6 +4883,12 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 }
 
 function now(): string { return new Date().toISOString(); }
+function summarizeTaskTitle(text: string): string { return text.trim().split(/\r?\n/, 1)[0]!.slice(0, 120) || "Untitled task"; }
+function durationSeconds(startedAt: string | null, finishedAt: string | null): number | null {
+  if (!startedAt) return null;
+  const start = Date.parse(startedAt); const finish = Date.parse(finishedAt ?? now());
+  return Number.isFinite(start) && Number.isFinite(finish) ? Math.max(0, Math.floor((finish - start) / 1_000)) : null;
+}
 function approvalIdentityMatches(left: ApprovalIdentity, right: ApprovalIdentity): boolean {
   return left.actorId === right.actorId && left.projectId === right.projectId && left.instanceId === right.instanceId
     && left.instanceGeneration === right.instanceGeneration && left.actionFingerprint === right.actionFingerprint

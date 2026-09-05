@@ -159,6 +159,14 @@ export function reduceWorkerTurnCard(state: WorkerTurnCardView, change: WorkerTu
   return { ...state, ...patch, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
 }
 
+export function updateWorkerTurnCardTargets(state: WorkerTurnCardView, workerMain: CardTargetRef, primaryAnswer: CardTargetRef | null, occurredAt: string): WorkerTurnCardView {
+  if (sameTarget(state.workerMain, workerMain) && sameNullableTarget(state.primaryAnswer, primaryAnswer)) return state;
+  return { ...state, workerMain, primaryAnswer, viewVersion: state.viewVersion + 1, updatedAt: occurredAt };
+}
+
+function sameNullableTarget(left: CardTargetRef | null, right: CardTargetRef | null): boolean { return left === right || Boolean(left && right && sameTarget(left, right)); }
+function sameTarget(left: CardTargetRef, right: CardTargetRef): boolean { return left.aggregateKind === right.aggregateKind && left.aggregateId === right.aggregateId && left.generation === right.generation && left.messageId === right.messageId; }
+
 function sameProgress(left: readonly RunProgressEvent[], right: readonly RunProgressEvent[]): boolean {
   return left.length === right.length && left.every((event, index) => {
     const other = right[index];

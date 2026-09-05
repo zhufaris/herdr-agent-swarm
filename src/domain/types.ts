@@ -304,6 +304,7 @@ export interface OutboundReply {
   selectionId: string | null;
   cardRole: RequestCardRole | null;
   targetRole: OutboundTargetRole | null;
+  laneKey: string;
   rootMessageId: string;
   kind: OutboundReplyKind;
   payload: string;
