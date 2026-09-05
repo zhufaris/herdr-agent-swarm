@@ -43,13 +43,20 @@ When these sources disagree, do not repair SQLite from a Lark card or infer a
 pane state from a card. Reconcile against Herdr, then let the normal projection
 and durable Lark outbox converge the visible state.
 
-An operator can explicitly recover a binding blocked by an exact-owned detached
+An operator can explicitly observe a binding blocked by an exact-owned detached
 prompt with `/swarm awake`. This path reopens the matching TraeX transcript
 immediately after the detached turn's exact completion boundary, or at the next
 distinct turn start when interruption left no completion record, adopts later
 turns in chronological order into separate Answer Cards, and then wakes the
 ordinary prompt FIFO. It never submits text to TraeX. Missing, incomplete, or
 mismatched boundaries fail closed and leave the detached prompt unchanged.
+
+When observation cannot recover that blocker, the topic creator may use
+`/swarm skip`. One durable command invocation atomically fails only the oldest
+ordinary `running` / `detached` prompt for the frozen binding generation, updates
+its Run Card and outbox intent, records an audit entry, and then wakes the FIFO.
+The prior runtime outcome remains explicitly uncertain; skip never sends terminal
+input, interrupts TraeX, or replays the prompt.
 
 ## Architecture and dependency direction
 
@@ -374,6 +381,10 @@ change during the target decomposition without changing these steps.
    Primary is idle. Both modes fence binding generation, pane, and native Agent
    session. Blocked and unknown states reject; ordinary FIFO order is preserved,
    and an uncertain external result is never replayed.
+   `/swarm awake` observes detached transcript state without terminalizing an
+   unrecoverable prompt. `/swarm skip` is the separate creator-authorized,
+   generation-fenced action that atomically fails one oldest detached ordinary
+   prompt and wakes the existing FIFO dispatcher.
    Mutating Session card actions use a separate durable handoff: the callback
    atomically consumes its scoped interaction and inserts one idempotent
    `session_operations` row, then returns an accepted Toast. A coalescing

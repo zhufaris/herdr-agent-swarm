@@ -62,6 +62,8 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "resume" };
     case "awake":
       return argument ? { kind: "help" } : { kind: "awake" };
+    case "skip":
+      return argument ? { kind: "help" } : { kind: "skip" };
     case "worker":
       return parseWorkerCommand(argument) ?? { kind: "help" };
     case "help":

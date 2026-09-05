@@ -175,6 +175,10 @@ FIFO 执行，但不会取消或重排普通队列。所有路径都会校验 bi
 session。`blocked`、unknown、session 缺失或身份变化时会明确拒绝；结果不确定的 native steer
 不会自动重放。
 
+如果当前 Herdr/TraeX 运行时不支持 native steering，命令会直接失败，不会偷偷变成普通任务。
+可先用 `/swarm awake` 观察恢复已完成的 transcript；若当前任务已经 detached 且无法恢复，
+由话题创建者明确使用 `/swarm skip` 释放 blocker。
+
 该命令只作用于当前话题的 Primary。Worker 的 `/steer <worker> <文本>` 使用相同语义：
 working 时注入当前 turn，idle 时创建 priority turn。普通排队任务仍使用 `/to <worker> <任务>`。
 `blocked` 通常表示本地审批或提问界面，Bridge 会拒绝远程 steering，必须回到 Herdr 处理。
@@ -351,6 +355,20 @@ Bridge 会从 detached turn 的精确 transcript 边界（完成记录或 interr
 Herdr turn 投影为新的 Answer Card，然后继续原有飞书 FIFO。该命令不会向
 TraeX 重发旧任务，不会写入 terminal；重复执行不会重复创建已接管的 turn。
 如果找不到完整且带用户请求的后续 turn，原 detached 状态保持不变。
+`/swarm awake` 只负责观察和恢复，绝不会把无法确认的 detached prompt 标记为完成或失败。
+
+### `/swarm skip`
+
+当当前话题被一个无法安全恢复的 detached Primary prompt 阻塞时，话题创建者可以发送：
+
+```text
+/swarm skip
+```
+
+每次只处理当前话题最早的 `running/detached` 普通 prompt，将它标记为人工跳过并唤醒原有
+FIFO 调度。此前 TraeX 执行结果仍然不确定，Bridge 不会重放该请求，也不会发送 terminal
+输入或中断 TraeX。命令不接受 prompt ID；没有 detached blocker 或 binding generation 已变化时
+不会改动任何任务。重复投递同一条飞书命令也不会继续跳过下一条 prompt。
 
 ### `/swarm help`
 

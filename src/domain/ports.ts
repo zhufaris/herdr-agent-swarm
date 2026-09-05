@@ -159,6 +159,14 @@ export interface BindingStorePort {
   recoverRunningPrompts(): number;
   scanDurablePromptWork(): DurablePromptWorkScan;
   listDetachedPrompts(): PromptJob[];
+  skipOldestDetachedPrompt(input: {
+    bindingId: string; expectedBindingGeneration: number; actorOpenId: string; sourceMessageId: string;
+    reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object;
+  }): import("./ports/prompt.js").DetachedPromptSkipResult;
+  settleDetachedPrompt(input: {
+    promptId: string; bindingId: string; runtime: Binding["lastAgentState"]; occurredAt: string;
+    terminal: { kind: "completed"; answer: string; outputFingerprint: string } | { kind: "failed"; error: string };
+  }): boolean;
   markPromptObservationDetached(id: string, notice: string): void;
   markPromptDispatched(id: string, dispatchedAt: string): void;
   markModelPromptPrepared(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean;

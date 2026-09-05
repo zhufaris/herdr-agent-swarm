@@ -2431,6 +2431,80 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return (this.database.prepare("SELECT * FROM prompt_jobs WHERE state = 'running' AND observation_state = 'detached' ORDER BY created_at, id").all() as PromptRow[]).map(mapPrompt);
   }
 
+  skipOldestDetachedPrompt(input: { bindingId: string; expectedBindingGeneration: number; actorOpenId: string; sourceMessageId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): import("../domain/ports/prompt.js").DetachedPromptSkipResult {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const binding = this.database.prepare("SELECT generation, lifecycle, state FROM bindings WHERE id = ?").get(input.bindingId) as { generation: number; lifecycle: string; state: string } | undefined;
+      if (!binding || Number(binding.generation) !== input.expectedBindingGeneration || binding.lifecycle !== "active" || binding.state !== "active") {
+        this.database.exec("COMMIT");
+        return { outcome: "stale" };
+      }
+      const candidate = this.database.prepare(`
+        SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+        WHERE p.binding_id = ? AND c.binding_generation = ?
+          AND p.dispatch_kind = 'turn' AND p.state = 'running' AND p.observation_state = 'detached'
+        ORDER BY p.created_at, p.rowid LIMIT 1
+      `).get(input.bindingId, input.expectedBindingGeneration) as { id: string } | undefined;
+      if (!candidate) { this.database.exec("COMMIT"); return { outcome: "none" }; }
+      const changed = this.database.prepare(`
+        UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ?
+        WHERE id = ? AND binding_id = ? AND dispatch_kind = 'turn' AND state = 'running' AND observation_state = 'detached'
+          AND EXISTS (SELECT 1 FROM run_cards c WHERE c.prompt_id = prompt_jobs.id AND c.binding_generation = ?)
+      `).run(input.reason, input.occurredAt, candidate.id, input.bindingId, input.expectedBindingGeneration);
+      if (Number(changed.changes) !== 1) { this.database.exec("COMMIT"); return { outcome: "stale" }; }
+      const current = this.loadRunCard(candidate.id);
+      if (!current) throw new Error(`Run card missing for prompt: ${candidate.id}`);
+      const next = reduceRunCard(current, { type: "failed", occurredAt: input.occurredAt, notice: input.reason });
+      this.saveRunCard(next);
+      const topic = this.loadTopicView(input.bindingId);
+      if (topic) this.saveTopicView(mirrorRunCardToTopic(topic, next));
+      let outboxReserved = false;
+      if (next.answerMessageId) {
+        this.enqueueOutboundReply({
+          id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId,
+          viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(input.renderRunCard(next))
+        });
+        outboxReserved = true;
+      } else if (input.rootMessageId) {
+        const pendingCreate = this.database.prepare("SELECT idempotency_key FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' ORDER BY delivery_order LIMIT 1").get(next.promptId) as { idempotency_key: string } | undefined;
+        if (pendingCreate) {
+          this.enqueueOutboundReply({
+            id: randomUUID(), idempotencyKey: pendingCreate.idempotency_key, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion,
+            cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next))
+          });
+          outboxReserved = true;
+        }
+      }
+      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'swarm.skip', ?, 'skipped', ?)")
+        .run(input.actorOpenId, `binding:${input.bindingId}:prompt:${candidate.id}:message:${input.sourceMessageId}`, input.occurredAt);
+      this.database.exec("COMMIT");
+      return { outcome: "skipped", promptId: candidate.id, outboxReserved };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  settleDetachedPrompt(input: { promptId: string; bindingId: string; runtime: Binding["lastAgentState"]; occurredAt: string; terminal: { kind: "completed"; answer: string; outputFingerprint: string } | { kind: "failed"; error: string } }): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const nextState = input.terminal.kind === "completed" ? "delivered" : "failed";
+      const error = input.terminal.kind === "failed" ? input.terminal.error : null;
+      const changed = this.database.prepare(`
+        UPDATE prompt_jobs SET state = ?, observation_state = 'completed', error = ?, updated_at = ?
+        WHERE id = ? AND binding_id = ? AND state = 'running' AND observation_state = 'detached'
+      `).run(nextState, error, input.occurredAt, input.promptId, input.bindingId);
+      if (Number(changed.changes) !== 1) { this.database.exec("COMMIT"); return false; }
+      this.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.runtime });
+      if (input.terminal.kind === "completed") {
+        this.persistBindingPatch(input.bindingId, { lastOutputFingerprint: input.terminal.outputFingerprint });
+        this.transitionBinding(input.bindingId, { type: "turn_completed" });
+        this.persistTerminalRunCard(input.promptId, { type: "completed", occurredAt: input.occurredAt, answer: input.terminal.answer, replaceAnswer: true });
+      } else {
+        this.persistTerminalRunCard(input.promptId, { type: "failed", occurredAt: input.occurredAt, notice: input.terminal.error });
+      }
+      this.database.exec("COMMIT");
+      return true;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   markPromptObservationDetached(id: string, notice: string): void {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");

@@ -16,7 +16,10 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
   const operationsQuery = { listSpaces: vi.fn(async () => undefined), listSessions: vi.fn(async () => undefined), listFailures: vi.fn(async () => undefined) };
   const sessionAdministration = { emitStatus: vi.fn(async () => undefined), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) };
   const modelSelection = { runModel: vi.fn(async () => true) }; const paneControl = { stop: vi.fn(async () => true), steer: vi.fn(async () => true) };
-  const paneClosure = { requestPaneClose: vi.fn(async () => true), confirmPaneClose: vi.fn(async () => true) }; const promptRun = { awake: vi.fn(async () => ({ outcome: "none", reason: "no_detached_prompt" })) };
+  const paneClosure = { requestPaneClose: vi.fn(async () => true), confirmPaneClose: vi.fn(async () => true) }; const promptRun = {
+    awake: vi.fn(async () => ({ outcome: "none", reason: "no_detached_prompt" })),
+    skipDetached: vi.fn(() => ({ outcome: "skipped" as const, promptId: "detached-prompt", outboxReserved: true }))
+  };
   const worker = { id: "worker", name: "reviewer" }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
   const gateway = new SwarmCommandGateway({ store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl } as never);
@@ -58,6 +61,7 @@ describe("SwarmCommandGateway", () => {
     [{ kind: "pane_close_confirm", code: "ABC123" }, "paneClosure", "confirmPaneClose"],
     [{ kind: "resume" }, "sessionAdministration", "resume"],
     [{ kind: "awake" }, "promptRun", "awake"],
+    [{ kind: "skip" }, "promptRun", "skipDetached"],
     [{ kind: "stop" }, "paneControl", "stop"],
     [{ kind: "steer", text: "focus" }, "paneControl", "steer"],
     [{ kind: "model", name: "gpt" }, "modelSelection", "runModel"],
@@ -68,6 +72,33 @@ describe("SwarmCommandGateway", () => {
     expect((fixture[owner] as never)[method]).toHaveBeenCalled();
     const row = fixture.store.database.prepare("SELECT id FROM swarm_command_intents").get() as { id: string };
     expect(fixture.store.getCommandIntent(row.id)).toMatchObject({ command: { kind: command.kind }, state: "succeeded", attemptCount: 1 });
+    fixture.store.close();
+  });
+
+  it("skips a durable detached blocker without requiring an in-memory active turn and deduplicates redelivery", async () => {
+    const fixture = setup(() => null);
+    const skipMessage = { ...message, messageId: "skip-message" };
+
+    await fixture.gateway.handle(skipMessage, { kind: "skip" });
+    await fixture.gateway.handle(skipMessage, { kind: "skip" });
+
+    expect(fixture.promptRun.skipDetached).toHaveBeenCalledOnce();
+    expect(fixture.promptRun.skipDetached).toHaveBeenCalledWith("binding", 1, "admin", "skip-message", "root");
+    expect(fixture.outbound.enqueueCard).toHaveBeenCalledWith("root", "skip:skip-message", expect.any(Object));
+    expect(JSON.stringify(fixture.outbound.enqueueCard.mock.calls.at(-1)?.[2])).toMatch(/detached-prompt|结果仍不确定/);
+    expect(fixture.store.database.prepare("SELECT state, attempt_count FROM swarm_command_intents").all()).toEqual([{ state: "succeeded", attempt_count: 1 }]);
+    fixture.store.close();
+  });
+
+  it.each([
+    [{ outcome: "none" as const }, "当前没有 detached prompt", "succeeded"],
+    [{ outcome: "stale" as const }, "上下文已变化", "rejected"]
+  ])("renders detached skip outcome %# without changing another prompt", async (result, expectedText, intentState) => {
+    const fixture = setup(() => null);
+    fixture.promptRun.skipDetached.mockReturnValueOnce(result);
+    await fixture.gateway.handle({ ...message, messageId: `skip-${result.outcome}` }, { kind: "skip" });
+    expect(JSON.stringify(fixture.outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain(expectedText);
+    expect(fixture.store.database.prepare("SELECT state FROM swarm_command_intents").get()).toEqual({ state: intentState });
     fixture.store.close();
   });
 

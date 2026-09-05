@@ -73,6 +73,9 @@ describe("run card", () => {
     expect(help).toContain("不取消 FIFO");
     expect(help).toContain("/swarm steer <文本>");
     expect(help).toContain("idle 时优先于普通队列执行");
+    expect(help).toContain("/swarm awake");
+    expect(help).toContain("/swarm skip");
+    expect(help).toContain("此前结果仍不确定");
     expect(help).toContain("其它 slash 命令会原样提交给 TraeX");
   });
 

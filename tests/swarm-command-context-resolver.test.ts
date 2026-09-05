@@ -10,7 +10,7 @@ const commandByKind = {
   help: { kind: "help" }, projects: { kind: "projects" }, spaces: { kind: "spaces" }, sessions: { kind: "sessions" }, failures: { kind: "failures" }, status: { kind: "status" },
   new: { kind: "new", title: null }, reset: { kind: "reset", title: null }, attach: { kind: "attach", spaceName: "space", paneId: "w1:p2" }, rename: { kind: "rename", title: "name" },
   close: { kind: "close" }, pane_close_request: { kind: "pane_close_request" }, pane_close_confirm: { kind: "pane_close_confirm", code: "ABC" }, reattach: { kind: "reattach", paneId: "w1:p2" },
-  replace: { kind: "replace" }, resume: { kind: "resume" }, awake: { kind: "awake" }, stop: { kind: "stop" }, steer: { kind: "steer", text: "focus" },
+  replace: { kind: "replace" }, resume: { kind: "resume" }, awake: { kind: "awake" }, skip: { kind: "skip" }, stop: { kind: "stop" }, steer: { kind: "steer", text: "focus" },
   model: { kind: "model", name: "gpt" }, worker_create: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false }
 } as const satisfies Record<keyof typeof SWARM_COMMAND_POLICIES, BridgeCommand>;
 
@@ -48,6 +48,7 @@ describe("SwarmCommandContextResolver", () => {
     [{ kind: "replace" }, "primary-session", "binding:binding"],
     [{ kind: "resume" }, "primary-session", "binding:binding"],
     [{ kind: "awake" }, "active-turn", "binding:binding"],
+    [{ kind: "skip" }, "active-turn", "binding:binding"],
     [{ kind: "stop" }, "active-turn", "binding:binding"],
     [{ kind: "steer", text: "focus" }, "primary-session", "binding:binding"],
     [{ kind: "model", name: null }, "primary-session", "binding:binding"],

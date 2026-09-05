@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderAwakeStatusCard, renderHelpCard, renderMessageRejectedCard } from "../cards/run-card.js";
+import { renderAwakeStatusCard, renderHelpCard, renderMessageRejectedCard, renderSkipStatusCard } from "../cards/run-card.js";
 import type { CreateWorkerResult } from "../domain/agent-instance.js";
 import type { CommandIntent, CommandIntentOutcome } from "../domain/command-intent.js";
 import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
@@ -104,7 +104,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
         this.finish(intent, "rejected", "stale_context", "Primary context changed before command execution"); return;
       }
       const command = intent.command; let ok = true; let outcomeCode = "completed"; let outcomeDetail: string | null = null;
-      if (swarmCommandPolicy(command).scope === "active-turn") {
+      if (swarmCommandPolicy(command).scope === "active-turn" && command.kind !== "skip") {
         const current = this.options.resolver.resolve(message, command);
         if (current.outcome !== "resolved" || current.context.primary?.activePromptId !== intent.context.primary?.activePromptId) {
           this.finish(intent, "rejected", "stale_context", "Active turn changed before command execution"); return;
@@ -132,6 +132,17 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
       }
       else if (command.kind === "resume") ok = await this.options.sessionAdministration.resume(message, binding);
       else if (command.kind === "awake") ok = await this.awake(message, binding);
+      else if (command.kind === "skip") {
+        if (!binding || !intent.context.primary) { ok = false; outcomeCode = "rejected"; }
+        else {
+          const result = this.options.promptRun.skipDetached(binding.id, intent.context.primary.bindingGeneration, message.actorOpenId, message.messageId, message.rootMessageId);
+          ok = result.outcome !== "stale"; outcomeCode = result.outcome; outcomeDetail = result.outcome === "skipped" ? result.promptId : null;
+          const detail = result.outcome === "skipped"
+            ? `已跳过 detached prompt \`${result.promptId.slice(0, 12)}\`；此前执行结果仍不确定，任务不会自动重放。`
+            : result.outcome === "none" ? "当前没有 detached prompt，无需跳过。" : "Primary 上下文已变化，未跳过任何 prompt。";
+          await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `skip:${message.messageId}`, renderSkipStatusCard(detail, result.outcome));
+        }
+      }
       else if (command.kind === "stop") ok = await this.options.paneControl.stop(message, binding);
       else if (command.kind === "steer") ok = await this.options.paneControl.steer(message, binding, command.text, intent.context.primary?.activePromptId ?? undefined);
       else if (command.kind === "model") ok = await this.options.modelSelection.runModel(message, binding, command.name);

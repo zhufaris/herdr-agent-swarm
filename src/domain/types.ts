@@ -660,6 +660,7 @@ export type BridgeCommand =
   | { kind: "replace" }
   | { kind: "resume" }
   | { kind: "awake" }
+  | { kind: "skip" }
   | { kind: "worker_create"; name: string; agentKind: import("./agent-instance.js").AgentKind; model: string | null; start: boolean }
   | { kind: "help" };
 

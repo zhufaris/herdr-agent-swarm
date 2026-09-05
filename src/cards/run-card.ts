@@ -339,6 +339,7 @@ export function renderHelpCard(): object {
         "`/swarm replace`  创建新的 Pane generation（不会重放任务）",
         "`/swarm resume`  验证后恢复已归档会话",
         "`/swarm awake`  从 detached turn 后补投影遗漏的 Herdr Answer Card（不会重发任务）",
+        "`/swarm skip`  人工跳过当前话题最早的 detached Primary 任务并继续 FIFO（此前结果仍不确定）",
         "`/swarm help`  显示本卡片", "",
         "只有 `/swarm …` 会由 HerdrSwarm 处理；其它 slash 命令会原样提交给 TraeX。"
       ].join("\n") }
@@ -352,6 +353,15 @@ export function renderAwakeStatusCard(message: string, recovered = false): objec
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: recovered ? "恢复完成" : "无需恢复" } },
     header: { title: { tag: "plain_text", content: recovered ? "✓ Answer Card 恢复完成" : "ℹ Answer Card 恢复" }, template: recovered ? "green" : "blue" },
+    body: { elements: [{ tag: "markdown", content: message }] }
+  };
+}
+
+export function renderSkipStatusCard(message: string, outcome: "skipped" | "none" | "stale"): object {
+  const skipped = outcome === "skipped";
+  return {
+    schema: "2.0", config: { update_multi: true, summary: { content: skipped ? "Detached prompt 已跳过" : "未跳过 prompt" } },
+    header: { title: { tag: "plain_text", content: skipped ? "✓ Detached prompt 已跳过" : "ℹ Detached prompt 未变化" }, template: skipped ? "orange" : "blue" },
     body: { elements: [{ tag: "markdown", content: message }] }
   };
 }

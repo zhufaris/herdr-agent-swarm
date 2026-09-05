@@ -568,6 +568,149 @@ describe("SQLite store", () => {
     expect(() => store!.markPromptDispatched("p1", "not-an-iso-timestamp")).toThrow("Invalid prompt dispatch timestamp");
   });
 
+  it("atomically skips only the oldest detached ordinary prompt and reserves its terminal card", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c1", topicId: "t2", rootMessageId: "other-root", title: "Other" });
+    const seed = (id: string, bindingId: string, occurredAt: string, dispatchKind: "turn" | "steering" = "turn") => {
+      const view = createQueuedRunCard({ promptId: id, bindingId, title: id, workspaceId: bindingId === "b1" ? "w1" : "w2", paneId: `${bindingId}:p1`, requestText: `private ${id}`, queuePosition: 1, occurredAt });
+      store!.acceptPrompt({ prompt: { id, bindingId, larkMessageId: `m-${id}`, actorOpenId: "u1", body: `private ${id}`, dispatchKind, parentPromptId: dispatchKind === "steering" ? "oldest" : null }, view, rootMessageId: bindingId === "b1" ? "root" : "other-root", answerCard: { phase: "queued", id } });
+    };
+    seed("oldest", "b1", "2026-09-05T00:00:00.000Z");
+    seed("newer", "b1", "2026-09-05T00:00:01.000Z");
+    seed("queued", "b1", "2026-09-05T00:00:02.000Z");
+    seed("steering", "b1", "2026-09-05T00:00:03.000Z", "steering");
+    seed("other", "b2", "2026-09-05T00:00:00.000Z");
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id IN ('oldest','newer','steering','other')").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id IN ('oldest','newer','steering','other')").run();
+    const initialCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "oldest")!;
+    store.markOutboundReplyDelivered(initialCreate.id, "answer-oldest", "card-oldest");
+
+    const reason = "人工跳过；此前执行结果不确定，任务不会自动重放。";
+    const result = store.skipOldestDetachedPrompt({
+      bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip-message",
+      reason, occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: (view) => ({ phase: view.phase, notice: view.notice, version: view.viewVersion })
+    });
+
+    expect(result).toEqual({ outcome: "skipped", promptId: "oldest", outboxReserved: true });
+    expect(store.getPrompt("oldest")).toMatchObject({ state: "failed", observationState: "completed", error: reason, updatedAt: "2026-09-05T00:01:00.000Z" });
+    expect(store.loadRunCard("oldest")).toMatchObject({ phase: "failed", notice: reason, finishedAt: "2026-09-05T00:01:00.000Z" });
+    expect(store.getPrompt("newer")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started" });
+    expect(store.getPrompt("steering")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("other")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({
+      idempotencyKey: "run-card:update:oldest:answer:2", kind: "card_update", rootMessageId: "answer-oldest", payload: JSON.stringify({ phase: "failed", notice: reason, version: 2 })
+    }));
+    expect(store.database.prepare("SELECT actor_open_id, action, target, outcome FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({
+      actor_open_id: "creator", action: "swarm.skip", target: "binding:b1:prompt:oldest:message:skip-message", outcome: "skipped"
+    });
+    expect(JSON.stringify(store.database.prepare("SELECT * FROM audit_log WHERE action = 'swarm.skip'").get())).not.toContain("private oldest");
+  });
+
+  it("does not skip another prompt when detached skip is stale or has no eligible target", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    for (const [id, occurredAt] of [["first", "2026-09-05T00:00:00.000Z"], ["second", "2026-09-05T00:00:01.000Z"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = ?").run(id);
+      store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = ?").run(id);
+    }
+    const input = { bindingId: "b1", expectedBindingGeneration: 2, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) };
+
+    expect(store.skipOldestDetachedPrompt(input)).toEqual({ outcome: "stale" });
+    expect(store.getPrompt("first")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("second")).toMatchObject({ state: "running", observationState: "detached" });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed' WHERE id IN ('first','second')").run();
+    expect(store.skipOldestDetachedPrompt({ ...input, expectedBindingGeneration: 1 })).toEqual({ outcome: "none" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 0 });
+  });
+
+  it("does not let detached observation settle a prompt after skip won the state CAS", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
+
+    expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) })).toMatchObject({ outcome: "skipped" });
+    expect(store.settleDetachedPrompt({
+      promptId: "p1", bindingId: "b1", runtime: "idle", occurredAt: "2026-09-05T00:01:01.000Z",
+      terminal: { kind: "completed", answer: "late answer", outputFingerprint: "late" }
+    })).toBe(false);
+
+    expect(store.getPrompt("p1")).toMatchObject({ state: "failed", observationState: "completed", error: "human skip" });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed", notice: "human skip" });
+    expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "working", lastOutputFingerprint: null });
+  });
+
+  it("returns stale without skipping the next detached prompt when the selected candidate loses its CAS", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    for (const [id, occurredAt] of [["first", "2026-09-05T00:00:00.000Z"], ["second", "2026-09-05T00:00:01.000Z"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = ?").run(id);
+      store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = ?").run(id);
+    }
+    store.database.exec("CREATE TRIGGER lose_first_skip BEFORE UPDATE OF state ON prompt_jobs WHEN OLD.id = 'first' AND NEW.state = 'failed' BEGIN SELECT RAISE(IGNORE); END");
+
+    expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) })).toEqual({ outcome: "stale" });
+    expect(store.getPrompt("first")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("second")).toMatchObject({ state: "running", observationState: "detached" });
+  });
+
+  it("does not skip a detached prompt owned by an earlier binding generation", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 2 });
+    const view = createQueuedRunCard({ promptId: "old", bindingId: "b1", bindingGeneration: 1, title: "old", workspaceId: "w1", paneId: "w1:p0", requestText: "old", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "u1", body: "old" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'old'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'old'").run();
+
+    expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 2, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) })).toEqual({ outcome: "none" });
+    expect(store.getPrompt("old")).toMatchObject({ state: "running", observationState: "detached" });
+  });
+
+  it("rolls back detached skip when its durable card projection fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "private", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "private" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
+
+    expect(() => store!.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => { throw new Error("render failed"); } })).toThrow("render failed");
+    expect(store.getPrompt("p1")).toMatchObject({ state: "running", observationState: "detached", error: null });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "running" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 0 });
+  });
+
+  it("updates the original pending Answer Card creation when skipping before delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: { phase: "queued" } });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
+    const original = store.listPendingOutboundReplies()[0]!;
+
+    expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: (run) => ({ phase: run.phase, version: run.viewVersion }) })).toMatchObject({ outcome: "skipped", outboxReserved: true });
+
+    const replies = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ id: original.id, idempotencyKey: "run-card:create:p1:answer", kind: "stream_card_create", viewVersion: 2, payload: JSON.stringify({ phase: "failed", version: 2 }) });
+  });
+
   it("claims a priority Primary turn before ordinary FIFO without reordering the ordinary queue", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

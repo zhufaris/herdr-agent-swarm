@@ -269,6 +269,81 @@ describe("PromptRunWorkflow durable safety scan", () => {
     expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
     await workflow.stop();
   });
+
+  it("does not let a detached observer overwrite an explicit skip after reading terminal output", async () => {
+    const wake = vi.fn();
+    const running = { id: "p1", bindingId: "b1", state: "running", observationState: "detached", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-08-29T00:00:00.000Z" };
+    const skipped = { ...running, state: "failed", observationState: "completed" };
+    let skippedAfterTerminalRead = false;
+    const getPrompt = vi.fn(() => skippedAfterTerminalRead ? skipped : running);
+    const settleDetachedPrompt = vi.fn(() => !skippedAfterTerminalRead);
+    const workflow = new PromptRunWorkflow({
+      store: {
+        getPrompt, settleDetachedPrompt, countPendingPrompts: () => 0,
+        getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "working" })
+      } as never,
+      scheduler: { subscribe: () => () => {}, wake },
+      turnTimeoutMs: 1_000,
+      transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          skippedAfterTerminalRead = true;
+          return {
+            turnId: "turn-1", answerDelta: "late answer",
+            turnLifecycle: { turnId: "turn-1", state: "completed" as const, startedAt: "2026-08-29T00:00:00.000Z", finalAnswer: "late answer" }
+          };
+        }
+      } }; } },
+      herdr: { async observeRuntime() { return { pane: { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; } } as never,
+      bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    workflow.wake({ kind: "detached-observer-ready", bindingId: "b1", promptId: "p1" });
+    await vi.waitFor(() => expect(workflow.snapshot().activeTurnWorkers).toBe(0));
+
+    expect(settleDetachedPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      promptId: "p1", bindingId: "b1", runtime: "idle", terminal: expect.objectContaining({ kind: "completed", answer: "late answer" })
+    }));
+    expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
+    await workflow.stop();
+  });
+
+  it("atomically skips one detached prompt before waking its FIFO and outbound delivery", () => {
+    const schedulerWake = vi.fn();
+    const outboundWake = vi.fn();
+    const skipOldestDetachedPrompt = vi.fn(() => ({ outcome: "skipped" as const, promptId: "p1", outboxReserved: true }));
+    const workflow = new PromptRunWorkflow({
+      store: { skipOldestDetachedPrompt } as never,
+      scheduler: { subscribe: () => () => {}, wake: schedulerWake },
+      turnTimeoutMs: 1_000, herdr: {} as never, bus: { async publish() {} },
+      outboundWork: { wake: outboundWake, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    expect(workflow.skipDetached("b1", 4, "creator", "skip-message", "root")).toEqual({ outcome: "skipped", promptId: "p1", outboxReserved: true });
+    expect(skipOldestDetachedPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      bindingId: "b1", expectedBindingGeneration: 4, actorOpenId: "creator", sourceMessageId: "skip-message", rootMessageId: "root",
+      reason: "人工跳过；此前执行结果不确定，任务不会自动重放。", renderRunCard: expect.any(Function)
+    }));
+    expect(schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
+    expect(outboundWake).toHaveBeenCalledOnce();
+  });
+
+  it("does not wake work when detached skip is stale or finds nothing", () => {
+    const schedulerWake = vi.fn();
+    const outboundWake = vi.fn();
+    const skipOldestDetachedPrompt = vi.fn(() => ({ outcome: "none" as const }));
+    const workflow = new PromptRunWorkflow({
+      store: { skipOldestDetachedPrompt } as never, scheduler: { subscribe: () => () => {}, wake: schedulerWake },
+      turnTimeoutMs: 1_000, herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake: outboundWake, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    expect(workflow.skipDetached("b1", 1, "creator", "skip-message", "root")).toEqual({ outcome: "none" });
+    expect(schedulerWake).not.toHaveBeenCalled();
+    expect(outboundWake).not.toHaveBeenCalled();
+  });
 });
 
 function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanIntervalMs: number, error = vi.fn(), info = vi.fn()): PromptRunWorkflow {

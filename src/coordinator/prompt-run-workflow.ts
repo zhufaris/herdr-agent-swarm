@@ -1,9 +1,9 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard } from "../cards/run-card.js";
+import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { HerdrPort, TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
-import type { PromptRunStore } from "../domain/ports/prompt.js";
+import type { DetachedPromptSkipResult, PromptRunStore } from "../domain/ports/prompt.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -32,6 +32,7 @@ export interface PromptRunWorkflowPort {
   activeTurn(bindingId: string): ActiveTurnSnapshot | null;
   isBindingBusy(bindingId: string): boolean;
   awake(bindingId: string): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "busy" | "unavailable"; reason: string }>;
+  skipDetached(bindingId: string, expectedBindingGeneration: number, actorOpenId: string, sourceMessageId: string, rootMessageId: string | null): DetachedPromptSkipResult;
   stop(context?: ShutdownContext): Promise<void>;
 }
 
@@ -223,6 +224,20 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       if (this.workers.get(bindingId) === worker) this.workers.delete(bindingId);
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
     }
+  }
+
+  skipDetached(bindingId: string, expectedBindingGeneration: number, actorOpenId: string, sourceMessageId: string, rootMessageId: string | null): DetachedPromptSkipResult {
+    const result = this.options.store.skipOldestDetachedPrompt({
+      bindingId, expectedBindingGeneration, actorOpenId, sourceMessageId, rootMessageId,
+      reason: "人工跳过；此前执行结果不确定，任务不会自动重放。",
+      occurredAt: new Date().toISOString(), renderRunCard: renderRequestAnswerCard
+    });
+    this.options.logger.info({ event: "detached-prompt-skip", bindingId, promptId: result.outcome === "skipped" ? result.promptId : null, actorOpenId, sourceMessageId, outcome: result.outcome }, "processed explicit detached prompt skip");
+    if (result.outcome === "skipped") {
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
+      if (result.outboxReserved) this.options.outboundWork.wake();
+    }
+    return result;
   }
 
   async stop(context?: ShutdownContext): Promise<void> {
@@ -512,18 +527,24 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           ? decideDetachedTurnTerminalOutcome(prompt, owned.observation, observation.traexProcess)
           : { kind: "pending" as const };
         if (terminal.kind === "completed") {
-          this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
           const sourceAnswer = terminal.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
           const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
-          this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer), occurredAt: new Date().toISOString(), replaceAnswer: true });
+          const settled = this.options.store.settleDetachedPrompt({
+            promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(),
+            terminal: { kind: "completed", answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer) }
+          });
+          if (!settled) return;
           await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;
         }
         if (terminal.kind === "aborted") {
-          this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
           const reason = abortedPromptNotice(terminal.reason);
-          this.options.store.failPrompt({ promptId: prompt.id, error: reason, occurredAt: new Date().toISOString() });
+          const settled = this.options.store.settleDetachedPrompt({
+            promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(),
+            terminal: { kind: "failed", error: reason }
+          });
+          if (!settled) return;
           await this.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-aborted", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "failed_without_replay" }, "observed explicit abort of an existing TraeX turn");
           return;

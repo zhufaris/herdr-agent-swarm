@@ -572,6 +572,8 @@ Available commands:
 /swarm reattach <pane-id>
 /swarm replace
 /swarm resume
+/swarm awake  # observe and recover completed turns after a detached Primary prompt
+/swarm skip   # explicitly fail one oldest detached Primary blocker and resume FIFO
 /swarm help
 ```
 

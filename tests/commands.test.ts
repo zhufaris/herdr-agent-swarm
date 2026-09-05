@@ -23,6 +23,8 @@ describe("commands", () => {
     expect(parseCommand("/swarm resume")).toEqual({ kind: "resume" });
     expect(parseCommand("/swarm awake")).toEqual({ kind: "awake" });
     expect(parseCommand("/swarm awake extra")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm skip")).toEqual({ kind: "skip" });
+    expect(parseCommand("/swarm skip prompt-1")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm worker create reviewer")).toEqual({ kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false });
     expect(parseCommand("/swarm worker create reviewer --agent codex --model \"GPT 5\" --start")).toEqual({ kind: "worker_create", name: "reviewer", agentKind: "codex", model: "GPT 5", start: true });
     expect(parseCommand("/swarm worker create reviewer --start --start")).toEqual({ kind: "help" });
@@ -48,8 +50,9 @@ describe("commands", () => {
 
   it("classifies every Swarm command through one exhaustive policy catalog", () => {
     expect(Object.keys(SWARM_COMMAND_POLICIES).sort()).toEqual([
-      "attach", "awake", "close", "failures", "help", "model", "new", "pane_close_confirm", "pane_close_request", "projects", "reattach", "rename", "replace", "reset", "resume", "sessions", "spaces", "status", "steer", "stop", "worker_create"
+      "attach", "awake", "close", "failures", "help", "model", "new", "pane_close_confirm", "pane_close_request", "projects", "reattach", "rename", "replace", "reset", "resume", "sessions", "skip", "spaces", "status", "steer", "stop", "worker_create"
     ]);
+    expect(swarmCommandPolicy({ kind: "skip" })).toEqual({ mode: "mutation", scope: "active-turn", authorization: "creator", replay: "reconcilable", handler: "prompt-recovery" });
     expect(swarmCommandPolicy({ kind: "model", name: null })).toMatchObject({ mode: "query", replay: "none" });
     expect(swarmCommandPolicy({ kind: "model", name: "GPT-5" })).toMatchObject({ mode: "mutation", replay: "non-replayable" });
   });

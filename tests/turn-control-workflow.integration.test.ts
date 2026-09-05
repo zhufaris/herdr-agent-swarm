@@ -151,6 +151,18 @@ describe("TurnControlWorkflow", () => {
     expect(interrupt).toHaveBeenCalledOnce();
   });
 
+  it("guides an unsupported exact-turn steer to observation or explicit skip without queueing", async () => {
+    const unsupported = vi.fn(async () => ({ status: "unsupported" as const, reason: "native steering unavailable" }));
+    const { workflow, worker } = setupWorker({}, unsupported);
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "unsupported-visible", sourceMessageId: "message-1", resultTargetMessageId: "root-1" }))
+      .resolves.toMatchObject({ mode: "native", operation: { state: "rejected", result: { status: "unsupported" } } });
+    const payload = store!.listPendingOutboundReplies()[0]!.payload;
+    expect(payload).toContain("/swarm awake");
+    expect(payload).toContain("/swarm skip");
+    expect(payload).toContain("不会转为普通任务");
+    expect(store!.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get()).toEqual({ count: 1 });
+  });
+
   it("returns the stored result without resolving or replaying a completed target", async () => {
     const { workflow, getPane, steer, worker } = setupWorker();
     const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, text: "change direction", idempotencyKey: "message-1:steer", sourceMessageId: "message-1" };
