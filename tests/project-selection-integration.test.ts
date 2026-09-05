@@ -134,7 +134,7 @@ describe("project selection flow", () => {
     await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
     expect(created).toHaveLength(1);
-    expect(created[0]).toMatch(/^task-[a-z0-9]{4}$/);
+    expect(created[0]).toMatch(/^[a-z0-9]{4}$/);
     expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", title: `alpha / ${created[0]}` });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
@@ -231,7 +231,7 @@ describe("project selection flow", () => {
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
     expect(created).toEqual([["wD", "/work/datasage", {
-      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: expect.stringMatching(/^task-[a-z0-9]{4}$/),
+      bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: expect.stringMatching(/^[a-z0-9]{4}$/),
       environment: { SWARM_PRIMARY_CAPABILITY: expect.stringMatching(/^test-.+-1$/) }
     }]]);
     const bindingId = (created[0]![2] as { bindingId: string }).bindingId;
@@ -307,7 +307,7 @@ describe("project selection flow", () => {
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
     const paneName = created[0]?.title;
-    expect(paneName).toMatch(/^task-[a-z0-9]{4}$/);
+    expect(paneName).toMatch(/^[a-z0-9]{4}$/);
     expect(store.findBindingByPane("w1:p7")).toMatchObject({ title: `alpha / ${paneName}` });
     expect(JSON.stringify(groupCards[0])).toContain(`alpha / ${paneName}`);
 

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
+import { primaryPaneToken } from "../domain/pane-title.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
@@ -196,7 +197,8 @@ export class InstanceControlWorkflow {
 }
 
 function workerPaneTitle(instance: AgentInstance): string {
-  const primary = paneTitleSegment(instance.sourcePrimaryPaneLabel ?? instance.parent?.paneId ?? "parent");
+  if (!instance.parent) throw new Error("Worker parent identity is missing");
+  const primary = primaryPaneToken(instance.sourcePrimaryPaneLabel, instance.parent.paneId);
   return `lark_${primary}-${paneTitleSegment(instance.name)}`;
 }
 
