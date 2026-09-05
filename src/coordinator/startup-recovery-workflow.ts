@@ -18,6 +18,7 @@ import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
+import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 export interface StartupRecoveryWorkflowPort {
   start(): Promise<void>;
@@ -28,7 +29,7 @@ export interface StartupRecoveryWorkflowPort {
 type Store = InboundRoutingStore & PromptAcceptanceStore;
 export interface StartupRecoveryWorkflowOptions {
   config: BridgeConfig; store: Store; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; lark: Pick<LarkPort, "start" | "stop">; logger: Logger; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
-  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; messageRouting: InboundMessageRoutingWorkflowPort;
+  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "recover">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; messageRouting: InboundMessageRoutingWorkflowPort;
 }
 
 /** Coordinates the ordered, degradable recovery sequence before accepting Lark work. */
@@ -55,6 +56,7 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     });
     await this.runStage("pane-controls", () => Promise.all([paneControl.recover(), this.options.paneClosure.recover()]).then(() => undefined));
     await this.runStage("session-operations", () => this.options.sessionOperations.recover());
+    await this.runStage("swarm-commands", () => this.options.swarmCommands.recover());
     await this.runStage("retired-pane-cleanup", () => retiredPaneCleanup.recover());
     await this.runStage("runtime-reconciliation", () => reconciler.reconcile());
     promptRun.start(); this.options.sessionOperations.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);

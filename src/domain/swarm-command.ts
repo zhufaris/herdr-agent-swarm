@@ -39,7 +39,7 @@ export function swarmCommandPolicy(command: BridgeCommand): SwarmCommandPolicy {
 }
 
 export interface PrimaryCommandContext {
-  bindingId: string; bindingGeneration: number; paneId: string; terminalId: string | null; nativeSession: HerdrAgentSession | null; activePromptId: string | null;
+  bindingId: string; bindingGeneration: number; paneId: string | null; terminalId: string | null; nativeSession: HerdrAgentSession | null; activePromptId: string | null;
 }
 
 export interface SwarmCommandContext {

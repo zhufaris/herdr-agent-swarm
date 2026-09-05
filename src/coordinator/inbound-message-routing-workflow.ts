@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderAwakeStatusCard, renderDisconnectedTopicCard, renderHelpCard, renderMessageRejectedCard, renderRequestAnswerCard } from "../cards/run-card.js";
+import { renderDisconnectedTopicCard, renderMessageRejectedCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { classifyContinuation } from "../domain/continuation-classifier.js";
@@ -20,12 +20,8 @@ import { safeLogError } from "../runtime/safe-error.js";
 import { PermanentInboundMessageRejection } from "../domain/permanent-inbound-message-rejection.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
-import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
-import type { OperationsQueryWorkflowPort } from "./operations-query-workflow.js";
-import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
-import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
-import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
+import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -35,7 +31,7 @@ export interface InboundMessageRoutingWorkflowPort {
 type Store = InboundRoutingStore & PromptAcceptanceStore & InstanceStore;
 interface Options {
   config: BridgeConfig; store: Store; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler;
-  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort; operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort; instanceInteractions?: InstanceInteractionWorkflow;
+  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
 }
 
 export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkflowPort {
@@ -55,35 +51,12 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   async handle(message: IncomingLarkMessage): Promise<void> {
     const instanceCommand = parseInstanceCommand(message.text);
     const command = parseCommand(message.text); const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
-    if (command && requiresAdministrator(command.kind) && !(this.options.config.lark.adminOpenIds ?? []).includes(message.actorOpenId)) {
-      await this.reject(message, "你没有管理权限。");
-      this.options.logger.warn({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, actorOpenId: message.actorOpenId, route: command.kind, reason: "administrator_required" }, "rejected unauthorized Lark management command");
-      return;
-    }
     const decision = instanceCommand ? `instance-command:${instanceCommand.kind}` : command ? `command:${command.kind}` : binding?.state === "active" && binding.lifecycle === "active" ? "prompt" : this.options.store.getConversationTarget(message.chatId) ? "instance-prompt" : message.isRootMessage && message.mentionsBot ? "create_binding" : binding?.state === "archived" ? "archived_feedback" : "unbound_feedback";
     this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: "accepted" }, "routed persisted Lark message");
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
       if (instanceCommand) { if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
-      else if (command?.kind === "help") await this.reply(message.rootMessageId ?? message.messageId, renderHelpCard());
-      else if (command?.kind === "stop") disposition = await this.requireCreator(message, binding) && await this.options.paneControl.stop(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "steer") disposition = await this.options.paneControl.steer(message, binding, command.text) ? "command_completed" : "rejected";
-      else if (command?.kind === "model") disposition = await this.requireCreator(message, binding) && await this.options.modelSelection.runModel(message, binding, command.name) ? "command_completed" : "rejected";
-      else if (command?.kind === "reset") disposition = await this.requireCreator(message, binding) && await this.options.provisioning.reset(message, binding, command.title) ? "command_completed" : "rejected";
-      else if (command?.kind === "new" || command?.kind === "projects") await this.options.provisioning.selectProject(message, command.kind === "new" ? command.title : null);
-      else if (command?.kind === "spaces") await this.options.operationsQuery.listSpaces(message);
-      else if (command?.kind === "sessions") await this.options.operationsQuery.listSessions(message);
-      else if (command?.kind === "failures") await this.options.operationsQuery.listFailures(message);
-      else if (command?.kind === "attach") disposition = await this.options.provisioning.attach(message, command.spaceName, command.paneId) ? "command_completed" : "rejected";
-      else if (command?.kind === "status") { if (!binding) { await this.reject(message, "这个话题尚未连接 Herdr。请发送 `/swarm new` 创建项目。"); disposition = "rejected"; } else await this.options.sessionAdministration.emitStatus(binding); }
-      else if (command?.kind === "rename") disposition = await this.requireCreator(message, binding) && await this.options.sessionAdministration.rename(message, binding, command.title) ? "command_completed" : "rejected";
-      else if (command?.kind === "close") disposition = await this.requireCreator(message, binding) && await this.options.sessionAdministration.archive(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "pane_close_request") disposition = await this.requireCreator(message, binding) && await this.options.paneClosure.requestPaneClose(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "pane_close_confirm") disposition = await this.requireCreator(message, binding) && await this.options.paneClosure.confirmPaneClose(message, binding, command.code) ? "command_completed" : "rejected";
-      else if (command?.kind === "reattach") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "当前会话不处于 orphaned 状态，无需重新连接。"); disposition = "rejected"; } else await this.options.provisioning.reattach(binding, command.paneId, message.actorOpenId); }
-      else if (command?.kind === "replace") { if (!await this.requireCreator(message, binding) || !binding || binding.attachment !== "orphaned") { if (binding?.creatorOpenId === message.actorOpenId) await this.reject(message, "只有 orphaned 会话可以创建 replacement Pane。"); disposition = "rejected"; } else await this.options.provisioning.replace(binding, message.actorOpenId); }
-      else if (command?.kind === "resume") disposition = await this.requireCreator(message, binding) && await this.options.sessionAdministration.resume(message, binding) ? "command_completed" : "rejected";
-      else if (command?.kind === "awake") await this.awake(message, binding).then((result) => { disposition = result ? "command_completed" : "rejected"; });
+      else if (command) await this.options.swarmCommands.handle(message, command);
       else if (binding?.state === "active" && binding.lifecycle === "active") disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected";
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) disposition = "prompt_queued";
       else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
@@ -99,14 +72,6 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       throw error;
     }
     this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");
-  }
-
-  private async awake(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
-    if (!await this.requireCreator(message, binding) || !binding) return false;
-    const result = await this.options.promptRun.awake(binding.id); const recovered = result.outcome === "recovered";
-    const detail = recovered ? `已从 Herdr transcript 恢复 ${result.recoveredTurns} 个遗漏 turn；每个 turn 使用新的 Answer Card，未向 TraeX 重发任务。` : result.outcome === "busy" ? "当前绑定仍在切换观察器，请稍后重试 `/swarm awake`。" : result.reason === "no_detached_prompt" ? "当前没有 detached prompt，无需唤醒。" : result.reason === "no_complete_later_turn" ? "没有找到可安全恢复的完整后续 Herdr turn；原任务保持 detached，不会重发。" : `无法安全恢复（${result.reason}）；原任务保持 detached，不会重发。`;
-    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `awake:${message.messageId}`, renderAwakeStatusCard(detail, recovered));
-    return recovered || result.outcome === "none";
   }
 
   private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<boolean> {
@@ -125,17 +90,11 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     return true;
   }
 
-  private async requireCreator(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> { if (binding && (binding.creatorOpenId === null || binding.creatorOpenId === message.actorOpenId)) return true; await this.reject(message, "只有会话创建者可以执行这项管理操作。"); return false; }
   private spaceNameFor(binding: Binding): string { const project = binding.projectId ? this.projectsById.get(binding.projectId) : this.uniqueProjectByWorkspace.get(binding.workspaceId); return project ? projectSpaceName(project) : "legacy/unresolved"; }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }
-  private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card); }
 }
 
 function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> { const result = new Map<string, BridgeConfig["projects"][number] | null>(); for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project); return result; }
-function requiresAdministrator(kind: NonNullable<ReturnType<typeof parseCommand>>["kind"]): boolean {
-  return ["new", "projects", "stop", "steer", "model", "reset", "attach", "rename", "close", "pane_close_request", "pane_close_confirm", "reattach", "replace", "resume"].includes(kind);
-}
-
 function permanentInstanceCommandRejection(error: unknown): string | null {
   const message = error instanceof Error ? error.message : String(error);
   return [

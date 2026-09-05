@@ -1,8 +1,8 @@
-import type { BridgeConfig } from "../config.js";
+import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { BridgeCommand, Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import { swarmCommandPolicy, type SwarmCommandContext } from "../domain/swarm-command.js";
 
-interface Store { findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null }
+interface Store { findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null; getBinding?(id: string): Binding | null }
 interface Options {
   config: Pick<BridgeConfig, "defaultProjectId" | "projects" | "lark">;
   store: Store;
@@ -21,15 +21,17 @@ export class SwarmCommandContextResolver {
     this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
     const bySpace = new Map<string, ProjectConfig[]>();
     for (const project of options.config.projects) {
-      const key = project.spaceName ?? project.displayName;
+      const key = projectSpaceName(project);
       bySpace.set(key, [...(bySpace.get(key) ?? []), project]);
     }
     this.projectsBySpaceName = bySpace;
   }
 
-  resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution {
+  resolve(message: IncomingLarkMessage, command: BridgeCommand, explicitBindingId?: string): SwarmCommandContextResolution {
     const policy = swarmCommandPolicy(command);
-    const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
+    const binding = explicitBindingId
+      ? this.bindingById(explicitBindingId)
+      : this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
     if (requiresAdministrator(policy.authorization) && !this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) {
       return { outcome: "rejected", code: "administrator_required", message: "你没有管理权限。" };
     }
@@ -41,20 +43,29 @@ export class SwarmCommandContextResolver {
     }
     const project = this.resolveProject(command, binding);
     if (policy.scope === "project" && !project) {
-      return { outcome: "rejected", code: "project_required", message: "无法唯一确定命令所属项目。" };
+      const matches = command.kind === "attach" ? this.projectsBySpaceName.get(command.spaceName) ?? [] : [];
+      const message = matches.length > 1 ? `空间 ${command.kind === "attach" ? command.spaceName : ""} 对应多个项目，无法确定要连接哪一个。`
+        : command.kind === "attach" ? `未找到空间 ${command.spaceName}。` : "无法唯一确定命令所属项目。";
+      return { outcome: "rejected", code: "project_required", message };
     }
     const active = binding ? this.options.activeTurn(binding.id) : null;
+    const includesProject = policy.scope !== "global";
+    const includesPrimary = policy.scope === "primary-session" || policy.scope === "active-turn";
     const context: SwarmCommandContext = {
       chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId, sourceMessageId: message.messageId, actorOpenId: message.actorOpenId,
-      projectId: project?.id ?? binding?.projectId ?? null, workspaceId: project?.workspaceId ?? binding?.workspaceId ?? null,
-      primary: binding ? {
-        bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId ?? "", terminalId: binding.traexSessionId,
+      projectId: includesProject ? project?.id ?? binding?.projectId ?? null : null, workspaceId: includesProject ? project?.workspaceId ?? binding?.workspaceId ?? null : null,
+      primary: includesPrimary && binding ? {
+        bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId, terminalId: binding.traexSessionId,
         nativeSession: binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
           ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null,
-        activePromptId: active?.promptId ?? null
+        activePromptId: policy.scope === "active-turn" ? active?.promptId ?? null : null
       } : null
     };
     return { outcome: "resolved", context, laneKey: laneKey(policy.scope, context) };
+  }
+
+  private bindingById(id: string): Binding | null {
+    return this.options.store.getBinding?.(id) ?? null;
   }
 
   private resolveProject(command: BridgeCommand, binding: Binding | null): ProjectConfig | null {
