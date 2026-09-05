@@ -146,6 +146,10 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
+  if (input.workers.length > 0) {
+    elements.push({ tag: "hr" }, { tag: "markdown", content: `**Workers**\n${input.workers.map((worker) => `- ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
+    for (const worker of input.workers) if (worker.workerMain.messageId) elements.push(callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default"));
+  }
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
@@ -192,6 +196,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   if (input.phase === "failed" && input.steeringOrigin === "automatic" && input.steeringFailureKind === "rejected") elements.push(callbackButton("作为新任务排队", { action: "enqueue_failed_steering", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, sourcePromptId: input.promptId }, "primary"));
+  elements.push(...workerActivityElements(input));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {
@@ -231,6 +236,7 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
   const elements = foldFinalAnswerContent(options.initialContent);
   if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const pageNumber = options.pageNumber ?? 1;
+  const workerElements = workerActivityElements(input);
   return {
     schema: "2.0",
     config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
@@ -241,9 +247,17 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
     },
     body: { elements: [
       { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
+      ...workerElements,
       ...elements
     ] }
   };
+}
+
+function workerActivityElements(input: RunCardView): object[] {
+  if (input.workerActivity.length === 0) return [];
+  const elements: object[] = [{ tag: "markdown", content: `**Worker activity**\n${input.workerActivity.map((worker) => `- ${worker.name} · ${worker.latestPhase} · ${worker.latestTaskTitle}${worker.taskCount > 1 ? ` · ${worker.taskCount} tasks` : ""}`).join("\n")}` }];
+  for (const worker of input.workerActivity) if (worker.latestTaskCard.messageId) elements.push(callbackButton(`打开 ${worker.name} Task`, { action: "card_target_open", ...worker.latestTaskCard }, "default"));
+  return elements;
 }
 
 function attachElementIdToFirstMarkdown(elements: FinalAnswerElement[], elementId: string): boolean {

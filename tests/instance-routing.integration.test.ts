@@ -5,6 +5,7 @@ import { normalizeCardActionEvent } from "../src/adapters/lark-adapter.js";
 import type { IncomingLarkMessage } from "../src/domain/types.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { createWorkerMainView } from "../src/domain/worker-main-view.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -275,6 +276,32 @@ describe("instance routing", () => {
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "reviewer · Task turn-his" } } } });
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, turnId: "missing" } })).resolves.toEqual({ toast: { type: "warning", content: "任务不存在或不属于当前 Worker。" } });
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, bindingGeneration: 0 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
+  });
+  it("opens durable Worker card targets by persisted ownership without requiring a conversation key", async () => {
+    const { create, workflow } = setup();
+    const worker = create("reviewer", "worker");
+    const main = createWorkerMainView({
+      workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default",
+      workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
+    });
+    store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
+    const task = taskCard(worker.id, "completed", "owned-task");
+
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "Worker · reviewer" } } } });
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId } })).resolves.toMatchObject({ card: { header: { title: { content: "reviewer · Task owned-ta" } } } });
+  });
+
+  it("rejects stale and cross-Primary Worker card targets", async () => {
+    const { create, workflow } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "completed", "owned-task");
+    store!.createPendingBinding({ id: "binding-other", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-other", rootMessageId: "root-other", title: "Other Primary" });
+    store!.updateBinding("binding-other", { paneId: "w1:primary-other", state: "active", lifecycle: "active", attachment: "attached" });
+    const target = { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId };
+
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, messageId: "stale-message" } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, generation: worker.generation + 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, conversationKey: "binding:binding-other", bindingId: "binding-other", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
   });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
     const { workflow, control } = setup(["u1", "u2"]);

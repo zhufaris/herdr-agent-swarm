@@ -15,6 +15,7 @@ interface ShutdownDependencies {
   integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
   coordinator: { stop(context?: ShutdownContext): Promise<void> };
   queueFeedbackProjector?: { stop(context?: ShutdownContext): Promise<void> };
+  cardContextRebuilder?: { stop(context?: ShutdownContext): Promise<void> };
   projector: { stop(context?: ShutdownContext): Promise<void> };
   publisher: { stop(context?: ShutdownContext): Promise<void> };
   healthServer: { close(callback: (error?: Error) => void): unknown };
@@ -59,7 +60,7 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<BridgeRuntimeShutdownOutcome> {
-    const { herdrSocketSubscriber, primaryToolGateway, instanceRuntime, instanceWorker, integrityAuditor, coordinator, queueFeedbackProjector, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+    const { herdrSocketSubscriber, primaryToolGateway, instanceRuntime, instanceWorker, integrityAuditor, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     const startedAt = Date.now();
     const budgetMs = this.dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     const { context, abort } = createShutdownContext(budgetMs);
@@ -82,6 +83,7 @@ export class BridgeRuntimeShutdown {
     if (integrityAuditor) await this.stopComponent("integrityAuditor", () => integrityAuditor.stop(context), context, logger, failures, timeouts);
     writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
     if (queueFeedbackProjector) writers.push({ component: "queueFeedbackProjector", ...(await this.stopComponent("queueFeedbackProjector", () => queueFeedbackProjector.stop(context), context, logger, failures, timeouts)) });
+    if (cardContextRebuilder) writers.push({ component: "cardContextRebuilder", ...(await this.stopComponent("cardContextRebuilder", () => cardContextRebuilder.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "publisher", ...(await this.stopComponent("publisher", () => publisher.stop(context), context, logger, failures, timeouts)) });
     await this.stopComponent("healthServer", () => closeServer(healthServer), context, logger, failures, timeouts);

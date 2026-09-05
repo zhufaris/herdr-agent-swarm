@@ -10,6 +10,8 @@ import { renderInstanceDetailCard } from "../cards/instance-detail-card.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../cards/instance-control-card.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import { renderWorkerMainCard } from "../cards/worker-main-card.js";
+import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort }
@@ -103,8 +105,9 @@ export class InstanceInteractionWorkflow {
   async handleCardAction(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
     if (!action.value || typeof action.value !== "object") return;
     const value = action.value as Record<string, unknown>;
-    if (typeof value.action !== "string" || !value.action.startsWith("instance_")) return;
+    if (typeof value.action !== "string" || (!value.action.startsWith("instance_") && value.action !== "card_target_open")) return;
     if (!this.isOperator(action.operatorOpenId)) return { toast: { type: "error", content: "你没有 Agent 管理权限。" } };
+    if (value.action === "card_target_open") return this.openCardTarget(value, action.chatId);
     const actor = { kind: "human" as const, userId: action.operatorOpenId, channel: "feishu" as const };
     const conversationKey = typeof value.conversationKey === "string" && value.conversationKey.length <= 200 ? value.conversationKey : action.chatId;
     const bindingContext = this.boundProjectForConversationKey(conversationKey, action.chatId);
@@ -191,6 +194,46 @@ export class InstanceInteractionWorkflow {
         return { toast: { type: removed ? "success" : "warning", content: removed ? `实例 ${instance.name} 已删除。` : "实例未删除，请刷新后重试。" } };
       } catch (error) { return failed(error); }
     }
+  }
+
+  private openCardTarget(value: Record<string, unknown>, chatId: string): LarkCardActionResult {
+    const kind = value.aggregateKind; const id = typeof value.aggregateId === "string" ? value.aggregateId : ""; const generation = Number(value.generation); const messageId = typeof value.messageId === "string" ? value.messageId : "";
+    if (!id || !Number.isInteger(generation) || !messageId) return warning("卡片入口尚未完成投递，请稍后重试。");
+    if (kind === "worker-session") {
+      const view = this.options.store.loadWorkerMainView(id, generation);
+      const instance = this.options.store.getAgentInstance(id);
+      if (!view || view.messageId !== messageId || !instance || instance.role !== "worker" || instance.workerSessionGeneration !== generation
+        || instance.parent?.bindingId !== view.parentBindingId || instance.parent.paneId !== view.parentPaneId
+        || !this.isOwnedCardBinding(value, chatId, view.parentBindingId, view.parentBindingGeneration, view.parentPaneId)) return warning("Worker 卡片已过期或不属于当前 Primary。");
+      return { card: renderWorkerMainCard(view) };
+    }
+    if (kind === "worker-turn") {
+      const view = this.options.store.loadWorkerTurnCard(id); const instance = view ? this.options.store.getAgentInstance(view.instanceId) : null;
+      if (!view || view.instanceGeneration !== generation || view.messageId !== messageId || !instance || instance.role !== "worker"
+        || instance.workerSessionGeneration !== view.workerSessionGeneration || !instance.parent
+        || !this.isOwnedCardBinding(value, chatId, instance.parent.bindingId, instance.parent.bindingGeneration ?? 1, instance.parent.paneId)) return warning("Worker Task 卡片已过期或不属于当前 Primary。");
+      return { card: renderWorkerTurnCard(view) };
+    }
+    if (kind === "primary-session") {
+      const binding = this.options.store.getBinding(id); const view = this.options.store.loadTopicView(id);
+      if (!binding || binding.chatId !== chatId || binding.generation !== generation || binding.statusMessageId !== messageId || !view) return warning("Primary 卡片已过期或不属于当前会话。");
+      return { card: renderProjectEntryCard(view) };
+    }
+    if (kind === "primary-turn") {
+      const view = this.options.store.loadRunCard(id); const binding = view ? this.options.store.getBinding(view.bindingId) : null;
+      if (!view || !binding || binding.chatId !== chatId || view.bindingGeneration !== generation || view.answerMessageId !== messageId) return warning("Primary Answer 卡片已过期或不属于当前会话。");
+      return { card: renderRequestAnswerCard(view, { streaming: view.workerContextFrozenAt === null }) };
+    }
+    return warning("未知的卡片入口。");
+  }
+
+  private isOwnedCardBinding(value: Record<string, unknown>, chatId: string, bindingId: string, bindingGeneration: number, parentPaneId: string): boolean {
+    const binding = this.options.store.getBinding(bindingId);
+    if (!binding || binding.chatId !== chatId || binding.generation !== bindingGeneration || binding.paneId !== parentPaneId) return false;
+    if (typeof value.conversationKey === "string" && value.conversationKey !== `binding:${bindingId}`) return false;
+    if (typeof value.bindingId === "string" && value.bindingId !== bindingId) return false;
+    if (value.bindingGeneration !== undefined && Number(value.bindingGeneration) !== bindingGeneration) return false;
+    return true;
   }
 
   private async showDirectory(message: IncomingLarkMessage, projectId: string, conversationKey: string): Promise<void> {

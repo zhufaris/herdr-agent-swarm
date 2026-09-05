@@ -57,6 +57,14 @@ active turn；没有 active turn、目标已经换代或 Agent 不支持 steerin
 冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
 capture 状态，点击“打开”只读取该任务的持久化卡片，不会再次执行任务。
 
+每个 Worker session generation 还拥有一张持久 Worker Main Card。它只汇总 Worker 身份、
+runtime 状态、当前任务、排队数量和最近五条终态任务，不复制请求正文、结果或 reasoning。
+runtime 重启、reattach 或 pane replacement 会继续更新同一张 Worker Main；终止后该卡冻结，
+同名重建会创建新的 Worker session 和新卡。Primary Main 只展示当前 Primary pane 拥有的
+Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Worker activity。Answer
+完成后摘要随页面冻结，较晚的 Worker 更新只进入 Worker Task、Worker Main 和 Primary Main。
+卡片间的“打开”按钮只在目标卡已成功投递后出现。
+
 要持续给同一个任务补充要求，请直接回复它的 task card 并 `@Bot`：
 
 - 回复正在运行或 blocked 的卡片会精确 steer 该 turn。

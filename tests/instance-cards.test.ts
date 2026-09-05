@@ -20,9 +20,8 @@ describe("instance cards", () => {
     expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true }, body: { elements: expect.any(Array) } });
     expect(text).toContain("reviewer · Task turn:uns");
     expect(text).toContain("parent-turn");
-    expect(text).toContain("View Worker");
-    expect(text).toContain('\"instanceId\":\"i1\"');
-    expect(text).toContain('\"instanceGeneration\":2');
+    expect(text).not.toContain("View Worker Main");
+    expect(text).not.toContain("card_target_open");
     expect(text).not.toContain("live-secret");
     expect(text.length).toBeLessThan(12_000);
     expect(queued.elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);

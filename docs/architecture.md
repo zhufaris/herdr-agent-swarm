@@ -252,13 +252,18 @@ Lark message or card action                 Herdr Socket event
                     SQLite outbox -> Lark port
 ```
 
-The Worker task path is a parallel durable flow with one card aggregate per turn:
+The Worker task path is a parallel durable flow with a task aggregate per turn
+and a session aggregate per Worker session generation:
 
 ```text
-Lark inbound -> atomic InstanceTurn + WorkerTurnCard projection + outbox
+Lark inbound -> atomic InstanceTurn + WorkerTurnCard projection + invalidations
              -> FIFO scheduler -> exact structured observation
-             -> SQLite result/page projection -> Worker-specific outbox lane
-             -> Lark CardKit
+             -> SQLite result/page projection + durable context invalidations
+             -> CardContextRebuilder
+                  +-> Worker Main snapshot
+                  +-> exact Primary Main generation
+                  `-> mutable originating Primary Answer
+             -> independent SQLite outbox lanes -> Lark CardKit
 ```
 
 Acceptance persists the turn, its initial queued card projection, and delivery
@@ -275,6 +280,23 @@ still advance. Output pages are ordered within the task. Once a continuation pag
 is created, earlier pages are frozen and are not patched. SQLite retains the full
 sanitized canonical result; recent Worker history and card previews are bounded
 render-only summaries.
+
+The other card contexts are explicit durable projection boundaries. Primary Main
+contains only bounded summaries for Workers owned by its exact binding and pane.
+Primary Answer contains only activity whose persisted `parentPromptId` names that
+Primary turn, and freezes that summary when its Answer page becomes terminal.
+Worker Main is keyed by `(workerId, workerSessionGeneration)`; runtime generation,
+pane replacement, and native-session renewal update that card rather than creating
+a new session card. Termination freezes it, while same-name recreation creates a
+new Worker identity and card. Worker output remains exclusive to Worker Task cards.
+
+Context invalidations are committed in the same SQLite transaction as the owning
+Worker transition. Startup, notifier hints, and periodic scans rebuild unfinished
+revisions, so a lost wake-up cannot lose a refresh. Replaceable snapshots use
+`worker-main:<workerId>:<workerSessionGeneration>`,
+`primary-main:<bindingId>:<bindingGeneration>`, and
+`primary-answer:<promptId>:<bindingGeneration>` lanes. The persisted `lane_key` is
+the delivery and quarantine authority; retrying a card can never repeat Agent work.
 
 Direct replies use the normalized Lark `parent_id`, not the topic root or selected
 Worker. A reply to the exact active card is generation-fenced steering. A reply

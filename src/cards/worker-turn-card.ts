@@ -35,10 +35,11 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   if (view.parentTurnId) elements.push({ tag: "markdown", content: `**承接任务**  \`${escapeCode(view.parentTurnId)}\`` });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
-  elements.push({
-    tag: "column_set", flex_mode: "none", horizontal_spacing: "8px",
-    columns: [{ tag: "column", width: "auto", elements: [callbackButton("View Worker", { action: "instance_view", instanceId: view.instanceId, instanceGeneration: view.instanceGeneration }, "primary")] }]
-  });
+  const targets = [
+    view.workerMain.messageId ? callbackButton("View Worker Main", { action: "card_target_open", ...view.workerMain }, "primary") : null,
+    view.primaryAnswer?.messageId ? callbackButton("View Primary Answer", { action: "card_target_open", ...view.primaryAnswer }, "default") : null
+  ].filter((button): button is object => button !== null);
+  if (targets.length > 0) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: targets.map((button) => ({ tag: "column", width: "auto", elements: [button] })) });
   return {
     schema: "2.0",
     config: { update_multi: true, streaming_mode: ["preparing", "running", "blocked"].includes(view.phase), summary: { content: `${view.workerName} · ${state.label}` } },
