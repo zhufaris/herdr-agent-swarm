@@ -159,8 +159,20 @@ prompt，也不依赖 Herdr 是否识别出 named agent。
 
 ### `/swarm steer <文本>`
 
-当前不支持。Bridge 会返回拒绝卡，不创建控制操作、不写入 terminal，也不会把文本
-自动降级为普通任务。需要继续工作时，请把内容作为普通消息发送，它会进入 FIFO。
+将补充指令发送给当前话题中正在执行的 Primary turn：
+
+```text
+/swarm steer 先不要修改代码，只定位根因
+```
+
+Bridge 会把命令绑定到当前 binding generation、Primary pane、Agent session 和 runtime
+turn，并在真正发送前再次校验这些身份。只有 Agent 仍为 `working` 且报告 native steering
+能力时才会发送。任务已经结束、目标发生变化、session 缺失或 runtime 不支持 steering 时，
+命令会明确拒绝。拒绝的 steer 不会进入普通 FIFO；结果不确定的 steer 也不会自动重放。
+
+该命令只作用于当前话题的 Primary。要调整指定 Worker 的当前任务，使用
+`/steer <worker> <文本>`；要给 Worker 新建一条排队任务，使用 `/to <worker> <任务>`。
+`blocked` 通常表示本地审批或提问界面，Bridge 会拒绝远程 steering，必须回到 Herdr 处理。
 
 ### `/swarm new [说明]`
 
@@ -354,8 +366,9 @@ TraeX 重发旧任务，不会写入 terminal；重复执行不会重复创建�
 有效历史 turn 样本时，卡片还显示基于最近最多十个样本中位数计算的粗略等待区间。该区间
 用于解释队列进展，不是截止时间或倒计时。
 
-旧版本留下的 steering 记录在恢复时会标记为 rejected，不会自动重放。`/swarm stop`
-仍是显式优先级命令；`/swarm steer` 当前始终拒绝。
+旧版本留下的 legacy steering 记录在恢复时会标记为 rejected，不会自动重放。
+当前 native steering 操作在外部发送前持久化；若发送结果不确定，则标记为 uncertain，
+不会自动重试。`/swarm stop` 仍是显式优先级命令。
 
 ## 权限与审批
 
@@ -374,7 +387,8 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
 - 通过 `/swarm stop` 强制终止 TraeX 进程或 Herdr pane。
 
-`blocked` 时 `/swarm steer` 同样不会发送文本；是否放行高风险操作仍由 Herdr 终端决定。
+`blocked` 时 `/swarm steer` 和 `/steer <worker>` 都不会发送文本；是否放行高风险操作
+仍由 Herdr 终端决定。
 
 ## 从飞书关闭 Pane
 
@@ -402,8 +416,9 @@ Worker/pane 关闭步骤，绝不会自动重放关闭命令或 Agent 任务。
 ### 消息没有立即执行
 
 先发送 `/swarm status`。普通消息进入 FIFO；排队卡上的前方条数是准确顺序，等待区间
-只是基于历史样本的粗略估算。当前不支持远程 steering；如果 TraeX 是 `blocked`，
-请到 Herdr 处理审批。
+只是基于历史样本的粗略估算。若要调整正在执行的 Primary turn，使用 `/swarm steer`；
+若任务已经结束，则发送普通消息创建新的 FIFO 任务。如果 TraeX 是 `blocked`，请到
+Herdr 处理审批。
 
 ### `/swarm close` 后 pane 还在
 

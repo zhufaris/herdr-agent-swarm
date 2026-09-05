@@ -362,14 +362,16 @@ change during the target decomposition without changing these steps.
    `processing` are never removed by retention.
 3. A command is handled as a binding or operational workflow. Ordinary text in
    an active bound topic normally becomes a FIFO prompt job. A conservative
-   classifier may describe a message as a short continuation, but steering is
-   currently unsupported, so every ordinary message remains FIFO. One SQLite
-   acceptance transaction rechecks the binding generation and queue limit.
+   classifier may route an eligible short continuation to the exact active turn;
+   all other ordinary messages remain FIFO. One SQLite acceptance transaction
+   rechecks the binding generation and queue limit.
    Exact, case-insensitive `/swarm stop` is a local Herdr
    `Esc` control while the bridge has a supervised active turn (`working` or
    `blocked`): it bypasses queued ordinary prompts and creates no prompt job.
-   Explicit `/swarm steer <text>` is rejected before durable control acceptance;
-   it never writes text to the terminal and never falls back to the ordinary FIFO.
+   Explicit `/swarm steer <text>` durably targets the exact active Primary turn,
+   binding generation, pane, and native Agent session. Dispatch requires native
+   steering capability and a `working` pane; rejection never falls back to the
+   ordinary FIFO, and an uncertain external result is never replayed.
    Mutating Session card actions use a separate durable handoff: the callback
    atomically consumes its scoped interaction and inserts one idempotent
    `session_operations` row, then returns an accepted Toast. A coalescing
@@ -861,9 +863,9 @@ and credentials.
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
 - `/swarm stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
-  `/swarm steer <text>` and card-based immediate supplements are unsupported and
-  rejected without terminal input. Neither path can approve, reject, or bypass a
-  high-risk approval.
+  `/swarm steer <text>` and Worker `/steer <name> <text>` use only identity-fenced
+  native steering against an exact active turn. They reject blocked approval or
+  question states and cannot approve, reject, or bypass a high-risk operation.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and
   terminal identity before changing a binding.
