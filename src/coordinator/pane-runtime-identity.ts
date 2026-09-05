@@ -7,15 +7,35 @@ export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime
   if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
   const project = binding.projectId ? projectsById.get(binding.projectId) : undefined;
   if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`);
-  if (hasNativeAgentSession(binding) && pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${paneId}`);
-  if (binding.traexSessionId && pane.terminalId && binding.traexSessionId !== pane.terminalId && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr pane identity changed for ${paneId}`);
+  requireMatchingRuntimeIdentity(binding, pane);
   if (hasNativeAgentSession(binding) && !pane.agentSession) pane = { ...pane, agentSession: persistedAgentSession(binding) };
   if (!pane.foregroundExecutables.includes("traex")) throw new Error(`TraeX is not running in pane ${paneId}`);
   return pane;
 }
 
 export function hasNativeAgentSession(binding: Binding): boolean { return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue); }
-export function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean { return Boolean(pane.agentSession && binding.agentSessionSource === pane.agentSession.source && binding.agentSessionAgent === pane.agentSession.agent && binding.agentSessionKind === pane.agentSession.kind && binding.agentSessionValue === pane.agentSession.value); }
+export function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {
+  return Boolean(pane.agentSession
+    && normalizeAgentSessionSource(binding.agentSessionSource!) === normalizeAgentSessionSource(pane.agentSession.source)
+    && binding.agentSessionAgent === pane.agentSession.agent
+    && binding.agentSessionKind === pane.agentSession.kind
+    && binding.agentSessionValue === pane.agentSession.value);
+}
+
+export function requireMatchingRuntimeIdentity(binding: Binding, pane: HerdrPane): void {
+  if (binding.paneId && binding.paneId !== pane.paneId) throw new Error(`Herdr pane identity changed for ${pane.paneId}`);
+  if (binding.traexSessionId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${pane.paneId}`);
+  if (hasNativeAgentSession(binding) && pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${pane.paneId}`);
+}
+
+export function preferredRuntimeSessionId(binding: Binding, pane: HerdrPane): string | null {
+  requireMatchingRuntimeIdentity(binding, pane);
+  return pane.agentSession?.value ?? (hasNativeAgentSession(binding) ? binding.agentSessionValue! : pane.terminalId ?? null);
+}
+
+function normalizeAgentSessionSource(source: string): string {
+  return source === "herdr:codex" || source === "herdr-traex-shim" ? "herdr-traex" : source;
+}
 
 function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSession"]> {
   return { source: binding.agentSessionSource!, agent: binding.agentSessionAgent!, kind: binding.agentSessionKind!, value: binding.agentSessionValue! };

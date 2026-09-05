@@ -48,6 +48,31 @@ describe("InstanceControlWorkflow", () => {
     await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" })).resolves.toMatchObject({ status: "created", instance: { agentKind: "traex", observedState: "idle" } });
   });
 
+  it("creates a Worker for the task-di58 dual-identity Primary shape", async () => {
+    const { workflow, paneHost } = setup();
+    store!.updateBinding("binding-1", {
+      traexSessionId: "term_65aa3500203c441", agentSessionSource: "herdr:codex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "01a06b58-1cfd-7c81-b11e-afb1cd7c2cee"
+    });
+    vi.mocked(paneHost.inspectPane).mockResolvedValueOnce({
+      ...primaryPane, terminalId: "term_65aa3500203c441",
+      agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a06b58-1cfd-7c81-b11e-afb1cd7c2cee" }
+    });
+
+    await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: false, bindingId: "binding-1" }))
+      .resolves.toMatchObject({ status: "created", instance: { parent: { nativeSessionId: "01a06b58-1cfd-7c81-b11e-afb1cd7c2cee" } } });
+  });
+
+  it("rejects genuine terminal and native Primary replacement", async () => {
+    const { workflow, paneHost } = setup();
+    store!.updateBinding("binding-1", { agentSessionSource: "herdr:codex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const command = { actor: { kind: "human" as const, userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex" as const, model: null, start: false, bindingId: "binding-1" };
+    vi.mocked(paneHost.inspectPane).mockResolvedValueOnce({ ...primaryPane, terminalId: "terminal-replaced", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } });
+    await expect(workflow.createWorker(command)).rejects.toThrow("Worker parent pane identity changed");
+    vi.mocked(paneHost.inspectPane).mockResolvedValueOnce({ ...primaryPane, terminalId: "term-1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-replaced" } });
+    await expect(workflow.createWorker(command)).rejects.toThrow("Worker parent pane identity changed");
+  });
+
   it("allocates a named branch and isolated worktree for an explicit worker", async () => {
     const { workflow, worktrees } = setup();
     const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true });
