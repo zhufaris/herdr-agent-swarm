@@ -85,7 +85,7 @@ describe("active-turn steering", () => {
     const herdr: HerdrPort = {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } }]; },
-      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, activeTurnId: "runtime-1" }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
         await onObservation?.({ state: "working", stateSource: "structured", output, turnId: "runtime-1", turnStartedAt: "2026-09-05T00:00:00.000Z" });

@@ -10,7 +10,8 @@ afterEach(() => { store?.close(); store = undefined; });
 function setupWorker(
   overrides: Partial<HerdrPane> = {},
   steer = vi.fn(async () => ({ status: "delivered" as const, operationId: "native-1", turnId: "runtime-1" })),
-  interrupt = vi.fn(async () => ({ status: "interrupted" as const }))
+  interrupt = vi.fn(async () => ({ status: "interrupted" as const })),
+  maxQueueDepth = 20
 ) {
   store = new SqliteBindingStore(":memory:");
   store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
@@ -21,7 +22,7 @@ function setupWorker(
   store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
   const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1", ...overrides };
   const getPane = vi.fn(async () => pane);
-  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent: steer, interruptAgent: interrupt }, idFactory: () => "control-1" });
+  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent: steer, interruptAgent: interrupt }, idFactory: () => "control-1", maxQueueDepth });
   return { workflow, getPane, steer, interrupt, worker, pane };
 }
 
@@ -186,6 +187,74 @@ describe("TurnControlWorkflow", () => {
     await expect(workflow.steer(command)).resolves.toMatchObject({ operation: { state: "uncertain", result: { status: "delivery-uncertain" } } });
     await expect(workflow.steer(command)).resolves.toMatchObject({ duplicate: true, operation: { state: "uncertain" } });
     expect(steer).toHaveBeenCalledTimes(1);
+  });
+
+  it("converts a proven not-active Worker steer into one durable priority turn after a fresh idle observation", async () => {
+    const steer = vi.fn(async () => ({ status: "not-active" as const, reason: "expected turn is no longer active" }));
+    const { workflow, getPane, worker, pane } = setupWorker({}, steer);
+    getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, agentState: "idle", activeTurnId: null });
+    const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, text: "continue safely", idempotencyKey: "steer-fallback", sourceMessageId: "message-1", resultTargetMessageId: "root-1" };
+
+    const first = await workflow.steer(command);
+    expect(first).toMatchObject({ mode: "priority", duplicate: false });
+    if (first.mode !== "priority") throw new Error("expected priority fallback");
+    expect(store!.getInstanceTurn(first.logicalTurnId)).toMatchObject({ priority: "priority", state: "queued", text: "continue safely" });
+    expect(store!.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
+    await expect(workflow.steer(command)).resolves.toEqual({ ...first, duplicate: true });
+    expect(steer).toHaveBeenCalledOnce();
+  });
+
+  it("converts a proven not-active Worker steer without a result card", async () => {
+    const steer = vi.fn(async () => ({ status: "not-active" as const, reason: "turn completed" }));
+    const { workflow, getPane, worker, pane } = setupWorker({}, steer);
+    getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, agentState: "done", activeTurnId: null });
+
+    const outcome = await workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "primary", bindingId: "b1" }, text: "continue safely", idempotencyKey: "tool-fallback" });
+    expect(outcome).toMatchObject({ mode: "priority" });
+    if (outcome.mode !== "priority") throw new Error("expected priority fallback");
+    expect(store!.getInstanceTurn(outcome.logicalTurnId)).toMatchObject({ priority: "priority", state: "queued" });
+    expect(store!.loadWorkerTurnCard(outcome.logicalTurnId)).toBeNull();
+  });
+
+  it("converts a proven not-active Primary steer into one durable priority prompt", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const view = createQueuedRunCard({ promptId: "prompt-1", bindingId: "b1", bindingGeneration: 3, title: "Primary", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-03T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "prompt-1", bindingId: "b1", larkMessageId: "message-1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("prompt-1", "running");
+    store.markPromptDispatched("prompt-1", "2026-09-03T00:00:00.000Z");
+    store.claimPromptTranscriptTurn({ promptId: "prompt-1", bindingId: "b1", turnId: "runtime-1", startedAt: "2026-09-03T00:00:00.100Z" });
+    const working: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1" };
+    const getPane = vi.fn().mockResolvedValueOnce(working).mockResolvedValueOnce(working).mockResolvedValueOnce({ ...working, agentState: "idle", activeTurnId: null });
+    const steerAgent = vi.fn(async () => ({ status: "not-active" as const, reason: "turn completed" }));
+    let id = 0;
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent }, idFactory: () => `generated-${++id}`, maxQueueDepth: 20 });
+
+    const outcome = await workflow.steer({ owner: { kind: "binding", id: "b1" }, actor: { kind: "human", userId: "u1" }, text: "continue safely", idempotencyKey: "primary-fallback" });
+    expect(outcome).toMatchObject({ mode: "priority" });
+    if (outcome.mode !== "priority") throw new Error("expected priority fallback");
+    expect(store.getPrompt(outcome.logicalTurnId)).toMatchObject({ priority: "priority", state: "queued" });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+  });
+
+  it("records a proven not-active fallback admission failure as rejected", async () => {
+    const steer = vi.fn(async () => ({ status: "not-active" as const, reason: "turn completed" }));
+    const { workflow, getPane, worker, pane } = setupWorker({}, steer, undefined, 1);
+    getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, agentState: "idle", activeTurnId: null });
+
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "continue", idempotencyKey: "full-fallback", resultTargetMessageId: "root-1" }))
+      .resolves.toMatchObject({ mode: "native", operation: { state: "rejected", result: { status: "rejected", reason: expect.stringContaining("queue is full") } } });
+  });
+
+  it("never converts an uncertain Worker steer into priority work", async () => {
+    const steer = vi.fn(async () => ({ status: "delivery-uncertain" as const, operationId: "native-1", reason: "receipt lost" }));
+    const { workflow, getPane, worker } = setupWorker({}, steer);
+
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "do not replay", idempotencyKey: "steer-uncertain", resultTargetMessageId: "root-1" }))
+      .resolves.toMatchObject({ mode: "native", operation: { state: "uncertain" } });
+    expect(getPane).toHaveBeenCalledTimes(2);
+    expect(store!.listInstanceTurns(worker.id).items.filter((turn) => turn.priority === "priority")).toHaveLength(0);
   });
 
   it("rejects a changed runtime turn during the fresh pre-claim observation", async () => {

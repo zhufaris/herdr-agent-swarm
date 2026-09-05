@@ -366,7 +366,8 @@ change during the target decomposition without changing these steps.
    classifier may route an eligible short continuation to the exact active turn;
    all other ordinary messages remain FIFO. One SQLite acceptance transaction
    rechecks the binding generation and queue limit.
-   Exact, case-insensitive `/swarm stop` uses identity-fenced native interruption
+   Exact, case-insensitive `/swarm stop` uses a freshly identity-checked,
+   best-effort local interruption
    while the bridge has a supervised active turn; it bypasses queued ordinary
    prompts and creates no prompt job. Explicit `/swarm steer <text>` durably
    targets the exact active Primary turn, or persists a priority turn when the
@@ -682,8 +683,9 @@ cannot race.
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;
 ordinary prompts use `agent prompt --wait`, and
-interrupts use `agent send-keys`. Runtime model switching and steering are
-rejected because Herdr exposes no equivalent structured operation. Terminal text
+interrupts use `agent send-keys`. Runtime steering is enabled only when Herdr
+exposes an exact-turn structured operation; otherwise it fails fast as
+unsupported. Terminal text
 never becomes Answer content, either live or during detached restart recovery.
 Because persisted RunCard text does not carry durable source provenance,
 detached recovery replaces it with the bounded, redacted transcript completion
@@ -883,7 +885,8 @@ and credentials.
 ## Safety rules
 
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
-- `/swarm stop` is a Herdr-local `Esc` control, not a remote process or pane kill.
+- `/swarm stop` is a freshly identity-checked, best-effort Herdr-local `Ctrl+C`
+  control, not an atomic exact-turn CAS or a remote process or pane kill.
   `/swarm steer <text>` and Worker `/steer <name> <text>` use identity-fenced
   native steering against an exact active turn, or a durable priority turn when
   idle. They reject blocked approval or question states and cannot approve,

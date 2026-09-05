@@ -1117,6 +1117,73 @@ describe("SQLite store", () => {
     expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "uncertain", result: { reason: expect.stringContaining("restarted") } });
   });
 
+  it("atomically converts a dispatching Worker steer into queued priority work", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const actor = { kind: "human" as const, userId: "u1" };
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor, payload: "continue safely" });
+    store.claimTurnControlOperation("control-1");
+
+    const converted = store.convertTurnControlToWorkerPriority({
+      operationId: "control-1",
+      turn: { id: "priority-1", idempotencyKey: "steer-1", actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", priority: "priority", text: "continue safely", parentTurnId: null, sourceMessageId: "message-1" },
+      maxQueueDepth: 2, result: { status: "priority-accepted", logicalTurnId: "priority-1" }
+    });
+
+    expect(converted).toMatchObject({ operation: { state: "delivered", result: { status: "priority-accepted", logicalTurnId: "priority-1" } }, logicalTurnId: "priority-1" });
+    expect(store.getInstanceTurn("priority-1")).toMatchObject({ state: "queued", priority: "priority", text: "continue safely" });
+    expect(store.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
+  });
+
+  it("rolls back Worker priority conversion when atomic admission fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const actor = { kind: "human" as const, userId: "u1" };
+    store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
+    store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor, payload: "continue safely" });
+    store.claimTurnControlOperation("control-1");
+
+    expect(() => store!.convertTurnControlToWorkerPriority({
+      operationId: "control-1",
+      turn: { id: "priority-1", idempotencyKey: "steer-1", actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", priority: "priority", text: "continue safely", parentTurnId: null, sourceMessageId: "message-1" },
+      maxQueueDepth: 1, result: { status: "priority-accepted", logicalTurnId: "priority-1" }
+    })).toThrow(/queue is full/);
+    expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "dispatching", result: null });
+    expect(store.getInstanceTurn("priority-1")).toBeNull();
+  });
+
+  it("atomically converts a dispatching Primary steer while preserving the active-turn claim fence", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const activeView = createQueuedRunCard({ promptId: "logical-1", bindingId: "b1", bindingGeneration: 3, title: "active", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-03T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "logical-1", bindingId: "b1", larkMessageId: "message-1", actorOpenId: "u1", body: "work" }, view: activeView, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("logical-1", "running");
+    store.markPromptDispatched("logical-1", "2026-09-03T00:00:00.000Z");
+    store.claimPromptTranscriptTurn({ promptId: "logical-1", bindingId: "b1", turnId: "runtime-1", startedAt: "2026-09-03T00:00:00.100Z" });
+    const target = { owner: { kind: "binding" as const, id: "b1" }, projectId: "project-a", paneId: "w1:p1", generation: 3, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "continue safely" });
+    store.claimTurnControlOperation("control-1");
+    const priorityView = createQueuedRunCard({ promptId: "priority-1", bindingId: "b1", bindingGeneration: 3, title: "Priority steer", workspaceId: "w1", paneId: "w1:p1", requestText: "continue safely", queuePosition: 0, occurredAt: "2026-09-03T00:00:01.000Z" });
+
+    const converted = store.convertTurnControlToPrimaryPriority({ operationId: "control-1", prompt: { id: "priority-1", bindingId: "b1", larkMessageId: "priority-steer:steer-1", actorOpenId: "u1", body: "continue safely", priority: "priority" }, view: priorityView, rootMessageId: "root", answerCard: {}, maxQueueDepth: 2, expectedBindingGeneration: 3, result: { status: "priority-accepted", logicalTurnId: "priority-1" } });
+
+    expect(converted).toMatchObject({ operation: { state: "delivered" }, prompt: { id: "priority-1", state: "queued", priority: "priority" } });
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ idempotencyKey: "run-card:create:priority-1:answer" })]));
+  });
+
   it("atomically projects one durable operation-result card through pending and delivered states", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

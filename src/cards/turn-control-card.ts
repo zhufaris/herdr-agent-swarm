@@ -16,7 +16,8 @@ const interruptPresentation: Record<TurnControlState, { title: string; template:
 };
 
 export function renderTurnControlResultCard(operation: TurnControlOperation): object {
-  const presentation = (operation.kind === "interrupt" ? interruptPresentation : steerPresentation)[operation.state];
+  const priorityAccepted = operation.kind === "steer" && operation.result?.status === "priority-accepted";
+  const presentation = priorityAccepted ? { title: "Priority Steering 已接收", template: "blue", summary: "目标 turn 已结束，指令已转为优先任务并等待安全调度。" } : (operation.kind === "interrupt" ? interruptPresentation : steerPresentation)[operation.state];
   const target = operation.target.owner.kind === "binding" ? "Primary" : "Worker";
   return {
     schema: "2.0",
