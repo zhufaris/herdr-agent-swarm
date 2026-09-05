@@ -131,17 +131,17 @@ describe("pane/thread lifecycle integration", () => {
     const active = runtime(store, herdr, lark);
     await active.coordinator.start();
 
-    await active.coordinator.handleMessage({ ...message(1, "/swarm reset fresh"), mentionsBot: true });
+    await active.coordinator.handleMessage({ ...message(1, "/swarm reset"), mentionsBot: true });
 
     await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
     await vi.waitFor(() => expect(store.getBinding("old")?.lifecycle).toBe("closed"));
     expect(closePane).toHaveBeenCalledWith(oldPane.paneId);
-    expect(createdTitles).toEqual(["fresh"]);
+    expect(createdTitles).toEqual([expect.stringMatching(/^[a-z0-9]{4}$/)]);
     const replacementId = store.findBindingByLarkScope("topic", "root")!.id;
     expect(createdOptions).toMatchObject({ bindingId: replacementId, generation: 1, projectId: "repo", environment: { SWARM_PRIMARY_CAPABILITY: `test-${replacementId}-1` } });
     expect(startedArgs).toEqual(primaryToolArgs(replacementId, 1));
     expect(store.hasBindingPrimaryToolCapability(replacementId, 1)).toBe(true);
-    expect(store.findBindingByLarkScope("topic", "root")?.title).toBe("repo / fresh");
+    expect(store.findBindingByLarkScope("topic", "root")?.title).toBe(`repo / ${createdTitles[0]}`);
     expect(store.getBinding("old")).toMatchObject({ lifecycle: "closed", attachment: "unattached" });
     expect(store.listRetiredPaneCleanupOperations(["succeeded"])).toMatchObject([{ oldBindingId: "old", replacementBindingId: expect.any(String), paneId: oldPane.paneId, state: "succeeded" }]);
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { renderAttachStatusCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
@@ -7,6 +7,7 @@ import type { HerdrPort, LarkPort } from "../domain/ports/external.js";
 import type { ImmediateOutboundDispatcher, OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { BindingProvisioningStore } from "../domain/ports/binding.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
+import { createPrimaryPaneToken } from "../domain/pane-title.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, HerdrPane, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig, ProjectSelection } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -443,7 +444,7 @@ function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSess
     agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
   };
 }
-function randomPaneName(): string { const suffix = randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4); return `task-${suffix}`; }
+function randomPaneName(): string { return createPrimaryPaneToken(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 class ProvisionedPaneMissingError extends Error {

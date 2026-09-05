@@ -315,9 +315,9 @@ describe("Herdr adapter structured control", () => {
       if (args[0] === "pane" && args[1] === "process-info") return json({ process_info: { foreground_processes: [] } });
       return { stdout: "", stderr: "" };
     } };
-    await new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo", { bindingId: "b1", generation: 1, projectId: "repo", placement: "dedicated-tab", title: "task" });
+    await new HerdrCliAdapter(runner, "herdr", 1000).createPane("w1", "/repo", { bindingId: "b1", generation: 1, projectId: "repo", placement: "dedicated-tab", title: "ilcs" });
     expect(calls[0]).toContain("--no-focus");
-    expect(calls[0]).toContain("lark_task");
+    expect(calls[0]).toContain("lark_ilcs");
   });
 
   it("does not duplicate the Lark tab prefix when a Worker title already has it", async () => {

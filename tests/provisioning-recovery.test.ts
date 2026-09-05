@@ -107,6 +107,7 @@ describe("project provisioning recovery", () => {
     expect(harness.created).toBe(1);
     expect(harness.createdCalls).toEqual([expect.objectContaining({
       bindingId: "binding-1", generation: 2, projectId: "alpha",
+      title: expect.stringMatching(/^[a-z0-9]{4}$/),
       environment: { SWARM_PRIMARY_CAPABILITY: "test-binding-1-2" }
     })]);
     expect(harness.startedPaneIds).toEqual(["w1:p10"]);
