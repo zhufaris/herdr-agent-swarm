@@ -1,9 +1,8 @@
-# Native Turn Stop and Steer Design
+# Native Stop and Priority Steer Design
 
 ## Goal
 
-Provide two explicit, durable controls for the exact active Primary or Worker
-turn:
+Provide two explicit, durable controls for a Primary or Worker runtime:
 
 ```text
 /swarm stop
@@ -13,31 +12,30 @@ turn:
 /steer <worker> <instruction>
 ```
 
-`stop` interrupts the active turn. `steer` injects guidance into that same
-active turn. Neither command creates an ordinary queued turn, changes FIFO
-order, freezes the queue, or falls back to submitting work after the target
-turn ends.
+`stop` interrupts the exact active turn. `steer` is a priority instruction: it
+injects guidance into an exact active turn when one exists, or starts a new
+priority turn immediately when the runtime is idle. It never joins the ordinary
+FIFO and never reorders or cancels the ordinary backlog.
 
-This design replaces the immediate implementation proposed in
-`2026-09-05-steer-replace-queue-preemption-design.md`. A future replace
-workflow may compose queue freeze, native stop, confirmed termination, and an
-explicit emergency submission, but those policies do not belong in either
-native primitive.
+The queue-freezing replacement workflow in
+`2026-09-05-steer-replace-queue-preemption-design.md` remains deferred. Priority
+steer is narrower: it does not interrupt a working turn, freeze a queue, or
+require an explicit resume.
 
-## Why independent native primitives
+## Why one priority-steer boundary
 
-Three shapes were considered. Keeping the current split implementation would
-leave Primary stop as an unfenced Escape key and Worker interrupt as a separate
-instance operation, while steer already uses an exact-turn workflow. Renaming
-those paths would improve syntax without improving safety. Implementing the
-full replace workflow now would combine turn control with queue policy and make
-the basic stop action unnecessarily stateful.
+Three shapes were considered. Rejecting steer while idle leaves an unusable gap:
+ordinary text waits behind the FIFO while the explicit priority command cannot
+run. Treating steer as an ordinary prompt with a priority number would duplicate
+Primary and Worker scheduling rules and could race an active runtime. The full
+replace workflow would interrupt work and freeze the queue, which is stronger
+than the requested behavior.
 
-The selected design extends `TurnControlWorkflow` with `stop` beside `steer`.
-Both operations resolve and persist the exact target before any external effect,
-share the same identity validation, and fail closed after an uncertain effect.
-Primary and Worker adapters become thin command-facing wrappers over this one
-workflow.
+The selected design keeps `TurnControlWorkflow` as the shared Primary/Worker
+boundary and gives steer two effect modes selected from a fresh owner state:
+`native-steer` for a working exact turn and `priority-turn` for an idle runtime.
+The boundary serializes both modes with stop and normal dispatch for the same
+owner. Primary and Worker adapters remain thin command-facing wrappers.
 
 ## Command semantics
 
@@ -63,15 +61,50 @@ Remote turn control must not become a remote approval or denial mechanism.
 
 ### Steer
 
-`/swarm steer <instruction>` targets the current Primary turn.
-`/steer <worker> <instruction>` targets the current Worker turn. Steer injects
-the text into the native active turn and never creates a new turn or queues a
-fallback.
+`/swarm steer <instruction>` targets the current Primary runtime.
+`/steer <worker> <instruction>` targets the selected Worker runtime.
 
-Steer remains unavailable when the exact turn is absent, has changed, is no
-longer working, is blocked on local interaction, or lacks native steering
-capability. Text containing words such as `stop` or `--replace` is ordinary
-steering content and does not change the operation kind.
+The behavior is state dependent:
+
+```text
+working + exact turn -> native steer into that turn
+idle                 -> dispatch one durable priority turn immediately
+blocked              -> reject without terminal input
+unknown              -> reject until reconciliation establishes a safe state
+```
+
+The idle path bypasses queued ordinary work but does not mutate its order. Once
+the priority turn settles, normal dispatch resumes from the original FIFO head.
+If the owner changes from idle to working during dispatch, the workflow
+re-resolves the fresh exact turn and uses native steer; it must not start a
+second concurrent turn. If it changes from working to idle before native steer,
+the native exact-turn compare-and-swap rejects the stale target and the workflow
+may perform one fresh resolution to dispatch the same durable operation as a
+priority turn, provided no external effect may have occurred.
+
+Steer remains unavailable while the runtime is blocked on local interaction.
+Native steering capability is required only for the working mode. Text
+containing words such as `stop` or `--replace` is ordinary steering content and
+does not change the operation kind.
+
+## Priority turn and ordinary FIFO
+
+An idle steer is persisted as a priority turn before any Herdr prompt effect.
+It has a stable logical turn ID, owner generation, source identity, payload,
+dispatch fence, result projection, and idempotency key. It reuses the existing
+Primary or Worker turn observation and settlement pipeline but is claimed only
+by the priority path.
+
+Ordinary acceptance remains open. Existing and newly accepted ordinary turns
+stay in FIFO order while a priority turn is pending or running. The ordinary
+claim transaction must reject a claim whenever an owner has a dispatchable or
+possibly-running priority turn. The priority claim transaction must reject a
+claim whenever any ordinary or priority runtime turn is already active.
+
+Only one priority turn may be pending or running per owner. A later steer against
+an idle owner is serialized behind the first priority operation rather than
+creating concurrent work. No priority turn that may have reached Herdr is ever
+returned to a dispatchable state or automatically replayed.
 
 ## Exact target and effect fencing
 
@@ -81,17 +114,19 @@ Both controls persist a `TurnControlOperation` containing:
 - project and owner generation;
 - pane ID;
 - native agent-session identity;
-- durable logical turn ID;
-- native runtime turn ID;
+- effect mode, `native-steer`, `priority-turn`, or `interrupt`;
+- durable logical turn ID, once resolved or created;
+- native runtime turn ID when targeting an existing turn;
 - actor and source identity;
 - operation kind and steer payload, when applicable;
 - idempotency key, state, result, and timestamps.
 
 Before claiming an accepted operation, the workflow obtains a fresh Herdr pane
-observation and verifies generation, pane, native session, agent state, and
-runtime turn. The store atomically changes `accepted` to `dispatching` before
-the adapter is called. A duplicate idempotency key returns the existing result
-and never repeats the external effect.
+observation and verifies generation, pane, native session, agent state, and any
+runtime turn identity. The store atomically records the selected effect mode and
+changes `accepted` to `dispatching` before the adapter is called. A duplicate
+idempotency key returns the existing result and never repeats the external
+effect.
 
 The state meanings are:
 
@@ -109,10 +144,12 @@ interrupted `dispatching` operation becomes `uncertain`.
 
 ## Herdr adapter contract
 
-Steer continues to call Herdr's native agent-steer request with pane, native
-session, runtime turn, text, and idempotency key. The adapter validates the
-structured result and exposes delivered, rejected, unsupported, blocked, or
-delivery-uncertain outcomes without logging the steer payload.
+Working-mode steer calls Herdr's native agent-steer request with pane, native
+session, runtime turn, text, and idempotency key. Herdr performs the final exact
+turn compare-and-swap; a coarse `agent_status` observation is not sufficient to
+override a durable exact turn identity. Idle-mode steer uses the same formal
+agent prompt boundary as an ordinary turn, but through the priority claim path.
+Adapters validate structured results and never log the steer payload.
 
 The installed Herdr CLI does not currently expose an exact-turn `agent
 interrupt` command. Stop therefore uses a new `interruptAgent` port method. Its
@@ -130,11 +167,11 @@ only for internal lifecycle operations that are not user turn controls.
 
 ## Context boundaries and routing
 
-All `/swarm` commands continue to enter through `SwarmCommandGateway`. Its
-immutable command context captures the current Primary generation and active
-prompt ID. Immediately before execution, the gateway re-resolves active-turn
-context; `TurnControlWorkflow` then performs the stronger runtime identity
-validation.
+All `/swarm` commands continue to enter through `SwarmCommandGateway`. Steer is
+scoped to a Primary session rather than requiring an active-turn context, so an
+idle Primary can accept it. The immutable command context captures the Primary
+generation; `TurnControlWorkflow` performs the fresh state and runtime identity
+resolution immediately before selecting an effect mode.
 
 Worker commands continue to enter through `InstanceInteractionWorkflow`, which
 resolves the worker name within the current Primary ownership boundary. Both
@@ -171,9 +208,11 @@ cancelled, and no coordinator patches Lark directly.
   successor.
 - A transport timeout or malformed response after dispatch is uncertain and is
   never replayed.
-- Stop and steer aimed at the same turn are serialized by the target turn's
-  control lane. Once a stop has been dispatched, later controls for that turn
-  are rejected or remain behind it until fresh state proves applicability.
+- Stop, steer, priority-turn dispatch, and ordinary claim are serialized by the
+  owner lane. At most one runtime turn is authorized at a time.
+- A native not-active result is eligible for one fresh mode resolution only when
+  the result proves no effect was sent. Delivery-uncertain is terminal and never
+  retried or converted into a priority turn.
 - Natural turn completion racing with control dispatch is safe: revalidation
   rejects before the effect when completion is already visible; otherwise the
   observer settles the durable turn from authoritative transcript/runtime data.
@@ -182,8 +221,12 @@ cancelled, and no coordinator patches Lark directly.
 
 ## Component changes
 
-- Extend `TurnControlWorkflow` with a shared resolve, revalidate, claim, dispatch,
-  and recovery path for `steer` and `interrupt`.
+- Extend `TurnControlWorkflow` with shared state resolution and explicit
+  native-steer, priority-turn, and interrupt effect modes.
+- Add durable priority-turn acceptance and claim methods to the Primary and
+  Worker store ports without changing ordinary FIFO ordering.
+- Make ordinary Primary and Worker claims observe the priority-turn exclusion in
+  the same transaction.
 - Extend `HerdrPort` and `HerdrCliAdapter` with identity-bearing
   `interruptAgent`; keep terminal key mechanics inside the adapter.
 - Route Primary stop through `TurnControlWorkflow` and retire legacy
@@ -194,23 +237,26 @@ cancelled, and no coordinator patches Lark directly.
   temporary alias.
 - Use one result-card reducer/renderer for both operation kinds, with no payload
   disclosure.
-- Update help and Feishu usage documentation to describe exact-turn, no-fallback,
-  and no-replay behavior.
+- Change `/swarm steer` policy scope from active-turn to primary-session and
+  update help and Feishu usage documentation with idle priority behavior.
 
 ## Testing and verification
 
 Focused tests cover:
 
 1. Primary and Worker stop/steer parsing, including the legacy Worker alias.
-2. Exact generation, pane, native-session, logical-turn, and runtime-turn fences.
-3. Rejection for idle, changed, unsupported, and locally blocked runtimes.
-4. Persist-before-effect ordering and one external call for duplicate requests.
-5. Stop acknowledgement without premature durable turn settlement.
-6. Observer-driven cancelled settlement followed by the next FIFO claim.
-7. Transport failure and restart recovery to non-replayable uncertainty.
-8. Serialization of stop and steer targeting the same turn.
-9. Primary and Worker cards that omit steer payloads and expose safe outcomes.
-10. All text and card entry points reaching the same control workflow.
+2. Working steer uses exact native turn and session fences even when coarse
+   Herdr status is stale.
+3. Idle steer starts before an existing ordinary backlog while preserving that
+   backlog's order.
+4. Idle-to-working and working-to-idle races never authorize two turns.
+5. Blocked and unknown states reject without terminal input.
+6. Persist-before-effect ordering and one external call for duplicate requests.
+7. Stop acknowledgement without premature durable turn settlement.
+8. Transport failure and restart recovery preserve non-replayable uncertainty.
+9. Serialization of stop and steer targeting the same turn.
+10. Primary and Worker cards that omit steer payloads and expose safe outcomes.
+11. All text and card entry points reaching the same control workflow.
 
 Run the focused command, adapter, turn-control, Primary concurrency, Worker
 messaging, observer, and card suites, then `npm run typecheck`, `npm run build`,

@@ -1,10 +1,10 @@
 # Replace Steering and Queue Preemption Design
 
-> Superseded as an immediate implementation plan by
+> Deferred in favor of the priority-steer behavior in
 > `2026-09-05-native-turn-stop-and-steer-design.md`. Replacement remains a
-> possible higher-level workflow, but it must be composed from the independent
-> native `stop` and `steer` turn-control primitives after those primitives are
-> implemented and verified.
+> possible higher-level workflow for explicitly interrupting work and freezing
+> a backlog. Normal steer now starts a priority turn while idle, but does not
+> freeze or cancel ordinary FIFO work.
 
 ## Goal
 
@@ -23,9 +23,10 @@ and then runs one new emergency turn ahead of the frozen backlog. The backlog
 remains frozen after the emergency turn settles until the user explicitly
 resumes or cancels it.
 
-Normal `/swarm steer <text>` and `/steer <worker> <text>` retain their current
-meaning: inject text into the exact active native turn. They do not create a new
-turn, skip a queue, or fall back to FIFO dispatch.
+Normal `/swarm steer <text>` and `/steer <worker> <text>` use priority-steer
+semantics: inject into the exact active native turn, or start one priority turn
+ahead of ordinary FIFO work while idle. They do not interrupt the active turn,
+freeze the queue, or require an explicit resume.
 
 ## Why a durable queue barrier
 
