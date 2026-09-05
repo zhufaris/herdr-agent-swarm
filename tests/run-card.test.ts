@@ -69,8 +69,10 @@ describe("run card", () => {
   it("documents priority stop steering and its safety boundary", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/swarm stop");
-    expect(help).toContain("Herdr Esc");
+    expect(help).toContain("exact active turn");
+    expect(help).toContain("不取消 FIFO");
     expect(help).toContain("/swarm steer <文本>");
+    expect(help).toContain("不创建新任务");
     expect(help).toContain("其它 slash 命令会原样提交给 TraeX");
   });
 

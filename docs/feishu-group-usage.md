@@ -44,13 +44,15 @@ branch/worktree；Primary 由当前 Thread 的 binding 提供，不作为实例�
 /instance reviewer
 /to reviewer Review the SQLite transaction boundaries
 /steer reviewer Focus on generation fencing
-/interrupt reviewer
+/stop reviewer
 ```
 
 `/to` 始终创建一条新的 Worker 任务，并按该 Worker 的 FIFO 排队；即使这条命令是回复
 另一张任务卡发送的，也不会变成 steer 或 follow-up。`/steer` 只作用于该 Worker 当前唯一的
 active turn；没有 active turn、目标已经换代或 Agent 不支持 steering 时会明确拒绝，不会退化成
 一条新的 `/to` 任务。
+`/stop reviewer` 只中断该 Worker 当前唯一的 exact active turn，不停止 Worker 实例，也不取消
+其 FIFO backlog。旧命令 `/interrupt reviewer` 暂时作为同一操作的兼容别名。
 
 每次 `/to` 都会立即创建独立的 Worker task card。卡片从排队、准备、运行或阻塞推进到完成、
 失败、取消或 `dispatch-uncertain`，可信的结构化输出会持续写入这张卡。长输出会分页；已经
@@ -146,16 +148,18 @@ blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 H
 
 ### `/swarm stop`
 
-当当前话题有活动 TraeX turn 时，字面量 `/swarm stop` 会直接向 Herdr pane 发送 `Esc`，
-无论 TraeX 当前是 `working`、`blocked` 还是 `unknown`。它绕过普通 FIFO，不创建
-prompt，也不依赖 Herdr 是否识别出 named agent。
+当当前话题有活动 TraeX turn 时，字面量 `/swarm stop` 会锁定当前 binding generation、
+Primary pane、Agent session 和 runtime turn，再通过 Herdr native Agent control 发送 `Ctrl+C`。
+它绕过普通 FIFO且不创建 prompt，但必须拥有完整的 exact-turn identity。
 
 只有不带参数的 `/swarm stop`（大小写不敏感）具有这个含义。`/swarm stop now` 等带参数形式
 不会作为停止命令。若没有 active binding 或当前没有受 bridge 监督的活动 turn，Bridge
 会拒绝 `/swarm stop`，不会加入普通队列。
 
-`/swarm stop` 是 Herdr 本地 Esc 控制，不是 Bridge 对进程或 Herdr pane 的远程强杀，
-也不能批准、拒绝或绕过高风险操作。
+“中断已发送”只表示 native control 可能已送达，不代表 turn 已经终止。Bridge 继续通过
+authoritative Herdr observation 结算原 turn；已经可能开始的 turn 永不自动重放。Stop 不停止
+TraeX 进程或关闭 pane，也不能批准、拒绝或绕过高风险操作。Agent 处于 `blocked`、idle、
+unknown，或 exact identity 已变化时会拒绝远程 stop。
 
 ### `/swarm steer <文本>`
 
@@ -269,9 +273,10 @@ Primary binding、generation、pane/terminal/native session，再交给所属 wo
 不创建 CommandIntent；修改命令先持久化并按 context lane 串行执行。服务重启只恢复尚未
 开始的命令；已经开始但结果不确定的命令标记为 `uncertain`，不会盲目重放。
 
-未被多 Agent 命令层识别的 `/herdr`、`/model`、`/new`、`/stop` 以及其它 slash 命令，
+未被多 Agent 命令层识别的 `/herdr`、`/model`、`/new` 以及其它 slash 命令，
 会作为普通任务原样提交给绑定 pane 中的 TraeX，使其可使用自身命令与已安装 skills。
-顶层 `/steer <worker> <要求>` 属于多 Agent Worker 控制命令，不会进入 Primary FIFO。
+顶层 `/steer <worker> <要求>` 和 `/stop <worker>` 属于多 Agent Worker 控制命令，不会进入
+Primary FIFO。`/interrupt <worker>` 是 `/stop <worker>` 的临时兼容别名。
 
 ### `/swarm worker create <name> [options]`
 
@@ -372,7 +377,7 @@ TraeX 重发旧任务，不会写入 terminal；重复执行不会重复创建�
 
 旧版本留下的 legacy steering 记录在恢复时会标记为 rejected，不会自动重放。
 当前 native steering 操作在外部发送前持久化；若发送结果不确定，则标记为 uncertain，
-不会自动重试。`/swarm stop` 仍是显式优先级命令。
+不会自动重试。`/swarm stop` 使用相同的 durable exact-turn effect fence。
 
 ## 权限与审批
 
@@ -391,8 +396,8 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 - 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
 - 通过 `/swarm stop` 强制终止 TraeX 进程或 Herdr pane。
 
-`blocked` 时 `/swarm steer` 和 `/steer <worker>` 都不会发送文本；是否放行高风险操作
-仍由 Herdr 终端决定。
+`blocked` 时 `/swarm steer`、`/swarm stop`、`/steer <worker>` 和 `/stop <worker>` 都不会
+发送远程控制；是否放行高风险操作仍由 Herdr 终端决定。
 
 ## 从飞书关闭 Pane
 

@@ -313,7 +313,7 @@ export function renderHelpCard(): object {
       { tag: "markdown", content: [
         "**直接开始**",
         "@机器人 描述任务 → 选择项目 → 自动开始。",
-        "话题里的普通消息始终按 FIFO 排队；当前版本不支持向运行中的任务注入补充。", "",
+        "话题里的普通消息始终按 FIFO 排队；需要调整活动 turn 时使用显式 steer。", "",
         "**紧急操作**",
         "`/swarm stop` 停止当前任务 · `/swarm status` 刷新状态"
       ].join("\n") },
@@ -321,8 +321,8 @@ export function renderHelpCard(): object {
       { tag: "markdown", content: [
         "`/swarm new [标题]`  选择项目并创建 TraeX pane",
         "`/swarm reset [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
-        "`/swarm stop`  向活动 TraeX pane 发送 Herdr Esc，不进入任务队列",
-        "`/swarm steer <文本>`  当前不支持；拒绝且不写入 terminal",
+        "`/swarm stop`  中断 exact active turn，不停止 pane、不取消 FIFO",
+        "`/swarm steer <文本>`  向 exact active turn 注入指令，不创建新任务",
         "`/swarm projects`  打开项目选择卡片",
         "`/swarm spaces`  按 Space 查看全部 Pane",
         "`/swarm sessions`  查看当前群的会话",
