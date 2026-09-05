@@ -61,6 +61,60 @@ describe("PromptRunWorkflow durable safety scan", () => {
     await workflow.stop();
   });
 
+  it("requeues an unowned stale pre-dispatch claim and wakes its FIFO", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T00:00:10.000Z"));
+    const wake = vi.fn();
+    const candidate = { promptId: "p1", bindingId: "b1", updatedAt: "2026-09-05T00:00:00.000Z" };
+    const requeue = vi.fn(() => true);
+    const workflow = new PromptRunWorkflow({
+      store: {
+        scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
+        listStaleUndispatchedPromptClaims: vi.fn(() => [candidate]),
+        requeueStaleUndispatchedPromptClaim: requeue
+      } as never,
+      scheduler: { subscribe: () => () => {}, wake }, safetyScanIntervalMs: 100, staleClaimGraceMs: 1_000, turnTimeoutMs: 1_000,
+      herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    workflow.requestSafetyScan();
+
+    expect(requeue).toHaveBeenCalledWith(candidate);
+    expect(wake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "b1" });
+    expect(workflow.snapshot()).toMatchObject({ lastScanOutcome: "work_found", lastDiscovered: { recoveredClaims: 1 } });
+  });
+
+  it("does not requeue a stale claim while its binding worker is still alive", async () => {
+    const candidate = { promptId: "p1", bindingId: "b1", updatedAt: "2026-09-05T00:00:00.000Z" };
+    const requeue = vi.fn(() => true);
+    let claimCount = 0;
+    const workflow = new PromptRunWorkflow({
+      store: {
+        scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
+        listStaleUndispatchedPromptClaims: vi.fn(() => [candidate]),
+        requeueStaleUndispatchedPromptClaim: requeue,
+        claimNextDispatchablePrompt: vi.fn(() => claimCount++ === 0 ? {
+          binding: { id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" },
+          prompt: { id: "p1", bindingId: "b1", body: "work", state: "running", observationState: "not_started" },
+          model: null
+        } : null),
+        countPendingPrompts: () => 1,
+        getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" })
+      } as never,
+      scheduler: { subscribe: () => () => {}, wake: vi.fn() }, safetyScanIntervalMs: 100, staleClaimGraceMs: 1_000, turnTimeoutMs: 1_000,
+      transcriptReader: { async open() { return new Promise(() => undefined); } },
+      herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+    });
+
+    workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
+    await vi.waitFor(() => expect(workflow.snapshot().activeTurnWorkers).toBe(1));
+    workflow.requestSafetyScan();
+
+    expect(requeue).not.toHaveBeenCalled();
+  });
+
   it("reports terminal detached convergence as discovered work without exposing prompt identity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T00:00:00.000Z"));

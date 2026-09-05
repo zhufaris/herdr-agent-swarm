@@ -20,7 +20,7 @@ describe("prompt safety scan policy", () => {
 
     expect(result).toEqual({
       outcome: "work_found", consecutiveIdleScans: 0, nextDelayMs: 100,
-      discovered: { turns: 1, steering: 1, detached: 1, cancelled: 2, failedDetached: 3 }
+      discovered: { turns: 1, steering: 1, detached: 1, recoveredClaims: 0, cancelled: 2, failedDetached: 3 }
     });
     expect(JSON.stringify(result.discovered)).not.toContain("private");
   });
@@ -28,7 +28,14 @@ describe("prompt safety scan policy", () => {
   it("treats terminal convergence without hints as work", () => {
     expect(decidePromptSafetyScan({ cancelled: 1, failedDetached: 0, hints: [] }, 5, 100)).toMatchObject({
       outcome: "work_found", consecutiveIdleScans: 0, nextDelayMs: 100,
-      discovered: { turns: 0, steering: 0, detached: 0, cancelled: 1, failedDetached: 0 }
+      discovered: { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 1, failedDetached: 0 }
+    });
+  });
+
+  it("treats recovered orphan claims as discovered work", () => {
+    expect(decidePromptSafetyScan({ cancelled: 0, failedDetached: 0, hints: [] }, 3, 100, 1)).toMatchObject({
+      outcome: "work_found", consecutiveIdleScans: 0, nextDelayMs: 100,
+      discovered: { recoveredClaims: 1 }
     });
   });
 

@@ -199,6 +199,18 @@ describe("Herdr adapter structured control", () => {
     expect(dispatched).toBe(1);
   });
 
+  it("does not report dispatch when the shim proves no matching TraeX turn started", async () => {
+    const onDispatched = vi.fn();
+    const runner = { run: vi.fn(async (_command, _args, _timeout, onSpawn) => {
+      onSpawn?.();
+      throw new Error('{"error":{"code":"agent_prompt_not_started","message":"No matching TraeX turn started"}}');
+    }) };
+    const adapter = new HerdrCliAdapter(runner as never, "herdr", 100);
+
+    await expect(adapter.runPrompt("w1:p1", "/ti", 2_000, undefined, undefined, onDispatched)).rejects.toThrow("agent_prompt_not_started");
+    expect(onDispatched).not.toHaveBeenCalled();
+  });
+
   it("reports dispatch only after successful prompt completion", async () => {
     let releaseCompletion!: () => void;
     const completion = new Promise<void>((resolve) => { releaseCompletion = resolve; });

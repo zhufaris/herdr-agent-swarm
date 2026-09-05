@@ -44,6 +44,7 @@ interface PromptRunWorkflowOptions {
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
+  staleClaimGraceMs?: number;
   transcriptReader?: TraexTranscriptReaderPort;
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
   observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
@@ -69,6 +70,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly turns = new TurnSupervisor();
   private readonly shutdownGraceMs: number;
   private readonly safetyScanIntervalMs: number;
+  private readonly staleClaimGraceMs: number;
   private unsubscribe: (() => void) | null = null;
   private safetyTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -79,7 +81,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private nextSafetyScanAt: string | null = null;
   private lastScanAt: string | null = null;
   private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
-  private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 };
+  private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 };
   private lastScanFailureAt: string | null = null;
   private readonly legacyDetachedWithoutIdentity = new Set<string>();
   private readonly transcriptConflictTurns = new Map<string, Set<string>>();
@@ -87,6 +89,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   constructor(private readonly options: PromptRunWorkflowOptions) {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
     this.safetyScanIntervalMs = options.safetyScanIntervalMs ?? 5_000;
+    this.staleClaimGraceMs = options.staleClaimGraceMs ?? Math.max(10_000, this.safetyScanIntervalMs * 2);
   }
 
   prepareRecovery(): void {
@@ -109,6 +112,20 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.currentSafetyScanDelayMs = null;
     this.nextSafetyScanAt = null;
     try {
+      const staleCutoff = new Date(Date.now() - this.staleClaimGraceMs).toISOString();
+      let recoveredClaims = 0;
+      const recoveredBindings = new Set<string>();
+      const staleClaims = this.options.store.listStaleUndispatchedPromptClaims?.(staleCutoff, 100) ?? [];
+      for (const candidate of staleClaims) {
+        if (this.workers.has(candidate.bindingId) || this.turns.has(candidate.bindingId)) continue;
+        if (!this.options.store.requeueStaleUndispatchedPromptClaim?.(candidate)) continue;
+        recoveredClaims += 1;
+        recoveredBindings.add(candidate.bindingId);
+        this.options.logger.warn({
+          event: "orphaned-prompt-claim-requeued", bindingId: candidate.bindingId, promptId: candidate.promptId,
+          ageMs: Math.max(0, Date.now() - Date.parse(candidate.updatedAt)), outcome: "requeued_before_dispatch"
+        }, "requeued an unowned prompt claim with no durable dispatch evidence");
+      }
       const result = this.options.store.scanDurablePromptWork();
       for (const promptId of this.legacyDetachedWithoutIdentity) {
         const prompt = this.options.store.getPrompt(promptId);
@@ -118,8 +135,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         const prompt = this.options.store.getPrompt(promptId);
         if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.transcriptConflictTurns.delete(promptId);
       }
-      const decision = decidePromptSafetyScan(result, this.consecutiveIdleScans, this.safetyScanIntervalMs);
+      const decision = decidePromptSafetyScan(result, this.consecutiveIdleScans, this.safetyScanIntervalMs, recoveredClaims);
       for (const hint of result.hints) this.options.scheduler.wake(hint);
+      for (const bindingId of recoveredBindings) this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
       this.lastDiscovered = decision.discovered;
       this.lastScanOutcome = decision.outcome;
       this.consecutiveIdleScans = decision.consecutiveIdleScans;
@@ -128,7 +146,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         event: "prompt-backlog-converged", cancelled: result.cancelled, failedDetached: result.failedDetached, outcome: "terminalized"
       }, "converged prompt work whose bindings can no longer dispatch or observe");
     } catch (error) {
-      this.lastDiscovered = { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 };
+      this.lastDiscovered = { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 };
       this.lastScanOutcome = "failed";
       const decision = decidePromptSafetyScanFailure(this.safetyScanIntervalMs);
       this.consecutiveIdleScans = decision.consecutiveIdleScans;
@@ -328,7 +346,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         await attachedTranscriptObserver;
         attachedTranscriptObserver = null;
         await turnStartedPublication;
-        if (!this.isBindingActive(bindingId)) return;
+        if (!this.isBindingActive(bindingId) && this.options.store.getBinding(bindingId)?.lifecycle !== "draining") {
+          observerDetached = true;
+          this.options.store.markPromptObservationDetached(prompt.id, "Session changed after dispatch; the prompt will not be replayed.");
+          return;
+        }
         const stateBeforeReturn = binding.lastAgentState;
         this.turns.updateState(bindingId, prompt.id, state);
         binding = this.options.store.transitionBinding(bindingId, { type: "pane_observed", runtime: state });
@@ -350,7 +372,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         stopAttachedTranscript?.abort();
         if (attachedTranscriptObserver) await attachedTranscriptObserver;
         attachedTranscriptObserver = null;
-        if (!this.isBindingActive(bindingId)) { observerDetached = true; return; }
         const failure = decidePromptExecutionFailure({ dispatched, stopping: this.stopping, observerAborted: abortController.signal.aborted, error: errorMessage(error) });
         if (failure.kind === "detach") {
           await turnStartedPublication;

@@ -172,7 +172,8 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
   let previousSignature = "";
   for (;;) {
     const currentTime = dependencies.now();
-    if ((!owned && currentTime >= startDeadline) || (owned && turnDeadline !== null && currentTime >= turnDeadline)) return submitted;
+    if (!owned && currentTime >= startDeadline) return promptNotStartedResult();
+    if (owned && turnDeadline !== null && currentTime >= turnDeadline) return submitted;
     let observation: TraexTranscriptObservation;
     try { observation = opened.cursor.readObservation ? await opened.cursor.readObservation() : { answerDelta: await opened.cursor.readDelta() }; }
     catch { return submitted; }
@@ -184,7 +185,12 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
         previousSignature = signature;
         continue;
       }
-      if (!lifecycle || lifecycle.turnId !== observation.turnId || Date.parse(lifecycle.startedAt) < dispatchBoundaryMs) return submitted;
+      if (!lifecycle || lifecycle.turnId !== observation.turnId) return submitted;
+      if (Date.parse(lifecycle.startedAt) < dispatchBoundaryMs) {
+        await dependencies.sleep(signature === previousSignature ? 100 : 50);
+        previousSignature = signature;
+        continue;
+      }
       owned = lifecycle;
     } else if (observation.freshTurnStart && lifecycle && lifecycle.turnId !== owned.turnId) {
       return submitted;
@@ -205,6 +211,14 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
     else await dependencies.sleep(50);
     previousSignature = signature;
   }
+}
+
+function promptNotStartedResult(): TraexPromptCommandResult {
+  return {
+    exitCode: 1,
+    stdout: "",
+    stderr: JSON.stringify({ error: { code: "agent_prompt_not_started", message: "No matching TraeX turn started within the settlement window" } })
+  };
 }
 
 function managedTraexSession(agent: TraexPromptAgent | null): { source: string; agent: string; kind: "id"; value: string } | null {

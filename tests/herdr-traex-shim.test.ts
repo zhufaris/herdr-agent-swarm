@@ -149,7 +149,7 @@ describe("Herdr TraeX prompt transcript settlement", () => {
 
   it("bounds the wait for a missing fresh turn independently of the command timeout", async () => {
     const fixture = promptFixture([{ answerDelta: "" }]);
-    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled") });
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_not_started") });
     expect(fixture.submit).toHaveBeenCalledOnce();
     expect(fixture.sleep.mock.calls.length).toBeGreaterThan(0);
     expect(fixture.sleep.mock.calls.length).toBeLessThan(60);
@@ -157,12 +157,16 @@ describe("Herdr TraeX prompt transcript settlement", () => {
 
   it.each([
     ["no fresh turn", [{ answerDelta: "" }]],
-    ["old turn", [{ ...completed, turnLifecycle: { ...completed.turnLifecycle, startedAt: "2026-09-04T07:59:58.000Z" } }]],
-    ["ambiguous turns", [completed, { ...completed, turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f", freshTurnStart: true, turnLifecycle: { ...completed.turnLifecycle, turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f" } }]]
-  ])("preserves stalled for %s", async (_label, observations) => {
+    ["old turn", [{ ...completed, turnLifecycle: { ...completed.turnLifecycle, startedAt: "2026-09-04T07:59:58.000Z" } }]]
+  ])("reports no matching turn start for %s", async (_label, observations) => {
     const fixture = promptFixture(observations);
-    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled") });
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_not_started") });
     expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
+  it("preserves stalled when a second fresh turn makes settlement ambiguous", async () => {
+    const fixture = promptFixture([completed, { ...completed, turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f", freshTurnStart: true, turnLifecycle: { ...completed.turnLifecycle, turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f" } }]);
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled") });
   });
 
   it("passes explicit pre-dispatch errors through unchanged", async () => {

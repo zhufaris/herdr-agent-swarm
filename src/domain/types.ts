@@ -58,6 +58,12 @@ export interface DurablePromptWorkScan {
   hints: PromptWorkHint[];
 }
 
+export interface StalePromptClaim {
+  promptId: string;
+  bindingId: string;
+  updatedAt: string;
+}
+
 export interface InstanceLease {
   ownerId: string;
   fencingToken: number;
@@ -463,7 +469,7 @@ export interface PromptWorkerDiagnostics {
   nextSafetyScanAt: string | null;
   lastScanAt: string | null;
   lastScanOutcome: "idle" | "work_found" | "failed" | null;
-  lastDiscovered: { turns: number; steering: number; detached: number; cancelled: number; failedDetached: number };
+  lastDiscovered: { turns: number; steering: number; detached: number; recoveredClaims: number; cancelled: number; failedDetached: number };
   lastScanFailureAt: string | null;
 }
 

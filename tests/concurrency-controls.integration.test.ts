@@ -684,6 +684,45 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
+  it("fails a prompt proven not started and continues the binding FIFO", async () => {
+    let rejectFirst!: () => void;
+    const firstMayFinish = new Promise<void>((resolve) => { rejectFirst = resolve; });
+    const runPrompt = vi.fn(async (_paneId: string, text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      if (text === "/ti") {
+        await firstMayFinish;
+        throw new Error('{"error":{"code":"agent_prompt_not_started","message":"No matching TraeX turn started"}}');
+      }
+      await onDispatched?.();
+      return "done" as const;
+    });
+    const herdr: HerdrPort = { ...emptyHerdr(), runPrompt, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; } };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true });
+
+    try {
+      await coordinator.start();
+      await coordinator.handleMessage({ eventId: "not-started-e1", messageId: "not-started-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "/ti", mentionsBot: false, isRootMessage: false });
+      await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce());
+      await coordinator.handleMessage({ eventId: "not-started-e2", messageId: "not-started-m2", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "second queued work", mentionsBot: false, isRootMessage: false });
+      rejectFirst();
+
+      await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledTimes(2));
+      const cards = () => store.listRunCards("b1");
+      await vi.waitFor(() => expect(cards().find(({ requestText }) => requestText === "second queued work")).toMatchObject({ phase: "completed" }));
+      const first = cards().find(({ requestText }) => requestText === "/ti")!;
+      expect(store.getPrompt(first.promptId)).toMatchObject({ state: "failed", observationState: "completed", dispatchedAt: null, transcriptTurnId: null });
+      expect(runPrompt.mock.calls.map((call) => call[1])).toEqual(["/ti", "second queued work"]);
+    } finally {
+      rejectFirst();
+      await coordinator.stop(); await publisher.stop(); store.close();
+    }
+  });
+
   it("rejects transcript output whose lifecycle predates dispatch tolerance", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     const transcriptReader: TraexTranscriptReaderPort = {

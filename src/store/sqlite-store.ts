@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { AcceptInstanceTurnWithCardInput, BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -2233,6 +2233,39 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       for (const row of turns) hints.push({ kind: "prompt-ready", bindingId: row.binding_id });
       this.database.exec("COMMIT");
       return { cancelled: Number(result.changes), failedDetached: Number(detachedResult.changes), hints };
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  listStaleUndispatchedPromptClaims(updatedBefore: string, limit: number): StalePromptClaim[] {
+    if (!Number.isFinite(Date.parse(updatedBefore))) throw new Error("Invalid stale prompt cutoff");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new Error("Invalid stale prompt claim limit");
+    const rows = this.database.prepare(`
+      SELECT id, binding_id, updated_at FROM prompt_jobs
+      WHERE state = 'running' AND dispatch_kind = 'turn' AND observation_state = 'not_started'
+        AND dispatched_at IS NULL AND transcript_turn_id IS NULL AND updated_at < ?
+      ORDER BY updated_at, rowid LIMIT ?
+    `).all(updatedBefore, limit) as Array<{ id: string; binding_id: string; updated_at: string }>;
+    return rows.map((row) => ({ promptId: row.id, bindingId: row.binding_id, updatedAt: row.updated_at }));
+  }
+
+  requeueStaleUndispatchedPromptClaim(candidate: StalePromptClaim): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const timestamp = now();
+      const result = this.database.prepare(`
+        UPDATE prompt_jobs SET state = 'queued', observation_state = 'not_started', error = NULL, updated_at = ?
+        WHERE id = ? AND binding_id = ? AND updated_at = ?
+          AND state = 'running' AND dispatch_kind = 'turn' AND observation_state = 'not_started'
+          AND dispatched_at IS NULL AND transcript_turn_id IS NULL
+      `).run(timestamp, candidate.promptId, candidate.bindingId, candidate.updatedAt);
+      if (Number(result.changes) !== 1) { this.database.exec("COMMIT"); return false; }
+      this.database.prepare(`
+        UPDATE run_cards SET phase = 'queued', started_at = NULL, finished_at = NULL, notice = NULL,
+          queue_position = 1, activity_at = ?, view_version = view_version + 1, updated_at = ?
+        WHERE prompt_id = ? AND phase IN ('queued','running')
+      `).run(timestamp, timestamp, candidate.promptId);
+      this.database.exec("COMMIT");
+      return true;
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 

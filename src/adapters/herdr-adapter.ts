@@ -428,7 +428,7 @@ function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
 
 function isExplicitPreDispatchAgentPromptError(error: unknown): boolean {
   const code = structuredHerdrErrorCode(error);
-  return code === "agent_not_found" || code === "agent_not_ready" || code === "agent_blocked";
+  return code === "agent_not_found" || code === "agent_not_ready" || code === "agent_blocked" || code === "agent_prompt_not_started";
 }
 
 function isPossiblyDispatchedAgentPromptError(error: unknown): boolean {

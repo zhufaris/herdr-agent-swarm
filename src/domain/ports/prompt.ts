@@ -1,5 +1,5 @@
 import type { ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../ports.js";
-import type { Binding, BindingMetadataPatch, DurablePromptWorkScan, OperationalSummary, PromptJob, StaleOutboxQuarantineRecovery } from "../types.js";
+import type { Binding, BindingMetadataPatch, DurablePromptWorkScan, OperationalSummary, PromptJob, StaleOutboxQuarantineRecovery, StalePromptClaim } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { MainCardReservationOutcome } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
@@ -28,6 +28,8 @@ export interface PromptRunStore {
   recoverRunningPrompts(): number;
   listDetachedPrompts(): PromptJob[];
   scanDurablePromptWork(): DurablePromptWorkScan;
+  listStaleUndispatchedPromptClaims?(updatedBefore: string, limit: number): StalePromptClaim[];
+  requeueStaleUndispatchedPromptClaim?(candidate: StalePromptClaim): boolean;
   getBinding(id: string): Binding | null;
   getPrompt(id: string): PromptJob | null;
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;

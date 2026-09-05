@@ -3537,6 +3537,41 @@ describe("SQLite store", () => {
     expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, failedDetached: 0, hints: [] });
   });
 
+  it("atomically requeues only a stale pre-dispatch claim with no delivery evidence", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "orphan", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "private", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "orphan", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "private" }, view, rootMessageId: "m1", answerCard: {} });
+    store.claimNextDispatchablePrompt("b1");
+    store.database.prepare("UPDATE prompt_jobs SET updated_at = '2026-09-05T00:00:01.000Z' WHERE id = 'orphan'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-09-05T00:00:01.000Z' WHERE prompt_id = 'orphan'").run();
+
+    expect(store.listStaleUndispatchedPromptClaims("2026-09-05T00:00:00.999Z", 10)).toEqual([]);
+    const [candidate] = store.listStaleUndispatchedPromptClaims("2026-09-05T00:00:02.000Z", 10);
+    expect(candidate).toEqual({ promptId: "orphan", bindingId: "b1", updatedAt: "2026-09-05T00:00:01.000Z" });
+    expect(store.requeueStaleUndispatchedPromptClaim(candidate!)).toBe(true);
+    expect(store.getPrompt("orphan")).toMatchObject({ state: "queued", observationState: "not_started", dispatchedAt: null, transcriptTurnId: null });
+    expect(store.loadRunCard("orphan")).toMatchObject({ phase: "queued", startedAt: null, notice: null });
+    expect(store.scanDurablePromptWork().hints).toContainEqual({ kind: "prompt-ready", bindingId: "b1" });
+    expect(store.requeueStaleUndispatchedPromptClaim(candidate!)).toBe(false);
+  });
+
+  it.each([
+    ["dispatch timestamp", "UPDATE prompt_jobs SET dispatched_at = '2026-09-05T00:00:01.500Z' WHERE id = 'p1'"],
+    ["transcript identity", "UPDATE prompt_jobs SET transcript_turn_id = 'turn-1' WHERE id = 'p1'"]
+  ])("never offers a stale claim with %s for replay", (_label, evidenceSql) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "private" });
+    store.claimNextDispatchablePrompt("b1");
+    store.database.prepare(evidenceSql).run();
+    store.database.prepare("UPDATE prompt_jobs SET updated_at = '2026-09-05T00:00:01.000Z' WHERE id = 'p1'").run();
+
+    expect(store.listStaleUndispatchedPromptClaims("2026-09-05T00:00:02.000Z", 10)).toEqual([]);
+  });
+
   it("claims steering in order and fails leftovers instead of converting them to turns", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

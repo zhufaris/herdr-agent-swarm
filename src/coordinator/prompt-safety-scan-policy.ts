@@ -15,15 +15,16 @@ export interface PromptSafetyScanDecision {
 export function decidePromptSafetyScan(
   scan: DurablePromptWorkScan,
   previousConsecutiveIdleScans: number,
-  baseDelayMs: number
+  baseDelayMs: number,
+  recoveredClaims = 0
 ): PromptSafetyScanDecision {
-  const discovered = { turns: 0, steering: 0, detached: 0, cancelled: scan.cancelled, failedDetached: scan.failedDetached };
+  const discovered = { turns: 0, steering: 0, detached: 0, recoveredClaims, cancelled: scan.cancelled, failedDetached: scan.failedDetached };
   for (const hint of scan.hints) {
     if (hint.kind === "prompt-ready") discovered.turns += 1;
     else if (hint.kind === "steering-ready") discovered.steering += 1;
     else if (hint.kind === "detached-observer-ready") discovered.detached += 1;
   }
-  const outcome = scan.hints.length > 0 || scan.cancelled > 0 || scan.failedDetached > 0 ? "work_found" : "idle";
+  const outcome = scan.hints.length > 0 || recoveredClaims > 0 || scan.cancelled > 0 || scan.failedDetached > 0 ? "work_found" : "idle";
   const consecutiveIdleScans = outcome === "idle" ? previousConsecutiveIdleScans + 1 : 0;
   const nextDelayMs = outcome === "idle"
     ? baseDelayMs * Math.min(2 ** Math.max(0, consecutiveIdleScans - 1), 6)
