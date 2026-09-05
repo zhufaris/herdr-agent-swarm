@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexStart, TraexStartError } from "../src/runtime/herdr-traex-shim.js";
+import { describe, expect, it, vi } from "vitest";
+import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexPrompt, runHerdrTraexStart, TraexStartError } from "../src/runtime/herdr-traex-shim.js";
 
 describe("Herdr TraeX shim invocation", () => {
   it.each([
@@ -18,6 +18,15 @@ describe("Herdr TraeX shim invocation", () => {
     [["api", "snapshot"]]
   ])("projects local agent-bearing JSON for %j", (argv) => {
     expect(parseHerdrShimInvocation(argv)).toEqual({ kind: "project", argv });
+  });
+
+  it("intercepts only a local prompt wait with a valid timeout", () => {
+    expect(parseHerdrShimInvocation(["agent", "prompt", "reviewer", "hello", "--wait", "--timeout", "120000"])).toEqual({
+      kind: "prompt-traex", target: "reviewer", text: "hello", argv: ["agent", "prompt", "reviewer", "hello", "--wait", "--timeout", "120000"],
+      timeoutMs: 120000, until: []
+    });
+    expect(parseHerdrShimInvocation(["agent", "prompt", "reviewer", "hello"])).toEqual({ kind: "project", argv: ["agent", "prompt", "reviewer", "hello"] });
+    expect(parseHerdrShimInvocation(["agent", "prompt", "reviewer", "hello", "--wait", "--timeout", "invalid"])).toEqual({ kind: "project", argv: ["agent", "prompt", "reviewer", "hello", "--wait", "--timeout", "invalid"] });
   });
 
   it("parses the exact local TraeX start and preserves trailing argv", () => {
@@ -42,6 +51,30 @@ describe("Herdr TraeX shim invocation", () => {
       kind: "steer-traex", target: "reviewer", text: "focus on generation fencing",
       turnId: "turn-42", idempotencyKey: "message:123", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, timeoutMs: 2500
     });
+  });
+
+  it("parses a session-fenced model catalog request", () => {
+    expect(parseHerdrShimInvocation([
+      "agent", "model-list", "reviewer", "--agent-session",
+      '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"01a03eb1-c193-7531-83c0-e6c6f70143d4"}',
+      "--timeout", "2500"
+    ])).toEqual({
+      kind: "model-list-traex", target: "reviewer", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" }, timeoutMs: 2500
+    });
+  });
+
+  it("parses two-phase model prompt commands without losing prompt boundaries", () => {
+    const digest = "a".repeat(64);
+    const session = '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"01a03eb1-c193-7531-83c0-e6c6f70143d4"}';
+    expect(parseHerdrShimInvocation(["agent", "model-prompt", "prepare", "reviewer", "--model", "GPT-5.4", "--model-revision", "3", "--prompt-sha256", digest, "--agent-session", session, "--timeout", "2500"])).toMatchObject({ kind: "model-prompt-prepare", target: "reviewer", model: "GPT-5.4", revision: 3, promptSha256: digest, timeoutMs: 2500 });
+    expect(parseHerdrShimInvocation(["agent", "model-prompt", "commit", "b".repeat(64), "hello world", "--prompt-sha256", digest, "--timeout", "2500"])).toEqual({ kind: "model-prompt-commit", operationId: "b".repeat(64), text: "hello world", promptSha256: digest, timeoutMs: 2500 });
+  });
+
+  it.each([
+    [["agent", "model-list", "reviewer"], /agent-session/],
+    [["agent", "model-list", "reviewer", "--agent-session", '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"not-a-uuid"}'], /session/i]
+  ])("rejects an unfenced model catalog invocation %j", (argv, error) => {
+    expect(() => parseHerdrShimInvocation(argv)).toThrow(error);
   });
 
   it.each([
@@ -85,6 +118,51 @@ describe("Herdr TraeX shim invocation", () => {
     expect(() => parseHerdrShimInvocation(argv)).toThrow(error);
   });
 
+});
+
+describe("Herdr TraeX prompt transcript settlement", () => {
+  const completed = { turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0e", freshTurnStart: true, answerDelta: "HERDR_082_OK", turnLifecycle: { turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0e", state: "completed" as const, startedAt: "2026-09-04T08:00:00.000Z", finalAnswer: "HERDR_082_OK" } };
+
+  it("converts a stalled short completed turn to success without replaying", async () => {
+    const fixture = promptFixture([completed]);
+    const result = await runHerdrTraexPrompt(promptInput(), fixture.dependencies);
+    expect(result).toMatchObject({ exitCode: 0, result: { agent: { agent_status: "idle" } } });
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
+  it("waits for the exact fresh active turn to complete", async () => {
+    const turn = completed.turnLifecycle.turnId;
+    const fixture = promptFixture([
+      { turnId: turn, freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: turn, state: "active" as const, startedAt: completed.turnLifecycle.startedAt } },
+      { turnId: turn, answerDelta: "done", turnLifecycle: completed.turnLifecycle }
+    ]);
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 0 });
+    expect(fixture.submit).toHaveBeenCalledOnce();
+    expect(fixture.sleep).toHaveBeenCalled();
+  });
+
+  it("waits past unrelated transcript observations for the fresh turn", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }, completed]);
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 0 });
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["no fresh turn", [{ answerDelta: "" }]],
+    ["old turn", [{ ...completed, turnLifecycle: { ...completed.turnLifecycle, startedAt: "2026-09-04T07:59:58.000Z" } }]],
+    ["ambiguous turns", [completed, { ...completed, turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f", freshTurnStart: true, turnLifecycle: { ...completed.turnLifecycle, turnId: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f" } }]]
+  ])("preserves stalled for %s", async (_label, observations) => {
+    const fixture = promptFixture(observations);
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled") });
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
+  it("passes explicit pre-dispatch errors through unchanged", async () => {
+    const fixture = promptFixture([completed], { code: "agent_blocked" });
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_blocked") });
+    expect(fixture.openTranscript).toHaveBeenCalledOnce();
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Herdr TraeX managed start", () => {
@@ -209,4 +287,24 @@ function startInput() { return { name: "reviewer", paneId: "w1:p1", timeoutMs: 5
 function startConfig() { return { realHerdr: "/opt/herdr", traex: "/opt/traex", launcher: "/opt/shim/pane-launcher", reporter: "/opt/shim/reporter.js", requestDir: "/run/user/1/shim", sessionPeersDir: "/home/user/.trae/cli/session-peers", steeringOperationDir: "/home/user/.local/state/herdr-traex-shim/steering-operations", validatedHerdrVersion: "0.7.5" }; }
 function fakeStartDependencies(runHerdr: (args: string[]) => Promise<{ stdout: string; stderr: string }>, onWrite = () => undefined) {
   return { runHerdr, writeRequest: async () => { onWrite(); return "abc"; }, removeRequest: async () => undefined, processExecutable: async () => null, processStartTicks: async () => null, startReporter: () => undefined, sleep: async () => undefined, now: (() => { let now = 0; return () => ++now; })(), generateSessionId: () => "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
+}
+
+function promptInput() {
+  return { target: "reviewer", text: "secret prompt", argv: ["agent", "prompt", "reviewer", "secret prompt", "--wait", "--timeout", "120000"], timeoutMs: 120000, until: [] };
+}
+
+function promptFixture(observations: Array<Record<string, unknown>>, error: { code: string } = { code: "agent_prompt_stalled" }) {
+  const submit = vi.fn(async () => ({ exitCode: 1, stdout: "", stderr: JSON.stringify({ error }) }));
+  const sleep = vi.fn(async () => undefined);
+  const openTranscript = vi.fn(async (_session, _expectedPrompt) => {
+    const queue = [...observations];
+    return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return queue.shift() ?? { answerDelta: "" }; } } };
+  });
+  let now = Date.parse("2026-09-04T08:00:00.100Z");
+  const agent = { agent: "traex", display_agent: "traex", agent_status: "idle", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a06b5e-2a25-7c53-b12e-ed02181a4e0e" } };
+  return { submit, sleep, openTranscript, dependencies: {
+    resolveAgent: async () => agent,
+    openTranscript, submit, currentAgent: async () => agent,
+    sleep, now: () => { now += 100; return now; }
+  } };
 }

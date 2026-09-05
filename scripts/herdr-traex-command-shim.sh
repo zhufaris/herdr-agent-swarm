@@ -12,16 +12,23 @@ if [[ $current_version != "$validated_herdr_version" ]]; then
 fi
 
 intercept=0
+requires_validated_version=0
 if [[ ${1:-} == agent && ${2:-} == start ]]; then
   for ((index = 3; index <= $#; index++)); do
     [[ ${!index} == -- ]] && break
     if [[ ${!index} == --kind ]]; then
       next=$((index + 1))
-      [[ $next -le $# && ${!next} == traex ]] && intercept=1
+      [[ $next -le $# && ${!next} == traex ]] && { intercept=1; requires_validated_version=1; }
     fi
   done
 fi
-if [[ ${1:-} == agent && ${2:-} == steer ]]; then intercept=1; fi
+if [[ ${1:-} == agent && ${2:-} == steer ]]; then intercept=1; requires_validated_version=1; fi
+if [[ ${1:-} == agent && ${2:-} =~ ^(model-list|model-prompt)$ ]]; then intercept=1; requires_validated_version=1; fi
+if [[ ${1:-} == agent && ${2:-} == prompt ]]; then
+  for ((index = 3; index <= $#; index++)); do
+    [[ ${!index} == --wait ]] && intercept=1
+  done
+fi
 
 project=0
 if [[ ${1:-} == api && ${2:-} == snapshot ]]; then project=1; fi
@@ -29,7 +36,7 @@ if [[ ${1:-} == pane && ${2:-} =~ ^(list|get|current)$ ]]; then project=1; fi
 if [[ ${1:-} == agent && ${2:-} =~ ^(list|get|prompt|wait|focus|rename)$ ]]; then project=1; fi
 
 if (( intercept || project )); then
-  if (( intercept )) && [[ $current_version != "$validated_herdr_version" ]]; then
+  if (( requires_validated_version )) && [[ $current_version != "$validated_herdr_version" ]]; then
     echo "herdr-traex-shim: managed TraeX command refused because current Herdr is not validated" >&2
     exit 1
   fi

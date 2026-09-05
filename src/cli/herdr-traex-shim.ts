@@ -4,9 +4,13 @@ import { chmod, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promise
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexStart, type TraexLaunchConfig, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
+import { dirname, resolve } from "node:path";
+import { parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexPrompt, runHerdrTraexStart, type TraexLaunchConfig, type TraexPromptCommandResult, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
 import { findTraexSessionPeer } from "../runtime/traex-session-peer.js";
 import { steerTraexTurn } from "../runtime/traex-native-steering.js";
+import { TraexPromptTranscriptReader } from "../runtime/traex-prompt-settlement.js";
+import { listTraexModels } from "../runtime/traex-model-protocol.js";
+import { commitTraexModelPrompt, prepareTraexModelPrompt } from "../runtime/traex-model-prompt.js";
 
 async function main(): Promise<void> {
   const configPath = process.env.HERDR_TRAEX_SHIM_CONFIG;
@@ -20,6 +24,23 @@ async function main(): Promise<void> {
     if (stdout) process.stdout.write(stdout);
     if (delegated.stderr) process.stderr.write(delegated.stderr);
     process.exitCode = delegated.exitCode;
+    return;
+  }
+  if (invocation.kind === "prompt-traex") {
+    const reader = new TraexPromptTranscriptReader(resolve(dirname(config.sessionPeersDir), "sessions"));
+    const outcome = await runHerdrTraexPrompt(invocation, {
+      resolveAgent: async (target) => projectTraexAgentJson(parseAgent((await run(config.realHerdr, ["agent", "get", target], 10_000)).stdout)) as ReturnType<typeof parseAgent>,
+      openTranscript: (session, expectedPrompt) => reader.open(session, expectedPrompt),
+      submit: (argv, timeoutMs) => runCaptured(config.realHerdr, argv, timeoutMs === null ? undefined : timeoutMs + 10_000),
+      currentAgent: async (target) => projectTraexAgentJson(parseAgent((await run(config.realHerdr, ["agent", "get", target], 10_000)).stdout)) as ReturnType<typeof parseAgent>,
+      sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+      now: Date.now
+    });
+    let stdout = outcome.stdout;
+    try { stdout = `${JSON.stringify(projectTraexAgentJson(JSON.parse(stdout)))}\n`; } catch { /* Preserve non-JSON native output. */ }
+    if (stdout) process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
+    if (outcome.stderr) process.stderr.write(outcome.stderr.endsWith("\n") ? outcome.stderr : `${outcome.stderr}\n`);
+    process.exitCode = outcome.exitCode;
     return;
   }
   if (invocation.kind === "steer-traex") {
@@ -38,6 +59,34 @@ async function main(): Promise<void> {
     const result = await steerTraexTurn({ peer, expectedTurnId: invocation.turnId, text: invocation.text, idempotencyKey: invocation.idempotencyKey }, { operationDir: config.steeringOperationDir, timeoutMs: invocation.timeoutMs });
     process.stdout.write(`${JSON.stringify({ id: "cli:agent:steer", result: { type: "agent_steered", ...result } })}\n`);
     return;
+  }
+  if (invocation.kind === "model-list-traex") {
+    const rawTarget = parseAgent((await run(config.realHerdr, ["agent", "get", invocation.target], invocation.timeoutMs)).stdout);
+    const target = projectTraexAgentJson(rawTarget) as typeof rawTarget;
+    const session = target.agent_session;
+    if (target.display_agent !== "traex" || target.agent !== "traex" || !session || session.source !== invocation.agentSession.source || session.kind !== invocation.agentSession.kind || session.value !== invocation.agentSession.value) {
+      throw Object.assign(new Error("Agent session identity changed"), { code: "agent_model_list_stale" });
+    }
+    const peer = await findTraexSessionPeer(config.sessionPeersDir, invocation.agentSession.value);
+    if (!peer) throw Object.assign(new Error("TraeX native session peer is unavailable"), { code: "agent_model_list_unsupported" });
+    const models = await listTraexModels(peer, { timeoutMs: invocation.timeoutMs });
+    process.stdout.write(`${JSON.stringify({ id: "cli:agent:model-list", result: { type: "agent_models", models } })}\n`);
+    return;
+  }
+  const modelPromptOperationDir = resolve(dirname(config.steeringOperationDir), "model-prompt-operations");
+  if (invocation.kind === "model-prompt-prepare") {
+    const rawTarget = parseAgent((await run(config.realHerdr, ["agent", "get", invocation.target], invocation.timeoutMs)).stdout);
+    const target = projectTraexAgentJson(rawTarget) as typeof rawTarget; const session = target.agent_session;
+    if (target.display_agent !== "traex" || target.agent !== "traex" || target.agent_status !== "idle" && target.agent_status !== "done" || !session || session.source !== invocation.agentSession.source || session.kind !== invocation.agentSession.kind || session.value !== invocation.agentSession.value) throw Object.assign(new Error("Agent session identity or state changed"), { code: "agent_model_prompt_stale" });
+    const peer = await findTraexSessionPeer(config.sessionPeersDir, invocation.agentSession.value); if (!peer) throw Object.assign(new Error("TraeX native session peer is unavailable"), { code: "agent_model_prompt_unsupported" });
+    const models = await listTraexModels(peer, { timeoutMs: invocation.timeoutMs });
+    if (!models.some((entry) => entry.name === invocation.model)) throw Object.assign(new Error("Selected model is no longer available"), { code: "agent_model_prompt_stale" });
+    const result = await prepareTraexModelPrompt({ peer, target: invocation.target, model: invocation.model, revision: invocation.revision, promptSha256: invocation.promptSha256 }, { operationDir: modelPromptOperationDir, timeoutMs: invocation.timeoutMs });
+    process.stdout.write(`${JSON.stringify({ id: "cli:agent:model-prompt:prepare", result: { type: "agent_model_prompt", ...result } })}\n`); return;
+  }
+  if (invocation.kind === "model-prompt-commit") {
+    const result = await commitTraexModelPrompt({ operationId: invocation.operationId, text: invocation.text, promptSha256: invocation.promptSha256 }, { operationDir: modelPromptOperationDir, timeoutMs: invocation.timeoutMs });
+    process.stdout.write(`${JSON.stringify({ id: "cli:agent:model-prompt:commit", result: { type: "agent_model_prompt", ...result } })}\n`); return;
   }
   if (invocation.kind !== "start-traex") throw new Error("Shim entrypoint accepts only managed TraeX commands");
   const result = await runHerdrTraexStart(invocation, config, dependencies(config));
@@ -78,6 +127,13 @@ function runProjected(executable: string, args: string[]): Promise<{ stdout: str
   return new Promise((resolve) => execFile(executable, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
     const exitCode = error && typeof error === "object" && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
     resolve({ stdout, stderr, exitCode });
+  }));
+}
+
+function runCaptured(executable: string, args: string[], timeout?: number): Promise<TraexPromptCommandResult> {
+  return new Promise((resolveResult) => execFile(executable, args, { ...(timeout === undefined ? {} : { timeout }), encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const exitCode = error && typeof error === "object" && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+    resolveResult({ exitCode, stdout, stderr });
   }));
 }
 

@@ -37,6 +37,9 @@ describe("Herdr TraeX shim installer", () => {
     expect(peerResolver).toContain("export");
     expect(peerResolver).not.toMatch(/from ["'](?!node:|\.)/);
     expect(await readFile(join(config.releaseDir, "runtime/traex-native-steering.js"), "utf8")).toContain("export");
+    expect(await readFile(join(config.releaseDir, "runtime/traex-prompt-settlement.js"), "utf8")).toContain("export");
+    expect(await readFile(join(config.releaseDir, "runtime/traex-model-protocol.js"), "utf8")).toContain("export");
+    expect(await readFile(join(config.releaseDir, "runtime/traex-model-prompt.js"), "utf8")).toContain("export");
 
     const status = await install(fixture, ["status"]);
     expect(status).toMatchObject({ code: 0 });
@@ -68,6 +71,15 @@ describe("Herdr TraeX shim installer", () => {
     const result = await install(fixture, ["install"]);
     expect(result.code).toBe(1);
     expect(result.stderr).toMatch(/session-start-source/);
+  });
+
+  it("rejects a release missing the prompt settlement runtime", async () => {
+    const fixture = await createFixture();
+    const { rm } = await import("node:fs/promises");
+    await rm(join(fixture.source, "dist/runtime/traex-prompt-settlement.js"));
+    const result = await install(fixture, ["install"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("missing built shim asset: dist/runtime/traex-prompt-settlement.js");
   });
 
   it("refuses unsafe PATH order and preserves an unrelated target", async () => {
@@ -135,7 +147,7 @@ async function createFixture(options: { shimAfterReal?: boolean; missingAgentSes
   ].join("\n"));
   await executable(traex, '#!/usr/bin/env bash\necho "traex 0.201.6"\n');
   for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js"]) await writeFile(join(source, "dist/cli", file), "export {};\n");
-  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js", "traex-native-steering.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
+  for (const file of ["herdr-traex-shim.js", "herdr-traex-reporter.js", "traex-session-peer.js", "traex-native-steering.js", "traex-prompt-settlement.js", "traex-model-protocol.js", "traex-model-prompt.js"]) await writeFile(join(source, "dist/runtime", file), "export {};\n");
   const repo = process.cwd();
   await writeFile(join(source, "scripts/herdr-traex-command-shim.sh"), await readFile(join(repo, "scripts/herdr-traex-command-shim.sh")));
   await writeFile(join(source, "scripts/herdr-traex-pane-launcher.sh"), await readFile(join(repo, "scripts/herdr-traex-pane-launcher.sh")));
