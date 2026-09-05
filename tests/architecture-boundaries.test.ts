@@ -110,6 +110,8 @@ describe("application composition boundaries", () => {
     expect(recovery).toContain("InboundMessageRoutingWorkflowPort");
     expect(commands).toContain("operationsQuery.listSpaces");
     expect(commands).toContain("sessionAdministration.archive");
+    expect(commands).toContain("async stop(): Promise<void>");
+    expect(router).toContain("swarmCommands.stop()");
   });
 
   it("keeps lifecycle publishers and subscribers behind their ports", () => {

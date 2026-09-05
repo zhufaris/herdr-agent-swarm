@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { SwarmCommandContextResolver } from "../src/coordinator/swarm-command-context-resolver.js";
+import { SWARM_COMMAND_POLICIES } from "../src/domain/swarm-command.js";
+import type { BridgeCommand } from "../src/domain/types.js";
 
 const project = { id: "project", displayName: "Project", spaceName: "space", description: "project", workspaceId: "w1", cwd: "/repo", maxInstances: 4 };
 const message = { eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "", mentionsBot: true, isRootMessage: false };
 const binding = { id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal", agentSessionSource: "herdr:codex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native", generation: 3 } as never;
+const commandByKind = {
+  help: { kind: "help" }, projects: { kind: "projects" }, spaces: { kind: "spaces" }, sessions: { kind: "sessions" }, failures: { kind: "failures" }, status: { kind: "status" },
+  new: { kind: "new", title: null }, reset: { kind: "reset", title: null }, attach: { kind: "attach", spaceName: "space", paneId: "w1:p2" }, rename: { kind: "rename", title: "name" },
+  close: { kind: "close" }, pane_close_request: { kind: "pane_close_request" }, pane_close_confirm: { kind: "pane_close_confirm", code: "ABC" }, reattach: { kind: "reattach", paneId: "w1:p2" },
+  replace: { kind: "replace" }, resume: { kind: "resume" }, awake: { kind: "awake" }, stop: { kind: "stop" }, steer: { kind: "steer", text: "focus" },
+  model: { kind: "model", name: "gpt" }, worker_create: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false }
+} as const satisfies Record<keyof typeof SWARM_COMMAND_POLICIES, BridgeCommand>;
 
 function resolver(current: typeof binding | null = binding) {
   return new SwarmCommandContextResolver({ config: { projects: [project], defaultProjectId: "project", lark: { adminOpenIds: ["admin"] } as never }, store: { findBindingByLarkScope: () => current, getBinding: (id: string) => id === binding.id ? binding : null }, activeTurn: () => ({ promptId: "prompt", paneId: "w1:p1" }) });
@@ -55,6 +64,18 @@ describe("SwarmCommandContextResolver", () => {
   it("enforces administrator and creator policy before dispatch", () => {
     expect(resolver().resolve({ ...message, actorOpenId: "member" }, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false })).toMatchObject({ outcome: "rejected", code: "administrator_required" });
     expect(resolver({ ...binding, creatorOpenId: "creator" } as never).resolve(message, { kind: "rename", title: "name" })).toMatchObject({ outcome: "rejected", code: "creator_required" });
+  });
+
+  it.each(Object.entries(SWARM_COMMAND_POLICIES))("enforces the declared authorization for %s", (kind, policy) => {
+    const command = commandByKind[kind as keyof typeof commandByKind];
+    const nonAdminCreator = resolver({ ...binding, creatorOpenId: "member" } as never).resolve({ ...message, actorOpenId: "member" }, command);
+    const adminNonCreator = resolver({ ...binding, creatorOpenId: "creator" } as never).resolve(message, command);
+    expect(nonAdminCreator.outcome === "rejected" ? nonAdminCreator.code : "resolved").toBe(
+      policy.authorization === "administrator" || policy.authorization === "creator-and-administrator" ? "administrator_required" : "resolved"
+    );
+    expect(adminNonCreator.outcome === "rejected" ? adminNonCreator.code : "resolved").toBe(
+      policy.authorization === "creator" || policy.authorization === "creator-and-administrator" ? "creator_required" : "resolved"
+    );
   });
 
   it("rejects session-scoped commands outside a bound topic", () => {

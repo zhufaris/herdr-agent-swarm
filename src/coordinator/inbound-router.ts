@@ -9,6 +9,7 @@ import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupRecoveryWorkflowPort } from "./startup-recovery-workflow.js";
+import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 export interface InboundRouterPort {
   start(): Promise<void>;
@@ -20,7 +21,7 @@ export interface InboundRouterPort {
 }
 
 export interface InboundRouterOptions {
-  lark: Pick<LarkPort, "stop">; modelSelection: ModelSelectionWorkflowPort; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
+  lark: Pick<LarkPort, "stop">; modelSelection: ModelSelectionWorkflowPort; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {
@@ -39,6 +40,8 @@ export class InboundRouter implements InboundRouterPort {
 
   async stop(context?: ShutdownContext): Promise<void> {
     await this.options.startupRecovery.stop(); this.options.modelSelection.shutdown();
-    await Promise.allSettled([this.options.lark.stop(), this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop(), this.options.inboundDispatcher.stop(), this.options.cardActionRouter.stop()]);
+    await Promise.allSettled([this.options.lark.stop(), this.options.inboundDispatcher.stop(), this.options.cardActionRouter.stop()]);
+    await this.options.swarmCommands.stop();
+    await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop()]);
   }
 }

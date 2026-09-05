@@ -8,7 +8,7 @@ const project = { id: "project", displayName: "Project", spaceName: "space", des
 const config = { projects: [project], defaultProjectId: "project", lark: { adminOpenIds: ["admin"] } } as never;
 const message = { eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "", mentionsBot: true, isRootMessage: false };
 
-function setup() {
+function setup(activeTurn: () => { promptId: string; paneId: string } | null = () => ({ promptId: "prompt", paneId: "w1:p1" })) {
   const store = new SqliteBindingStore(":memory:");
   store.createPendingBinding({ id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
   store.updateBinding("binding", { paneId: "w1:p1", traexSessionId: "terminal", state: "active", lifecycle: "active", attachment: "attached" });
@@ -18,7 +18,7 @@ function setup() {
   const modelSelection = { runModel: vi.fn(async () => true) }; const paneControl = { stop: vi.fn(async () => true), steer: vi.fn(async () => true) };
   const paneClosure = { requestPaneClose: vi.fn(async () => true), confirmPaneClose: vi.fn(async () => true) }; const promptRun = { awake: vi.fn(async () => ({ outcome: "none", reason: "no_detached_prompt" })) };
   const worker = { id: "worker", name: "reviewer" }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
-  const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn: () => ({ promptId: "prompt", paneId: "w1:p1" }) });
+  const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
   const gateway = new SwarmCommandGateway({ store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl } as never);
   return { store, gateway, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound };
 }
@@ -31,6 +31,14 @@ describe("SwarmCommandGateway", () => {
   ] as const)("runs query %j without a durable intent", async (command, owner, method) => {
     const fixture = setup(); await fixture.gateway.handle(message, command); expect((fixture[owner] as never)[method]).toHaveBeenCalled();
     expect(fixture.store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 0 }); fixture.store.close();
+  });
+
+  it("audits a query without creating a command intent", async () => {
+    const fixture = setup();
+    await fixture.gateway.handle(message, { kind: "status" });
+    expect(fixture.store.database.prepare("SELECT action, target, outcome FROM audit_log WHERE action = 'swarm.status'").get()).toEqual({ action: "swarm.status", target: "binding:binding", outcome: "success" });
+    expect(fixture.store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 0 });
+    fixture.store.close();
   });
 
   it("deduplicates a mutation before invoking its owning handler", async () => {
@@ -76,6 +84,49 @@ describe("SwarmCommandGateway", () => {
     store.close();
   });
 
+  it.each([
+    { kind: "reattach" as const, command: { kind: "reattach" as const, paneId: "w1:p2" }, method: "reattach" as const },
+    { kind: "replace" as const, command: { kind: "replace" as const }, method: "replace" as const }
+  ])("routes successful orphaned $kind through its durable handler", async ({ command, method }) => {
+    const fixture = setup();
+    fixture.store.updateBinding("binding", { state: "orphaned", attachment: "orphaned" });
+    await fixture.gateway.handle({ ...message, messageId: `orphaned-${command.kind}` }, command);
+    expect(fixture.provisioning[method]).toHaveBeenCalledOnce();
+    const row = fixture.store.database.prepare("SELECT id FROM swarm_command_intents").get() as { id: string };
+    expect(fixture.store.getCommandIntent(row.id)).toMatchObject({ command: { kind: command.kind }, state: "succeeded" });
+    fixture.store.close();
+  });
+
+  it.each([
+    ["generation", { generation: 2 }],
+    ["pane", { paneId: "w1:replacement" }],
+    ["terminal", { traexSessionId: "replacement-terminal" }],
+    ["native session", { agentSessionSource: "herdr:codex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "replacement-native" }]
+  ] as const)("rejects an accepted command after the Primary %s changes", async (_dimension, change) => {
+    const fixture = setup();
+    const resolved = new SwarmCommandContextResolver({ config, store: fixture.store, activeTurn: () => null }).resolve(message, { kind: "rename", title: "New title" });
+    if (resolved.outcome !== "resolved") throw new Error("context");
+    fixture.store.acceptCommandIntent({ id: "stale", idempotencyKey: "stale-key", laneKey: resolved.laneKey, command: { kind: "rename", title: "New title" }, context: resolved.context, replayPolicy: "safe-before-effect", acceptedAt: "2026-09-05T00:00:00.000Z" });
+    fixture.store.updateBinding("binding", change);
+    await fixture.gateway.recover();
+    expect(fixture.sessionAdministration.rename).not.toHaveBeenCalled();
+    expect(fixture.store.getCommandIntent("stale")).toMatchObject({ state: "rejected", outcome: { code: "stale_context" } });
+    fixture.store.close();
+  });
+
+  it("rejects an accepted active-turn command after the turn changes", async () => {
+    let promptId = "prompt";
+    const fixture = setup(() => ({ promptId, paneId: "w1:p1" }));
+    const resolved = new SwarmCommandContextResolver({ config, store: fixture.store, activeTurn: () => ({ promptId, paneId: "w1:p1" }) }).resolve(message, { kind: "stop" });
+    if (resolved.outcome !== "resolved") throw new Error("context");
+    fixture.store.acceptCommandIntent({ id: "stale-turn", idempotencyKey: "stale-turn-key", laneKey: resolved.laneKey, command: { kind: "stop" }, context: resolved.context, replayPolicy: "non-replayable", acceptedAt: "2026-09-05T00:00:00.000Z" });
+    promptId = "replacement-prompt";
+    await fixture.gateway.recover();
+    expect(fixture.paneControl.stop).not.toHaveBeenCalled();
+    expect(fixture.store.getCommandIntent("stale-turn")).toMatchObject({ state: "rejected", outcome: { code: "stale_context" } });
+    fixture.store.close();
+  });
+
   it("routes text and CardKit Worker creation through the same durable handler", async () => {
     const { gateway, store, instanceControl } = setup(); const command = { kind: "worker_create" as const, name: "reviewer", agentKind: "traex" as const, model: null, start: false };
     await gateway.handle(message, command);
@@ -118,6 +169,17 @@ describe("SwarmCommandGateway", () => {
     await gateway.recover(); expect(sessionAdministration.rename).not.toHaveBeenCalled(); expect(store.getCommandIntent("interrupted")).toMatchObject({ state: "uncertain" }); store.close();
   });
 
+  it("executes an accepted command during startup recovery", async () => {
+    const fixture = setup();
+    const resolved = new SwarmCommandContextResolver({ config, store: fixture.store, activeTurn: () => null }).resolve(message, { kind: "rename", title: "Recovered title" });
+    if (resolved.outcome !== "resolved") throw new Error("context");
+    fixture.store.acceptCommandIntent({ id: "accepted", idempotencyKey: "accepted-key", laneKey: resolved.laneKey, command: { kind: "rename", title: "Recovered title" }, context: resolved.context, replayPolicy: "safe-before-effect", acceptedAt: "2026-09-05T00:00:00.000Z" });
+    await fixture.gateway.recover();
+    expect(fixture.sessionAdministration.rename).toHaveBeenCalledOnce();
+    expect(fixture.store.getCommandIntent("accepted")).toMatchObject({ state: "succeeded", attemptCount: 1 });
+    fixture.store.close();
+  });
+
   it("records a throwing handler as uncertain and never replays it", async () => {
     const { gateway, store, sessionAdministration } = setup();
     sessionAdministration.rename.mockRejectedValueOnce(new Error("observer disconnected"));
@@ -127,5 +189,21 @@ describe("SwarmCommandGateway", () => {
     await gateway.recover();
     expect(sessionAdministration.rename).toHaveBeenCalledOnce();
     store.close();
+  });
+
+  it("waits for claimed command work during shutdown", async () => {
+    const fixture = setup();
+    let release!: () => void;
+    fixture.sessionAdministration.rename.mockImplementationOnce(() => new Promise<boolean>((resolve) => { release = () => resolve(true); }));
+    const handling = fixture.gateway.handle(message, { kind: "rename", title: "New title" });
+    await vi.waitFor(() => expect(fixture.sessionAdministration.rename).toHaveBeenCalledOnce());
+    let stopped = false;
+    const stopping = fixture.gateway.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await Promise.all([handling, stopping]);
+    expect(stopped).toBe(true);
+    fixture.store.close();
   });
 });

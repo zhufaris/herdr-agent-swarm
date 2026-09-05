@@ -185,9 +185,11 @@ Primary sessions remain concurrent.
 ## Idempotency and recovery
 
 Text idempotency keys are `lark-message:<messageId>:<command-kind>`. CardKit
-Worker creation keys are `lark-card:<messageId>:worker-create:<requestedBy>`. A
-duplicate returns or reprojects the existing outcome and never invokes the
-owning handler twice.
+Worker creation keys combine the card message, operator, and a SHA-256
+fingerprint of the normalized Worker-create command. Repeating the same form
+submission returns or reprojects the existing outcome and never invokes the
+owning handler twice, while a later submission from the same directory card can
+create a different Worker without colliding with the first request.
 
 Each mutation policy declares one of:
 

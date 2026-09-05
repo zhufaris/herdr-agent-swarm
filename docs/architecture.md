@@ -184,6 +184,9 @@ intents that never started. A handler error after invocation is also conservativ
 `uncertain`, because an external Herdr effect may already have occurred. Neither
 case is blindly replayed. Queries use the same parser, context, policy, and
 authorization path but create no command intent.
+Shutdown first stops new Lark, card, and inbound acceptance, then waits for all
+claimed command lanes to settle before the remaining workflows and SQLite store
+are stopped.
 
 A read-only SQLite integrity auditor runs before startup completes and every 15
 minutes afterward. It caches bounded results from `quick_check`,

@@ -93,6 +93,6 @@ export function createTestRouter(
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
   const startupViews = new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger);
   const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
-  const router = new InboundRouter({ lark, modelSelection, promptRun, reconciler, retiredPaneCleanup, sessionOperations, inboundDispatcher, cardActionRouter, startupRecovery });
+  const router = new InboundRouter({ lark, modelSelection, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
   return router;
 }

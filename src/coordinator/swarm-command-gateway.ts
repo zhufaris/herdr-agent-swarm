@@ -30,6 +30,7 @@ export interface SwarmCommandGatewayPort {
   handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void>;
   createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult>;
   recover(): Promise<void>;
+  stop(): Promise<void>;
 }
 
 export class SwarmCommandGateway implements SwarmCommandGatewayPort {
@@ -80,6 +81,10 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     await Promise.all([...lanes].map((lane) => this.drainLane(lane)));
   }
 
+  async stop(): Promise<void> {
+    while (this.laneWorkers.size > 0) await Promise.allSettled([...this.laneWorkers.values()]);
+  }
+
   private async drainLane(laneKey: string): Promise<void> {
     const previous = this.laneWorkers.get(laneKey) ?? Promise.resolve();
     const worker = previous.catch(() => undefined).then(async () => {
@@ -99,6 +104,12 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
         this.finish(intent, "rejected", "stale_context", "Primary context changed before command execution"); return;
       }
       const command = intent.command; let ok = true; let outcomeCode = "completed"; let outcomeDetail: string | null = null;
+      if (swarmCommandPolicy(command).scope === "active-turn") {
+        const current = this.options.resolver.resolve(message, command);
+        if (current.outcome !== "resolved" || current.context.primary?.activePromptId !== intent.context.primary?.activePromptId) {
+          this.finish(intent, "rejected", "stale_context", "Active turn changed before command execution"); return;
+        }
+      }
       effectMayHaveStarted = true;
       if (command.kind === "new") await this.options.provisioning.selectProject(message, command.title);
       else if (command.kind === "reset") ok = await this.options.provisioning.reset(message, binding, command.title);

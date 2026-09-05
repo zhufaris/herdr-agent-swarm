@@ -31,6 +31,13 @@ describe("run card", () => {
     expect(help).toContain("/swarm spaces");
   });
 
+  it("documents Primary-scoped Worker creation", () => {
+    const help = JSON.stringify(renderHelpCard());
+    expect(help).toContain("/swarm worker create <name>");
+    expect(help).toContain("--agent <kind>");
+    expect(help).toContain("--start");
+  });
+
   it("documents and renders the model command result", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/swarm model [name]");
