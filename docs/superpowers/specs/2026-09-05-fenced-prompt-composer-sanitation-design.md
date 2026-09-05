@@ -7,6 +7,13 @@ still contains unsubmitted composer text. The next `herdr agent prompt` may then
 fail with `agent_prompt_stalled`: Herdr observes no lifecycle change, the TraeX
 transcript contains no fresh turn, and the pane returns to or remains `idle`.
 
+The production `task-f1hq` incident demonstrates a second path to the same
+state. TraeX synchronously rejected `/steer` as an unrecognized TraeX command,
+created no transcript turn, and left `/steer` visible in the composer. Herdr
+therefore returned `agent_prompt_stalled`, and Agent Swarm conservatively kept
+the prompt as identityless detached work. Later Lark prompts accumulated behind
+that FIFO head even though the pane itself remained usable.
+
 The bridge currently treats every post-dispatch stall as potentially delivered.
 That is safe against replay, but an identityless detached prompt remains the
 single active FIFO head indefinitely. Later Lark messages are durably queued but
@@ -22,7 +29,7 @@ ordinary Primary or Worker prompt, the boundary clears the idle TraeX composer
 with logical `ctrl+u`. If submission creates no transcript turn, the boundary
 clears the composer again and returns a proven `not_started` result.
 
-The operation returns one of three domain outcomes:
+The operation returns one of four domain outcomes:
 
 ```ts
 type PromptSubmissionOutcome =
@@ -136,6 +143,14 @@ dispatch-time fence. A newly observed turn is `started` even if it completes ver
 quickly; the existing exact-turn observer then owns completion projection. A
 different or ambiguous fresh turn is never attributed to the claimed prompt.
 
+An immediate TraeX UI rejection such as `Unrecognized command '/steer'` is useful
+diagnostic evidence that explains why no turn started and why composer text may
+remain. It is not sufficient durable proof by itself: screen text can be stale,
+localized, truncated, or belong to another interaction. The adapter may record a
+bounded rejection classification for observability, but `not_started` still
+requires the identity, transcript, settled-state, and post-clean verification
+below.
+
 ## Proving `not_started`
 
 `agent_prompt_stalled` alone is not proof. `not_started` may be returned only
@@ -149,6 +164,12 @@ these facts:
 - the post-failure `ctrl+u` succeeded; and
 - a final fresh observation still shows the same settled target and no fresh
   transcript turn.
+
+For the synchronous command-rejection case, the second `ctrl+u` is the operation
+that removes the rejected slash text still retained by TraeX. The first
+pre-dispatch `ctrl+u` cannot prevent this residue because TraeX creates it while
+processing the newly submitted text. Both sanitation points are therefore
+required.
 
 If any fact cannot be established, the result is `uncertain`. Terminal
 scrollback, answer text, a Lark card, elapsed time by itself, or a cached Herdr
@@ -180,7 +201,7 @@ recovery cases.
 ## Code boundaries
 
 - `src/domain/ports/external.ts` defines a capability-focused prompt submission
-  contract and the three explicit outcomes. `PromptRunWorkflow` must not call a
+  contract and the four explicit outcomes. `PromptRunWorkflow` must not call a
   raw `send-keys` method.
 - `src/adapters/herdr-adapter.ts` owns fresh runtime checks and invokes the
   installed Herdr command surface. It never parses terminal pixels as proof.
@@ -233,14 +254,17 @@ Focused deterministic tests must cover:
    completes before Herdr reports a lifecycle change;
 5. no fresh turn plus an unchanged settled target performs the second `ctrl+u`
    and returns `not_started`;
-6. any conflicting or ambiguous evidence returns `uncertain`;
-7. prompt text is submitted at most once in every outcome;
-8. `not_started` atomically fails the current run card, records delivery intent,
+6. a synchronous unknown-command rejection that leaves the submitted text in the
+   composer follows the same `not_started` path and the next FIFO prompt becomes
+   claimable;
+7. any conflicting or ambiguous evidence returns `uncertain`;
+8. prompt text is submitted at most once in every outcome;
+9. `not_started` atomically fails the current run card, records delivery intent,
    and makes the next FIFO item claimable without sending it inline;
-9. `uncertain` remains detached and blocks FIFO;
-10. unknown slash-prefixed ordinary prompts follow the same protocol and are not
+10. `uncertain` remains detached and blocks FIFO;
+11. unknown slash-prefixed ordinary prompts follow the same protocol and are not
     rejected by command enumeration; and
-11. prompt text and composer contents do not appear in errors or logs.
+12. prompt text and composer contents do not appear in errors or logs.
 
 Before deployment, run the focused adapter, shim, Primary concurrency, Worker
 dispatch, and SQLite transition suites, followed by `npm run typecheck`,
