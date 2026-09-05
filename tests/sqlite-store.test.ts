@@ -10,6 +10,7 @@ import { renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
@@ -21,6 +22,45 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("migrates durable Worker session identity and context projection tables", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    expect(store.database.prepare("PRAGMA table_info(agent_instances)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "worker_session_generation", notnull: 1, dflt_value: "1" })
+    ]));
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('worker_main_views','card_context_invalidations') ORDER BY name").all()).toEqual([
+      { name: "card_context_invalidations" }, { name: "worker_main_views" }
+    ]);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 17").get()).toEqual({ version: 17 });
+  });
+
+  it("keeps Worker session generation stable across runtime replacement and freezes its persisted main view", () => {
+    store = new SqliteBindingStore(":memory:");
+    const created = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: "GPT-5", desiredState: "running",
+      parent: { bindingId: "binding-1", paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base" }
+    }, 4).instance;
+    const attached = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane-1", nativeSessionId: "worker-session-1" })!;
+    const detached = store.detachAgentInstanceRuntime({ instanceId: attached.id, expectedGeneration: attached.generation, reason: "pane replaced" })!;
+    const replaced = store.attachAgentInstanceRuntime({ instanceId: detached.id, expectedGeneration: detached.generation, herdrWorkspaceId: "w1", paneId: "worker-pane-2", nativeSessionId: "worker-session-2" })!;
+
+    expect([created, attached, detached, replaced].map(({ workerSessionGeneration }) => workerSessionGeneration)).toEqual([1, 1, 1, 1]);
+    const main = createWorkerMainView({
+      workerId: replaced.id, workerSessionGeneration: replaced.workerSessionGeneration!, parentBindingId: "binding-1", parentBindingGeneration: 7, parentPaneId: "primary-pane", workerName: replaced.name, ownerName: "Primary",
+      runtimeGeneration: replaced.generation, runtimeState: replaced.observedState, paneId: replaced.runtimeRef?.paneId ?? null, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: replaced.model, occurredAt: "2026-09-05T00:00:00.000Z"
+    });
+    expect(store.saveWorkerMainView(main)).toEqual(main);
+    expect(store.loadWorkerMainView(replaced.id, 1)).toEqual(main);
+
+    const terminated = store.terminateWorkerSession({ instanceId: replaced.id, expectedGeneration: replaced.generation, reason: "done" })!;
+    expect(terminated.instance.workerSessionGeneration).toBe(1);
+    const frozen = reduceWorkerMainView(main, { type: "terminated", occurredAt: "2026-09-05T00:02:00.000Z" });
+    expect(store.saveWorkerMainView(frozen)).toEqual(frozen);
+    expect(store.saveWorkerMainView({ ...frozen, frozenAt: null, runtimeState: "idle", viewVersion: frozen.viewVersion + 1 })).toBeNull();
+    expect(store.loadWorkerMainView(replaced.id, 1)).toEqual(frozen);
+  });
+
   it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-parent-migration-"));
     const path = join(temporaryDirectory, "bridge.db");

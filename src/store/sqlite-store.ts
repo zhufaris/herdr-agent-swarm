@@ -24,12 +24,13 @@ import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
+import type { WorkerMainView } from "../domain/worker-main-view.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
 
 const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
   "project_selections", "card_interactions", "session_operations", "pane_close_requests", "worker_pane_close_steps", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
@@ -235,6 +236,25 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   getAgentInstance(id: string): AgentInstance | null {
     const row = this.database.prepare("SELECT * FROM agent_instances WHERE id = ?").get(id) as AgentInstanceRow | undefined;
     return row ? mapAgentInstance(row) : null;
+  }
+
+  loadWorkerMainView(workerId: string, workerSessionGeneration: number): WorkerMainView | null {
+    const row = this.database.prepare("SELECT state_json FROM worker_main_views WHERE worker_id = ? AND worker_session_generation = ?").get(workerId, workerSessionGeneration) as { state_json: string } | undefined;
+    return row ? JSON.parse(row.state_json) as WorkerMainView : null;
+  }
+
+  saveWorkerMainView(view: WorkerMainView): WorkerMainView | null {
+    const instance = this.getAgentInstance(view.workerId);
+    if (!instance || instance.role !== "worker" || instance.workerSessionGeneration !== view.workerSessionGeneration
+      || instance.parent?.bindingId !== view.parentBindingId || instance.parent.paneId !== view.parentPaneId) return null;
+    const result = this.database.prepare(`
+      INSERT INTO worker_main_views(worker_id, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id, state_json, view_version, delivered_version, message_id, card_id, frozen_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(worker_id, worker_session_generation) DO UPDATE SET
+        state_json=excluded.state_json, view_version=excluded.view_version, delivered_version=excluded.delivered_version, message_id=excluded.message_id, card_id=excluded.card_id, frozen_at=excluded.frozen_at, updated_at=excluded.updated_at
+      WHERE worker_main_views.frozen_at IS NULL AND excluded.view_version >= worker_main_views.view_version
+    `).run(view.workerId, view.workerSessionGeneration, view.parentBindingId, view.parentBindingGeneration, view.parentPaneId, JSON.stringify(view), view.viewVersion, view.deliveredVersion, view.messageId, view.cardId, view.frozenAt, view.createdAt, view.updatedAt);
+    return result.changes === 1 ? this.loadWorkerMainView(view.workerId, view.workerSessionGeneration) : null;
   }
 
   findAgentInstanceByPane(paneId: string): AgentInstance | null {
@@ -866,7 +886,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     if (!binding?.projectId) return null;
     return {
       id: `legacy:${binding.id}`, projectId: binding.projectId, name: binding.title, role: "worker", agentKind: "traex", model: null, sourcePrimaryPaneLabel: null,
-      parent: null, workerSessionLifecycle: "legacy",
+      parent: null, workerSessionLifecycle: "legacy", workerSessionGeneration: 1,
       desiredState: binding.state === "archived" ? "stopped" : "running",
       observedState: binding.state === "failed" ? "failed" : binding.state === "archived" ? "stopped" : binding.lastAgentState === "done" ? "idle" : binding.lastAgentState === "unknown" ? "detached" : binding.lastAgentState,
       workspaceLeaseId: `legacy:${binding.id}:workspace`, generation: binding.generation,
@@ -3362,7 +3382,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       );
       CREATE TABLE IF NOT EXISTS agent_instances(
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
-        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')),
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
         desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
         observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
         workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
@@ -3564,6 +3584,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerSourcePrimaryPaneLabel();
     this.ensureWorkerParentIdentity();
     this.ensurePrimaryScopedWorkerNames();
+    this.ensureCardContextProjectionTables();
     this.ensureWorkerPaneCloseSteps();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
@@ -4186,6 +4207,33 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     }
     this.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_worker_parent_name ON agent_instances(parent_binding_id, parent_pane_id, name) WHERE role = 'worker' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL");
     this.database.prepare("INSERT INTO schema_migrations(version) VALUES (16)").run();
+  }
+
+  private ensureCardContextProjectionTables(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 17").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("worker_session_generation")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN worker_session_generation INTEGER NOT NULL DEFAULT 1");
+      this.database.exec(`
+        CREATE TABLE worker_main_views(
+          worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER NOT NULL,
+          parent_binding_id TEXT NOT NULL, parent_binding_generation INTEGER NOT NULL, parent_pane_id TEXT NOT NULL, state_json TEXT NOT NULL,
+          view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, message_id TEXT, card_id TEXT, frozen_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY(worker_id, worker_session_generation)
+        );
+        CREATE INDEX worker_main_views_parent ON worker_main_views(parent_binding_id, parent_binding_generation, parent_pane_id, frozen_at);
+        CREATE TABLE card_context_invalidations(
+          target_kind TEXT NOT NULL CHECK(target_kind IN ('primary-session','primary-turn','worker-session','worker-turn')), target_id TEXT NOT NULL, target_generation INTEGER NOT NULL,
+          requested_dependency_revision INTEGER NOT NULL, projected_dependency_revision INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY(target_kind, target_id, target_generation)
+        );
+        CREATE INDEX card_context_invalidations_pending ON card_context_invalidations(projected_dependency_revision, requested_dependency_revision, updated_at);
+        INSERT INTO schema_migrations(version) VALUES (17);
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   private ensureWorkerPaneCloseSteps(): void {

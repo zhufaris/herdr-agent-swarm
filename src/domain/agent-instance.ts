@@ -36,6 +36,7 @@ export interface AgentInstance {
   sourcePrimaryPaneLabel: string | null;
   parent: WorkerParentIdentity | null;
   workerSessionLifecycle: WorkerSessionLifecycle | null;
+  workerSessionGeneration: number;
   desiredState: DesiredInstanceState;
   observedState: ObservedInstanceState;
   workspaceLeaseId: string;

@@ -5,6 +5,7 @@ import type { ControlActor } from "../commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "../instance-turn.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../types.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
+import type { WorkerMainView } from "../worker-main-view.js";
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
@@ -44,6 +45,8 @@ export interface InstanceStore {
   getInstanceTurn(id: string): InstanceTurn | null;
   claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
+  loadWorkerMainView(workerId: string, workerSessionGeneration: number): WorkerMainView | null;
+  saveWorkerMainView(view: WorkerMainView): WorkerMainView | null;
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;
