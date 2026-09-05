@@ -273,7 +273,7 @@ describe("instance routing", () => {
     store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     const value = { action: "instance_turn_open", instanceId: worker.id, generation: worker.generation, turnId: task.turnId, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 };
 
-    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "reviewer · Task turn-his" } } } });
+    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "🎯 reviewer · Task turn-his" } } } });
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, turnId: "missing" } })).resolves.toEqual({ toast: { type: "warning", content: "任务不存在或不属于当前 Worker。" } });
     await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, bindingGeneration: 0 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
   });
@@ -287,8 +287,8 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
     const task = taskCard(worker.id, "completed", "owned-task");
 
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "Worker · reviewer" } } } });
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId } })).resolves.toMatchObject({ card: { header: { title: { content: "reviewer · Task owned-ta" } } } });
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🤖 Worker · reviewer" } } } });
+    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId } })).resolves.toMatchObject({ card: { header: { title: { content: "🎯 reviewer · Task owned-ta" } } } });
   });
 
   it("rejects stale and cross-Primary Worker card targets", async () => {

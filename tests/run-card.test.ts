@@ -143,7 +143,7 @@ describe("run card", () => {
     });
     expect(projectCard.body.elements.at(-1)).toMatchObject({
       tag: "markdown",
-      content: "`datasage` · `w5:t1` · `w5:p3G`\n`GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `w5:p3G`\n`GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
     });
     expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
   });
@@ -230,16 +230,16 @@ describe("run card", () => {
     });
     const elements = (card as { body: { elements: Array<{ tag: string; content?: string; header?: { title?: { content?: string } } }> } }).body.elements;
     const serialized = JSON.stringify(card);
-    const liveIndex = elements.findIndex((element) => element.header?.title?.content === "当前进展 · 1/2");
-    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("最近活动"));
-    const previewIndex = elements.findIndex((element) => element.content?.startsWith("**最新消息**"));
+    const liveIndex = elements.findIndex((element) => element.header?.title?.content === "📈 当前进展 · 1/2");
+    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 最近活动"));
+    const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息**"));
     const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
 
     expect(liveIndex).toBeGreaterThanOrEqual(0);
     expect(activityIndex).toBeGreaterThan(liveIndex);
     expect(previewIndex).toBeGreaterThan(activityIndex);
     expect(footerIndex).toBe(elements.length - 1);
-    expect(serialized).not.toContain("**当前工作**");
+    expect(serialized).not.toContain("**📊 状态**");
     expect(serialized.match(/确认部署版本/g)).toHaveLength(1);
     expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-1", "line-2", "line-3", "line-4", "line-5", "line-6"]);
     expect(serialized).toContain("`GPT-5.4` · context `36%` · queue `0`");
@@ -247,7 +247,7 @@ describe("run card", () => {
   });
 
   it("keeps the legacy current-work fallback when no live status exists", () => {
-    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running" }))).toContain("**当前工作**");
+    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running" }))).toContain("**📊 状态**");
   });
 
   it("renders a frozen Answer Card green even when no code block needs folding", () => {
@@ -267,7 +267,7 @@ describe("run card", () => {
 
     expect(card).toMatchObject({
       config: { summary: { content: "datasage / Fix login" } },
-      header: { title: { content: "datasage / Fix login" } }
+      header: { title: { content: "🧭 datasage / Fix login" } }
     });
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).toContain("wD:p9");
@@ -338,7 +338,7 @@ describe("run card", () => {
     });
     const serialized = JSON.stringify(card);
     const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**最新消息**"))?.content ?? "";
+      .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content ?? "";
 
     expect(serialized).toContain("🛠️ 修改卡片渲染");
     expect(serialized).toContain("🧪 运行聚焦测试");
@@ -369,7 +369,7 @@ describe("run card", () => {
       ...initialTopicView("b1"), phase: "running", answer: lines.join("\n")
     });
     const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**最新消息**"))?.content ?? "";
+      .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content ?? "";
     const previewBody = latestMessage.split("\n").slice(2).join("\n");
 
     expect(previewBody).not.toContain("line-13:");
@@ -385,7 +385,7 @@ describe("run card", () => {
       recentProgress: [{ key: "test:focused", kind: "test", label: "正在运行聚焦测试", state: "active", occurredAt: "now" }]
     });
     const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**最新消息**"))?.content;
+      .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content;
 
     expect(latestMessage).toContain("🛠️ 正在运行聚焦测试");
   });

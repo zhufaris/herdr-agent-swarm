@@ -19,6 +19,10 @@ describe("Worker Main card", () => {
     const withLink = JSON.stringify(renderWorkerMainCard({ ...projected, currentTask: { ...projected.currentTask!, taskCard: { ...projected.currentTask!.taskCard, messageId: "om_task_card" } } }));
 
     expect(withoutLink).toContain("reviewer");
+    expect(withoutLink).toContain("🤖 Worker · reviewer");
+    expect(withoutLink).toContain("**🎯 Current Task**");
+    expect(withoutLink).toContain("🧠 Review auth boundary");
+    expect(withoutLink).toContain("**📨 Queue**");
     expect(withoutLink).toContain("Review auth boundary");
     expect(withoutLink).toContain("Run recovery tests");
     expect(withoutLink).not.toContain("om_task_card");
@@ -31,6 +35,7 @@ describe("Worker Main card", () => {
     const frozen = reduceWorkerMainView(view(), { type: "terminated", occurredAt: "2026-09-05T00:02:00.000Z" });
     const text = JSON.stringify(renderWorkerMainCard(frozen));
     expect(text).toContain("已终止");
+    expect(text).toContain("📦 Worker session 已终止并冻结");
     expect(text).not.toContain("instance_steer");
     expect(text).not.toContain("instance_stop");
   });

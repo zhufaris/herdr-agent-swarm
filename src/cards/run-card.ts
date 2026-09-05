@@ -6,6 +6,7 @@ import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 import { callbackButton } from "./cardkit-button.js";
+import { cardSection, lifecycleMarker } from "./card-style.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
 
@@ -142,12 +143,12 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   const recentActivity = progress.filter((event) => !planKeys.has(event.key)).slice(-8);
-  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "最近活动", summary: effectiveProgressSummary(input.progressSummary, progress) }));
+  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最近活动", summary: effectiveProgressSummary(input.progressSummary, progress) }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
-  if (preview) elements.push({ tag: "markdown", content: `**最新消息**\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
+  if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
   if (input.workers.length > 0) {
-    elements.push({ tag: "hr" }, { tag: "markdown", content: `**Workers**\n${input.workers.map((worker) => `- ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
+    elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n${input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
     for (const worker of input.workers) if (worker.workerMain.messageId) elements.push(callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default"));
   }
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
@@ -155,8 +156,8 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     schema: "2.0",
     config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
     header: {
-      title: { tag: "plain_text", content: agentTitle(input.title) },
-      subtitle: { tag: "plain_text", content: `HERDR PROJECT · ${view.label}` },
+      title: { tag: "plain_text", content: `🧭 ${agentTitle(input.title)}` },
+      subtitle: { tag: "plain_text", content: `HERDR PROJECT · ${lifecycleMarker(input.phase)} ${view.label}` },
       template: view.color
     },
     body: { elements }
@@ -286,7 +287,7 @@ function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, pha
   });
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: phase === "done" ? "green" : phase === "error" || phase === "blocked" ? "orange" : "blue", corner_radius: "6px" },
-    header: { title: { tag: "plain_text", content: lines.length ? `当前进展 · ${done}/${lines.length}` : "当前进展" } },
+    header: { title: { tag: "plain_text", content: lines.length ? `📈 当前进展 · ${done}/${lines.length}` : "📈 当前进展" } },
     elements: content
   }];
 }
@@ -410,7 +411,7 @@ function runtimeFooter(input: TopicViewState): string {
   const runtime = [input.model ? `\`${escapeCode(input.model)}\`` : null, preference, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
   const updated = relativeTime(input.activityAt);
   const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
-  return [identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
+  return [cardSection("🖥️", "Runtime"), identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
 }
 
 function modelPreferenceHint(input: TopicViewState): string | null {
@@ -511,10 +512,10 @@ function projectProgressLine(event: RunCardView["progressEvents"][number]): stri
   return event.kind === "step" ? progressLine(event) : `🛠️ ${progressLabel(event.label)}`;
 }
 function projectWorkSummary(input: TopicViewState): string {
-  if (input.phase === "running") return `**当前工作**\nTraeX 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
-  if (input.phase === "queued") return `**队列状态**\n当前请求正在 FIFO 队列中等待${input.queueDepth > 0 ? `（队列共 ${input.queueDepth} 条）。` : "。"}`;
-  if (input.phase === "done") return `**最近完成**\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
-  return `**会话状态**\n${STATE_VIEW[input.phase].label}`;
+  if (input.phase === "running") return `${cardSection("📊", "状态")}\nTraeX 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
+  if (input.phase === "queued") return `${cardSection("📊", "状态")}\n当前请求正在 FIFO 队列中等待${input.queueDepth > 0 ? `（队列共 ${input.queueDepth} 条）。` : "。"}`;
+  if (input.phase === "done") return `${cardSection("📊", "状态")}\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
+  return `${cardSection("📊", "状态")}\n${STATE_VIEW[input.phase].label}`;
 }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   const label = progressLabel(event.label);

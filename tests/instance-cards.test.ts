@@ -18,7 +18,10 @@ describe("instance cards", () => {
     const text = JSON.stringify(card);
 
     expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true }, body: { elements: expect.any(Array) } });
-    expect(text).toContain("reviewer · Task turn:uns");
+    expect(text).toContain("🎯 reviewer · Task turn:uns");
+    expect(text).toContain("**💬 请求**");
+    expect(text).toContain("**📈 进度**");
+    expect(text).toContain("**🔗 承接任务**");
     expect(text).toContain("parent-turn");
     expect(text).not.toContain("View Worker Main");
     expect(text).not.toContain("card_target_open");
@@ -44,6 +47,17 @@ describe("instance cards", () => {
     expect(text).toContain("Checking durable state");
     expect(text).toContain("Inspect schema");
     expect(text).toContain("Read store");
+  });
+
+  it("decorates only structured Worker activity outside fenced code", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-activity", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const completed = reduceWorkerTurnCard(queued, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: ["✓ Read · src/store.ts", "ordinary prose", "```text", "✓ Read · literal", "```"].join("\n") });
+    const text = JSON.stringify(renderWorkerTurnCard(completed));
+
+    expect(text).toContain("📖 Read · src/store.ts");
+    expect(text).toContain("ordinary prose");
+    expect(text).toContain("✓ Read · literal");
+    expect(text).not.toContain("📖 Read · literal");
   });
   it("renders the current thread as Primary and counts only Workers", () => {
     const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries: [{ instance, workspace, capabilities, queueDepth: 3 }], target: { kind: "instance", instanceId: "i1" }, primary });
