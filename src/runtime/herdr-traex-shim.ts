@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult, TraexTranscriptObservation } from "../domain/ports/external.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PROMPT_START_SETTLEMENT_MS = 5_000;
 
 export type HerdrShimInvocation =
   | { kind: "delegate"; argv: string[] }
@@ -165,11 +166,13 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
   const dispatchBoundaryMs = Math.floor(dispatchStartedMs / 1_000) * 1_000;
   const submitted = await dependencies.submit(input.argv, input.timeoutMs);
   if (submitted.exitCode === 0 || structuredResultErrorCode(submitted.stderr) !== "agent_prompt_stalled" || opened?.mode !== "typed" || !completionMatchesUntil(input.until)) return submitted;
-  const deadline = input.timeoutMs === null ? null : dispatchStartedMs + input.timeoutMs;
+  const turnDeadline = input.timeoutMs === null ? null : dispatchStartedMs + input.timeoutMs;
+  const startDeadline = dispatchStartedMs + Math.min(PROMPT_START_SETTLEMENT_MS, input.timeoutMs ?? PROMPT_START_SETTLEMENT_MS);
   let owned: NonNullable<TraexTranscriptObservation["turnLifecycle"]> | null = null;
   let previousSignature = "";
   for (;;) {
-    if (deadline !== null && dependencies.now() >= deadline) return submitted;
+    const currentTime = dependencies.now();
+    if ((!owned && currentTime >= startDeadline) || (owned && turnDeadline !== null && currentTime >= turnDeadline)) return submitted;
     let observation: TraexTranscriptObservation;
     try { observation = opened.cursor.readObservation ? await opened.cursor.readObservation() : { answerDelta: await opened.cursor.readDelta() }; }
     catch { return submitted; }
@@ -177,7 +180,6 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
     const signature = JSON.stringify(observation);
     if (!owned) {
       if (!observation.freshTurnStart) {
-        if (input.timeoutMs === null) return submitted;
         await dependencies.sleep(signature === previousSignature ? 100 : 50);
         previousSignature = signature;
         continue;

@@ -147,6 +147,14 @@ describe("Herdr TraeX prompt transcript settlement", () => {
     expect(fixture.submit).toHaveBeenCalledOnce();
   });
 
+  it("bounds the wait for a missing fresh turn independently of the command timeout", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }]);
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled") });
+    expect(fixture.submit).toHaveBeenCalledOnce();
+    expect(fixture.sleep.mock.calls.length).toBeGreaterThan(0);
+    expect(fixture.sleep.mock.calls.length).toBeLessThan(60);
+  });
+
   it.each([
     ["no fresh turn", [{ answerDelta: "" }]],
     ["old turn", [{ ...completed, turnLifecycle: { ...completed.turnLifecycle, startedAt: "2026-09-04T07:59:58.000Z" } }]],
