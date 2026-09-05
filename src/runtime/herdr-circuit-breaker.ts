@@ -74,6 +74,10 @@ export class HerdrCircuitBreaker implements HerdrPort {
     if (!this.delegate.steerAgent) return { status: "unsupported", reason: "Herdr adapter does not support native steering" };
     return this.call("command", () => this.delegate.steerAgent!(input));
   }
+  async interruptAgent(input: Parameters<NonNullable<HerdrPort["interruptAgent"]>>[0]): Promise<import("../domain/agent-runtime.js").InterruptReceipt> {
+    if (!this.delegate.interruptAgent) return { status: "unsupported", reason: "Herdr adapter does not support native interruption" };
+    return this.call("command", () => this.delegate.interruptAgent!(input));
+  }
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> { await this.call("command", () => this.delegate.renamePane(paneId, title, options)); }
   async closePane(paneId: string): Promise<void> { await this.call("command", () => this.delegate.closePane(paneId)); }
 

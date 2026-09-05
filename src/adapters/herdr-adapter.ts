@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { HerdrPort, ModelPromptDispatchOptions } from "../domain/ports/external.js";
-import type { SteerReceipt } from "../domain/agent-runtime.js";
+import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
@@ -314,6 +314,18 @@ export class HerdrCliAdapter implements HerdrPort {
     return result;
   }
 
+  async interruptAgent(input: { paneId: string; agentSession: HerdrAgentSession; runtimeTurnId: string; idempotencyKey: string }): Promise<InterruptReceipt> {
+    void input.idempotencyKey;
+    const pane = await this.getAgentPane(input.paneId);
+    if (!pane) return { status: "not-active", reason: "Herdr Agent is no longer active" };
+    if (!pane.agentSession || !sameAgentSession(pane.agentSession, input.agentSession)) return { status: "not-active", reason: "Agent session identity changed" };
+    if (pane.agentState === "blocked") return { status: "blocked", reason: "Agent is blocked on a local approval or question" };
+    if (pane.agentState !== "working") return { status: "not-active", reason: "Agent turn is not active" };
+    if (pane.activeTurnId !== input.runtimeTurnId) return { status: "not-active", reason: "Runtime turn identity changed" };
+    await this.runner.run(this.executable, ["agent", "send-keys", input.paneId, "ctrl+c"], this.commandTimeoutMs);
+    return { status: "interrupted" };
+  }
+
   async renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void> {
     const pane = options?.tabTitle ? await this.getPane(paneId) : null;
     await this.runner.run(this.executable, ["pane", "rename", paneId, title], this.commandTimeoutMs);
@@ -537,6 +549,10 @@ function paneCreationTitle(options: HerdrPaneCreationOptions): string {
 
 function normalizePaneTitle(title: string | undefined): string {
   return (title ?? "TraeX pane").replace(/\s+/g, " " ).trim() || "TraeX pane";
+}
+
+function sameAgentSession(left: HerdrAgentSession, right: HerdrAgentSession): boolean {
+  return left.source === right.source && left.agent === right.agent && left.kind === right.kind && left.value === right.value;
 }
 
 function isReadyTraexAgent(pane: HerdrPane | null): boolean {

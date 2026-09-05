@@ -24,7 +24,13 @@ export type SteerReceipt =
   | { status: "blocked"; reason: string }
   | { status: "delivery-uncertain"; operationId: string; reason: string }
   | { status: "failed"; reason: string };
-export type InterruptReceipt = { status: "interrupted" } | { status: "not-active" } | { status: "failed"; reason: string };
+export type InterruptReceipt =
+  | { status: "interrupted" }
+  | { status: "not-active"; reason?: string }
+  | { status: "blocked"; reason: string }
+  | { status: "unsupported"; reason?: string }
+  | { status: "delivery-uncertain"; operationId: string; reason: string }
+  | { status: "failed"; reason: string };
 export interface AgentDispatchHooks {
   onDispatched?(): void | Promise<void>;
   onObservation?(observation: RuntimeTurnObservation): void | Promise<void>;

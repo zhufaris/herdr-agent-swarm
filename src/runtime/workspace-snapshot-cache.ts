@@ -151,6 +151,16 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (!this.delegate.steerAgent) return { status: "unsupported", reason: "Herdr adapter does not support native steering" };
     return this.delegate.steerAgent(input);
   }
+  async interruptAgent(input: Parameters<NonNullable<HerdrPort["interruptAgent"]>>[0]): Promise<import("../domain/agent-runtime.js").InterruptReceipt> {
+    if (!this.delegate.interruptAgent) return { status: "unsupported", reason: "Herdr adapter does not support native interruption" };
+    const result = await this.delegate.interruptAgent(input);
+    if (result.status === "interrupted") {
+      const workspaceId = this.paneWorkspaceIds.get(input.paneId);
+      if (workspaceId) this.invalidate(workspaceId);
+      else this.invalidateAll();
+    }
+    return result;
+  }
 
   async renamePane(paneId: string, title: string, options?: Parameters<HerdrPort["renamePane"]>[2]): Promise<void> {
     const workspaceId = this.paneWorkspaceIds.get(paneId);

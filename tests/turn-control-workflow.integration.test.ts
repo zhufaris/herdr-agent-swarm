@@ -7,7 +7,11 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 
-function setupWorker(overrides: Partial<HerdrPane> = {}, steer = vi.fn(async () => ({ status: "delivered" as const, operationId: "native-1", turnId: "runtime-1" }))) {
+function setupWorker(
+  overrides: Partial<HerdrPane> = {},
+  steer = vi.fn(async () => ({ status: "delivered" as const, operationId: "native-1", turnId: "runtime-1" })),
+  interrupt = vi.fn(async () => ({ status: "interrupted" as const }))
+) {
   store = new SqliteBindingStore(":memory:");
   store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
   const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
@@ -17,8 +21,8 @@ function setupWorker(overrides: Partial<HerdrPane> = {}, steer = vi.fn(async () 
   store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
   const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1", ...overrides };
   const getPane = vi.fn(async () => pane);
-  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent: steer }, idFactory: () => "control-1" });
-  return { workflow, getPane, steer, worker, pane };
+  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent: steer, interruptAgent: interrupt }, idFactory: () => "control-1" });
+  return { workflow, getPane, steer, interrupt, worker, pane };
 }
 
 describe("TurnControlWorkflow", () => {
@@ -48,6 +52,30 @@ describe("TurnControlWorkflow", () => {
     expect(steer).toHaveBeenCalledWith({ paneId: "w1:p1", agentSession: expect.objectContaining({ value: "session-1" }), runtimeTurnId: "runtime-1", text: "change direction", idempotencyKey: "control-1" });
     await expect(workflow.steer(command)).resolves.toMatchObject({ duplicate: true, operation: { state: "delivered" } });
     expect(steer).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatches one exact Worker interrupt without settling the active turn", async () => {
+    const { workflow, getPane, interrupt, worker } = setupWorker();
+    const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, idempotencyKey: "message-1:stop", sourceMessageId: "message-1" };
+    const stateBeforeInterrupt = store!.getInstanceTurn("logical-1")!.state;
+
+    await expect(workflow.interrupt(command)).resolves.toMatchObject({ duplicate: false, operation: { kind: "interrupt", state: "delivered", result: { status: "interrupted" } } });
+    expect(getPane).toHaveBeenCalledTimes(2);
+    expect(interrupt).toHaveBeenCalledWith({ paneId: "w1:p1", agentSession: expect.objectContaining({ value: "session-1" }), runtimeTurnId: "runtime-1", idempotencyKey: "control-1" });
+    expect(store!.getInstanceTurn("logical-1")).toMatchObject({ state: stateBeforeInterrupt, runtimeTurnId: "runtime-1" });
+
+    await expect(workflow.interrupt(command)).resolves.toMatchObject({ duplicate: true, operation: { state: "delivered" } });
+    expect(interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a stop result that does not claim the turn already terminated", async () => {
+    const { workflow, worker } = setupWorker();
+    await workflow.interrupt({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, idempotencyKey: "stop-visible", sourceMessageId: "message-1", resultTargetMessageId: "root-1" });
+
+    const payload = store!.listPendingOutboundReplies()[0]!.payload;
+    expect(payload).toContain("中断已发送");
+    expect(payload).toContain("等待 Herdr");
+    expect(payload).not.toContain("Steering 已送达");
   });
 
   it("returns the stored result without resolving or replaying a completed target", async () => {

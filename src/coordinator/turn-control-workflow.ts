@@ -1,5 +1,5 @@
 import type { ControlActor } from "../domain/commands.js";
-import type { SteerReceipt } from "../domain/agent-runtime.js";
+import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
@@ -11,23 +11,33 @@ import { renderTurnControlResultCard } from "../cards/turn-control-card.js";
 type Store = TurnControlStore & Pick<InstanceStore, "getBinding" | "getActiveOrdinaryPrompt" | "getAgentInstance" | "getActiveInstanceTurn">;
 type SteerOutcome = { operation: TurnControlOperation; duplicate: boolean };
 
-interface Options { store: Store; herdr: Pick<HerdrPort, "getPane" | "steerAgent">; idFactory: () => string; wakeOutbound?: () => void }
+interface Options { store: Store; herdr: Pick<HerdrPort, "getPane" | "steerAgent" | "interruptAgent">; idFactory: () => string; wakeOutbound?: () => void }
 interface SteerCommand { owner: { kind: "binding" | "instance"; id: string }; actor: ControlActor; text: string; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
+interface InterruptCommand { owner: SteerCommand["owner"]; actor: ControlActor; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
 
 export class TurnControlWorkflow {
   constructor(private readonly options: Options) {}
 
   async steer(input: SteerCommand): Promise<SteerOutcome> {
+    return this.control("steer", input);
+  }
+
+  async interrupt(input: InterruptCommand): Promise<SteerOutcome> {
+    return this.control("interrupt", input);
+  }
+
+  private async control(kind: "steer" | "interrupt", input: SteerCommand | InterruptCommand): Promise<SteerOutcome> {
     const previous = this.options.store.getTurnControlOperationByIdempotencyKey(input.idempotencyKey);
     if (previous) {
-      if (!sameSteerRequest(previous, input)) throw new Error("Idempotency key belongs to a different turn control operation");
+      if (!sameControlRequest(previous, kind, input)) throw new Error("Idempotency key belongs to a different turn control operation");
       this.options.wakeOutbound?.();
       return { operation: previous, duplicate: true };
     }
     const target = await this.resolveTarget(input.owner);
-    const pending: TurnControlOperation = { id: this.options.idFactory(), idempotencyKey: input.idempotencyKey, kind: "steer", target, actor: input.actor, payload: input.text, sourceMessageId: input.sourceMessageId ?? null, sourceCardId: input.sourceCardId ?? null, state: "accepted", result: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const payload = kind === "steer" ? (input as SteerCommand).text : null;
+    const pending: TurnControlOperation = { id: this.options.idFactory(), idempotencyKey: input.idempotencyKey, kind, target, actor: input.actor, payload, sourceMessageId: input.sourceMessageId ?? null, sourceCardId: input.sourceCardId ?? null, state: "accepted", result: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     const accepted = this.options.store.acceptTurnControlOperation({
-      id: pending.id, idempotencyKey: input.idempotencyKey, kind: "steer", target, actor: input.actor, payload: input.text,
+      id: pending.id, idempotencyKey: input.idempotencyKey, kind, target, actor: input.actor, payload,
       ...(input.sourceMessageId !== undefined ? { sourceMessageId: input.sourceMessageId } : {}),
       ...(input.sourceCardId !== undefined ? { sourceCardId: input.sourceCardId } : {}),
       ...(input.resultTargetMessageId ? { result: { targetMessageId: input.resultTargetMessageId, bindingId: target.owner.kind === "binding" ? target.owner.id : null, card: renderTurnControlResultCard(pending) } } : {})
@@ -78,8 +88,12 @@ export class TurnControlWorkflow {
       const rejected = { ...operation, state: "rejected" as const, result: { status: "rejected", reason: "Exact turn target changed before dispatch" } };
       return this.options.store.rejectAcceptedTurnControlOperation({ id: operation.id, result: rejected.result, card: renderTurnControlResultCard(rejected) }) ?? this.requireOperation(operation.id);
     }
-    if (!this.options.herdr.steerAgent) return this.finish(claimed.id, { status: "unsupported", reason: "Herdr native steering is unavailable" });
     try {
+      if (claimed.kind === "interrupt") {
+        if (!this.options.herdr.interruptAgent) return this.finish(claimed.id, { status: "unsupported", reason: "Herdr native interruption is unavailable" });
+        return this.finish(claimed.id, await this.options.herdr.interruptAgent({ paneId: claimed.target.paneId, agentSession: claimed.target.agentSession, runtimeTurnId: claimed.target.runtimeTurnId, idempotencyKey: claimed.id }));
+      }
+      if (!this.options.herdr.steerAgent) return this.finish(claimed.id, { status: "unsupported", reason: "Herdr native steering is unavailable" });
       return this.finish(claimed.id, await this.options.herdr.steerAgent({ paneId: claimed.target.paneId, agentSession: claimed.target.agentSession, runtimeTurnId: claimed.target.runtimeTurnId, text: claimed.payload!, idempotencyKey: claimed.id }));
     } catch (error) {
       const result = { status: "delivery-uncertain", reason: safeLogError(error).message };
@@ -87,8 +101,8 @@ export class TurnControlWorkflow {
     }
   }
 
-  private finish(id: string, receipt: SteerReceipt): TurnControlOperation {
-    const state = receipt.status === "delivered" ? "delivered" : receipt.status === "delivery-uncertain" || receipt.status === "failed" ? "uncertain" : "rejected";
+  private finish(id: string, receipt: SteerReceipt | InterruptReceipt): TurnControlOperation {
+    const state = receipt.status === "delivered" || receipt.status === "interrupted" ? "delivered" : receipt.status === "delivery-uncertain" || receipt.status === "failed" ? "uncertain" : "rejected";
     const operation = this.requireOperation(id);
     return this.options.store.finishTurnControlOperation({ id, state, result: receipt, card: renderTurnControlResultCard({ ...operation, state, result: receipt }) }) ?? this.requireOperation(id);
   }
@@ -124,7 +138,8 @@ function bindingSession(binding: Binding): HerdrAgentSession | null {
 function sameSession(left: HerdrAgentSession, right: HerdrAgentSession): boolean {
   return left.source === right.source && left.agent === right.agent && left.kind === right.kind && left.value === right.value;
 }
-function sameSteerRequest(operation: TurnControlOperation, input: SteerCommand): boolean {
-  return operation.kind === "steer" && operation.target.owner.kind === input.owner.kind && operation.target.owner.id === input.owner.id
-    && operation.payload === input.text && operation.sourceMessageId === (input.sourceMessageId ?? null) && operation.sourceCardId === (input.sourceCardId ?? null);
+function sameControlRequest(operation: TurnControlOperation, kind: "steer" | "interrupt", input: SteerCommand | InterruptCommand): boolean {
+  const payload = kind === "steer" ? (input as SteerCommand).text : null;
+  return operation.kind === kind && operation.target.owner.kind === input.owner.kind && operation.target.owner.id === input.owner.id
+    && operation.payload === payload && operation.sourceMessageId === (input.sourceMessageId ?? null) && operation.sourceCardId === (input.sourceCardId ?? null);
 }

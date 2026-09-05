@@ -73,6 +73,41 @@ describe("Herdr adapter structured control", () => {
     expect(calls).toEqual([["agent", "steer", "w1:p1", "private steer", "--turn-id", "turn-1", "--idempotency-key", "message:1", "--agent-session", '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"session-1"}', "--timeout", "1000"]]);
   });
 
+  it("revalidates the exact native turn before sending ctrl+c", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "agent" && args[1] === "get") return json({ agent: {
+        pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "working", active_turn_id: "turn-1",
+        steering_capability: "native", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }
+      } });
+      return { stdout: "", stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).interruptAgent({
+      paneId: "w1:p1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" },
+      runtimeTurnId: "turn-1", idempotencyKey: "control-1"
+    })).resolves.toEqual({ status: "interrupted" });
+    expect(calls).toEqual([["agent", "get", "w1:p1"], ["agent", "send-keys", "w1:p1", "ctrl+c"]]);
+  });
+
+  it("does not interrupt when the native runtime turn changed", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      return json({ agent: {
+        pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "working", active_turn_id: "turn-2",
+        steering_capability: "native", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }
+      } });
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).interruptAgent({
+      paneId: "w1:p1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" },
+      runtimeTurnId: "turn-1", idempotencyKey: "control-1"
+    })).resolves.toMatchObject({ status: "not-active", reason: expect.stringContaining("changed") });
+    expect(calls).toEqual([["agent", "get", "w1:p1"]]);
+  });
+
   it("verifies a newly started TraeX agent through targeted agent get when the snapshot is stale", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

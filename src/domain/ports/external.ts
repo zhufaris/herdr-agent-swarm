@@ -42,6 +42,7 @@ export interface HerdrPort {
   runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>, options?: ModelPromptDispatchOptions): Promise<AgentState>;
   listModels?(paneId: string, agentSession: HerdrAgentSession): Promise<TraexModelSummary[]>;
   steerAgent?(input: { paneId: string; agentSession: HerdrAgentSession; runtimeTurnId: string; text: string; idempotencyKey: string }): Promise<SteerReceipt>;
+  interruptAgent?(input: { paneId: string; agentSession: HerdrAgentSession; runtimeTurnId: string; idempotencyKey: string }): Promise<import("../agent-runtime.js").InterruptReceipt>;
   sendEscape?(paneId: string): Promise<void>;
   renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;
   closePane(paneId: string): Promise<void>;
