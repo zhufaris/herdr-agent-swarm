@@ -14,7 +14,8 @@ import { renderWorkerMainCard } from "../cards/worker-main-card.js";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort }
+interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: import("../domain/agent-instance.js").AgentKind; model: string | null; start: boolean }): Promise<import("../domain/agent-instance.js").CreateWorkerResult> }
+interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort; workerCreation?: WorkerCreationGateway }
 export class InstanceInteractionWorkflow {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   constructor(private readonly options: Options) { this.projects = new Map(options.projects.map((project) => [project.id, project])); }
@@ -125,12 +126,15 @@ export class InstanceInteractionWorkflow {
       if (!this.projects.has(projectId)) return warning("项目不存在或已移除。");
       if (bindingContext && bindingContext !== projectId) return warning("当前话题已固定到其他项目。");
       const form = action.formValues ?? {};
-      const agentKind = form.agent_kind === "pi" || form.agent_kind === "claude-code" || form.agent_kind === "codex" || form.agent_kind === "traex" ? form.agent_kind : null;
+      const agentKind: import("../domain/agent-instance.js").AgentKind | null = form.agent_kind === "pi" || form.agent_kind === "claude-code" || form.agent_kind === "codex" || form.agent_kind === "traex" ? form.agent_kind : null;
       const name = form.name?.trim() ?? "";
       if (!name || !agentKind) return { toast: { type: "error", content: "请填写有效的 Worker 名和 Agent。" } };
       try {
         const bindingId = conversationKey.startsWith("binding:") ? conversationKey.slice("binding:".length) : null;
-        const result = await this.options.control.createWorker({ actor, projectId, name, agentKind, model: form.model?.trim() || null, start: form.start === "true", bindingId });
+        const command = { kind: "worker_create" as const, name, agentKind, model: form.model?.trim() || null, start: form.start === "true" };
+        const result = this.options.workerCreation
+          ? bindingId ? await this.options.workerCreation.createWorkerFromCard(action, bindingId, command) : (() => { throw new Error("Worker 创建需要活动的 Primary 话题。"); })()
+          : await this.options.control.createWorker({ actor, projectId, ...command, bindingId });
         if (result.status === "created-start-failed") return { toast: { type: "warning", content: `Worker ${result.instance.name} 已创建，但启动失败：${result.error}` }, card: this.detailCard(result.instance, conversationKey) };
         return { toast: { type: "success", content: `Worker ${result.instance.name} 已创建。` }, card: this.detailCard(result.instance, conversationKey) };
       } catch (error) { return failed(error); }

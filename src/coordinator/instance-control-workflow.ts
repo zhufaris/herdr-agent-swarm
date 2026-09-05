@@ -8,6 +8,7 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { WorktreeManager } from "../runtime/worktree-manager.js";
+import { preferredRuntimeSessionId, requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 
 interface Options {
   projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
@@ -172,8 +173,9 @@ export class InstanceControlWorkflow {
     if (!binding || binding.projectId !== project.id || binding.workspaceId !== project.workspaceId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || !binding.paneId) throw new Error("Worker parent binding is not active");
     const pane = await this.options.paneHost.inspectPane(binding.paneId);
     if (!pane || pane.workspaceId !== project.workspaceId || pane.cwd !== project.cwd) throw new Error("Worker parent pane could not be verified");
-    const nativeSessionId = pane.agentSession?.value ?? pane.terminalId ?? null;
-    if (binding.traexSessionId && nativeSessionId !== binding.traexSessionId) throw new Error("Worker parent pane identity changed");
+    let nativeSessionId: string | null;
+    try { nativeSessionId = preferredRuntimeSessionId(binding, pane); }
+    catch { throw new Error("Worker parent pane identity changed"); }
     return { identity: { bindingId: binding.id, bindingGeneration: binding.generation, paneId: pane.paneId, nativeSessionId }, label: pane.label };
   }
   private async requireLiveParent(project: ProjectConfig, parent: NonNullable<AgentInstance["parent"]>): Promise<void> {
@@ -181,6 +183,8 @@ export class InstanceControlWorkflow {
     if (!binding || binding.projectId !== project.id || binding.workspaceId !== project.workspaceId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== parent.paneId || (parent.bindingGeneration !== undefined && binding.generation !== parent.bindingGeneration)) throw new Error("Worker parent binding is no longer active");
     const pane = await this.options.paneHost.inspectPane(parent.paneId);
     if (!pane || pane.workspaceId !== project.workspaceId || pane.cwd !== project.cwd) throw new Error("Worker parent pane could not be verified");
+    try { requireMatchingRuntimeIdentity(binding, pane); }
+    catch { throw new Error("Worker parent pane identity changed"); }
     const nativeSessionId = pane.agentSession?.value ?? pane.terminalId ?? null;
     if (parent.nativeSessionId && parent.nativeSessionId !== nativeSessionId) throw new Error("Worker parent pane identity changed");
   }

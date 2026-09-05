@@ -248,10 +248,29 @@ Agent 时选择模型，或显式替换 Agent 后使用新模型。该命令不�
 
 ### 命令边界
 
-传统单话题流程只把 `/swarm ...` 识别为该 binding 的控制命令。未被多 Agent 命令层
-识别的 `/herdr`、`/model`、`/new`、`/stop` 以及其它 slash 命令，会作为普通任务原样
-提交给绑定 pane 中的 TraeX，使其可使用自身命令与已安装 skills。顶层
-`/steer <worker> <要求>` 属于多 Agent Worker 控制命令，不会进入 Primary FIFO。
+全部 `/swarm ...` 命令共享同一个 command context boundary：先解析权限与 chat、project、
+Primary binding、generation、pane/terminal/native session，再交给所属 workflow。查询命令
+不创建 CommandIntent；修改命令先持久化并按 context lane 串行执行。服务重启只恢复尚未
+开始的命令；已经开始但结果不确定的命令标记为 `uncertain`，不会盲目重放。
+
+未被多 Agent 命令层识别的 `/herdr`、`/model`、`/new`、`/stop` 以及其它 slash 命令，
+会作为普通任务原样提交给绑定 pane 中的 TraeX，使其可使用自身命令与已安装 skills。
+顶层 `/steer <worker> <要求>` 属于多 Agent Worker 控制命令，不会进入 Primary FIFO。
+
+### `/swarm worker create <name> [options]`
+
+在当前 Primary 话题下创建一个 Worker pane。它与 `/instances` 卡片中的“创建实例”
+使用同一个 durable handler，并固定记录当前 Primary binding、generation 和运行时身份。
+
+```text
+/swarm worker create reviewer
+/swarm worker create reviewer --agent codex --model GPT-5.5 --start
+```
+
+`--agent` 可选 `traex`、`codex`、`claude-code` 或 `pi`，默认 `traex`；`--model` 可选。
+默认只创建不启动，传入 `--start` 才启动 Worker。Worker 始终归属于当前 Primary pane，
+不会退化成 project 级创建；Primary generation、terminal 或 native session 已变化时请求
+会失败关闭。重复的飞书事件复用同一个 CommandIntent，不会创建第二个 Worker。
 
 ### `/swarm rename <标题>`
 

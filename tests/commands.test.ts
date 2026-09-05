@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand, splitMessage } from "../src/domain/commands.js";
+import { SWARM_COMMAND_POLICIES, swarmCommandPolicy } from "../src/domain/swarm-command.js";
 
 describe("commands", () => {
   it("parses supported commands", () => {
@@ -22,6 +23,11 @@ describe("commands", () => {
     expect(parseCommand("/swarm resume")).toEqual({ kind: "resume" });
     expect(parseCommand("/swarm awake")).toEqual({ kind: "awake" });
     expect(parseCommand("/swarm awake extra")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm worker create reviewer")).toEqual({ kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false });
+    expect(parseCommand("/swarm worker create reviewer --agent codex --model \"GPT 5\" --start")).toEqual({ kind: "worker_create", name: "reviewer", agentKind: "codex", model: "GPT 5", start: true });
+    expect(parseCommand("/swarm worker create reviewer --start --start")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm worker create reviewer --agent unknown")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm worker delete reviewer")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm pane close")).toEqual({ kind: "pane_close_request" });
     expect(parseCommand("/swarm pane close confirm A7K9Q2")).toEqual({ kind: "pane_close_confirm", code: "A7K9Q2" });
     expect(parseCommand("/swarm pane close confirm")).toEqual({ kind: "help" });
@@ -38,6 +44,14 @@ describe("commands", () => {
     expect(parseCommand("/stop")).toBeNull();
     expect(parseCommand("/steer inspect the failing request")).toBeNull();
     expect(parseCommand("hello")).toBeNull();
+  });
+
+  it("classifies every Swarm command through one exhaustive policy catalog", () => {
+    expect(Object.keys(SWARM_COMMAND_POLICIES).sort()).toEqual([
+      "attach", "awake", "close", "failures", "help", "model", "new", "pane_close_confirm", "pane_close_request", "projects", "reattach", "rename", "replace", "reset", "resume", "sessions", "spaces", "status", "steer", "stop", "worker_create"
+    ]);
+    expect(swarmCommandPolicy({ kind: "model", name: null })).toMatchObject({ mode: "query", replay: "none" });
+    expect(swarmCommandPolicy({ kind: "model", name: "GPT-5" })).toMatchObject({ mode: "mutation", replay: "non-replayable" });
   });
 
   it("derives bounded titles and splits at line boundaries", () => {

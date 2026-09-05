@@ -330,6 +330,7 @@ export function renderHelpCard(): object {
         "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",
         "`/swarm status`  查看当前绑定",
         "`/swarm model [name]`  查看或切换当前 Pane 的 TraeX 模型",
+        "`/swarm worker create <name> [--agent <kind>] [--model <name>] [--start]`  在当前 Primary 下创建 Worker",
         "`/swarm rename <标题>`  重命名当前 pane",
         "`/swarm close`  归档映射（不会强杀 TraeX）",
         "`/swarm pane close`  请求关闭空闲 Pane（需要 60 秒内二次确认）",

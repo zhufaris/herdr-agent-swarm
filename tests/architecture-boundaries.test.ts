@@ -96,17 +96,22 @@ describe("application composition boundaries", () => {
   it("routes query and session administration through dedicated workflow seams", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const commands = readFileSync(new URL("../src/coordinator/swarm-command-gateway.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");
     expect(router).toContain("StartupRecoveryWorkflowPort");
     expect(router).not.toContain("operationsQuery.listSpaces");
-    expect(routing).toContain("OperationsQueryWorkflowPort");
-    expect(routing).toContain("SessionAdministrationWorkflowPort");
-    expect(routing).toContain("ModelSelectionWorkflowPort");
-    expect(routing).toContain("PaneControlWorkflowPort");
-    expect(routing).toContain("PaneClosureWorkflowPort");
+    expect(routing).toContain("SwarmCommandGatewayPort");
+    expect(routing).not.toContain("operationsQuery.listSpaces");
+    expect(commands).toContain("OperationsQueryWorkflowPort");
+    expect(commands).toContain("SessionAdministrationWorkflowPort");
+    expect(commands).toContain("ModelSelectionWorkflowPort");
+    expect(commands).toContain("PaneControlWorkflowPort");
+    expect(commands).toContain("PaneClosureWorkflowPort");
     expect(recovery).toContain("InboundMessageRoutingWorkflowPort");
-    expect(routing).toContain("operationsQuery.listSpaces");
-    expect(routing).toContain("sessionAdministration.archive");
+    expect(commands).toContain("operationsQuery.listSpaces");
+    expect(commands).toContain("sessionAdministration.archive");
+    expect(commands).toContain("async stop(): Promise<void>");
+    expect(router).toContain("swarmCommands.stop()");
   });
 
   it("keeps lifecycle publishers and subscribers behind their ports", () => {
