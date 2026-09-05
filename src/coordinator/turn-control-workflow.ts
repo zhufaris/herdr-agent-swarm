@@ -121,19 +121,19 @@ export class TurnControlWorkflow {
       const binding = target.binding;
       if (!binding.rootMessageId) throw new Error("Primary binding has no result thread");
       const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, title: "Priority steer", sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: input.text, queuePosition: 0, occurredAt });
-      const accepted = this.options.store.acceptPrompt({ prompt: { id, bindingId: binding.id, larkMessageId: `priority-steer:${input.idempotencyKey}`, actorOpenId: actorId(input.actor), body: input.text, priority: "priority" }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view) });
+      const accepted = this.options.store.acceptPrompt({ prompt: { id, bindingId: binding.id, larkMessageId: `priority-steer:${input.idempotencyKey}`, actorOpenId: actorId(input.actor), body: input.text, priority: "priority" }, view, rootMessageId: binding.rootMessageId, answerCard: renderRequestAnswerCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20, expectedBindingGeneration: binding.generation });
       if (accepted.inserted) { this.options.wakeOutbound?.(); this.options.wakePrimary?.(binding.id); }
       return { mode: "priority", logicalTurnId: accepted.prompt.id, duplicate: !accepted.inserted };
     }
     const instance = target.instance;
     if (input.resultTargetMessageId) {
       const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: instance.id, instanceGeneration: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name, parentTurnId: null, rootMessageId: input.resultTargetMessageId, requestText: input.text, queuePosition: 0, occurredAt });
-      const accepted = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", priority: "priority", text: input.text, parentTurnId: null, sourceMessageId: input.sourceMessageId ?? input.idempotencyKey, view, card: renderWorkerTurnCard(view) });
+      const accepted = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", priority: "priority", text: input.text, parentTurnId: null, sourceMessageId: input.sourceMessageId ?? input.idempotencyKey, view, card: renderWorkerTurnCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20 });
       if (accepted.inserted) this.options.wakeOutbound?.();
       this.options.wakeInstance?.(instance.id);
       return { mode: "priority", logicalTurnId: accepted.turn.id, duplicate: !accepted.inserted };
     }
-    const accepted = this.options.store.acceptInstanceTurn({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", priority: "priority", text: input.text });
+    const accepted = this.options.store.acceptInstanceTurn({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", priority: "priority", text: input.text, maxQueueDepth: this.options.maxQueueDepth ?? 20 });
     this.options.wakeInstance?.(instance.id);
     return { mode: "priority", logicalTurnId: accepted.turn.id, duplicate: !accepted.inserted };
   }
@@ -180,7 +180,7 @@ export class TurnControlWorkflow {
     if (expectedSession && !sameSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
     if (kind === "steer" && pane.steeringCapability !== "native") throw new Error("Native steering is unsupported for this pane");
     if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
-    if (pane.activeTurnId !== null && pane.activeTurnId !== undefined && pane.activeTurnId !== runtimeTurnId) throw new Error("Runtime turn identity changed");
+    if (pane.activeTurnId !== runtimeTurnId) throw new Error("Runtime turn identity changed");
     return pane;
   }
 

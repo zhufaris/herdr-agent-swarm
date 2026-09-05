@@ -62,6 +62,19 @@ describe("TurnControlWorkflow", () => {
     expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "priority-1", priority: "priority" });
   });
 
+  it("rejects a second live Primary priority steer and enforces queue capacity", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, lastAgentState: "idle", agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
+    let id = 0;
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => `priority-${++id}`, maxQueueDepth: 2 });
+    const command = (key: string) => ({ owner: { kind: "binding" as const, id: "b1" }, actor: { kind: "human" as const, userId: "u1" }, text: key, idempotencyKey: key });
+
+    await workflow.steer(command("first"));
+    await expect(workflow.steer(command("second"))).rejects.toThrow(/live priority turn/);
+  });
+
   it("uses exact native steer despite stale coarse idle state when a durable active turn exists", async () => {
     const { workflow, steer, worker } = setupWorker({ agentState: "idle" });
 
@@ -93,6 +106,17 @@ describe("TurnControlWorkflow", () => {
       .resolves.toEqual({ mode: "priority", logicalTurnId: "priority-worker", duplicate: false });
     expect(store.getInstanceTurn("priority-worker")).toMatchObject({ priority: "priority", state: "queued" });
     expect(wakeInstance).toHaveBeenCalledWith(worker.id);
+  });
+
+  it("enforces Worker queue capacity for an idle priority steer", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    store.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "queued" });
+    const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-worker", maxQueueDepth: 1 });
+
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "urgent", idempotencyKey: "priority" })).rejects.toThrow(/queue is full/);
   });
 
   it("dispatches one exact Worker interrupt without settling the active turn", async () => {
@@ -169,6 +193,15 @@ describe("TurnControlWorkflow", () => {
     getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, activeTurnId: "runtime-2" });
 
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "steer-1" })).resolves.toMatchObject({ operation: { state: "rejected", result: { reason: expect.stringContaining("identity changed") } } });
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the fresh observation has no exact active turn identity", async () => {
+    const { workflow, getPane, steer, worker, pane } = setupWorker();
+    getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, activeTurnId: null });
+
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "steer-null-turn" }))
+      .resolves.toMatchObject({ operation: { state: "rejected", result: { reason: expect.stringContaining("identity changed") } } });
     expect(steer).not.toHaveBeenCalled();
   });
 });

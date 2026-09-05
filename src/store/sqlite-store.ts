@@ -652,8 +652,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       const current = this.getAgentInstance(input.instanceId);
       if (!current || current.projectId !== input.projectId || current.generation !== input.instanceGeneration) throw new Error("Instance generation changed before turn acceptance");
-      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      const existing = this.getInstanceTurnByKey(input.idempotencyKey);
       const priority = input.priority ?? "normal";
+      if (existing) {
+        if (existing.instanceId !== input.instanceId || existing.text !== input.text || existing.kind !== input.kind || existing.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
+        this.database.exec("COMMIT"); return { turn: existing, inserted: false };
+      }
+      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      if (priority === "priority" && this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
+      if (priority === "priority" && this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
       const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
         .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
@@ -670,14 +677,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       const current = this.getAgentInstance(input.instanceId);
       if (!current || current.projectId !== input.projectId || current.generation !== input.instanceGeneration) throw new Error("Instance generation changed before turn acceptance");
+      const existing = this.getInstanceTurnByKey(input.idempotencyKey);
+      const priority = input.priority ?? "normal";
+      if (existing) {
+        if (existing.instanceId !== input.instanceId || existing.text !== input.text || existing.kind !== input.kind || existing.priority !== priority || existing.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
+        const view = this.loadWorkerTurnCard(existing.id);
+        if (!view) throw new Error("Accepted Worker turn card could not be loaded");
+        this.database.exec("COMMIT"); return { turn: existing, view, inserted: false };
+      }
       if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      if (priority === "priority" && this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
+      if (priority === "priority" && this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
       if (input.kind === "turn" && input.parentTurnId !== null) throw new Error("Ordinary Worker turn cannot have a parent");
       if (input.kind === "followup") {
         const parent = input.parentTurnId ? this.getInstanceTurn(input.parentTurnId) : null;
         if (!parent || parent.projectId !== input.projectId || parent.instanceId !== input.instanceId || !["completed", "failed", "cancelled"].includes(parent.state)) throw new Error("Worker follow-up parent must be a settled turn on the same instance");
       }
       if (input.view.turnId !== input.id || input.view.instanceId !== input.instanceId || input.view.instanceGeneration !== input.instanceGeneration || input.view.parentTurnId !== input.parentTurnId || input.view.rootMessageId.length === 0) throw new Error("Worker turn card identity does not match the accepted turn");
-      const priority = input.priority ?? "normal";
       const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
         .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
@@ -2597,6 +2613,17 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         if (!view) throw new Error(`Run card missing for prompt: ${existing.id}`);
         this.database.exec("COMMIT");
         return { prompt: mapPrompt(existing), view, inserted: false };
+      }
+      if (input.expectedBindingGeneration !== undefined) {
+        const binding = this.getBinding(input.prompt.bindingId);
+        if (!binding || binding.generation !== input.expectedBindingGeneration || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") throw new Error("Binding generation changed before prompt acceptance");
+      }
+      if (input.maxQueueDepth !== undefined && this.countPendingPrompts(input.prompt.bindingId) >= input.maxQueueDepth) throw new Error("This topic's prompt queue is full");
+      if (input.prompt.priority === "priority") {
+        const livePriority = this.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND priority = 'priority' AND state IN ('queued','running') LIMIT 1").get(input.prompt.bindingId);
+        if (livePriority) throw new Error("Primary binding already has a live priority turn");
+        const active = this.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND state = 'running' LIMIT 1").get(input.prompt.bindingId);
+        if (active) throw new Error("Primary binding already has an active runtime turn");
       }
       const timestamp = now();
       const dispatchKind = input.prompt.dispatchKind ?? "turn";
