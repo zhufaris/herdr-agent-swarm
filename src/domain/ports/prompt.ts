@@ -5,6 +5,13 @@ import type { MainCardReservationOutcome } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { TranscriptTurnClaimOutcome } from "../types.js";
+import type { ModelDispatch } from "../model-selection.js";
+
+export interface ClaimedPrompt {
+  binding: Binding;
+  prompt: PromptJob;
+  model: ModelDispatch | null;
+}
 
 export interface PromptAcceptanceStore {
   acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
@@ -32,9 +39,12 @@ export interface PromptRunStore {
   requeueStaleUndispatchedPromptClaim?(candidate: StalePromptClaim): boolean;
   getBinding(id: string): Binding | null;
   getPrompt(id: string): PromptJob | null;
-  claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
+  claimNextDispatchablePrompt(bindingId: string): ClaimedPrompt | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   markPromptDispatched(id: string, dispatchedAt: string): void;
+  markModelPromptPrepared(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean;
+  markModelPromptAccepted(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string; turnId: string }): boolean;
+  rollbackPreparedModelPrompt(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean;
   claimPromptTranscriptTurn(input: { promptId: string; bindingId: string; turnId: string; startedAt: string }): TranscriptTurnClaimOutcome;
   markPromptObservationDetached(id: string, notice: string): void;
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];

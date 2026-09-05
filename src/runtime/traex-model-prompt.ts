@@ -57,6 +57,19 @@ export async function commitTraexModelPrompt(input: { operationId: string; text:
   }
 }
 
+export async function abortTraexModelPrompt(input: { operationId: string }, options: ModelPromptOptions): Promise<ModelPromptResult> {
+  if (!HEX_SHA256.test(input.operationId)) throw new Error("Invalid model prompt operation identity");
+  const path = join(options.operationDir, `${input.operationId}.json`);
+  const record = await readRecord(path);
+  if (!record) throw new Error("Prepared model prompt operation not found");
+  if (record.state !== "prepared") return result(record);
+  const claim = await createDispatchClaim(`${path}.dispatch`);
+  if (!claim) return result((await readRecord(path))!);
+  const rejected = { ...record, state: "rejected" as const, detail: "Aborted before dispatch", updatedAt: (options.now ?? (() => new Date()))().toISOString() };
+  await replaceRecord(path, rejected);
+  return result(rejected);
+}
+
 async function callTurnStart(peer: TraexSessionPeer, text: string, model: string, timeoutMs: number): Promise<string> {
   const metadata = await stat(peer.socketPath);
   if (!metadata.isSocket() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o077) !== 0) throw new Error("TraeX session peer socket failed ownership or permission validation");

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BridgeEvent } from "../src/domain/events.js";
-import { initialTopicView, mirrorRunCardToTopic, reduceTopicView } from "../src/domain/topic-view.js";
+import { initialTopicView, mirrorRunCardToTopic, reduceTopicView, updateTopicModelPreference } from "../src/domain/topic-view.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { renderProjectEntryCard } from "../src/cards/run-card.js";
 
@@ -9,6 +9,16 @@ function event<T extends BridgeEvent["type"]>(type: T, payload: Extract<BridgeEv
 }
 
 describe("topic view reducer", () => {
+  it("projects model preference separately from confirmed runtime telemetry", () => {
+    const observed = { ...initialTopicView("b1"), model: "GPT-5.4" };
+    const pending = updateTopicModelPreference(observed, {
+      bindingId: "b1", bindingGeneration: 1, desiredModel: "GPT-5.6-Sol", desiredRevision: 2,
+      effectiveModel: "GPT-5.4", effectiveRevision: 1, state: "pending", dispatchPromptId: null, preparedOperationId: null, updatedAt: "now"
+    });
+
+    expect(pending).toMatchObject({ model: "GPT-5.4", modelPreference: { model: "GPT-5.6-Sol", state: "pending", revision: 2 } });
+    expect(updateTopicModelPreference(pending, null)).toMatchObject({ model: "GPT-5.4", modelPreference: null, viewVersion: pending.viewVersion + 1 });
+  });
   it("persists Primary tool unavailability independently from binding health", () => {
     const initial = initialTopicView("b1");
     const unavailable = reduceTopicView(initial, { eventId: "e1", bindingId: "b1", type: "PrimaryToolAvailabilityChanged", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { available: false, reason: "Primary tools unavailable; use reset or replace" } });

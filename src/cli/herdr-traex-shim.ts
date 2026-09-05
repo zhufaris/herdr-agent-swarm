@@ -10,7 +10,7 @@ import { findTraexSessionPeer } from "../runtime/traex-session-peer.js";
 import { steerTraexTurn } from "../runtime/traex-native-steering.js";
 import { TraexPromptTranscriptReader } from "../runtime/traex-prompt-settlement.js";
 import { listTraexModels } from "../runtime/traex-model-protocol.js";
-import { commitTraexModelPrompt, prepareTraexModelPrompt } from "../runtime/traex-model-prompt.js";
+import { abortTraexModelPrompt, commitTraexModelPrompt, prepareTraexModelPrompt } from "../runtime/traex-model-prompt.js";
 
 async function main(): Promise<void> {
   const configPath = process.env.HERDR_TRAEX_SHIM_CONFIG;
@@ -87,6 +87,10 @@ async function main(): Promise<void> {
   if (invocation.kind === "model-prompt-commit") {
     const result = await commitTraexModelPrompt({ operationId: invocation.operationId, text: invocation.text, promptSha256: invocation.promptSha256 }, { operationDir: modelPromptOperationDir, timeoutMs: invocation.timeoutMs });
     process.stdout.write(`${JSON.stringify({ id: "cli:agent:model-prompt:commit", result: { type: "agent_model_prompt", ...result } })}\n`); return;
+  }
+  if (invocation.kind === "model-prompt-abort") {
+    const result = await abortTraexModelPrompt({ operationId: invocation.operationId }, { operationDir: modelPromptOperationDir, timeoutMs: invocation.timeoutMs });
+    process.stdout.write(`${JSON.stringify({ id: "cli:agent:model-prompt:abort", result: { type: "agent_model_prompt", ...result } })}\n`); return;
   }
   if (invocation.kind !== "start-traex") throw new Error("Shim entrypoint accepts only managed TraeX commands");
   const result = await runHerdrTraexStart(invocation, config, dependencies(config));

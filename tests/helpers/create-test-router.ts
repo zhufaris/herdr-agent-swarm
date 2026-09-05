@@ -23,6 +23,7 @@ import { StartupRecoveryWorkflow } from "../../src/coordinator/startup-recovery-
 import { TurnControlWorkflow } from "../../src/coordinator/turn-control-workflow.js";
 import { SwarmCommandContextResolver } from "../../src/coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway.js";
+import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
 import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
@@ -49,6 +50,7 @@ export function createTestRouter(
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   outboundWork.subscribe(() => outbound.requestScan());
   const writer = new OutboundIntentWriter(store, outboundWork);
+  const mainCards = new MainCardWorkflow(store, () => outboundWork.wake(), logger);
   outbound.connectPromptScheduler(scheduler);
   let promptRun!: PromptRunWorkflow;
   const externalTurns = transcriptReader && observeExternalTurns ? new ExternalTurnObserver({
@@ -57,7 +59,7 @@ export function createTestRouter(
     wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
   }) : undefined;
   promptRun = new PromptRunWorkflow({
-    store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader,
+    store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
     handoffExternalTurns: externalTurns ? (bindingId) => externalTurns.handoff(bindingId) : undefined,
     observeSupersedingExternalTurn: externalTurns ? (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation) : undefined,
     recoverExternalTurns: externalTurns ? (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt) : undefined
@@ -72,7 +74,7 @@ export function createTestRouter(
     configurationForBinding: (bindingId: string, generation: number) => ({ environment: {}, command: "node", args: ["primary-tools", "--binding", bindingId, "--generation", String(generation)] })
   };
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
-  const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
+  const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
   const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID });
   const paneControl = new PaneControlWorkflow({ store, herdr, outbound: writer, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, logger });

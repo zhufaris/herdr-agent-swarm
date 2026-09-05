@@ -14,7 +14,8 @@ import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControl
 import type { HerdrPort, LarkPort, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort, TraexTranscriptUnavailableReason } from "./ports/external.js";
 import type { AcceptInstanceTurnWithCardInput, InstanceStore } from "./ports/instance.js";
 import type { TurnControlStore } from "./ports/turn-control.js";
-import type { PromptAcceptanceStore, PromptRunStore } from "./ports/prompt.js";
+import type { ClaimedPrompt, PromptAcceptanceStore, PromptRunStore } from "./ports/prompt.js";
+import type { ModelPreference } from "./model-selection.js";
 import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "./ports/projection.js";
 import type { BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore } from "./ports/binding.js";
 import type { PaneCloseStore, PaneControlStore } from "./ports/pane-operations.js";
@@ -22,7 +23,7 @@ import type { ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, Outboun
 import type { DatabaseIntegrityStore, HealthStore, LeaseStore } from "./ports/health.js";
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "./ports/workflow.js";
 import type { CommandIntentStore } from "./ports/swarm-command.js";
-export type { HerdrPort, LarkPort, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort, TraexTranscriptUnavailableReason, AcceptInstanceTurnWithCardInput, InstanceStore, TurnControlStore, PromptAcceptanceStore, PromptRunStore, AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore, BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore, PaneCloseStore, PaneControlStore, ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, OutboundIntentPort, OutboundIntentStore, OutboxDispatcherControl, OutboxStore, DatabaseIntegrityStore, HealthStore, LeaseStore, CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore, CommandIntentStore };
+export type { HerdrPort, LarkPort, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort, TraexTranscriptUnavailableReason, AcceptInstanceTurnWithCardInput, InstanceStore, TurnControlStore, ClaimedPrompt, PromptAcceptanceStore, PromptRunStore, AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore, BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore, PaneCloseStore, PaneControlStore, ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, OutboundIntentPort, OutboundIntentStore, OutboxDispatcherControl, OutboxStore, DatabaseIntegrityStore, HealthStore, LeaseStore, CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundRoutingStore, ModelSelectionStore, ModelPreference, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore, CommandIntentStore };
 
 
 
@@ -160,6 +161,9 @@ export interface BindingStorePort {
   listDetachedPrompts(): PromptJob[];
   markPromptObservationDetached(id: string, notice: string): void;
   markPromptDispatched(id: string, dispatchedAt: string): void;
+  markModelPromptPrepared(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean;
+  markModelPromptAccepted(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string; turnId: string }): boolean;
+  rollbackPreparedModelPrompt(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean;
   claimPromptTranscriptTurn(input: { promptId: string; bindingId: string; turnId: string; startedAt: string }): TranscriptTurnClaimOutcome;
   recoverLegacyElementIdDeadLetters(): number;
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean };
@@ -183,7 +187,7 @@ export interface BindingStorePort {
   reserveClosedAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome;
   reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome;
   reserveStaticAnswerReplacement(input: { promptId: string; previousPageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
-  claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob } | null;
+  claimNextDispatchablePrompt(bindingId: string): ClaimedPrompt | null;
   claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null;
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[];
   cancelQueuedPromptsWithProjection(input: {

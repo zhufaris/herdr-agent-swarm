@@ -16,6 +16,7 @@ import { TurnSupervisor } from "./turn-supervisor.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, decidePromptExecutionFailure, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
 import { decidePromptSafetyScan, decidePromptSafetyScanFailure } from "./prompt-safety-scan-policy.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
+import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 
 export interface ActiveTurnSnapshot {
   promptId: string;
@@ -49,6 +50,7 @@ interface PromptRunWorkflowOptions {
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
   observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
   recoverExternalTurns?: (binding: Binding, prompt: PromptJob) => Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }>;
+  mainCards?: Pick<MainCardWorkflowPort, "converge">;
 }
 
 type TurnOutputSource =
@@ -299,7 +301,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       if (this.options.handoffExternalTurns) await this.options.handoffExternalTurns(bindingId);
       const claimed = this.options.store.claimNextDispatchablePrompt(bindingId);
       if (!claimed) return;
-      let { binding, prompt } = claimed;
+      let { binding, prompt, model } = claimed;
+      if (model) await this.convergeMainCard(bindingId);
       const paneId = binding.paneId!;
       const queueDepth = this.options.store.countPendingPrompts(bindingId);
       const startedAt = Date.now();
@@ -325,6 +328,24 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           this.options.store.markPromptDispatched(prompt.id, dispatchAttemptedAt);
           dispatched = true;
         };
+        const modelOptions = model && binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue ? {
+          modelDispatch: model,
+          agentSession: { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue },
+          onPrepared: async (operationId: string) => {
+            if (!this.options.store.markModelPromptPrepared({ bindingId, bindingGeneration: binding.generation, promptId: prompt.id, revision: model.revision, operationId })) throw new Error("Model prompt prepare fence changed");
+            await this.convergeMainCard(bindingId);
+          },
+          onPrepareAborted: async (operationId: string) => {
+            if (!this.options.store.rollbackPreparedModelPrompt({ bindingId, bindingGeneration: binding.generation, promptId: prompt.id, revision: model.revision, operationId })) throw new Error("Model prompt abort fence changed");
+            dispatched = false;
+            await this.convergeMainCard(bindingId);
+          },
+          onAccepted: async ({ operationId, turnId }: { operationId: string; turnId: string }) => {
+            if (!this.options.store.markModelPromptAccepted({ bindingId, bindingGeneration: binding.generation, promptId: prompt.id, revision: model.revision, operationId, turnId })) throw new Error("Model prompt acceptance fence changed");
+            await this.convergeMainCard(bindingId);
+          }
+        } : undefined;
+        if (model && !modelOptions) throw new Error("Model-aware prompt requires an exact TraeX session identity");
         const promptWaiter = this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource }) => {
           if (!this.isBindingActive(bindingId)) return;
           const previousState = binding.lastAgentState;
@@ -335,7 +356,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
             await this.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: observedQueueDepth, promptId: prompt.id });
             if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: observedQueueDepth, outcome: "waiting_for_user" }, "TraeX turn requires user action");
           }
-        }, abortController.signal, confirmDispatched);
+        }, abortController.signal, confirmDispatched, modelOptions);
         stopAttachedTranscript = new AbortController();
         attachedTranscriptObserver = this.observeAttachedTranscript(
           outputSource, binding, prompt, startedAt, stopAttachedTranscript.signal, confirmDispatched,
@@ -349,6 +370,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (!this.isBindingActive(bindingId) && this.options.store.getBinding(bindingId)?.lifecycle !== "draining") {
           observerDetached = true;
           this.options.store.markPromptObservationDetached(prompt.id, "Session changed after dispatch; the prompt will not be replayed.");
+          await this.convergeMainCard(bindingId);
           return;
         }
         const stateBeforeReturn = binding.lastAgentState;
@@ -378,6 +400,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           outputSource = await this.drainAvailableTranscript(outputSource, binding, prompt, startedAt);
           observerDetached = true;
           this.options.store.markPromptObservationDetached(prompt.id, failure.notice);
+          await this.convergeMainCard(bindingId);
           this.options.logger.warn({ event: "turn-observer-detached", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "detached_without_replay" }, "detached Bridge waiter from possibly in-flight TraeX turn");
           const detachedPrompt = this.options.store.getPrompt(prompt.id);
           if (!this.stopping && detachedPrompt?.transcriptTurnId && detachedPrompt.transcriptTurnStartedAt) {
@@ -387,6 +410,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         }
         if (failure.kind === "ignore") { observerDetached = true; return; }
         this.options.store.failPrompt({ promptId: prompt.id, error: failure.error, occurredAt: new Date().toISOString() });
+        await this.convergeMainCard(bindingId);
         await this.publish(bindingId, "TurnFailed", "bridge", { promptId: prompt.id, error: failure.error, queueDepth: this.options.store.countPendingPrompts(bindingId) });
         this.options.logger.error({ event: "turn-failed", err: safeLogError(error), bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: "failed" }, "TraeX turn failed");
         if (binding.lastAgentState === "blocked") return;
@@ -635,7 +659,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const current = this.options.store.getPrompt(prompt.id) ?? prompt;
     if (!observation.turnId) return { owned: false, prompt: current, observation };
     let ownedPrompt = current;
-    if (!current.transcriptTurnId && observation.freshTurnStart === true && observation.turnLifecycle && current.observationState === "attached") {
+    const needsTurnIdentity = !current.transcriptTurnId;
+    const needsAcceptedTurnStart = current.transcriptTurnId === observation.turnId && !current.transcriptTurnStartedAt;
+    if ((needsTurnIdentity || needsAcceptedTurnStart) && observation.freshTurnStart === true && observation.turnLifecycle && (current.observationState === "attached" || needsAcceptedTurnStart)) {
       const outcome = this.options.store.claimPromptTranscriptTurn({
         promptId: current.id,
         bindingId: binding.id,
@@ -706,6 +732,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
+  }
+
+  private async convergeMainCard(bindingId: string): Promise<void> {
+    try { await this.options.mainCards?.converge(bindingId); }
+    catch (error) { this.options.logger.warn({ event: "model-main-card-convergence-failed", err: safeLogError(error), bindingId, outcome: "deferred" }, "deferred model state projection to normal Main Card convergence"); }
   }
 }
 

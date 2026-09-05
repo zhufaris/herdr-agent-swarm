@@ -68,6 +68,7 @@ describe("Herdr TraeX shim invocation", () => {
     const session = '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"01a03eb1-c193-7531-83c0-e6c6f70143d4"}';
     expect(parseHerdrShimInvocation(["agent", "model-prompt", "prepare", "reviewer", "--model", "GPT-5.4", "--model-revision", "3", "--prompt-sha256", digest, "--agent-session", session, "--timeout", "2500"])).toMatchObject({ kind: "model-prompt-prepare", target: "reviewer", model: "GPT-5.4", revision: 3, promptSha256: digest, timeoutMs: 2500 });
     expect(parseHerdrShimInvocation(["agent", "model-prompt", "commit", "b".repeat(64), "hello world", "--prompt-sha256", digest, "--timeout", "2500"])).toEqual({ kind: "model-prompt-commit", operationId: "b".repeat(64), text: "hello world", promptSha256: digest, timeoutMs: 2500 });
+    expect(parseHerdrShimInvocation(["agent", "model-prompt", "abort", "b".repeat(64), "--timeout", "2500"])).toEqual({ kind: "model-prompt-abort", operationId: "b".repeat(64), timeoutMs: 2500 });
   });
 
   it.each([

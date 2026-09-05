@@ -568,6 +568,125 @@ describe("SQLite store", () => {
     expect(() => store!.markPromptDispatched("p1", "not-an-iso-timestamp")).toThrow("Invalid prompt dispatch timestamp");
   });
 
+  it("atomically pins a pending model revision to the next FIFO prompt claim", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    for (const [id, body, occurredAt] of [["p1", "first", "2026-09-05T00:00:00.000Z"], ["p2", "second", "2026-09-05T00:00:01.000Z"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: body, workspaceId: "w1", paneId: "w1:p1", requestText: body, queuePosition: 1, occurredAt });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body }, view, rootMessageId: "root", answerCard: {} });
+    }
+
+    expect(store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.4" })).toMatchObject({
+      outcome: "accepted", preference: { desiredModel: "GPT-5.4", desiredRevision: 1, state: "pending", dispatchPromptId: null }
+    });
+
+    expect(store.claimNextDispatchablePrompt("b1")).toMatchObject({
+      prompt: { id: "p1" },
+      model: { name: "GPT-5.4", revision: 1 }
+    });
+    expect(store.getModelPreference("b1")).toMatchObject({
+      bindingGeneration: 1, desiredModel: "GPT-5.4", desiredRevision: 1, state: "applying", dispatchPromptId: "p1"
+    });
+    expect(store.getPrompt("p1")).toMatchObject({ modelName: "GPT-5.4", modelRevision: 1 });
+
+    expect(store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.5" })).toMatchObject({
+      outcome: "busy", preference: { desiredModel: "GPT-5.4", desiredRevision: 1, dispatchPromptId: "p1" }
+    });
+    expect(store.getPrompt("p1")).toMatchObject({ modelName: "GPT-5.4", modelRevision: 1 });
+  });
+
+  it("replaces only pending model preferences and fences them by binding generation", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+
+    expect(store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 2, model: "GPT-5.4" })).toEqual({ outcome: "stale", preference: null });
+    expect(store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.4" })).toMatchObject({ outcome: "accepted", preference: { desiredRevision: 1 } });
+    expect(store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.5" })).toMatchObject({
+      outcome: "accepted", preference: { desiredModel: "GPT-5.5", desiredRevision: 2, state: "pending", effectiveModel: null, effectiveRevision: null }
+    });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM binding_model_preferences WHERE binding_id = 'b1'").get()).toEqual({ count: 1 });
+  });
+
+  it("migrates model preferences without fabricating an effective model", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-model-preference-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 25").get()).toEqual({ version: 25 });
+    expect(store.database.prepare("PRAGMA table_info(prompt_jobs)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "model_name" }), expect.objectContaining({ name: "model_revision" })
+    ]));
+    expect(store.getModelPreference("b1")).toBeNull();
+    expect(() => store!.database.prepare("INSERT INTO binding_model_preferences(binding_id, binding_generation, desired_model, desired_revision, state, updated_at) VALUES ('missing',1,'GPT-5.4',1,'pending','now')").run()).toThrow();
+    expect(() => store!.database.prepare("INSERT INTO binding_model_preferences(binding_id, binding_generation, desired_model, desired_revision, state, updated_at) VALUES ('b1',1,'GPT-5.4',0,'pending','now')").run()).toThrow();
+  });
+
+  it("fences model prompt prepare, dispatch, acceptance, and uncertainty by exact revision", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.4" });
+    store.claimNextDispatchablePrompt("b1");
+
+    expect(store.markModelPromptPrepared({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 2, operationId: "wrong" })).toBe(false);
+    expect(store.markModelPromptPrepared({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
+    expect(store.getModelPreference("b1")).toMatchObject({ state: "applying", preparedOperationId: "op1" });
+    expect(store.rollbackPreparedModelPrompt({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "wrong" })).toBe(false);
+    store.markPromptDispatched("p1", "2026-09-05T00:00:01.000Z");
+    expect(store.rollbackPreparedModelPrompt({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
+    expect(store.getPrompt("p1")).toMatchObject({ dispatchedAt: null, observationState: "attached" });
+    expect(store.getModelPreference("b1")).toMatchObject({ state: "pending", dispatchPromptId: null, preparedOperationId: null });
+    store.database.prepare("UPDATE binding_model_preferences SET state = 'applying', dispatch_prompt_id = 'p1', prepared_operation_id = 'op1' WHERE binding_id = 'b1'").run();
+    expect(store.markModelPromptAccepted({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "wrong", turnId: "turn-1" })).toBe(false);
+    expect(store.markModelPromptAccepted({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1", turnId: "turn-1" })).toBe(true);
+    expect(store.getModelPreference("b1")).toMatchObject({ state: "effective", effectiveModel: "GPT-5.4", effectiveRevision: 1, dispatchPromptId: null });
+    expect(store.getPrompt("p1")).toMatchObject({ transcriptTurnId: "turn-1" });
+  });
+
+  it("requeues only model claims proven not prepared and makes prepared claims uncertain on recovery", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["safe", "prepared"] as const) {
+      store.createPendingBinding({ id, workspaceId: `w-${id}`, chatId: "c1", topicId: `t-${id}`, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w-${id}:p1`, lastAgentState: "idle" });
+      const view = createQueuedRunCard({ promptId: `p-${id}`, bindingId: id, title: id, workspaceId: `w-${id}`, paneId: `w-${id}:p1`, requestText: id, queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: `p-${id}`, bindingId: id, larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: `root-${id}`, answerCard: {} });
+      store.acceptModelPreference({ bindingId: id, bindingGeneration: 1, model: "GPT-5.4" });
+      store.claimNextDispatchablePrompt(id);
+    }
+    store.markModelPromptPrepared({ bindingId: "prepared", bindingGeneration: 1, promptId: "p-prepared", revision: 1, operationId: "op-prepared" });
+
+    store.recoverRunningPrompts();
+
+    expect(store.getPrompt("p-safe")).toMatchObject({ state: "queued", observationState: "not_started", modelName: null, modelRevision: null });
+    expect(store.getModelPreference("safe")).toMatchObject({ state: "pending", dispatchPromptId: null });
+    expect(store.getPrompt("p-prepared")).toMatchObject({ state: "running", observationState: "detached", modelName: "GPT-5.4", modelRevision: 1 });
+    expect(store.getModelPreference("prepared")).toMatchObject({ state: "uncertain", dispatchPromptId: "p-prepared", preparedOperationId: "op-prepared" });
+  });
+
+  it("rolls back a pre-prepare model failure and marks a dispatched observer uncertain", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["failed", "detached"] as const) {
+      store.createPendingBinding({ id, workspaceId: `w-${id}`, chatId: "c1", topicId: `t-${id}`, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w-${id}:p1`, lastAgentState: "idle" });
+      const view = createQueuedRunCard({ promptId: `p-${id}`, bindingId: id, title: id, workspaceId: `w-${id}`, paneId: `w-${id}:p1`, requestText: id, queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: `p-${id}`, bindingId: id, larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: `root-${id}`, answerCard: {} });
+      store.acceptModelPreference({ bindingId: id, bindingGeneration: 1, model: "GPT-5.4" });
+      store.claimNextDispatchablePrompt(id);
+    }
+
+    store.failPrompt({ promptId: "p-failed", error: "prepare rejected", occurredAt: "2026-09-05T00:00:01.000Z" });
+    expect(store.getModelPreference("failed")).toMatchObject({ state: "pending", dispatchPromptId: null, preparedOperationId: null });
+
+    store.markModelPromptPrepared({ bindingId: "detached", bindingGeneration: 1, promptId: "p-detached", revision: 1, operationId: "op-detached" });
+    store.markPromptDispatched("p-detached", "2026-09-05T00:00:01.000Z");
+    store.markPromptObservationDetached("p-detached", "commit outcome unknown");
+    expect(store.getModelPreference("detached")).toMatchObject({ state: "uncertain", dispatchPromptId: "p-detached", preparedOperationId: "op-detached" });
+  });
+
   it("claims one eligible transcript turn without allowing replacement", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
@@ -606,6 +725,24 @@ describe("SQLite store", () => {
     expect(store.recoverRunningPrompts()).toBe(2);
     expect(store.getPrompt("owned")).toMatchObject({ observationState: "detached", dispatchedAt: "2026-08-30T00:00:01.000Z", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptTurnStartedAt: "2026-08-30T00:00:01.250Z" });
     expect(store.getPrompt("legacy")).toMatchObject({ observationState: "detached", dispatchedAt: "2026-08-30T00:00:01.000Z", transcriptTurnId: null, transcriptTurnStartedAt: null });
+  });
+
+  it("fills the canonical start time for an already accepted model turn without changing its identity", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.4" });
+    store.claimNextDispatchablePrompt("b1");
+    store.markModelPromptPrepared({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" });
+    store.markPromptDispatched("p1", "2026-09-05T00:00:01.000Z");
+    store.markModelPromptAccepted({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1", turnId: "turn-1" });
+
+    expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "turn-1", startedAt: "2026-09-05T00:00:01.250Z" })).toMatchObject({
+      state: "claimed", prompt: { transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-09-05T00:00:01.250Z" }
+    });
+    expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "turn-2", startedAt: "2026-09-05T00:00:01.500Z" })).toMatchObject({ state: "conflict" });
   });
 
   it.each([
@@ -3691,7 +3828,7 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("source")).toMatchObject({ steeringOrigin: "automatic", steeringFailureKind: "rejected", phase: "failed" });
   });
 
-  it("deduplicates control operations and gives accepted model control priority over queued turns", () => {
+  it("deduplicates legacy model controls without blocking ordinary prompt dispatch", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
@@ -3701,7 +3838,8 @@ describe("SQLite store", () => {
 
     expect(first.inserted).toBe(true);
     expect(duplicate).toMatchObject({ inserted: false, operation: { id: "model-1", state: "accepted" } });
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("turn");
+    store.updatePrompt("turn", "delivered");
     expect(store.claimNextPaneControlOperation("b1")).toMatchObject({ id: "model-1", state: "running" });
     store.finishPaneControlOperation("model-1", "confirmed");
   });

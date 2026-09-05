@@ -203,12 +203,53 @@ describe("Herdr adapter structured control", () => {
     const onDispatched = vi.fn();
     const runner = { run: vi.fn(async (_command, _args, _timeout, onSpawn) => {
       onSpawn?.();
-      throw new Error('{"error":{"code":"agent_prompt_not_started","message":"No matching TraeX turn started"}}');
+      throw new Error('Command failed: {"error":{"code":"agent_prompt_not_started","message":"No matching TraeX turn started"}}');
     }) };
     const adapter = new HerdrCliAdapter(runner as never, "herdr", 100);
 
     await expect(adapter.runPrompt("w1:p1", "/ti", 2_000, undefined, undefined, onDispatched)).rejects.toThrow("agent_prompt_not_started");
     expect(onDispatched).not.toHaveBeenCalled();
+  });
+
+  it("queries the model catalog with the exact session fence", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      return { stdout: JSON.stringify({ id: "cli:agent:model-list", result: { type: "agent_models", models: [{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }] } }), stderr: "" };
+    } };
+    const session = { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).listModels("w1:p1", session)).resolves.toEqual([{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
+    expect(calls).toEqual([["agent", "model-list", "w1:p1", "--agent-session", JSON.stringify(session), "--timeout", "1000"]]);
+  });
+
+  it("prepares, checkpoints, and only then commits a model-aware prompt", async () => {
+    const events: string[] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      events.push(args[1] === "wait" ? "wait" : String(args[2]));
+      if (args[1] === "wait") return { stdout: JSON.stringify({ result: { agent: { agent_status: "done" } } }), stderr: "" };
+      const state = args[2] === "prepare" ? "prepared" : "accepted";
+      return { stdout: JSON.stringify({ id: "model-prompt", result: { type: "agent_model_prompt", operationId: "a".repeat(64), state, turnId: state === "accepted" ? "turn-1" : null, detail: null } }), stderr: "" };
+    } };
+    const session = { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { events.push("dispatched"); }, { modelDispatch: { name: "GPT-5.4", revision: 3 }, agentSession: session, onPrepared: () => { events.push("prepared-fence"); }, onAccepted: ({ turnId }) => { events.push(`accepted:${turnId}`); } })).resolves.toBe("done");
+    expect(events).toEqual(["prepare", "prepared-fence", "dispatched", "commit", "accepted:turn-1", "wait"]);
+  });
+
+  it("aborts the prepared operation when the durable dispatch checkpoint fails", async () => {
+    const events: string[] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      events.push(String(args[2]));
+      const state = args[2] === "prepare" ? "prepared" : "rejected";
+      return { stdout: JSON.stringify({ id: "model-prompt", result: { type: "agent_model_prompt", operationId: "a".repeat(64), state, turnId: null, detail: null } }), stderr: "" };
+    } };
+    const session = { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
+    const onAborted = vi.fn();
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { throw new Error("dispatch checkpoint failed"); }, {
+      modelDispatch: { name: "GPT-5.4", revision: 3 }, agentSession: session, onPrepared() {}, onPrepareAborted: onAborted
+    })).rejects.toThrow("dispatch checkpoint failed");
+    expect(events).toEqual(["prepare", "abort"]);
+    expect(onAborted).toHaveBeenCalledWith("a".repeat(64));
   });
 
   it("reports dispatch only after successful prompt completion", async () => {

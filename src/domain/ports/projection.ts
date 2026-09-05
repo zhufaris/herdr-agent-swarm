@@ -3,6 +3,7 @@ import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { InstanceStore } from "./instance.js";
 import type { OutboundReply } from "../types.js";
+import type { ModelPreference } from "../model-selection.js";
 
 export interface AnswerPageStore {
   getActiveAnswerPage(promptId: string): AnswerPage | null;
@@ -26,6 +27,7 @@ export type WorkerTurnCardStore = Pick<InstanceStore, "getWorkerTurnCardDelivery
 
 export interface MainCardStore {
   getBinding(id: string): Binding | null;
+  getModelPreference(bindingId: string): ModelPreference | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome;
   saveTopicView(view: TopicViewState): void;

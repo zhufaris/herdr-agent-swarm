@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { commitTraexModelPrompt, prepareTraexModelPrompt } from "../src/runtime/traex-model-prompt.js";
+import { abortTraexModelPrompt, commitTraexModelPrompt, prepareTraexModelPrompt } from "../src/runtime/traex-model-prompt.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -41,6 +41,25 @@ describe("TraeX two-phase model prompt", () => {
     await expect(commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart })).resolves.toMatchObject({ state: "uncertain" });
     await expect(commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart })).resolves.toMatchObject({ state: "uncertain" });
     expect(callTurnStart).toHaveBeenCalledOnce();
+  });
+
+  it("atomically aborts only a still-prepared operation", async () => {
+    const operationDir = await fixture();
+    const prepared = await prepareTraexModelPrompt({ peer, target: "primary", model: "GPT-5.4", revision: 3, promptSha256: digest }, { operationDir });
+
+    await expect(abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).resolves.toMatchObject({ state: "rejected" });
+    await expect(abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).resolves.toMatchObject({ state: "rejected" });
+    await expect(commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart: vi.fn() })).resolves.toMatchObject({ state: "rejected" });
+  });
+
+  it("cannot abort after commit owns the dispatch fence", async () => {
+    const operationDir = await fixture();
+    const release = Promise.withResolvers<string>();
+    const prepared = await prepareTraexModelPrompt({ peer, target: "primary", model: "GPT-5.4", revision: 3, promptSha256: digest }, { operationDir });
+    const commit = commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart: () => release.promise });
+    await vi.waitFor(async () => expect((await abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).state).toBe("dispatching"));
+    release.resolve("turn-1");
+    await expect(commit).resolves.toMatchObject({ state: "accepted" });
   });
 });
 

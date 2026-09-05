@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { renderProjectEntryCard } from "../cards/run-card.js";
 import type { MainCardStore } from "../domain/ports/projection.js";
-import type { TopicViewState } from "../domain/topic-view.js";
+import { updateTopicModelPreference, type TopicViewState } from "../domain/topic-view.js";
 
 export interface MainCardWorkflowPort {
   converge(bindingId: string): Promise<void>;
@@ -27,10 +27,11 @@ export class MainCardWorkflow implements MainCardWorkflowPort {
 
   private async reserve(bindingId: string, desired?: TopicViewState): Promise<void> {
     const binding = this.store.getBinding(bindingId);
-    const view = desired ?? this.store.loadTopicView(bindingId);
+    const stored = desired ?? this.store.loadTopicView(bindingId);
+    const view = stored ? updateTopicModelPreference(stored, this.store.getModelPreference(bindingId)) : null;
     if (!binding || !view) return;
     if (!binding.rootMessageId) {
-      if (desired) this.store.saveTopicView(desired);
+      if (desired) this.store.saveTopicView(view);
       return;
     }
     const outcome = this.store.reserveMainCard(view, binding.rootMessageId, renderProjectEntryCard(view));

@@ -104,7 +104,7 @@ The production implementation uses the following modules and seams.
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
-| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Stop control plus deterministic rejection of unsupported runtime model/steering operations | One queue owner with no raw terminal-input seam |
+| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Session-scoped model catalog/preferences plus stop control and legacy model-row recovery | Structured TraeX peer protocol; no raw terminal-input seam |
 | `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
@@ -448,6 +448,18 @@ prompt and its Run Card with an explicit no-replay notice; this retains audit
 history while preventing an unobservable turn from remaining operationally
 running forever. Detached turns on active, attached bindings remain observable.
 Jobs that never started remain queued.
+
+Runtime Primary model selection is scoped to the exact binding generation and
+shim-reported TraeX session. `model/list` supplies the canonical selectable
+catalog; a selection remains pending until the next ordinary FIFO prompt claims
+it atomically. The shim then prepares an owner-only operation record, SQLite
+records that operation and the no-replay dispatch fence, and one `turn/start`
+sends both prompt text and model. A failure before prepare returns the preference
+to pending. After prepare, an explicit shim compare-and-swap abort can still prove
+that commit never acquired the dispatch claim and safely roll back the SQLite
+fence. Once commit owns that claim, restart or response loss detaches the prompt
+and marks the preference uncertain unless exact turn acceptance is known. No
+terminal `/model` interaction or prompt replay is used.
 
 ## Reconciliation and events
 

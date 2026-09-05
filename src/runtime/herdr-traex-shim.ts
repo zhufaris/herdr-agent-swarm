@@ -12,6 +12,7 @@ export type HerdrShimInvocation =
   | { kind: "model-list-traex"; target: string; agentSession: { source: string; agent: string; kind: "id"; value: string }; timeoutMs: number }
   | { kind: "model-prompt-prepare"; target: string; model: string; revision: number; promptSha256: string; agentSession: { source: string; agent: string; kind: "id"; value: string }; timeoutMs: number }
   | { kind: "model-prompt-commit"; operationId: string; text: string; promptSha256: string; timeoutMs: number }
+  | { kind: "model-prompt-abort"; operationId: string; timeoutMs: number }
   | { kind: "start-traex"; name: string; paneId: string; timeoutMs: number; traexArgs: string[] };
 
 export interface TraexStartInput {
@@ -315,7 +316,7 @@ function parseTraexModelList(args: readonly string[]): Extract<HerdrShimInvocati
   return { kind: "model-list-traex", target, agentSession, timeoutMs };
 }
 
-function parseTraexModelPrompt(args: readonly string[]): Extract<HerdrShimInvocation, { kind: "model-prompt-prepare" | "model-prompt-commit" }> {
+function parseTraexModelPrompt(args: readonly string[]): Extract<HerdrShimInvocation, { kind: "model-prompt-prepare" | "model-prompt-commit" | "model-prompt-abort" }> {
   const action = args[0];
   if (action === "prepare") {
     const target = args[1]; if (!target || target.startsWith("-")) throw new Error("TraeX model prompt prepare requires an Agent target");
@@ -333,7 +334,12 @@ function parseTraexModelPrompt(args: readonly string[]): Extract<HerdrShimInvoca
     if (!/^[a-f0-9]{64}$/.test(operationId) || !promptSha256 || !/^[a-f0-9]{64}$/.test(promptSha256)) throw new Error("Invalid model prompt commit identity");
     return { kind: "model-prompt-commit", operationId, text, promptSha256, timeoutMs: parseTimeout(values.get("--timeout"), "model prompt") };
   }
-  throw new Error("TraeX model prompt requires prepare or commit");
+  if (action === "abort") {
+    const operationId = args[1]; if (!operationId || !/^[a-f0-9]{64}$/.test(operationId)) throw new Error("Invalid model prompt abort identity");
+    const values = parseUniqueOptions(args.slice(2), ["--timeout"]);
+    return { kind: "model-prompt-abort", operationId, timeoutMs: parseTimeout(values.get("--timeout"), "model prompt") };
+  }
+  throw new Error("TraeX model prompt requires prepare, commit, or abort");
 }
 
 function parseUniqueOptions(args: readonly string[], allowed: readonly string[]): Map<string, string> {

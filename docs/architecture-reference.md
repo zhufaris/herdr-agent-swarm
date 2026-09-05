@@ -123,10 +123,11 @@ Prompt 的执行状态和观测状态分开记录。`observationState` 用来表
 仍被当前进程观察、已与观察者脱离，或已经完成。这个区分支持最重要的 no-replay
 规则：一旦请求可能已送达 TraeX，bridge 就只能继续观察或标记不确定，不能自动重放。
 
-### 4.3 PaneControlOperation
+### 4.3 PaneControlOperation 与 ModelPreference
 
-stop、steer 和 model selection 都先成为持久化控制操作，再由同一个 Pane control queue
-串行执行。典型状态为：
+stop 与历史 steering 操作使用持久化 Pane control queue。运行时 model selection 使用独立的
+generation-scoped ModelPreference：catalog 查询和选择不写 terminal，也不占用 Pane control
+队列；pending revision 在下一条普通 Prompt claim 时原子绑定。典型旧 control 状态为：
 
 ```text
 accepted → running → applied → confirmed
@@ -137,6 +138,10 @@ accepted → running → applied → confirmed
 
 操作记录保留 `paneId`、`terminalId` 和 `bindingGeneration`。执行和完成回调必须同时
 匹配这些身份，防止旧 Pane 的迟到结果覆盖 replacement Pane 的状态。
+
+模型偏好使用 `pending → applying → effective`，任何可能已执行但无法确认的路径进入
+`uncertain`。模型与 prompt 通过同一次结构化 `turn/start` 提交；越过 durable dispatch
+fence 后不允许自动重放。
 
 ### 4.4 RunCard、TopicView 与 AnswerPage
 

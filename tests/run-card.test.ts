@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderModelResultCard } from "../src/cards/model-card.js";
+import { renderModelResultCard, renderModelSelectionCard } from "../src/cards/model-card.js";
 import { renderMoreActionsCard } from "../src/cards/interaction-card.js";
 import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
@@ -42,15 +42,28 @@ describe("run card", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/swarm model [name]");
 
-    const card = renderModelResultCard({
-      bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G", switched: false,
-      output: "Select Model and Effort\n 1. Seed-Evolving          1000K context window\n 2. GPT-5.6-Sol (current)  support reasoning"
+    const card = renderModelSelectionCard({
+      bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G",
+      models: [{ id: "seed", name: "Seed-Evolving", displayName: "Seed Evolving" }, { id: "sol", name: "GPT-5.6-Sol", displayName: "GPT 5.6 Sol" }],
+      preference: { bindingId: "binding-1", bindingGeneration: 1, desiredModel: "GPT-5.6-Sol", desiredRevision: 2, effectiveModel: "Seed-Evolving", effectiveRevision: 1, state: "pending", dispatchPromptId: null, preparedOperationId: null, updatedAt: "now" }
     });
-    expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage / w5:p3G" }, subtitle: { content: "HERDR MODEL" }, template: "blue" } });
+    expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage / w5:p3G" }, subtitle: { content: "HERDR MODEL" }, template: "green" } });
     expect(card).toMatchObject({ body: { elements: expect.arrayContaining([expect.objectContaining({
       tag: "select_static", name: "model", initial_option: "GPT-5.6-Sol",
       behaviors: [{ type: "callback", value: { action: "select_model", bindingId: "binding-1" } }]
     })]) } });
+    expect(JSON.stringify(card)).toContain("**Current**  Seed-Evolving");
+    expect(JSON.stringify(card)).toContain("**Next turn**  GPT-5.6-Sol");
+    expect(JSON.stringify(card)).toContain("将在下一条普通消息生效");
+
+    const uncertain = renderModelSelectionCard({
+      bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G",
+      models: [{ id: "seed", name: "Seed-Evolving", displayName: "Seed Evolving" }],
+      preference: { bindingId: "binding-1", bindingGeneration: 1, desiredModel: "removed-model", desiredRevision: 3, effectiveModel: "Seed-Evolving", effectiveRevision: 1, state: "uncertain", dispatchPromptId: "p1", preparedOperationId: "op1", updatedAt: "now" }
+    });
+    expect(uncertain).toMatchObject({ header: { template: "orange" }, body: { elements: [expect.objectContaining({ content: expect.stringContaining("不会自动重放") }), expect.not.objectContaining({ initial_option: "removed-model" })] } });
+
+    expect(JSON.stringify(renderModelResultCard({ bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G", switched: false, output: "模型目录读取失败" }))).not.toContain("select_static");
   });
 
   it("documents priority stop steering and its safety boundary", () => {
@@ -128,6 +141,22 @@ describe("run card", () => {
       content: "`datasage` · `w5:t1` · `w5:p3G`\n`GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
     });
     expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
+  });
+
+  it.each([
+    ["pending", "next GPT-5.6-Sol"],
+    ["applying", "applying GPT-5.6-Sol"],
+    ["uncertain", "uncertain GPT-5.6-Sol"],
+    ["effective", "applied GPT-5.6-Sol"]
+  ] as const)("renders a %s model preference hint without replacing confirmed MODEL telemetry", (state, hint) => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), model: "GPT-5.4",
+      modelPreference: { model: "GPT-5.6-Sol", revision: 2, state }
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("`GPT-5.4`");
+    expect(serialized).toContain(hint);
   });
 
   it("renders CardKit 2.0 from a projected state", () => {

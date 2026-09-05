@@ -3,13 +3,16 @@ import type { BridgeEvent } from "./events.js";
 import { normalizeTurnOutputObservation } from "./events.js";
 import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, progressSnapshot, type MainCardLiveStatus, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "./run-card-view.js";
 import type { PrimaryWorkerSummary } from "./card-context-summary.js";
+import type { ModelPreference, ModelPreferenceState } from "./model-selection.js";
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "degraded" | "draining" | "archived" | "orphaned";
+export interface TopicModelPreference { model: string; revision: number; state: ModelPreferenceState; }
 export interface TopicViewState {
   bindingId: string; title: string; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; progressSummary: RunProgressSummary; model: string | null; context: string | null;
+  modelPreference: TopicModelPreference | null;
   liveStatus: MainCardLiveStatus | null;
   primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
   workers: PrimaryWorkerSummary[]; workerOverflowCount: number; workerDependencyRevision: number;
@@ -19,7 +22,12 @@ export interface TopicViewState {
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+}
+
+export function updateTopicModelPreference(state: TopicViewState, preference: ModelPreference | null): TopicViewState {
+  const modelPreference = preference ? { model: preference.desiredModel, revision: preference.desiredRevision, state: preference.state } : null;
+  return updateTopicView(state, { modelPreference });
 }
 
 export function updateTopicWorkerContext(state: TopicViewState, workers: PrimaryWorkerSummary[], overflowCount: number, dependencyRevision: number): TopicViewState {
@@ -128,10 +136,14 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.phase === right.phase && left.agentState === right.agentState && left.queueDepth === right.queueDepth
     && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
     && left.model === right.model && left.context === right.context
+    && sameTopicModelPreference(left.modelPreference, right.modelPreference)
     && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice
     && left.workerOverflowCount === right.workerOverflowCount && sameWorkerSummaries(left.workers, right.workers)
     && sameLiveStatus(left.liveStatus, right.liveStatus)
     && sameVisibleProgress(left.recentProgress, right.recentProgress) && sameProgressSummary(left.progressSummary, right.progressSummary);
+}
+function sameTopicModelPreference(left: TopicModelPreference | null, right: TopicModelPreference | null): boolean {
+  return left === right || Boolean(left && right && left.model === right.model && left.revision === right.revision && left.state === right.state);
 }
 function sameWorkerSummaries(left: readonly PrimaryWorkerSummary[], right: readonly PrimaryWorkerSummary[]): boolean { return JSON.stringify(left) === JSON.stringify(right); }
 function sameProgressSummary(left: RunProgressSummary, right: RunProgressSummary): boolean { return left.total === right.total && left.stepTotal === right.stepTotal && left.stepDone === right.stepDone; }

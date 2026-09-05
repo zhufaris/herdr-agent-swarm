@@ -4,6 +4,7 @@ import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
 import type { BridgeEvent } from "../events.js";
 import type { RunCardView } from "../run-card-view.js";
+import type { ModelPreference } from "../model-selection.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
@@ -74,6 +75,8 @@ export interface SessionOperationStore {
 }
 
 export interface ModelSelectionStore {
+  acceptModelPreference(input: { bindingId: string; bindingGeneration: number; model: string }): { outcome: "accepted" | "busy" | "stale"; preference: ModelPreference | null };
+  getModelPreference(bindingId: string): ModelPreference | null;
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean };
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   finishPaneControlOperation(id: string, state: PaneControlOutcome, detail?: string | null): boolean;

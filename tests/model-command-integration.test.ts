@@ -11,19 +11,20 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 const UNSUPPORTED = "运行中的 Agent 不支持远程切换模型";
 
 describe("model command without terminal interaction", () => {
-  it("rejects a runtime model command without invoking Herdr", async () => {
+  it("validates and stores a runtime model for the next ordinary prompt", async () => {
     const fixture = await setup();
 
     await fixture.coordinator.handleMessage(message("/swarm model GPT-5.5"));
 
-    await vi.waitFor(() => expect(fixture.updates.some((update) => JSON.stringify(update.card).includes(UNSUPPORTED))).toBe(true));
-    expect(fixture.herdrCalls.filter((call) => call !== "assertWorkspace")).toEqual([]);
+    await vi.waitFor(() => expect(fixture.updates.some((update) => JSON.stringify(update.card).includes("将在下一条普通消息生效"))).toBe(true));
+    expect(fixture.herdrCalls).toContain("listModels");
     expect(fixture.store.countPendingPrompts(fixture.bindingId)).toBe(0);
-    expect(fixture.store.database.prepare("SELECT state, detail FROM pane_control_operations WHERE kind = 'model'").get()).toMatchObject({ state: "rejected", detail: expect.stringContaining(UNSUPPORTED) });
+    expect(fixture.store.getModelPreference(fixture.bindingId)).toMatchObject({ desiredModel: "GPT-5.5", state: "pending" });
+    expect(fixture.store.database.prepare("SELECT state FROM pane_control_operations WHERE kind = 'model'").get()).toBeUndefined();
     await fixture.close();
   });
 
-  it("rejects model card selection without terminal input", async () => {
+  it("stores model card selection without terminal input", async () => {
     const fixture = await setup();
 
     await fixture.coordinator.handleCardAction({
@@ -31,8 +32,9 @@ describe("model command without terminal interaction", () => {
       value: { action: "select_model", bindingId: fixture.bindingId }
     });
 
-    await vi.waitFor(() => expect(fixture.updates.some((update) => update.messageId === "model-card-1" && JSON.stringify(update.card).includes(UNSUPPORTED))).toBe(true));
-    expect(fixture.herdrCalls.filter((call) => call !== "assertWorkspace")).toEqual([]);
+    await vi.waitFor(() => expect(fixture.updates.some((update) => update.messageId === "model-card-1" && JSON.stringify(update.card).includes("将在下一条普通消息生效"))).toBe(true));
+    expect(fixture.herdrCalls).toContain("listModels");
+    expect(fixture.store.getModelPreference(fixture.bindingId)).toMatchObject({ desiredModel: "GPT-5.6-Terra", state: "pending" });
     expect(fixture.store.countPendingPrompts(fixture.bindingId)).toBe(0);
     await fixture.close();
   });
@@ -84,10 +86,11 @@ async function setup() {
     async replyCard(_root, card) { cards.push(card); return { messageId: `card-${cards.length}` }; },
     async updateCard(messageId, card) { updates.push({ messageId, card }); }
   };
-  const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", foregroundExecutables: ["traex"] };
+  const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } };
   const herdr: HerdrPort = {
     async assertWorkspace() { herdrCalls.push("assertWorkspace"); }, async listPanes() { return [pane]; }, async getPane() { return pane; },
     async observeRuntime() { herdrCalls.push("observeRuntime"); return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
+    async listModels() { herdrCalls.push("listModels"); return ["GPT-5.5", "GPT-5.6-Terra"].map((name) => ({ id: name, name, displayName: name })); },
     async createPane() { throw new Error("unused"); }, async startTraex() { herdrCalls.push("startTraex"); },
     async runPrompt() { herdrCalls.push("runPrompt"); return "done"; }, async sendEscape() { herdrCalls.push("sendEscape"); },
     async renamePane() { herdrCalls.push("renamePane"); }

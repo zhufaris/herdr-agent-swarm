@@ -246,6 +246,8 @@ export interface PromptJob {
   dispatchedAt: string | null;
   transcriptTurnId: string | null;
   transcriptTurnStartedAt: string | null;
+  modelName?: string | null;
+  modelRevision?: number | null;
   observationState: PromptObservationState;
   state: PromptState;
   attemptCount: number;

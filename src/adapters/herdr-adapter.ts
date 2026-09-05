@@ -1,8 +1,11 @@
 import { z } from "zod";
-import type { HerdrPort } from "../domain/ports/external.js";
+import type { HerdrPort, ModelPromptDispatchOptions } from "../domain/ports/external.js";
 import type { SteerReceipt } from "../domain/agent-runtime.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
+import type { HerdrAgentSession } from "../domain/types.js";
+import type { TraexModelSummary } from "../runtime/traex-model-protocol.js";
+import { createHash } from "node:crypto";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -36,6 +39,8 @@ const steerResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("unsupported"), reason: z.string() }),
   z.object({ status: z.literal("delivery-uncertain"), operationId: z.string(), reason: z.string() })
 ]);
+const modelSummarySchema = z.object({ id: z.string(), name: z.string(), displayName: z.string() });
+const modelPromptResultSchema = z.object({ type: z.literal("agent_model_prompt"), operationId: z.string(), state: z.enum(["prepared", "dispatching", "accepted", "rejected", "uncertain"]), turnId: z.string().nullable(), detail: z.string().nullable() });
 const PROCESS_INFO_CONCURRENCY = 4;
 
 interface HerdrNativeRequestClient {
@@ -213,8 +218,10 @@ export class HerdrCliAdapter implements HerdrPort {
     timeoutMs: number,
     onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
     signal?: AbortSignal,
-    onDispatched?: () => void | Promise<void>
+    onDispatched?: () => void | Promise<void>,
+    options?: ModelPromptDispatchOptions
   ): Promise<AgentState> {
+    if (options) return this.runModelPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched, options);
     throwIfAborted(signal);
     let commandStarted = false;
     let dispatchReported = false;
@@ -241,6 +248,55 @@ export class HerdrCliAdapter implements HerdrPort {
       }
       throw error;
     }
+  }
+
+  private async runModelPrompt(paneId: string, text: string, timeoutMs: number, onObservation: ((observation: RuntimeTurnObservation) => void | Promise<void>) | undefined, signal: AbortSignal | undefined, onDispatched: (() => void | Promise<void>) | undefined, options: ModelPromptDispatchOptions): Promise<AgentState> {
+    throwIfAborted(signal);
+    const digest = createHash("sha256").update(text).digest("hex");
+    const common = ["--prompt-sha256", digest, "--timeout", String(timeoutMs)];
+    const prepared = await this.modelPromptCommand([
+      "agent", "model-prompt", "prepare", paneId, "--model", options.modelDispatch.name, "--model-revision", String(options.modelDispatch.revision),
+      "--prompt-sha256", digest, "--agent-session", JSON.stringify(options.agentSession), "--timeout", String(timeoutMs)
+    ], timeoutMs);
+    if (prepared.state !== "prepared") throw new Error(`Model prompt prepare returned ${prepared.state}`);
+    await options.onPrepared(prepared.operationId);
+    let committed: z.infer<typeof modelPromptResultSchema>;
+    try {
+      await onDispatched?.();
+      throwIfAborted(signal);
+      committed = await this.modelPromptCommand(["agent", "model-prompt", "commit", prepared.operationId, text, ...common], timeoutMs);
+    } catch (error) {
+      const aborted = await this.modelPromptCommand(["agent", "model-prompt", "abort", prepared.operationId, "--timeout", String(timeoutMs)], timeoutMs).catch(() => null);
+      if (aborted?.state === "rejected") await options.onPrepareAborted?.(prepared.operationId);
+      throw error;
+    }
+    if (committed.state === "rejected") await options.onPrepareAborted?.(prepared.operationId);
+    if (committed.state !== "accepted" || !committed.turnId) throw new Error(committed.detail ?? `Model prompt commit returned ${committed.state}`);
+    await options.onAccepted?.({ operationId: committed.operationId, turnId: committed.turnId });
+    await onObservation?.({ state: "working", stateSource: "structured" });
+    throwIfAborted(signal);
+    const { stdout } = await this.runner.run(
+      this.executable,
+      ["agent", "wait", paneId, "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", String(timeoutMs)],
+      timeoutMs + this.commandTimeoutMs
+    );
+    const state = promptResultState(stdout) ?? (await this.getPane(paneId))?.agentState ?? "unknown";
+    const settled = state === "idle" ? "done" : state;
+    await onObservation?.({ state: settled, stateSource: settled === "unknown" ? "unknown" : "structured" });
+    return settled;
+  }
+
+  private async modelPromptCommand(args: string[], timeoutMs: number): Promise<z.infer<typeof modelPromptResultSchema>> {
+    const { stdout } = await this.runner.run(this.executable, args, timeoutMs + this.commandTimeoutMs);
+    return modelPromptResultSchema.parse(envelopeSchema.parse(JSON.parse(stdout)).result);
+  }
+
+  async listModels(paneId: string, agentSession: HerdrAgentSession): Promise<TraexModelSummary[]> {
+    const { stdout } = await this.runner.run(this.executable, [
+      "agent", "model-list", paneId, "--agent-session", JSON.stringify(agentSession), "--timeout", String(this.commandTimeoutMs)
+    ], this.commandTimeoutMs + 1_000);
+    const result = z.object({ type: z.literal("agent_models"), models: z.array(modelSummarySchema).max(5_000) }).parse(envelopeSchema.parse(JSON.parse(stdout)).result);
+    return result.models;
   }
 
   async sendEscape(paneId: string): Promise<void> {

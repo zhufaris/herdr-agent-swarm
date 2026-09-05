@@ -247,16 +247,20 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 
 ### `/swarm model [name]`
 
-该命令保留用于明确提示：运行中的 Agent 不支持远程切换模型。
+查看当前 Primary TraeX session 的结构化模型目录，或为下一条普通消息选择模型。
 
 ```text
 /swarm model
 /swarm model GPT-5.5
 ```
 
-Bridge 不会打开 TraeX 的 `/model` 菜单、读取 terminal 或模拟键盘选择。请在创建
-Agent 时选择模型，或显式替换 Agent 后使用新模型。该命令不创建 Request/Answer
-卡片，也不进入普通任务队列。
+不带名称时只查询目录；带名称时，Bridge 会严格按当前 session 返回的 catalog 校验，
+并持久化到当前 binding generation。选择不会中断正在运行的任务，也不会创建空 turn；
+它会原子绑定到下一条普通 FIFO 消息，并与该消息一起通过单次 `turn/start` 生效。
+
+在切换处于 `applying` 或结果为 `uncertain` 时，新的选择会被拒绝。任何可能已到达
+TraeX 的请求都不会自动重放。Bridge 不打开 `/model` 菜单、不读取 terminal，也不模拟
+键盘选择；模型命令本身不创建 Request/Answer 卡片，也不进入普通任务队列。
 
 ### 命令边界
 

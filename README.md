@@ -562,7 +562,8 @@ Available commands:
 /swarm projects
 /swarm spaces
 /swarm attach <space> <pane>
-/swarm model [name]  # reports runtime switching as unsupported
+/swarm model [name]  # list or select the current Primary session model
+/swarm steer <text>  # steer the current Primary active turn
 /swarm status
 /swarm rename <title>
 /swarm close
@@ -612,9 +613,13 @@ button when the binding has a Feishu root message. Clicking it makes the bridge
 send Feishu's native forwarded-topic card into the current group; open that card
 to enter the project thread. This avoids unsupported `openMessageId` chat links.
 Bindings owned by another group remain rejected without exposing their topic.
-`/swarm model` and `/swarm model <name>` do not interact with a running Agent.
-Herdr has no structured runtime model-selection operation, so the bridge returns
-an unsupported result; choose the model when creating or explicitly replacing an Agent.
+`/swarm model` reads the exact current Primary TraeX session's structured model
+catalog. `/swarm model <name>` validates the canonical catalog name and stores a
+generation-scoped preference for the next ordinary FIFO prompt; it does not
+interrupt an active turn or create an empty turn. The prompt and selected model
+are submitted together through one fenced `turn/start`. After delivery may have
+started, uncertain outcomes are observed and never automatically replayed. The
+bridge does not automate TraeX's terminal `/model` menu.
 Only `/swarm …` is reserved for the bridge. Other slash commands, including
 `/herdr` and TraeX skill commands, are passed to the bound pane as ordinary prompts.
 An `@Bot` root message creates a topic in the default project and uses the

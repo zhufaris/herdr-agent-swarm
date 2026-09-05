@@ -50,6 +50,22 @@ describe("MainCardWorkflow", () => {
     store.close();
   });
 
+  it("hydrates the durable model preference before reserving the Main Card", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.saveTopicView({ ...initialTopicView("b1"), model: "GPT-5.4", viewVersion: 1 });
+    store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.6-Sol" });
+
+    await new MainCardWorkflow(store, vi.fn()).converge("b1");
+
+    expect(store.loadTopicView("b1")).toMatchObject({
+      model: "GPT-5.4", modelPreference: { model: "GPT-5.6-Sol", revision: 1, state: "pending" }, viewVersion: 2
+    });
+    const [reply] = store.listPendingOutboundReplies();
+    expect(reply?.payload).toContain("next GPT-5.6-Sol");
+    store.close();
+  });
+
   it("delivers the newest version after initial card creation checkpoints", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

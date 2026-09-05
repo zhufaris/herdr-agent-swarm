@@ -396,10 +396,17 @@ function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "pa
 
 function runtimeFooter(input: TopicViewState): string {
   const identity = [input.spaceName, input.tabId, input.paneId].filter(Boolean).map((value) => `\`${escapeCode(value!)}\``).join(" · " );
-  const runtime = [input.model ? `\`${escapeCode(input.model)}\`` : null, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
+  const preference = modelPreferenceHint(input);
+  const runtime = [input.model ? `\`${escapeCode(input.model)}\`` : null, preference, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
   const updated = relativeTime(input.activityAt);
   const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
   return [identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
+}
+
+function modelPreferenceHint(input: TopicViewState): string | null {
+  if (!input.modelPreference) return null;
+  const prefix = { pending: "next", applying: "applying", uncertain: "uncertain", effective: "applied" }[input.modelPreference.state];
+  return `${prefix} ${escapeCode(input.modelPreference.model)}`;
 }
 
 function callout(color: string, content: string): object {
