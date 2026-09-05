@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexPrompt, runHerdrTraexStart, TraexStartError } from "../src/runtime/herdr-traex-shim.js";
+import { encodeLaunchRequest, parseHerdrShimInvocation, pollingDelay, projectTraexAgentJson, runHerdrTraexPrompt, runHerdrTraexStart, runHerdrTraexSteer, TraexStartError } from "../src/runtime/herdr-traex-shim.js";
 
 describe("Herdr TraeX shim invocation", () => {
   it.each([
@@ -119,6 +119,61 @@ describe("Herdr TraeX shim invocation", () => {
     expect(() => parseHerdrShimInvocation(argv)).toThrow(error);
   });
 
+});
+
+describe("Herdr TraeX native steering delegation", () => {
+  const invocation = parseHerdrShimInvocation([
+    "agent", "steer", "reviewer", "private steer",
+    "--turn-id", "turn-42", "--idempotency-key", "message:123",
+    "--agent-session", '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"session-1"}',
+    "--timeout", "2500"
+  ]);
+  const rawAgent = {
+    pane_id: "w1:p1", display_agent: "traex", agent: "codex", agent_status: "working",
+    agent_session: { source: "herdr:codex", agent: "codex", kind: "id", value: "session-1" }
+  };
+
+  it("fails fast without dispatch when real Herdr has no exact-turn steer command", async () => {
+    if (invocation.kind !== "steer-traex") throw new Error("invalid fixture");
+    const dispatch = vi.fn();
+    const result = await runHerdrTraexSteer(invocation, {
+      inspectAgent: async () => rawAgent,
+      inspectAgentCommands: async () => "herdr agent commands:\n  herdr agent prompt <target> <text>\n",
+      dispatch
+    });
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: { type: "agent_steered", status: "unsupported" } });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("delegates once with the unprojected native session when real Herdr supports steering", async () => {
+    if (invocation.kind !== "steer-traex") throw new Error("invalid fixture");
+    const dispatch = vi.fn(async () => ({ exitCode: 0, stdout: envelope({ type: "agent_steered", status: "delivered", turnId: "turn-42" }), stderr: "" }));
+    await runHerdrTraexSteer(invocation, {
+      inspectAgent: async () => rawAgent,
+      inspectAgentCommands: async () => "herdr agent commands:\n  herdr agent steer <target> <text>\n",
+      dispatch
+    });
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith([
+      "agent", "steer", "reviewer", "private steer", "--turn-id", "turn-42",
+      "--idempotency-key", "message:123", "--agent-session",
+      '{"source":"herdr:codex","agent":"codex","kind":"id","value":"session-1"}', "--timeout", "2500"
+    ], 2500);
+  });
+
+  it("rejects a stale projected session before capability discovery or dispatch", async () => {
+    if (invocation.kind !== "steer-traex") throw new Error("invalid fixture");
+    const inspectAgentCommands = vi.fn();
+    const dispatch = vi.fn();
+    const result = await runHerdrTraexSteer(invocation, {
+      inspectAgent: async () => ({ ...rawAgent, agent_session: { ...rawAgent.agent_session, value: "session-2" } }),
+      inspectAgentCommands,
+      dispatch
+    });
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: { status: "not-active" } });
+    expect(inspectAgentCommands).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
 });
 
 describe("Herdr TraeX prompt transcript settlement", () => {

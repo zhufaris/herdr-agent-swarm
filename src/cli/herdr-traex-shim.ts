@@ -5,9 +5,8 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexPrompt, runHerdrTraexStart, type TraexLaunchConfig, type TraexPromptCommandResult, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
+import { parseHerdrShimInvocation, projectTraexAgentJson, runHerdrTraexPrompt, runHerdrTraexStart, runHerdrTraexSteer, type TraexLaunchConfig, type TraexPromptCommandResult, type TraexStartDependencies } from "../runtime/herdr-traex-shim.js";
 import { findTraexSessionPeer } from "../runtime/traex-session-peer.js";
-import { steerTraexTurn } from "../runtime/traex-native-steering.js";
 import { TraexPromptTranscriptReader } from "../runtime/traex-prompt-settlement.js";
 import { listTraexModels } from "../runtime/traex-model-protocol.js";
 import { abortTraexModelPrompt, commitTraexModelPrompt, prepareTraexModelPrompt } from "../runtime/traex-model-prompt.js";
@@ -45,20 +44,14 @@ async function main(): Promise<void> {
     return;
   }
   if (invocation.kind === "steer-traex") {
-    const rawTarget = parseAgent((await run(config.realHerdr, ["agent", "get", invocation.target], invocation.timeoutMs)).stdout);
-    const target = projectTraexAgentJson(rawTarget) as typeof rawTarget;
-    const session = target.agent_session;
-    if (target.display_agent !== "traex" || !session || session.source !== "herdr-traex-shim" || session.kind !== "id" || typeof session.value !== "string") {
-      throw Object.assign(new Error("Target does not expose a shim-managed TraeX native session"), { code: "agent_steer_unsupported" });
-    }
-    if (session.source !== invocation.agentSession.source || target.agent !== invocation.agentSession.agent || session.kind !== invocation.agentSession.kind || session.value !== invocation.agentSession.value) {
-      process.stdout.write(`${JSON.stringify({ id: "cli:agent:steer", result: { type: "agent_steered", status: "not-active", reason: "Agent session identity changed" } })}\n`);
-      return;
-    }
-    const peer = await findTraexSessionPeer(config.sessionPeersDir, session.value);
-    if (!peer) throw Object.assign(new Error("TraeX native session peer is unavailable"), { code: "agent_steer_unsupported" });
-    const result = await steerTraexTurn({ peer, expectedTurnId: invocation.turnId, text: invocation.text, idempotencyKey: invocation.idempotencyKey }, { operationDir: config.steeringOperationDir, timeoutMs: invocation.timeoutMs });
-    process.stdout.write(`${JSON.stringify({ id: "cli:agent:steer", result: { type: "agent_steered", ...result } })}\n`);
+    const outcome = await runHerdrTraexSteer(invocation, {
+      inspectAgent: async (target) => parseAgent((await run(config.realHerdr, ["agent", "get", target], invocation.timeoutMs)).stdout),
+      inspectAgentCommands: async () => (await run(config.realHerdr, ["agent"], invocation.timeoutMs)).stdout,
+      dispatch: (argv, timeoutMs) => runCaptured(config.realHerdr, argv, timeoutMs + 10_000)
+    });
+    if (outcome.stdout) process.stdout.write(outcome.stdout);
+    if (outcome.stderr) process.stderr.write(outcome.stderr);
+    process.exitCode = outcome.exitCode;
     return;
   }
   if (invocation.kind === "model-list-traex") {

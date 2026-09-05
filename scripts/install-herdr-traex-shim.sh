@@ -97,7 +97,7 @@ case $action in
       (( owned )) || fail "refusing to replace unrelated $target"
     fi
     [[ ${HERDR_TRAEX_SKIP_BUILD:-0} == 1 ]] || (cd "$source_root" && npm run build)
-    assets=(dist/cli/herdr-traex-shim.js dist/cli/herdr-traex-reporter.js dist/runtime/herdr-traex-shim.js dist/runtime/herdr-traex-reporter.js dist/runtime/traex-session-peer.js dist/runtime/traex-native-steering.js dist/runtime/traex-prompt-settlement.js dist/runtime/traex-model-protocol.js dist/runtime/traex-model-prompt.js scripts/herdr-traex-command-shim.sh scripts/herdr-traex-pane-launcher.sh)
+    assets=(dist/cli/herdr-traex-shim.js dist/cli/herdr-traex-reporter.js dist/runtime/herdr-traex-shim.js dist/runtime/herdr-traex-reporter.js dist/runtime/traex-session-peer.js dist/runtime/traex-prompt-settlement.js dist/runtime/traex-model-protocol.js dist/runtime/traex-model-prompt.js scripts/herdr-traex-command-shim.sh scripts/herdr-traex-pane-launcher.sh)
     for file in "${assets[@]}"; do
       [[ -f $source_root/$file ]] || fail "missing built shim asset: $file"
     done
@@ -111,7 +111,7 @@ case $action in
     mkdir -p "$release/cli" "$release/runtime" "$config_root" "$request_dir" "$state_root/steering-operations" "$bin_dir"
     chmod 700 "$config_root" "$request_dir" "$state_root/steering-operations"
     cp "$source_root/dist/cli/herdr-traex-shim.js" "$source_root/dist/cli/herdr-traex-reporter.js" "$release/cli/"
-    cp "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/traex-session-peer.js" "$source_root/dist/runtime/traex-native-steering.js" "$release/runtime/"
+    cp "$source_root/dist/runtime/herdr-traex-shim.js" "$source_root/dist/runtime/herdr-traex-reporter.js" "$source_root/dist/runtime/traex-session-peer.js" "$release/runtime/"
     cp "$source_root/dist/runtime/traex-prompt-settlement.js" "$source_root/dist/runtime/traex-model-protocol.js" "$source_root/dist/runtime/traex-model-prompt.js" "$release/runtime/"
     cp "$source_root/scripts/herdr-traex-command-shim.sh" "$release/herdr"
     cp "$source_root/scripts/herdr-traex-pane-launcher.sh" "$release/pane-launcher"

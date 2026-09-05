@@ -44,6 +44,12 @@ export interface TraexPromptCommandResult {
   result?: { agent: TraexPromptAgent };
 }
 
+export interface TraexSteerDependencies {
+  inspectAgent(target: string): Promise<Record<string, unknown>>;
+  inspectAgentCommands(): Promise<string>;
+  dispatch(argv: string[], timeoutMs: number): Promise<TraexPromptCommandResult>;
+}
+
 export interface TraexPromptDependencies {
   resolveAgent(target: string): Promise<TraexPromptAgent | null>;
   openTranscript(session: { source: string; agent: string; kind: "id"; value: string }, expectedPrompt: string): Promise<TraexTranscriptOpenResult>;
@@ -218,6 +224,41 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
     else await dependencies.sleep(50);
     previousSignature = signature;
   }
+}
+
+export async function runHerdrTraexSteer(
+  input: Extract<HerdrShimInvocation, { kind: "steer-traex" }>,
+  dependencies: TraexSteerDependencies
+): Promise<TraexPromptCommandResult> {
+  const rawTarget = await dependencies.inspectAgent(input.target);
+  const projected = projectTraexAgentJson(rawTarget) as Record<string, unknown>;
+  const projectedSession = projected.agent_session as Record<string, unknown> | undefined;
+  if (projected.display_agent !== "traex" || projected.agent !== "traex" || !sameInvocationSession(projectedSession, input.agentSession)) {
+    return steerResult({ status: "not-active", reason: "Agent session identity changed" });
+  }
+  const commands = await dependencies.inspectAgentCommands();
+  if (!commands.split(/\r?\n/).some((line) => /^\s*herdr agent steer(?:\s|$)/.test(line))) {
+    return steerResult({ status: "unsupported", reason: "Installed Herdr does not expose exact-turn agent steering" });
+  }
+  const nativeSession = rawTarget.agent_session;
+  if (!nativeSession || typeof nativeSession !== "object" || Array.isArray(nativeSession)) {
+    return steerResult({ status: "not-active", reason: "Agent session identity changed" });
+  }
+  return dependencies.dispatch([
+    "agent", "steer", input.target, input.text,
+    "--turn-id", input.turnId,
+    "--idempotency-key", input.idempotencyKey,
+    "--agent-session", JSON.stringify(nativeSession),
+    "--timeout", String(input.timeoutMs)
+  ], input.timeoutMs);
+}
+
+function sameInvocationSession(actual: Record<string, unknown> | undefined, expected: Extract<HerdrShimInvocation, { kind: "steer-traex" }>["agentSession"]): boolean {
+  return actual?.source === expected.source && actual.agent === expected.agent && actual.kind === expected.kind && actual.value === expected.value;
+}
+
+function steerResult(result: Record<string, unknown>): TraexPromptCommandResult {
+  return { exitCode: 0, stderr: "", stdout: `${JSON.stringify({ id: "cli:agent:steer", result: { type: "agent_steered", ...result } })}\n` };
 }
 
 async function settleNotStarted(
