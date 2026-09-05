@@ -207,6 +207,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
 class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   private readonly projector = new TraexTranscriptProjector();
   private pendingLines: string[] = [];
+  private skippingOversizedRecord = false;
 
   constructor(
     private readonly path: string,
@@ -222,7 +223,7 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
   }
 
   async readObservation(): Promise<TraexTranscriptObservation> {
-    if (this.pendingLines.length === 0) {
+    while (this.pendingLines.length === 0) {
       const file = await stat(this.path);
       if (file.size < this.offset) throw new Error("TraeX transcript was truncated");
       const available = file.size - this.offset;
@@ -242,8 +243,22 @@ class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
       }
       const chunk = buffer.subarray(0, bytesRead);
       const lastNewline = chunk.lastIndexOf(0x0a);
+      if (this.skippingOversizedRecord) {
+        const firstNewline = chunk.indexOf(0x0a);
+        if (firstNewline < 0) {
+          this.offset += bytesRead;
+          continue;
+        }
+        this.offset += firstNewline + 1;
+        this.skippingOversizedRecord = false;
+        continue;
+      }
       if (lastNewline < 0) {
-        if (available > this.maxReadBytes) throw new Error("TraeX transcript record exceeds the read limit");
+        if (available > this.maxReadBytes) {
+          this.offset += bytesRead;
+          this.skippingOversizedRecord = true;
+          continue;
+        }
         return { answerDelta: "" };
       }
       const complete = chunk.subarray(0, lastNewline + 1);

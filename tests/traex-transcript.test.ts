@@ -57,6 +57,26 @@ describe("TraexTranscriptReader", () => {
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toMatchObject({ mode: "typed" });
   });
 
+  it("skips an oversized appended record and continues with the next turn", async () => {
+    const { root, path } = await createTranscript();
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, maxReadBytes: 256 });
+    const cursor = await expectTyped(await reader.open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      mutation([{ type: "message", id: "oversized-history", role: "assistant", content: [{ type: "output_text", text: "x".repeat(512) }] }]),
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "live-answer", role: "assistant", content: [{ type: "output_text", text: "live answer" }] }])
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, freshTurnStart: true, answerDelta: "",
+      turnLifecycle: { turnId, state: "active" }
+    });
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, answerDelta: "live answer", turnLifecycle: { turnId, state: "active" }
+    });
+  });
+
   it("opens at an exact completed turn even when newer turns already exist", async () => {
     const { root, path } = await createTranscript();
     const oldTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
