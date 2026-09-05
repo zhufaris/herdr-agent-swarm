@@ -28,7 +28,7 @@ export const SWARM_COMMAND_POLICIES = {
   resume: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "safe-before-effect", handler: "session" },
   awake: { mode: "mutation", scope: "active-turn", authorization: "creator", replay: "reconcilable", handler: "prompt-recovery" },
   stop: { mode: "mutation", scope: "active-turn", authorization: "creator-and-administrator", replay: "non-replayable", handler: "pane-control" },
-  steer: { mode: "mutation", scope: "active-turn", authorization: "administrator", replay: "non-replayable", handler: "pane-control" },
+  steer: { mode: "mutation", scope: "primary-session", authorization: "administrator", replay: "non-replayable", handler: "pane-control" },
   model: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "non-replayable", handler: "model" },
   worker_create: { mode: "mutation", scope: "primary-session", authorization: "administrator", replay: "reconcilable", handler: "worker-lifecycle" }
 } as const satisfies Record<SwarmCommandKind, SwarmCommandPolicy>;

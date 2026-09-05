@@ -322,7 +322,7 @@ export function renderHelpCard(): object {
         "`/swarm new [标题]`  选择项目并创建 TraeX pane",
         "`/swarm reset [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
         "`/swarm stop`  中断 exact active turn，不停止 pane、不取消 FIFO",
-        "`/swarm steer <文本>`  向 exact active turn 注入指令，不创建新任务",
+        "`/swarm steer <文本>`  active 时注入 exact turn，idle 时优先于普通队列执行",
         "`/swarm projects`  打开项目选择卡片",
         "`/swarm spaces`  按 Space 查看全部 Pane",
         "`/swarm sessions`  查看当前群的会话",

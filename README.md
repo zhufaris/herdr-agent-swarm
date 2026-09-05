@@ -563,7 +563,7 @@ Available commands:
 /swarm spaces
 /swarm attach <space> <pane>
 /swarm model [name]  # list or select the current Primary session model
-/swarm steer <text>  # steer the current Primary active turn
+/swarm steer <text>  # steer the active Primary turn, or run first when idle
 /swarm status
 /swarm rename <title>
 /swarm close

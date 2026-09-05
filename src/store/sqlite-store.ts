@@ -646,18 +646,19 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean } {
+  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean } {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const current = this.getAgentInstance(input.instanceId);
       if (!current || current.projectId !== input.projectId || current.generation !== input.instanceGeneration) throw new Error("Instance generation changed before turn acceptance");
       if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
-      const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, input.text, timestamp, timestamp).changes === 1;
+      const priority = input.priority ?? "normal";
+      const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
       if (!turn) throw new Error("Accepted instance turn could not be loaded");
-      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind) throw new Error("Idempotency key belongs to a different instance turn");
+      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
       if (inserted) this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
       this.database.exec("COMMIT"); return { turn, inserted };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
@@ -676,11 +677,12 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         if (!parent || parent.projectId !== input.projectId || parent.instanceId !== input.instanceId || !["completed", "failed", "cancelled"].includes(parent.state)) throw new Error("Worker follow-up parent must be a settled turn on the same instance");
       }
       if (input.view.turnId !== input.id || input.view.instanceId !== input.instanceId || input.view.instanceGeneration !== input.instanceGeneration || input.view.parentTurnId !== input.parentTurnId || input.view.rootMessageId.length === 0) throw new Error("Worker turn card identity does not match the accepted turn");
-      const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
+      const priority = input.priority ?? "normal";
+      const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
       if (!turn) throw new Error("Accepted instance turn could not be loaded");
-      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
+      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority || turn.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
       if (inserted) {
         this.saveWorkerTurnCard(input.view);
         this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
@@ -920,7 +922,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (!instance || instance.generation !== expectedGeneration || instance.desiredState !== "running" || !instance.runtimeRef || !["idle", "working", "blocked"].includes(instance.observedState)) { this.database.exec("COMMIT"); return null; }
       const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
       if (active) { this.database.exec("COMMIT"); return null; }
-      const row = this.database.prepare("SELECT id FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state = 'queued' ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as { id: string } | undefined;
+      const row = this.database.prepare("SELECT id FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state = 'queued' ORDER BY CASE priority WHEN 'priority' THEN 0 ELSE 1 END, created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as { id: string } | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
       this.database.prepare("UPDATE instance_turns SET state = 'claimed', updated_at = ? WHERE id = ? AND state = 'queued'").run(now(), row.id);
       const turn = this.getInstanceTurn(row.id)!; this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.claimed", {});
@@ -1040,6 +1042,14 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     const row = this.database.prepare("SELECT * FROM turn_control_operations WHERE idempotency_key = ?").get(idempotencyKey) as TurnControlOperationRow | undefined;
     return row ? mapTurnControlOperation(row) : null;
   }
+  getPrioritySteer(owner: import("../domain/turn-control.js").TurnControlOwner, idempotencyKey: string): { logicalTurnId: string; text: string } | null {
+    if (owner.kind === "binding") {
+      const row = this.database.prepare("SELECT id, body FROM prompt_jobs WHERE binding_id = ? AND lark_message_id = ? AND priority = 'priority'").get(owner.id, `priority-steer:${idempotencyKey}`) as { id: string; body: string } | undefined;
+      return row ? { logicalTurnId: row.id, text: row.body } : null;
+    }
+    const row = this.database.prepare("SELECT id, text FROM instance_turns WHERE instance_id = ? AND idempotency_key = ? AND priority = 'priority'").get(owner.id, idempotencyKey) as { id: string; text: string } | undefined;
+    return row ? { logicalTurnId: row.id, text: row.text } : null;
+  }
   claimTurnControlOperation(id: string): TurnControlOperation | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -1117,7 +1127,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       .run(input.chatId, input.projectId, input.target.kind, input.target.kind === "instance" ? input.target.instanceId : null, input.target.kind === "instance" ? input.target.expectedGeneration ?? null : null, now());
   }
   private insertInstanceEvent(projectId: string, instanceId: string, turnId: string | null, kind: InstanceEventKind, payload: Record<string, unknown>): void { this.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(projectId, instanceId, turnId, kind, JSON.stringify(payload), now()); }
-  private mapInstanceTurn(row: Record<string, unknown> | undefined): InstanceTurn | null { return row ? { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceTurn["kind"], text: String(row.text), state: String(row.state) as InstanceTurnState, result: row.result === null ? null : String(row.result), error: row.error === null ? null : String(row.error), parentTurnId: row.parent_turn_id === null || row.parent_turn_id === undefined ? null : String(row.parent_turn_id), sourceMessageId: row.source_message_id === null || row.source_message_id === undefined ? null : String(row.source_message_id), runtimeTurnId: row.runtime_turn_id === null || row.runtime_turn_id === undefined ? null : String(row.runtime_turn_id), runtimeTurnStartedAt: row.runtime_turn_started_at === null || row.runtime_turn_started_at === undefined ? null : String(row.runtime_turn_started_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : null; }
+  private mapInstanceTurn(row: Record<string, unknown> | undefined): InstanceTurn | null { return row ? { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceTurn["kind"], priority: String(row.priority ?? "normal") as InstanceTurn["priority"], text: String(row.text), state: String(row.state) as InstanceTurnState, result: row.result === null ? null : String(row.result), error: row.error === null ? null : String(row.error), parentTurnId: row.parent_turn_id === null || row.parent_turn_id === undefined ? null : String(row.parent_turn_id), sourceMessageId: row.source_message_id === null || row.source_message_id === undefined ? null : String(row.source_message_id), runtimeTurnId: row.runtime_turn_id === null || row.runtime_turn_id === undefined ? null : String(row.runtime_turn_id), runtimeTurnStartedAt: row.runtime_turn_started_at === null || row.runtime_turn_started_at === undefined ? null : String(row.runtime_turn_started_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : null; }
 
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null {
     const binding = this.getBinding(bindingId);
@@ -2564,15 +2574,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
     const timestamp = now();
     const result = this.database.prepare(`
-      INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?) ON CONFLICT(lark_message_id) DO NOTHING
+      INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, priority, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?) ON CONFLICT(lark_message_id) DO NOTHING
     `);
     const dispatchKind = input.dispatchKind ?? "turn";
     const steeringOrigin = input.steeringOrigin ?? (dispatchKind === "steering" ? "explicit" : null);
-    const inserted = result.run(input.id, input.bindingId, input.larkMessageId, input.actorOpenId, input.body, dispatchKind, input.parentPromptId ?? null, steeringOrigin, input.sourcePromptId ?? null, input.wasDetached ? 1 : 0, timestamp, timestamp).changes === 1;
+    const inserted = result.run(input.id, input.bindingId, input.larkMessageId, input.actorOpenId, input.body, dispatchKind, input.priority ?? "normal", input.parentPromptId ?? null, steeringOrigin, input.sourcePromptId ?? null, input.wasDetached ? 1 : 0, timestamp, timestamp).changes === 1;
     const row = this.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.larkMessageId) as PromptRow | undefined;
     if (!row) throw new Error(`Prompt not found: ${input.larkMessageId}`);
     return { prompt: mapPrompt(row), inserted };
@@ -2591,8 +2601,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const timestamp = now();
       const dispatchKind = input.prompt.dispatchKind ?? "turn";
       const steeringOrigin = input.prompt.steeringOrigin ?? (dispatchKind === "steering" ? "explicit" : null);
-      this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`)
-        .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, dispatchKind, input.prompt.parentPromptId ?? null, steeringOrigin, input.prompt.sourcePromptId ?? null, input.prompt.wasDetached ? 1 : 0, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, priority, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`)
+        .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, dispatchKind, input.prompt.priority ?? "normal", input.prompt.parentPromptId ?? null, steeringOrigin, input.prompt.sourcePromptId ?? null, input.prompt.wasDetached ? 1 : 0, timestamp, timestamp);
       const view = { ...input.view, steeringOrigin, steeringFailureKind: null };
       this.insertRunCard(view);
       const createCard = this.database.prepare(`
@@ -2690,7 +2700,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         SELECT p.* FROM prompt_jobs p
         WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
           AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
-        ORDER BY p.created_at, p.rowid LIMIT 1
+        ORDER BY CASE p.priority WHEN 'priority' THEN 0 ELSE 1 END, p.created_at, p.rowid LIMIT 1
       `).get(bindingId) as PromptRow | undefined;
       if (!row) { this.database.exec("COMMIT"); return null; }
       const claimed = this.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'queued'")
@@ -3977,7 +3987,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       );
       CREATE TABLE IF NOT EXISTS instance_turns(
         id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, actor_json TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('turn','followup')), text TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued','claimed','dispatching','running','blocked','completed','failed','cancelled','dispatch-uncertain')), result TEXT, error TEXT,
+        kind TEXT NOT NULL CHECK(kind IN ('turn','followup')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), text TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued','claimed','dispatching','running','blocked','completed','failed','cancelled','dispatch-uncertain')), result TEXT, error TEXT,
         parent_turn_id TEXT REFERENCES instance_turns(id), source_message_id TEXT, runtime_turn_id TEXT, runtime_turn_started_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS instance_turns_queue ON instance_turns(instance_id, state, created_at);
@@ -4039,7 +4049,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       CREATE INDEX IF NOT EXISTS swarm_command_intents_recovery ON swarm_command_intents(state, updated_at);
       CREATE TABLE IF NOT EXISTS prompt_jobs(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), parent_prompt_id TEXT,
         steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
         dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT, model_name TEXT, model_revision INTEGER CHECK(model_revision IS NULL OR model_revision >= 0),
         state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
@@ -4161,6 +4171,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensurePromptObservationColumn();
     this.ensurePromptProvenanceColumns();
     this.ensurePromptTranscriptProvenanceColumns();
+    this.ensureTurnPriorityColumns();
     this.ensureModelPreferenceSchema();
     this.ensurePromptExecutionOriginColumn();
     this.ensureRunCardActivityColumn();
@@ -4577,6 +4588,18 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     if (!names.has("dispatched_at")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN dispatched_at TEXT");
     if (!names.has("transcript_turn_id")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN transcript_turn_id TEXT");
     if (!names.has("transcript_turn_started_at")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN transcript_turn_started_at TEXT");
+  }
+
+  private ensureTurnPriorityColumns(): void {
+    const promptNames = new Set((this.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!promptNames.has("priority")) this.database.exec("ALTER TABLE prompt_jobs ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority'))");
+    const turnNames = new Set((this.database.prepare("PRAGMA table_info(instance_turns)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!turnNames.has("priority")) this.database.exec("ALTER TABLE instance_turns ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority'))");
+    this.database.exec(`
+      CREATE INDEX IF NOT EXISTS prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, dispatch_kind, priority, created_at);
+      CREATE INDEX IF NOT EXISTS instance_turns_priority_queue ON instance_turns(instance_id, instance_generation, state, priority, created_at);
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (26);
+    `);
   }
 
   private ensureModelPreferenceSchema(): void {

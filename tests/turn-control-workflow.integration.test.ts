@@ -43,6 +43,33 @@ describe("TurnControlWorkflow", () => {
     expect(steerAgent).toHaveBeenCalledOnce();
   });
 
+  it("accepts an idle Primary steer as a durable priority turn ahead of ordinary FIFO", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, lastAgentState: "idle", agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    for (const id of ["ordinary-1", "ordinary-2"]) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", bindingGeneration: 3, title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "2026-09-03T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+    }
+    const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
+    const wakePrimary = vi.fn();
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-1", wakePrimary });
+    const command = { owner: { kind: "binding" as const, id: "b1" }, actor: { kind: "human" as const, userId: "u1" }, text: "urgent", idempotencyKey: "steer-idle-1" };
+
+    await expect(workflow.steer(command)).resolves.toEqual({ mode: "priority", logicalTurnId: "priority-1", duplicate: false });
+    await expect(workflow.steer(command)).resolves.toEqual({ mode: "priority", logicalTurnId: "priority-1", duplicate: true });
+    expect(wakePrimary).toHaveBeenCalledOnce();
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "priority-1", priority: "priority" });
+  });
+
+  it("uses exact native steer despite stale coarse idle state when a durable active turn exists", async () => {
+    const { workflow, steer, worker } = setupWorker({ agentState: "idle" });
+
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "focus", idempotencyKey: "stale-idle" }))
+      .resolves.toMatchObject({ mode: "native", operation: { state: "delivered" } });
+    expect(steer).toHaveBeenCalledOnce();
+  });
+
   it("dispatches one exact Worker steer and returns its durable terminal operation", async () => {
     const { workflow, getPane, steer, worker } = setupWorker();
     const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, text: "change direction", idempotencyKey: "message-1:steer", sourceMessageId: "message-1" };
@@ -52,6 +79,20 @@ describe("TurnControlWorkflow", () => {
     expect(steer).toHaveBeenCalledWith({ paneId: "w1:p1", agentSession: expect.objectContaining({ value: "session-1" }), runtimeTurnId: "runtime-1", text: "change direction", idempotencyKey: "control-1" });
     await expect(workflow.steer(command)).resolves.toMatchObject({ duplicate: true, operation: { state: "delivered" } });
     expect(steer).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts an idle Worker steer as a durable priority turn", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
+    const wakeInstance = vi.fn();
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-worker", wakeInstance });
+
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "urgent", idempotencyKey: "worker-steer-idle" }))
+      .resolves.toEqual({ mode: "priority", logicalTurnId: "priority-worker", duplicate: false });
+    expect(store.getInstanceTurn("priority-worker")).toMatchObject({ priority: "priority", state: "queued" });
+    expect(wakeInstance).toHaveBeenCalledWith(worker.id);
   });
 
   it("dispatches one exact Worker interrupt without settling the active turn", async () => {

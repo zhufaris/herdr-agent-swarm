@@ -568,6 +568,22 @@ describe("SQLite store", () => {
     expect(() => store!.markPromptDispatched("p1", "not-an-iso-timestamp")).toThrow("Invalid prompt dispatch timestamp");
   });
 
+  it("claims a priority Primary turn before ordinary FIFO without reordering the ordinary queue", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    for (const [id, priority] of [["ordinary-1", "normal"], ["ordinary-2", "normal"], ["priority", "priority"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id, priority }, view, rootMessageId: "root", answerCard: {} });
+    }
+
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "priority", priority: "priority" });
+    store.updatePrompt("priority", "delivered");
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("ordinary-1");
+    store.updatePrompt("ordinary-1", "delivered");
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("ordinary-2");
+  });
+
   it("atomically pins a pending model revision to the next FIFO prompt claim", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
@@ -1058,6 +1074,25 @@ describe("SQLite store", () => {
     });
     expect(store.getInstanceTurn("claimed-turn")).toMatchObject({ state: "queued" });
     expect(store.getInstanceTurn("uncertain-turn")).toMatchObject({ state: "dispatching" });
+  });
+
+  it("claims a priority Worker turn before ordinary FIFO and preserves single-active exclusion", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const actor = { kind: "human" as const, userId: "u1" };
+    for (const [id, priority] of [["ordinary-1", "normal"], ["ordinary-2", "normal"], ["priority", "priority"]] as const) {
+      store.acceptInstanceTurn({ id, idempotencyKey: id, actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: id, priority });
+    }
+
+    expect(store.claimNextInstanceTurn(worker.id, worker.generation)).toMatchObject({ id: "priority", priority: "priority" });
+    expect(store.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
+    store.updateInstanceTurn({ turnId: "priority", expectedGeneration: worker.generation, state: "dispatch-uncertain", eventKind: "turn.dispatch-uncertain" });
+    expect(store.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
+    store.updateInstanceTurn({ turnId: "priority", expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed" });
+    expect(store.claimNextInstanceTurn(worker.id, worker.generation)?.id).toBe("ordinary-1");
+    store.updateInstanceTurn({ turnId: "ordinary-1", expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed" });
+    expect(store.claimNextInstanceTurn(worker.id, worker.generation)?.id).toBe("ordinary-2");
   });
 
   it("persists and fences exact-turn control operations without replaying dispatching work", () => {

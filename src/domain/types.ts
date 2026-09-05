@@ -6,6 +6,7 @@ export interface HerdrAgentSession { source: string; agent: string; kind: "id" |
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
+export type TurnPriority = "normal" | "priority";
 export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
 export type SteeringOrigin = "explicit" | "automatic" | "converted";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
@@ -239,6 +240,7 @@ export interface PromptJob {
   body: string;
   executionOrigin: "bridge" | "herdr";
   dispatchKind: PromptDispatchKind;
+  priority: TurnPriority;
   parentPromptId: string | null;
   steeringOrigin: SteeringOrigin | null;
   sourcePromptId: string | null;

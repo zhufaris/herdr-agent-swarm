@@ -14,7 +14,7 @@ import type { RunCardView } from "../run-card-view.js";
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
-  kind: InstanceTurn["kind"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; card: object;
+  kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; card: object;
 }
 
 export interface InstanceStore {
@@ -45,7 +45,7 @@ export interface InstanceStore {
   getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null;
   consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
-  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean };
+  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean };
   acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
   getInstanceTurn(id: string): InstanceTurn | null;
   claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;

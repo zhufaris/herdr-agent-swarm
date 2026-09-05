@@ -36,7 +36,7 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
     if (!active || active.paneId !== binding.paneId) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/swarm stop` 未进入任务队列。"); return false; }
     try {
       const result = await this.options.turnControl.interrupt({ owner: { kind: "binding", id: binding.id }, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, idempotencyKey: `message:${message.messageId}:stop`, sourceMessageId: message.messageId, resultTargetMessageId: message.rootMessageId ?? message.messageId });
-      return result.operation.state === "delivered";
+      return result.mode !== "priority" && result.operation.state === "delivered";
     } catch (error) { await this.reject(message, `Stop 未发送：${errorMessage(error)}`); return false; }
   }
 
@@ -48,7 +48,7 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
         if (active && active.promptId !== expectedParentPromptId) { await this.reject(message, "目标 turn 已变化。`/swarm steer` 未进入任务队列。"); return false; }
       }
       const result = await this.options.turnControl.steer({ owner: { kind: "binding", id: binding.id }, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, text, idempotencyKey: `message:${message.messageId}:steer`, sourceMessageId: message.messageId, resultTargetMessageId: message.rootMessageId ?? message.messageId });
-      return result.operation.state === "delivered";
+      return result.mode === "priority" || result.operation.state === "delivered";
     } catch (error) { await this.reject(message, `Steer 未发送：${errorMessage(error)}`); return false; }
   }
 

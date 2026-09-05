@@ -39,7 +39,9 @@ export class InstanceMessagingWorkflow {
       if (!active || active.id !== turn.id) return { status: "not-active", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
     }
     try {
-      const { operation } = await this.options.turnControl.steer({ owner: { kind: "instance", id: target.id }, actor: input.actor, text: input.text, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
+      const outcome = await this.options.turnControl.steer({ owner: { kind: "instance", id: target.id }, actor: input.actor, text: input.text, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
+      if (outcome.mode === "priority") return { status: "delivered", operationId: outcome.logicalTurnId, ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
+      const { operation } = outcome;
       return { ...turnControlSteerReceipt(operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -54,7 +56,9 @@ export class InstanceMessagingWorkflow {
   async interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string }): Promise<InterruptReceipt> {
     const target = this.authorize(input.actor, undefined, input.targetInstanceId);
     try {
-      const { operation } = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey });
+      const outcome = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey });
+      if (outcome.mode === "priority") return { status: "failed", reason: "Interrupt unexpectedly resolved to a priority turn" };
+      const { operation } = outcome;
       return turnControlInterruptReceipt(operation.state, operation.result);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);

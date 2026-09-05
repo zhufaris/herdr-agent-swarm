@@ -49,7 +49,7 @@ describe("SwarmCommandContextResolver", () => {
     [{ kind: "resume" }, "primary-session", "binding:binding"],
     [{ kind: "awake" }, "active-turn", "binding:binding"],
     [{ kind: "stop" }, "active-turn", "binding:binding"],
-    [{ kind: "steer", text: "focus" }, "active-turn", "binding:binding"],
+    [{ kind: "steer", text: "focus" }, "primary-session", "binding:binding"],
     [{ kind: "model", name: null }, "primary-session", "binding:binding"],
     [{ kind: "model", name: "gpt" }, "primary-session", "binding:binding"],
     [{ kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false }, "primary-session", "binding:binding"]

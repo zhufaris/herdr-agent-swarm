@@ -163,19 +163,20 @@ unknown，或 exact identity 已变化时会拒绝远程 stop。
 
 ### `/swarm steer <文本>`
 
-将补充指令发送给当前话题中正在执行的 Primary turn：
+向当前话题的 Primary 发送一条优先指令：
 
 ```text
 /swarm steer 先不要修改代码，只定位根因
 ```
 
-Bridge 会把命令绑定到当前 binding generation、Primary pane、Agent session 和 runtime
-turn，并在真正发送前再次校验这些身份。只有 Agent 仍为 `working` 且报告 native steering
-能力时才会发送。任务已经结束、目标发生变化、session 缺失或 runtime 不支持 steering 时，
-命令会明确拒绝。拒绝的 steer 不会进入普通 FIFO；结果不确定的 steer 也不会自动重放。
+Primary 正在 `working` 且存在 exact runtime turn 时，Bridge 使用 native steering 注入当前
+turn；Primary 为 `idle` 时，Bridge 持久化一个 priority turn 并立即唤醒调度，它会先于普通
+FIFO 执行，但不会取消或重排普通队列。所有路径都会校验 binding generation、pane 和 Agent
+session。`blocked`、unknown、session 缺失或身份变化时会明确拒绝；结果不确定的 native steer
+不会自动重放。
 
-该命令只作用于当前话题的 Primary。要调整指定 Worker 的当前任务，使用
-`/steer <worker> <文本>`；要给 Worker 新建一条排队任务，使用 `/to <worker> <任务>`。
+该命令只作用于当前话题的 Primary。Worker 的 `/steer <worker> <文本>` 使用相同语义：
+working 时注入当前 turn，idle 时创建 priority turn。普通排队任务仍使用 `/to <worker> <任务>`。
 `blocked` 通常表示本地审批或提问界面，Bridge 会拒绝远程 steering，必须回到 Herdr 处理。
 
 ### `/swarm new [说明]`
