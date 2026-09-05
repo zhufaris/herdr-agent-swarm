@@ -34,6 +34,43 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 17").get()).toEqual({ version: 17 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 22").get()).toEqual({ version: 22 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 23").get()).toEqual({ version: 23 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 24").get()).toEqual({ version: 24 });
+  });
+
+  it("deduplicates Command intents and serializes claims by lane", () => {
+    store = new SqliteBindingStore(":memory:");
+    const context = { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "message-1", actorOpenId: "admin", projectId: "project", workspaceId: "workspace", primary: null };
+    const first = { id: "command-1", idempotencyKey: "lark-message:message-1:new", laneKey: "project:project", command: { kind: "new", title: "One" } as const, context, replayPolicy: "reconcilable" as const, acceptedAt: "2026-09-05T00:00:00.000Z" };
+    const second = { ...first, id: "command-2", idempotencyKey: "lark-message:message-2:new", command: { kind: "new", title: "Two" } as const, acceptedAt: "2026-09-05T00:00:01.000Z" };
+    const independent = { ...first, id: "command-3", idempotencyKey: "lark-message:message-3:new", laneKey: "project:other", context: { ...context, projectId: "other", sourceMessageId: "message-3" }, acceptedAt: "2026-09-05T00:00:02.000Z" };
+
+    expect(store.acceptCommandIntent(first)).toMatchObject({ outcome: "accepted", intent: { state: "accepted", attemptCount: 0 } });
+    expect(store.acceptCommandIntent({ ...first, id: "ignored" })).toMatchObject({ outcome: "duplicate", intent: { id: "command-1" } });
+    expect(store.acceptCommandIntent({ ...first, id: "conflict", command: { kind: "new", title: "Changed" } })).toMatchObject({ outcome: "conflict", intent: { id: "command-1" } });
+    store.acceptCommandIntent(second);
+    store.acceptCommandIntent(independent);
+
+    expect(store.claimNextCommandIntent()).toMatchObject({ id: "command-1", state: "executing", attemptCount: 1 });
+    expect(store.claimNextCommandIntent("project:project")).toBeNull();
+    expect(store.claimNextCommandIntent()).toMatchObject({ id: "command-3", state: "executing" });
+    expect(store.finishCommandIntent("command-1", "succeeded", { code: "created", detail: null, operationKind: "binding", operationId: "binding-1" })).toMatchObject({ state: "succeeded", outcome: { operationId: "binding-1" } });
+    expect(store.claimNextCommandIntent("project:project")).toMatchObject({ id: "command-2", state: "executing" });
+  });
+
+  it("recovers accepted Command intents and terminalizes executing work as uncertain", () => {
+    store = new SqliteBindingStore(":memory:");
+    const context = { chatId: "chat", topicId: null, rootMessageId: null, sourceMessageId: "message", actorOpenId: "admin", projectId: null, workspaceId: null, primary: null };
+    for (const [index, replayPolicy] of (["safe-before-effect", "non-replayable"] as const).entries()) {
+      store.acceptCommandIntent({ id: `command-${index}`, idempotencyKey: `key-${index}`, laneKey: `lane-${index}`, command: { kind: index === 0 ? "close" : "stop" }, context, replayPolicy, acceptedAt: `2026-09-05T00:00:0${index}.000Z` });
+    }
+    store.claimNextCommandIntent("lane-1");
+
+    expect(store.recoverExecutingCommandIntents("2026-09-05T01:00:00.000Z")).toBe(1);
+    expect(store.listRecoverableCommandIntents()).toEqual([
+      expect.objectContaining({ id: "command-0", state: "accepted" }),
+      expect.objectContaining({ id: "command-1", state: "uncertain", outcome: expect.objectContaining({ code: "restart_during_execution" }) })
+    ]);
+    expect(store.claimNextCommandIntent("lane-1")).toBeNull();
   });
 
   it("backfills safe Worker, Primary Main, and mutable Answer invalidations on upgrade", () => {

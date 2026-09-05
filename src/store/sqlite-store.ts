@@ -17,7 +17,7 @@ import { normalizeLarkCardElementIds } from "../runtime/lark-card-id.js";
 import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
-import { mapAnswerPage, mapBinding, mapCardInteraction, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, mapSessionOperation, mapTurnControlOperation, type AnswerPageRow, type BindingRow, type CardInteractionRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SessionOperationRow, type SqlValue, type TurnControlOperationRow } from "./sqlite-records.js";
+import { mapAnswerPage, mapBinding, mapCardInteraction, mapCommandIntent, mapInstanceLease, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, mapSessionOperation, mapTurnControlOperation, type AnswerPageRow, type BindingRow, type CardInteractionRow, type CommandIntentRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SessionOperationRow, type SqlValue, type TurnControlOperationRow } from "./sqlite-records.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 import type { ControlActor } from "../domain/commands.js";
@@ -33,11 +33,12 @@ import { updateRunCardWorkerContext } from "../domain/run-card-view.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
+import type { AcceptCommandIntentInput, AcceptCommandIntentResult, CommandIntent, CommandIntentTerminalState } from "../domain/command-intent.js";
 
 const FENCED_TABLES = [
   "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
   "outbox_lane_heads", "outbox_lane_quarantines",
-  "project_selections", "card_interactions", "session_operations", "pane_close_requests", "worker_pane_close_steps", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
+  "project_selections", "card_interactions", "session_operations", "swarm_command_intents", "pane_close_requests", "worker_pane_close_steps", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
@@ -1285,6 +1286,75 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   listRecoverableSessionOperations(): SessionOperation[] {
     return (this.database.prepare("SELECT * FROM session_operations WHERE state IN ('accepted','running','uncertain') ORDER BY created_at, rowid").all() as SessionOperationRow[]).map(mapSessionOperation);
+  }
+
+  acceptCommandIntent(input: AcceptCommandIntentInput): AcceptCommandIntentResult {
+    const commandJson = JSON.stringify(input.command);
+    const contextJson = JSON.stringify(input.context);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.database.prepare("SELECT * FROM swarm_command_intents WHERE idempotency_key = ?").get(input.idempotencyKey) as CommandIntentRow | undefined;
+      if (existing) {
+        const intent = mapCommandIntent(existing);
+        const exact = existing.lane_key === input.laneKey && existing.command_json === commandJson
+          && existing.context_json === contextJson && existing.replay_policy === input.replayPolicy;
+        this.database.exec("COMMIT");
+        return { outcome: exact ? "duplicate" : "conflict", intent };
+      }
+      this.database.prepare(`
+        INSERT INTO swarm_command_intents(
+          id, idempotency_key, lane_key, command_json, context_json, replay_policy, state, attempt_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
+      `).run(input.id, input.idempotencyKey, input.laneKey, commandJson, contextJson, input.replayPolicy, input.acceptedAt, input.acceptedAt);
+      const intent = this.getCommandIntent(input.id);
+      if (!intent) throw new Error(`Command intent insertion was not observable: ${input.id}`);
+      this.database.exec("COMMIT");
+      return { outcome: "accepted", intent };
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  getCommandIntent(id: string): CommandIntent | null {
+    const row = this.database.prepare("SELECT * FROM swarm_command_intents WHERE id = ?").get(id) as CommandIntentRow | undefined;
+    return row ? mapCommandIntent(row) : null;
+  }
+
+  claimNextCommandIntent(laneKey?: string): CommandIntent | null {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare(`
+        SELECT candidate.* FROM swarm_command_intents candidate
+        WHERE candidate.state = 'accepted' ${laneKey ? "AND candidate.lane_key = ?" : ""}
+          AND NOT EXISTS (
+            SELECT 1 FROM swarm_command_intents active
+            WHERE active.lane_key = candidate.lane_key AND active.state = 'executing'
+          )
+        ORDER BY candidate.created_at, candidate.rowid LIMIT 1
+      `).get(...(laneKey ? [laneKey] : [])) as CommandIntentRow | undefined;
+      if (!row) { this.database.exec("COMMIT"); return null; }
+      const claimedAt = now();
+      const changed = this.database.prepare("UPDATE swarm_command_intents SET state = 'executing', attempt_count = attempt_count + 1, claimed_at = ?, updated_at = ? WHERE id = ? AND state = 'accepted'")
+        .run(claimedAt, claimedAt, row.id);
+      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      const intent = this.getCommandIntent(row.id);
+      this.database.exec("COMMIT");
+      return intent;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  finishCommandIntent(id: string, state: CommandIntentTerminalState, outcome: CommandIntent["outcome"]): CommandIntent | null {
+    const changed = this.database.prepare("UPDATE swarm_command_intents SET state = ?, outcome_json = ?, updated_at = ? WHERE id = ? AND state IN ('executing','uncertain')")
+      .run(state, outcome === null ? null : JSON.stringify(outcome), now(), id);
+    return changed.changes === 1 ? this.getCommandIntent(id) : null;
+  }
+
+  listRecoverableCommandIntents(): CommandIntent[] {
+    return (this.database.prepare("SELECT * FROM swarm_command_intents WHERE state IN ('accepted','uncertain') ORDER BY created_at, rowid").all() as CommandIntentRow[]).map(mapCommandIntent);
+  }
+
+  recoverExecutingCommandIntents(recoveredAt: string): number {
+    const outcome = JSON.stringify({ code: "restart_during_execution", detail: "Command execution outcome is uncertain after restart", operationKind: null, operationId: null });
+    return Number(this.database.prepare("UPDATE swarm_command_intents SET state = 'uncertain', outcome_json = COALESCE(outcome_json, ?), updated_at = ? WHERE state = 'executing'")
+      .run(outcome, recoveredAt).changes);
   }
 
   pruneTerminalSessionOperations(cutoff: string, limit: number): number {
@@ -3725,6 +3795,14 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
       );
       CREATE INDEX IF NOT EXISTS card_interactions_expiry ON card_interactions(state, expires_at);
+      CREATE TABLE IF NOT EXISTS swarm_command_intents(
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, lane_key TEXT NOT NULL, command_json TEXT NOT NULL, context_json TEXT NOT NULL,
+        replay_policy TEXT NOT NULL CHECK(replay_policy IN ('safe-before-effect','reconcilable','non-replayable')),
+        state TEXT NOT NULL CHECK(state IN ('accepted','executing','succeeded','rejected','failed','uncertain')), attempt_count INTEGER NOT NULL DEFAULT 0,
+        outcome_json TEXT, claimed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS swarm_command_intents_claim ON swarm_command_intents(state, lane_key, created_at);
+      CREATE INDEX IF NOT EXISTS swarm_command_intents_recovery ON swarm_command_intents(state, updated_at);
       CREATE TABLE IF NOT EXISTS prompt_jobs(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
         actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
@@ -3870,6 +3948,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensurePaneCloseOperationState();
     this.ensurePaneControlOperationState();
     this.ensureTurnControlOperations();
+    this.ensureSwarmCommandIntents();
     if (runCardViewNeedsRebuild) this.recreateRunCardsView();
     this.ensureQueryIndexes();
     const answerTargetMigration = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
@@ -4331,6 +4410,20 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       );
       CREATE INDEX IF NOT EXISTS turn_control_operations_claim ON turn_control_operations(state, owner_kind, owner_id, created_at);
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (10);
+    `);
+  }
+
+  private ensureSwarmCommandIntents(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS swarm_command_intents(
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, lane_key TEXT NOT NULL, command_json TEXT NOT NULL, context_json TEXT NOT NULL,
+        replay_policy TEXT NOT NULL CHECK(replay_policy IN ('safe-before-effect','reconcilable','non-replayable')),
+        state TEXT NOT NULL CHECK(state IN ('accepted','executing','succeeded','rejected','failed','uncertain')), attempt_count INTEGER NOT NULL DEFAULT 0,
+        outcome_json TEXT, claimed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS swarm_command_intents_claim ON swarm_command_intents(state, lane_key, created_at);
+      CREATE INDEX IF NOT EXISTS swarm_command_intents_recovery ON swarm_command_intents(state, updated_at);
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (24);
     `);
   }
 

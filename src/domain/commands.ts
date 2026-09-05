@@ -62,10 +62,41 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "resume" };
     case "awake":
       return argument ? { kind: "help" } : { kind: "awake" };
+    case "worker":
+      return parseWorkerCommand(argument) ?? { kind: "help" };
     case "help":
     default:
       return { kind: "help" };
   }
+}
+
+function parseWorkerCommand(argument: string): Extract<BridgeCommand, { kind: "worker_create" }> | null {
+  const tokens = argument.match(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+/g)?.map(unquote) ?? [];
+  if (tokens[0]?.toLowerCase() !== "create" || !tokens[1] || tokens[1].startsWith("--")) return null;
+  const name = tokens[1];
+  let agentKind: AgentKind = "traex";
+  let model: string | null = null;
+  let start = false;
+  const seen = new Set<string>();
+  for (let index = 2; index < tokens.length; index += 1) {
+    const option = tokens[index]!;
+    if (seen.has(option)) return null;
+    if (option === "--start") { seen.add(option); start = true; continue; }
+    if (option !== "--agent" && option !== "--model") return null;
+    const value = tokens[++index];
+    if (!value || value.startsWith("--")) return null;
+    seen.add(option);
+    if (option === "--agent") {
+      if (value !== "traex" && value !== "codex" && value !== "claude-code" && value !== "pi") return null;
+      agentKind = value;
+    } else model = value;
+  }
+  return { kind: "worker_create", name, agentKind, model, start };
+}
+
+function unquote(value: string): string {
+  if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) return value.slice(1, -1).replace(/\\([\\"'])/g, "$1");
+  return value;
 }
 
 export function parseInstanceCommand(text: string): InstanceCommand | null {
