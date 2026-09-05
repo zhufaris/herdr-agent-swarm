@@ -881,6 +881,22 @@ describe("SQLite store", () => {
     });
   });
 
+  it("finds eligible pending panes but prefers an attached pane owner", () => {
+    store = new SqliteBindingStore(":memory:");
+    const create = (id: string) => store!.createAgentInstance({
+      id, projectId: "project-a", name: id, role: "worker", agentKind: "traex", model: null, workerSessionLifecycle: "active", desiredState: "running",
+      workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "abc123" }
+    });
+    create("pending");
+    const pending = store.checkpointAgentInstance({ instanceId: "pending", expectedGeneration: 1, checkpoint: "pane-allocated", observedState: "failed", pendingPaneId: "w1:p1", pendingWorkspaceId: "w1", lastError: "uncertain" })!;
+
+    expect(store.findAgentInstanceByPane("w1:p1")).toEqual(pending);
+
+    create("attached");
+    const attached = store.attachAgentInstanceRuntime({ instanceId: "attached", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    expect(store.findAgentInstanceByPane("w1:p1")).toEqual(attached);
+  });
+
   it("recovers only pre-dispatch instance claims back to the FIFO queue", () => {
     store = new SqliteBindingStore(":memory:");
     const createRunning = (id: string) => {

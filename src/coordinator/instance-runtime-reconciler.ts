@@ -88,8 +88,24 @@ export class InstanceRuntimeReconciler {
   }
 
   private async reconcileInstance(instance: AgentInstance, project: ProjectConfig, panes: ReadonlyMap<string, HerdrPane>): Promise<void> {
-    const runtime = instance.runtimeRef;
-    if (!runtime) return;
+    let runtime = instance.runtimeRef;
+    if (!runtime) {
+      const pending = instance.pendingRuntimeRef;
+      if (instance.role !== "worker" || instance.workerSessionLifecycle !== "active" || instance.desiredState !== "running" || !pending
+        || pending.generation !== instance.generation || instance.provisioningCheckpoint !== "pane-allocated" && instance.provisioningCheckpoint !== "runtime-started") return;
+      const pendingPane = panes.get(pending.paneId);
+      const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
+      if (!pendingPane || pending.herdrWorkspaceId !== project.workspaceId || pendingPane.workspaceId !== pending.herdrWorkspaceId
+        || pendingPane.cwd !== workspace?.cwd || !pendingPane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pendingPane.agentKind)
+        || !pendingPane.agentSession?.value || !matchesHerdrAgentKind(instance.agentKind, pendingPane.agentSession.agent)) return;
+      const attached = this.options.store.attachAgentInstanceRuntime({
+        instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: pending.herdrWorkspaceId,
+        paneId: pending.paneId, nativeSessionId: pendingPane.agentSession.value
+      });
+      if (!attached?.runtimeRef) return;
+      instance = attached;
+      runtime = attached.runtimeRef;
+    }
     const pane = panes.get(runtime.paneId);
     if (!pane) { if (this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} is missing` })) this.options.wakeCardContext?.(); return; }
     const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
@@ -100,7 +116,7 @@ export class InstanceRuntimeReconciler {
     const observedState = normalizeState(pane);
     const updated = this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState, lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });
     if (updated) this.options.wakeCardContext?.();
-    if (updated && observedState === "idle" && this.options.store.countPendingInstanceTurns(instance.id) > 0) this.options.wake(instance.id);
+    if (updated && observedState === "idle" && this.options.store.countPendingInstanceTurns(instance.id, instance.generation) > 0) this.options.wake(instance.id);
   }
 }
 

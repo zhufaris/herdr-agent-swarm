@@ -448,7 +448,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   findAgentInstanceByPane(paneId: string): AgentInstance | null {
-    const row = this.database.prepare("SELECT * FROM agent_instances WHERE pane_id = ? ORDER BY created_at, id LIMIT 1").get(paneId) as AgentInstanceRow | undefined;
+    const row = this.database.prepare(`
+      SELECT * FROM agent_instances
+      WHERE pane_id = ? OR (
+        pane_id IS NULL AND pending_pane_id = ? AND role = 'worker'
+        AND worker_session_lifecycle = 'active' AND desired_state = 'running'
+        AND provisioning_checkpoint IN ('pane-allocated', 'runtime-started')
+      )
+      ORDER BY CASE WHEN pane_id = ? THEN 0 ELSE 1 END, created_at, id
+      LIMIT 1
+    `).get(paneId, paneId, paneId) as AgentInstanceRow | undefined;
     return row ? mapAgentInstance(row) : null;
   }
 

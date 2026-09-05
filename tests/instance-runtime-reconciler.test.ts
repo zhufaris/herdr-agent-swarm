@@ -8,7 +8,7 @@ let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 
 const project = { id: "p1", name: "Project", description: "test", workspaceId: "herdr-w", cwd: "/repo" } as ProjectConfig;
-function pane(overrides: Partial<HerdrPane> = {}): HerdrPane { return { paneId: "herdr-w:p1", workspaceId: "herdr-w", cwd: "/repo", label: "worker", agentKind: "codex", agentState: "idle", foregroundExecutables: ["codex"], ...overrides }; }
+function pane(overrides: Partial<HerdrPane> = {}): HerdrPane { return { paneId: "herdr-w:p1", workspaceId: "herdr-w", cwd: "/repo", label: "worker", agentKind: "codex", agentSession: { source: "herdr:codex", agent: "codex", kind: "id", value: "session-1" }, agentState: "idle", foregroundExecutables: ["codex"], ...overrides }; }
 function setup(snapshot: HerdrPane[], options: { bulkSnapshot?: boolean } = {}) {
   store = new SqliteBindingStore(":memory:");
   store.createAgentInstance({ id: "i1", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
@@ -17,6 +17,20 @@ function setup(snapshot: HerdrPane[], options: { bulkSnapshot?: boolean } = {}) 
     listPanes: vi.fn(async () => snapshot),
     inspectPane: vi.fn(async (paneId: string) => snapshot.find((candidate) => candidate.paneId === paneId) ?? null),
     ...(options.bulkSnapshot ? { snapshotPanes: vi.fn(async () => snapshot) } : {})
+  } as unknown as PaneHost;
+  const wake = vi.fn();
+  const wakeCardContext = vi.fn();
+  const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake, wakeCardContext });
+  return { instance, reconciler, wake, wakeCardContext, paneHost };
+}
+
+function setupPending(snapshot: HerdrPane[]) {
+  store = new SqliteBindingStore(":memory:");
+  store.createAgentInstance({ id: "pending", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "ws-pending", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+  const instance = store.checkpointAgentInstance({ instanceId: "pending", expectedGeneration: 1, checkpoint: "pane-allocated", observedState: "failed", pendingPaneId: "herdr-w:p1", pendingWorkspaceId: "herdr-w", lastError: "agent start result uncertain" })!;
+  const paneHost = {
+    listPanes: vi.fn(async () => snapshot),
+    inspectPane: vi.fn(async (paneId: string) => snapshot.find((candidate) => candidate.paneId === paneId) ?? null)
   } as unknown as PaneHost;
   const wake = vi.fn();
   const wakeCardContext = vi.fn();
@@ -78,6 +92,41 @@ describe("instance runtime reconciliation", () => {
     store!.database.prepare("UPDATE agent_instances SET agent_kind = 'traex' WHERE id = ?").run(instance.id);
     await reconciler.reconcile();
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "idle", runtimeRef: { paneId: "herdr-w:p1" } });
+  });
+
+  it("adopts a matching pending TraeX runtime without starting it again", async () => {
+    const { instance, reconciler, wake, wakeCardContext, paneHost } = setupPending([pane()]);
+
+    await reconciler.reconcile();
+
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({
+      generation: instance.generation + 1,
+      desiredState: "running",
+      observedState: "idle",
+      provisioningCheckpoint: "verified",
+      pendingRuntimeRef: null,
+      runtimeRef: { herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: "session-1", generation: instance.generation + 1 },
+      lastError: null
+    });
+    expect(paneHost.listPanes).toHaveBeenCalledOnce();
+    expect(wake).not.toHaveBeenCalled();
+    expect(wakeCardContext).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["missing pane", null],
+    ["missing session identity", pane({ agentSession: null })],
+    ["workspace mismatch", pane({ workspaceId: "other-w" })],
+    ["cwd mismatch", pane({ cwd: "/other" })],
+    ["agent mismatch", pane({ agentKind: "claude", foregroundExecutables: ["claude"] })]
+  ])("leaves a pending runtime unchanged on %s", async (_reason, observedPane) => {
+    const { instance, reconciler, wake, wakeCardContext } = setupPending(observedPane ? [observedPane] : []);
+
+    await reconciler.reconcile();
+
+    expect(store!.getAgentInstance(instance.id)).toEqual(instance);
+    expect(wake).not.toHaveBeenCalled();
+    expect(wakeCardContext).not.toHaveBeenCalled();
   });
 
   it("terminalizes queued work when a Worker pane is missing", async () => {
