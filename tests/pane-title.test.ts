@@ -7,6 +7,7 @@ describe("Primary pane tokens", () => {
   });
 
   it.each([
+    ["e8g2", "e8g2"],
     ["lark_ilcs", "ilcs"],
     ["LARK_ILCS", "ilcs"],
     ["lark_task-ilcs", "ilcs"],
@@ -16,7 +17,7 @@ describe("Primary pane tokens", () => {
     expect(primaryPaneToken(label, "pane-1")).toBe(expected);
   });
 
-  it.each([null, "", "primary-ilcs", "prefix-lark_ilcs", "lark_ilcs-extra", "lark_abc", "lark_abcde"])
+  it.each([null, "", "primary-ilcs", "prefix-lark_ilcs", "lark_ilcs-extra", "abc", "abcde"])
     ("uses a deterministic pane-id fallback for noncanonical label %s", (label) => {
       const token = primaryPaneToken(label, "pane-1");
       expect(token).toMatch(/^[a-z0-9]{4}$/);

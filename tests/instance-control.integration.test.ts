@@ -95,7 +95,7 @@ describe("InstanceControlWorkflow", () => {
     await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: false, bindingId: "binding-1" })).rejects.toThrow(/already exists in this Primary/);
   });
 
-  it.each(["lark_ilcs", "LARK_ILCS", "lark_task-ilcs", "task-ilcs"])("reuses the Primary token from %s in the Worker pane title", async (label) => {
+  it.each(["ilcs", "lark_ilcs", "LARK_ILCS", "lark_task-ilcs", "task-ilcs"])("reuses the Primary token from %s in the Worker pane title", async (label) => {
     const { workflow, paneHost } = setup();
     vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? { ...primaryPane, label } : pane);
 

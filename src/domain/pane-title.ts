@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-const PRIMARY_PANE_TOKEN_PATTERN = /^(?:lark_|lark_task-|task-)([a-z0-9]{4})$/i;
+const PRIMARY_PANE_TOKEN_PATTERN = /^(?:lark_|lark_task-|task-)?([a-z0-9]{4})$/i;
 
 export function createPrimaryPaneToken(): string {
   return randomBytes(3).readUIntBE(0, 3).toString(36).padStart(4, "0").slice(-4);

@@ -22,9 +22,10 @@ lark_<primary-token>
 ```
 
 The existing four-character base36 generator remains the token source. The
-semantic Primary title passed to the Herdr adapter is `<primary-token>`; the
-adapter's default Primary title policy adds exactly one `lark_` prefix. New,
-reset, and replacement Primary creation all use this rule.
+semantic Primary title passed to the Herdr adapter is `<primary-token>`. Herdr
+exposes that value as the pane label while the adapter renders the surrounding
+tab as `lark_<primary-token>`. New, reset, and replacement Primary creation all
+use this rule.
 
 A newly allocated Worker pane uses this complete semantic title:
 
@@ -41,10 +42,10 @@ The coordinator extracts the token using these rules, in order:
 
 1. Normalize the observed Primary pane label by trimming surrounding whitespace
    and comparing case-insensitively.
-2. Accept the new canonical shape `lark_<token>` and the compatibility shapes
-   `lark_task-<token>` and `task-<token>`, where `<token>` is exactly four ASCII
-   base36 characters (`[a-z0-9]{4}`). Preserve the token after normalizing it to
-   lowercase.
+2. Accept the canonical pane-label shape `<token>`, the canonical tab-label
+   shape `lark_<token>`, and the compatibility shapes `lark_task-<token>` and
+   `task-<token>`, where `<token>` is exactly four ASCII base36 characters
+   (`[a-z0-9]{4}`). Preserve the token after normalizing it to lowercase.
 3. If the label is absent or does not match either canonical shape exactly,
    derive a deterministic fallback token from the immutable parent pane ID.
 
