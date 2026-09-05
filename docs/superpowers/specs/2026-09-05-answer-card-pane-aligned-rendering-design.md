@@ -29,10 +29,23 @@ or pane status bars.
 During streaming, tool activity is represented by a compact one-line summary in
 the Markdown stream. The style follows the Herdr pane's information hierarchy:
 
-- command: `◆ Ran · npm test · 运行中`, `◆ Ran · npm test · 完成`, or
-  `◆ Ran · npm test · ✗ exit 2`;
-- non-command activity: the existing compact `Read`, `Search`, `Edit`, `Skill`,
-  `Wait`, `Agent`, or fallback `Tool` row.
+- command: `⚙️ Ran · npm test · 运行中`, `⚙️ Ran · npm test · 完成`, or
+  `⚙️ Ran · npm test · ✗ exit 2`;
+- read: `📖 Read · src/main.ts`;
+- search: `🔍 Search · answer card`;
+- edit: `✏️ Edit · run-card.ts`;
+- skill: `🧩 Skill · brainstorming`;
+- wait: `⏳ Wait · worker`;
+- agent activity: `🤖 Agent · reviewer`;
+- warning and failure notices: `⚠️ Warning` and `❌ Error`;
+- unknown structured activity: `🛠️ Tool · <safe target>`.
+
+Emoji are type markers, not decoration on every paragraph. Assistant prose,
+headings, lists, tables, and code remain unchanged. A recognized activity gets
+exactly one leading emoji, replacing the generic diamond marker rather than
+duplicating it. The live row and finalized panel title use the same centralized
+type-to-emoji mapping. Unknown or malformed prose is preserved verbatim instead
+of being guessed from keywords.
 
 The command label is sanitized, single-line, and bounded by the existing
 160-character target limit. A result summary is shown when the projector can
@@ -143,6 +156,8 @@ or finalization checkpoint is added through an idempotent SQLite migration.
 Focused tests cover:
 
 - exact recognition of successful, running, and failed command blocks;
+- stable emoji mapping for every recognized activity type, with exactly one
+  marker in both compact rows and final panel titles;
 - compact live rows and ordered final panels around assistant prose;
 - commands without output and non-command activities remaining rows;
 - malformed and assistant-authored lookalike markers remaining Markdown;
