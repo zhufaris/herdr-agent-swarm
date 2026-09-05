@@ -4,6 +4,7 @@ import { workerTurnElementId, workerTurnProgressElementId, workerTurnStreamConte
 import type { WorkerTurnCardStore } from "../domain/ports/projection.js";
 import { renderLarkMarkdownPage } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
+import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 
 const PAGE_LIMIT = 9_000;
 
@@ -30,7 +31,17 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
       if (this.store.listPendingOutboundReplies().some((reply) => reply.workerTurnId === turnId)) this.wakeOutbound();
       return;
     }
-    const page = this.store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view.pageIndex && candidate.state === "active");
+    const currentPage = this.store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view.pageIndex);
+    const shouldHydrate = currentPage && workerTaskInteraction(view.phase).actionLabel && (
+      (currentPage.pageIndex > 0 && currentPage.state === "active" && (view.phase === "running" || view.phase === "blocked"))
+      || (currentPage.state === "finished" && view.phase === "completed")
+    );
+    if (shouldHydrate && currentPage.cardId && currentPage.messageId) {
+      const hydration = this.store.reserveWorkerTurnCardHydration({ turnId, pageIndex: currentPage.pageIndex, cardId: currentPage.cardId, messageId: currentPage.messageId, card: renderWorkerTurnCard(view, currentPage) });
+      if (hydration === "reserved") this.wakeOutbound();
+      if (hydration === "stale") return;
+    }
+    const page = currentPage?.state === "active" ? currentPage : null;
     if (!page?.cardId) return;
     if (view.statusTitle || view.progressEvents.length > 0) {
       const progress = workerTurnProgressContent(view);

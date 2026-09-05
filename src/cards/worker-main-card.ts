@@ -23,7 +23,7 @@ export function renderWorkerMainCard(view: WorkerMainView): object {
   }
   if (!view.frozenAt && !["terminated", "failed", "stopped"].includes(view.runtimeState) && view.messageId) {
     elements.push(
-      { tag: "note", elements: [{ tag: "plain_text", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "发起一条与历史任务无父子关系的新任务。" }] },
+      { tag: "note", elements: [{ tag: "plain_text", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。" }] },
       callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")
     );
   }

@@ -93,9 +93,10 @@ try {
   promptRun = new PromptRunWorkflow({ store, herdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, logger: pino({ enabled: false }), turnTimeoutMs: 180_000, transcriptReader });
   promptRun.start();
   const workerResult = await control.createWorker({ actor: { kind: "human", userId: "smoke", channel: "local" }, projectId: project.id, bindingId, name: "worker", agentKind: "traex", model: null, start: true });
+  if (workerResult.instance.pendingRuntimeRef?.paneId) ownedPanes.add(workerResult.instance.pendingRuntimeRef.paneId);
   if (workerResult.status !== "created" || !workerResult.instance.runtimeRef) throw new Error(`Worker startup failed: ${workerResult.error ?? "runtime was not attached"}`);
   const worker = workerResult.instance;
-  ownedPanes.add(worker.pendingRuntimeRef?.paneId ?? worker.runtimeRef!.paneId);
+  ownedPanes.add(worker.runtimeRef.paneId);
   await requireAgentReady(worker.runtimeRef!.paneId, "traex");
 
   const primaryPromptId = randomUUID();

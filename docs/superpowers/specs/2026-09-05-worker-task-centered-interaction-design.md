@@ -187,9 +187,10 @@ wake-up. Those require separate workflow and authorization designs.
 
 ### Real Herdr/TraeX acceptance
 
-`npm run smoke:headless-multi-agent -- --execute` must create an isolated
-temporary repository and a real Thread-Primary-equivalent binding/pane, create a
-derived Worker through `createWorker`, execute one Primary-to-Worker delegation,
+`npm run smoke:headless-multi-agent -- --execute` must use the trusted project
+checkout with isolated temporary state and a real Thread-Primary-equivalent
+binding/pane, create an isolated derived Worker worktree through `createWorker`,
+execute one Primary-to-Worker delegation,
 verify exact Worker completion and no automatic Primary turn, restart durable
 components, verify no replay, and clean only resources it owns.
 

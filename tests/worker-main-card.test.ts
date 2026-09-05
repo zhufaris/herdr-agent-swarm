@@ -42,4 +42,10 @@ describe("Worker Main card", () => {
     expect(text).not.toContain("instance_steer");
     expect(text).not.toContain("instance_stop");
   });
+
+  it("states that a new task can run immediately when the Worker is idle", () => {
+    const text = JSON.stringify(renderWorkerMainCard({ ...view(), messageId: "om_worker_main", runtimeState: "idle" }));
+    expect(text).toContain("立即执行");
+    expect(text).toContain("发起新任务");
+  });
 });

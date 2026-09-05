@@ -14,12 +14,14 @@ import { renderWorkerMainCard } from "../cards/worker-main-card.js";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../domain/worker-task-interaction.js";
+import { randomUUID } from "node:crypto";
 
 interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: import("../domain/agent-instance.js").AgentKind; model: string | null; start: boolean }): Promise<import("../domain/agent-instance.js").CreateWorkerResult> }
-interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort; workerCreation?: WorkerCreationGateway }
+interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort; workerCreation?: WorkerCreationGateway; idFactory?: () => string }
 export class InstanceInteractionWorkflow {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
-  constructor(private readonly options: Options) { this.projects = new Map(options.projects.map((project) => [project.id, project])); }
+  private readonly idFactory: () => string;
+  constructor(private readonly options: Options) { this.projects = new Map(options.projects.map((project) => [project.id, project])); this.idFactory = options.idFactory ?? randomUUID; }
 
   async handleCommand(message: IncomingLarkMessage, command: InstanceCommand): Promise<void> {
     if (!this.isOperator(message.actorOpenId)) return this.reject(message, "你没有 Agent 管理权限。");
@@ -78,18 +80,21 @@ export class InstanceInteractionWorkflow {
     if (!matched) return false;
     if (!message.mentionsBot) return false;
     if (!this.isOperator(message.actorOpenId)) { await this.reject(message, "你没有 Agent 管理权限。"); return true; }
-    const { turn } = matched;
+    const { turn, view } = matched;
     const context = this.resolveConversationContext(message);
-    if (!this.listScopedWorkers(context.conversationKey).some(({ id }) => id === turn.instanceId)) {
-      await this.reject(message, "任务不存在或不属于当前 Primary。"); return true;
+    const instance = this.listScopedWorkers(context.conversationKey).find(({ id }) => id === turn.instanceId);
+    if (!instance || turn.instanceGeneration !== instance.generation || view.instanceId !== instance.id || view.instanceGeneration !== instance.generation
+      || view.workerSessionGeneration !== instance.workerSessionGeneration) {
+      await this.reject(message, "任务卡片已过期，或不属于当前 Primary/Worker session。"); return true;
     }
     const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
-    if (["running", "blocked"].includes(turn.state)) {
+    const interaction = workerTaskInteraction(view.phase);
+    if (interaction.replyIntent === "steer") {
       const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: turn.instanceId, targetTurnId: turn.id, text: message.text, resultTargetMessageId: message.rootMessageId ?? message.messageId });
       if (result.durableResult === false) await this.reply(message, statusCard(`Steer: ${result.status}`));
       return true;
     }
-    if (["completed", "failed", "cancelled"].includes(turn.state)) {
+    if (interaction.replyIntent === "followup") {
       await this.options.messaging.submit({
         idempotencyKey: `lark:${message.messageId}`, actor, projectId: turn.projectId, targetInstanceId: turn.instanceId,
         content: { kind: "followup", text: message.text },
@@ -97,10 +102,7 @@ export class InstanceInteractionWorkflow {
       });
       return true;
     }
-    const notice = turn.state === "dispatch-uncertain"
-      ? "该任务的投递状态无法确认，不能安全地追加消息。请先在 Herdr 中确认任务状态。"
-      : "该任务仍在排队，暂时不能追加消息。";
-    await this.reject(message, notice);
+    await this.reject(message, interaction.guidance);
     return true;
   }
 
@@ -209,7 +211,7 @@ export class InstanceInteractionWorkflow {
     const { instance, turn, view, intent } = owned;
     if (value.action === "worker_task_instruction_form") {
       if (intent === "reject") return warning(workerTaskInteraction(view.phase).guidance);
-      return { card: renderWorkerTaskInstructionCard({ workerName: instance.name, turnId: turn.id, intent, requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+      return { card: renderWorkerTaskInstructionCard({ workerName: instance.name, turnId: turn.id, intent, interactionId: this.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
     }
     if (value.action === "worker_task_interrupt") {
       if (!workerTaskInteraction(view.phase).canInterrupt) return warning("任务已不处于可停止的运行状态。");
@@ -218,6 +220,8 @@ export class InstanceInteractionWorkflow {
     }
     if (value.action !== "worker_task_instruction_submit") return warning("未知的 Worker Task 操作。");
     if (!sameOperator(value, action)) return forbidden();
+    const interactionId = validInteractionId(value.interactionId);
+    if (!interactionId) return warning("操作标识无效，请重新打开表单。");
     const requestedIntent = value.intent === "steer" || value.intent === "followup" ? value.intent : null;
     if (!requestedIntent || requestedIntent !== intent) return warning("任务状态已变化，请重新打开 Task Card 后再操作。");
     const text = action.formValues?.instruction_text?.trim() ?? "";
@@ -225,10 +229,10 @@ export class InstanceInteractionWorkflow {
     const actor = { kind: "human" as const, userId: action.operatorOpenId, channel: "feishu" as const };
     try {
       if (intent === "steer") {
-        const result = await this.options.messaging.steer({ idempotencyKey: `card:${action.messageId}:task-steer:${turn.id}`, actor, targetInstanceId: instance.id, targetTurnId: turn.id, text, resultTargetMessageId: action.messageId });
+        const result = await this.options.messaging.steer({ idempotencyKey: `card:${interactionId}:task-steer:${turn.id}`, actor, targetInstanceId: instance.id, targetTurnId: turn.id, text, resultTargetMessageId: action.messageId });
         return { toast: { type: result.status === "delivered" ? "success" : "warning", content: result.status === "delivered" ? `已补充到 ${instance.name} 的当前任务。` : `补充当前任务：${result.status}` } };
       }
-      const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${action.messageId}:task-followup:${turn.id}`, actor, projectId: turn.projectId, targetInstanceId: instance.id, content: { kind: "followup", text }, source: { messageId: action.messageId, rootMessageId: view.rootMessageId, parentTurnId: turn.id } });
+      const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${interactionId}:task-followup:${turn.id}`, actor, projectId: turn.projectId, targetInstanceId: instance.id, content: { kind: "followup", text }, source: { messageId: action.messageId, rootMessageId: view.rootMessageId, parentTurnId: turn.id } });
       return { toast: { type: "success", content: `已创建 ${instance.name} 的后续任务，当前排队位置 ${submitted.card?.queuePosition ?? 1}。` } };
     } catch (error) { return failed(error); }
   }
@@ -237,13 +241,15 @@ export class InstanceInteractionWorkflow {
     const owned = this.resolveOwnedMainAction(action, value);
     if (!owned) return warning("Worker Main 卡片已过期、状态已变化或不属于当前 Primary。");
     const { instance, view } = owned;
-    if (value.action === "worker_new_task_form") return { card: renderWorkerNewTaskCard({ workerName: instance.name, requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+    if (value.action === "worker_new_task_form") return { card: renderWorkerNewTaskCard({ workerName: instance.name, interactionId: this.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
     if (value.action !== "worker_new_task_submit") return warning("未知的 Worker 新任务操作。");
     if (!sameOperator(value, action)) return forbidden();
+    const interactionId = validInteractionId(value.interactionId);
+    if (!interactionId) return warning("操作标识无效，请重新打开表单。");
     const text = action.formValues?.task_text?.trim() ?? "";
     if (!text) return { toast: { type: "error", content: "新任务内容不能为空。" } };
     try {
-      const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${action.messageId}:worker-new-task:${instance.id}`, actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }, projectId: instance.projectId, targetInstanceId: instance.id, content: { kind: "turn", text }, source: { messageId: action.messageId, rootMessageId: view.messageId! } });
+      const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${interactionId}:worker-new-task:${instance.id}`, actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }, projectId: instance.projectId, targetInstanceId: instance.id, content: { kind: "turn", text }, source: { messageId: action.messageId, rootMessageId: view.messageId! } });
       return { toast: { type: "success", content: `已向 ${instance.name} 发起新任务，当前排队位置 ${submitted.card?.queuePosition ?? 1}。` } };
     } catch (error) { return failed(error); }
   }
@@ -365,6 +371,7 @@ export class InstanceInteractionWorkflow {
 function projectCard(projects: readonly ProjectConfig[], selected?: string): object { return { schema: "2.0", header: { title: { tag: "plain_text", content: "Projects" }, template: "blue" }, body: { elements: projects.map((project) => ({ tag: "markdown", content: `${project.id === selected ? "▶ " : ""}**${project.displayName}** · \`${project.id}\`\n${project.description}` })) } }; }
 function statusCard(text: string): object { return { schema: "2.0", header: { title: { tag: "plain_text", content: "Agent control" }, template: "blue" }, body: { elements: [{ tag: "markdown", content: text }] } }; }
 function sameOperator(value: Record<string, unknown>, action: IncomingLarkCardAction): boolean { return typeof value.requestedBy === "string" && value.requestedBy === action.operatorOpenId; }
+function validInteractionId(value: unknown): string | null { return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null; }
 function forbidden(): LarkCardActionResult { return { toast: { type: "error", content: "只有发起此操作的用户可以提交。" } }; }
 function warning(content: string): LarkCardActionResult { return { toast: { type: "warning", content } }; }
 function bindingCardContext(value: Record<string, unknown>): { bindingId?: string; bindingGeneration?: number } {

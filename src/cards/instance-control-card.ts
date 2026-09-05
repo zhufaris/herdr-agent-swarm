@@ -21,23 +21,23 @@ export function renderInstanceSteerCard(input: { instance: AgentInstance; reques
   ]);
 }
 
-export function renderWorkerTaskInstructionCard(input: { workerName: string; turnId: string; intent: "steer" | "followup"; requestedBy: string; sourceCardMessageId: string; instanceId: string; generation: number; workerSessionGeneration: number }): object {
+export function renderWorkerTaskInstructionCard(input: { workerName: string; turnId: string; intent: "steer" | "followup"; interactionId: string; requestedBy: string; sourceCardMessageId: string; instanceId: string; generation: number; workerSessionGeneration: number }): object {
   const steer = input.intent === "steer";
   return card(steer ? `补充当前任务 · ${input.workerName}` : `继续这个任务 · ${input.workerName}`, "blue", [
     { tag: "markdown", content: steer ? "内容只会发送到这一个精确活动 turn；状态变化时会拒绝，不会自动排队。" : "内容会创建为一条新的 FIFO 后续任务，并保留当前任务作为父任务。" },
     { tag: "form", name: "worker_task_instruction_form", elements: [
       { tag: "input", name: "instruction_text", input_type: "text", required: true, placeholder: { tag: "plain_text", content: steer ? "输入补充要求" : "输入后续要求" } },
-      formSubmitButton(steer ? "补充当前任务" : "创建后续任务", "worker_task_instruction_submit", { action: "worker_task_instruction_submit", intent: input.intent, turnId: input.turnId, instanceId: input.instanceId, generation: input.generation, workerSessionGeneration: input.workerSessionGeneration, sourceCardMessageId: input.sourceCardMessageId, requestedBy: input.requestedBy }, "primary")
+      formSubmitButton(steer ? "补充当前任务" : "创建后续任务", "worker_task_instruction_submit", { action: "worker_task_instruction_submit", interactionId: input.interactionId, intent: input.intent, turnId: input.turnId, instanceId: input.instanceId, generation: input.generation, workerSessionGeneration: input.workerSessionGeneration, sourceCardMessageId: input.sourceCardMessageId, requestedBy: input.requestedBy }, "primary")
     ] }
   ]);
 }
 
-export function renderWorkerNewTaskCard(input: { workerName: string; requestedBy: string; sourceCardMessageId: string; instanceId: string; generation: number; workerSessionGeneration: number }): object {
+export function renderWorkerNewTaskCard(input: { workerName: string; interactionId: string; requestedBy: string; sourceCardMessageId: string; instanceId: string; generation: number; workerSessionGeneration: number }): object {
   return card(`发起新任务 · ${input.workerName}`, "blue", [
     { tag: "markdown", content: "这会创建一条独立 FIFO 任务，不会修改当前任务，也不会建立父任务关系。" },
     { tag: "form", name: "worker_new_task_form", elements: [
       { tag: "input", name: "task_text", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "输入新任务" } },
-      formSubmitButton("发起新任务", "worker_new_task_submit", { action: "worker_new_task_submit", instanceId: input.instanceId, generation: input.generation, workerSessionGeneration: input.workerSessionGeneration, sourceCardMessageId: input.sourceCardMessageId, requestedBy: input.requestedBy }, "primary")
+      formSubmitButton("发起新任务", "worker_new_task_submit", { action: "worker_new_task_submit", interactionId: input.interactionId, instanceId: input.instanceId, generation: input.generation, workerSessionGeneration: input.workerSessionGeneration, sourceCardMessageId: input.sourceCardMessageId, requestedBy: input.requestedBy }, "primary")
     ] }
   ]);
 }

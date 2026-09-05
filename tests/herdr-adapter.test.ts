@@ -135,16 +135,34 @@ describe("Herdr adapter structured control", () => {
     expect(calls[0]).toEqual(["agent", "start", "primary", "--kind", "codex", "--pane", "w1:p1", "--timeout", "1000", "--", ...forwarded]);
   });
 
-  it("retries agent start only while a new pane shell is busy", async () => {
+  it.each([
+    "agent_pane_busy",
+    "agent_start_failed: Pane w1:p1 is not an available shell"
+  ])("retries agent start while a new pane shell is not ready: %s", async (readinessError) => {
     let starts = 0;
     const runner: CommandRunner = { async run(_executable, args) {
-      if (args[0] === "agent" && args[1] === "start" && starts++ === 0) throw new Error("agent_pane_busy");
+      if (args[0] === "agent" && args[1] === "start" && starts++ === 0) throw new Error(readinessError);
       if (args[0] === "api") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle" }], agents: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "codex", agent_status: "idle" }] } });
       return { stdout: "", stderr: "" };
     } };
 
     await new HerdrCliAdapter(runner, "herdr", 1000).startAgent("w1:p1", { name: "primary", kind: "codex", executable: "codex" });
     expect(starts).toBe(2);
+  });
+
+  it("does not retry an uncertain agent start", async () => {
+    let starts = 0;
+    const runner: CommandRunner = { async run(_executable, args) {
+      if (args[0] === "agent" && args[1] === "start") {
+        starts += 1;
+        throw new Error("agent_start_uncertain: TraeX may have started in pane w1:p1");
+      }
+      throw new Error(`unexpected CLI call: ${args.join(" ")}`);
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).startAgent("w1:p1", { name: "primary", kind: "traex", executable: "traex" }))
+      .rejects.toThrow("agent_start_uncertain");
+    expect(starts).toBe(1);
   });
 
   it("derives runtime readiness only from structured state and process metadata", async () => {

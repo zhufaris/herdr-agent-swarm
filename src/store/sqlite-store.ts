@@ -800,6 +800,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       return "reserved";
     });
   }
+  reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const pageRow = this.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(input.turnId, input.pageIndex) as Record<string, unknown> | undefined;
+      const view = this.loadWorkerTurnCard(input.turnId);
+      if (!pageRow || !view) { this.database.exec("COMMIT"); return "stale"; }
+      const page = mapWorkerTurnCardPage(pageRow);
+      const liveContinuation = page.pageIndex > 0 && page.state === "active" && (view.phase === "running" || view.phase === "blocked");
+      const completedPage = page.state === "finished" && view.phase === "completed";
+      if ((!liveContinuation && !completedPage) || page.cardId !== input.cardId || page.messageId !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
+      const key = `worker-turn:hydrate:${input.turnId}:${input.pageIndex}:${input.cardId}:${view.phase}`;
+      if (this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) { this.database.exec("COMMIT"); return "waiting"; }
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `worker-turn:${input.turnId}` });
+      this.database.exec("COMMIT");
+      return "reserved";
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
     return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
       if (page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.pageStart) return "stale";

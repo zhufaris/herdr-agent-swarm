@@ -43,6 +43,19 @@ describe("instance cards", () => {
     expect(completedText).toContain("继续这个任务"); expect(completedText).not.toContain("停止当前任务");
   });
 
+  it("never binds continuation-card actions to an earlier page message", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-pages", instanceId: "i1", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const running = { ...reduceWorkerTurnCard(queued, { type: "running", occurredAt: "2026-09-01T00:00:01.000Z" }), messageId: "first-page-message" };
+    const creatingPage = { id: "turn-pages:1", turnId: "turn-pages", pageIndex: 1, pageStart: 9_000, elementId: "worker_turn_pages_1", messageId: null, cardId: null, state: "creating" as const, sequence: 0, createdAt: running.createdAt, updatedAt: running.updatedAt };
+    const deliveredPage = { ...creatingPage, messageId: "second-page-message", cardId: "second-page-card", state: "active" as const };
+
+    expect(JSON.stringify(renderWorkerTurnCard(running, creatingPage))).not.toContain("worker_task_instruction_form");
+    const delivered = JSON.stringify(renderWorkerTurnCard(running, deliveredPage));
+    expect(delivered).toContain("worker_task_instruction_form");
+    expect(delivered).toContain("second-page-message");
+    expect(delivered).not.toContain("first-page-message");
+  });
+
   it("states explicitly when a completed Worker result could not be captured", () => {
     const queued = createQueuedWorkerTurnCard({ turnId: "turn-a", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
     const completed = reduceWorkerTurnCard(queued, { type: "completed-without-output", occurredAt: "2026-09-01T00:01:00.000Z", notice: "Structured output is unavailable" });

@@ -45,7 +45,8 @@ function setup(adminOpenIds: readonly string[] = ["u1"]) {
     planRemoval: vi.fn(async ({ instanceId }) => { const instance = store!.getAgentInstance(instanceId)!; const workspace = store!.getWorkspaceLease(instance.workspaceLeaseId)!; return store!.createInstanceRemovalPlan({ id: "plan-1", instanceId, instanceGeneration: instance.generation, workspaceGeneration: workspace.generation, worktreeFingerprint: "clean-fp", safe: true, reason: "clean", state: "pending", createdAt: "now" }); }),
     confirmRemoval: vi.fn(async () => true)
   };
-  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never });
+  let interaction = 0;
+  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, idFactory: () => `interaction-${++interaction}` });
   return { create, workflow, outbound, messaging, control };
 }
 
@@ -75,6 +76,36 @@ describe("instance routing", () => {
 
     expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId, text: "focus on transactions" }));
     expect(messaging.submit).not.toHaveBeenCalled();
+  });
+
+  it("uses the shared task policy for blocked and preparing direct replies", async () => {
+    const { create, workflow, messaging, outbound } = setup();
+    const worker = create("reviewer", "worker");
+    const blocked = taskCard(worker.id, "running", "turn-blocked");
+    store!.transitionInstanceTurnWithProjection({ turnId: blocked.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-01T00:02:00.000Z", notice: "local approval" }, render: renderWorkerTurnCard });
+    vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
+
+    await workflow.handleOrdinaryMessage({ ...message("more context", "reply-blocked"), parentMessageId: blocked.cardMessageId });
+    expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetTurnId: blocked.turnId, text: "more context" }));
+
+    const preparing = taskCard(worker.id, "queued", "turn-preparing");
+    store!.transitionInstanceTurnWithProjection({ turnId: preparing.turnId, expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching", change: { type: "preparing", occurredAt: "2026-09-01T00:03:00.000Z" }, render: renderWorkerTurnCard });
+    await workflow.handleOrdinaryMessage({ ...message("do not guess", "reply-preparing"), parentMessageId: preparing.cardMessageId });
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain("准备");
+  });
+
+  it("rejects a direct reply to a Task Card from an old Worker generation", async () => {
+    const { create, workflow, messaging, outbound } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "completed", "turn-old-generation");
+    store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:replacement", nativeSessionId: "replacement" });
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("continue old work", "reply-old-generation"), parentMessageId: task.cardMessageId })).resolves.toBe(true);
+
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(messaging.steer).not.toHaveBeenCalled();
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain("过期");
   });
 
   it.each(["completed", "failed", "cancelled"] as const)("routes a direct reply to a %s Worker card as a follow-up", async (state) => {
@@ -144,13 +175,64 @@ describe("instance routing", () => {
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
     const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-action", cardId: "card-main" });
-    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
+    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 2 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
     const form = await workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: open });
     const submit = callbackValue(form, "worker_new_task_submit");
 
-    await expect(workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { task_text: "new independent work" } })).resolves.toEqual({ toast: { type: "success", content: "已向 reviewer 发起新任务，当前排队位置 1。" } });
+    await expect(workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { task_text: "new independent work" } })).resolves.toEqual({ toast: { type: "success", content: "已向 reviewer 发起新任务，当前排队位置 2。" } });
     expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ content: { kind: "turn", text: "new independent work" }, source: expect.not.objectContaining({ parentTurnId: expect.anything() }) }));
+  });
+
+  it("deduplicates one form submission but gives a newly opened form a new interaction key", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "completed", "turn-repeat");
+    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
+    const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
+    const firstForm = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const firstSubmit = callbackValue(firstForm, "worker_task_instruction_submit");
+    await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: firstSubmit, formValues: { instruction_text: "first follow-up" } });
+    await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: firstSubmit, formValues: { instruction_text: "first follow-up" } });
+    const secondForm = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const secondSubmit = callbackValue(secondForm, "worker_task_instruction_submit");
+    await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: secondSubmit, formValues: { instruction_text: "second follow-up" } });
+
+    const keys = vi.mocked(messaging.submit).mock.calls.map(([input]) => input.idempotencyKey);
+    expect(keys).toEqual(["card:interaction-1:task-followup:turn-repeat", "card:interaction-1:task-followup:turn-repeat", "card:interaction-2:task-followup:turn-repeat"]);
+  });
+
+  it("gives each Worker Main new-task form its own idempotency scope", async () => {
+    const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
+    worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
+    worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
+    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
+    store!.saveWorkerMainView({ ...main, messageId: "worker-main-repeat", cardId: "card-main-repeat" });
+    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
+    const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
+    const first = callbackValue(await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: open }), "worker_new_task_submit");
+    const second = callbackValue(await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: open }), "worker_new_task_submit");
+    await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: first, formValues: { task_text: "first task" } });
+    await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: second, formValues: { task_text: "second task" } });
+
+    expect(vi.mocked(messaging.submit).mock.calls.map(([input]) => input.idempotencyKey)).toEqual([
+      `card:interaction-1:worker-new-task:${worker.id}`, `card:interaction-2:worker-new-task:${worker.id}`
+    ]);
+  });
+
+  it("rejects empty, wrong-operator, stale-session, and stale-binding Worker forms", async () => {
+    const { create, workflow, messaging } = setup(["u1", "u2"]);
+    const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "completed", "turn-fences");
+    const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
+    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const submit = callbackValue(form, "worker_task_instruction_submit");
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u2", value: submit, formValues: { instruction_text: "forged" } })).resolves.toMatchObject({ toast: { type: "error" } });
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "   " } })).resolves.toMatchObject({ toast: { type: "error" } });
+    store!.database.prepare("UPDATE agent_instances SET worker_session_generation = worker_session_generation + 1 WHERE id = ?").run(worker.id);
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "stale session" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    store!.database.prepare("UPDATE agent_instances SET worker_session_generation = worker_session_generation - 1 WHERE id = ?").run(worker.id);
+    store!.updateBinding("binding-default", { generation: 2 });
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "stale binding" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    expect(messaging.submit).not.toHaveBeenCalled();
   });
 
   it("does not route an unmapped direct reply through the selected Worker", async () => {

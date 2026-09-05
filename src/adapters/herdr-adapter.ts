@@ -206,7 +206,10 @@ export class HerdrCliAdapter implements HerdrPort {
       try { await this.runner.run(this.executable, args, this.commandTimeoutMs); return; }
       catch (error) {
         lastError = error;
-        if (!String(error).includes("agent_pane_busy")) throw error;
+        const message = String(error);
+        const shellNotReady = message.includes("agent_pane_busy")
+          || (message.includes("agent_start_failed") && message.includes("is not an available shell"));
+        if (!shellNotReady) throw error;
         await new Promise((resolve) => setTimeout(resolve, herdrRetryDelay(attempt)));
       }
     }
