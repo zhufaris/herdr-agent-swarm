@@ -21,6 +21,12 @@ export function renderWorkerMainCard(view: WorkerMainView): object {
     elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🕘", "Recent Tasks")}\n${view.recentTasks.map(taskLine).join("\n")}` });
     for (const task of view.recentTasks) pushTaskLink(elements, task.taskCard, `打开 ${safe(task.title)}`);
   }
+  if (!view.frozenAt && !["terminated", "failed", "stopped"].includes(view.runtimeState) && view.messageId) {
+    elements.push(
+      { tag: "note", elements: [{ tag: "plain_text", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "发起一条与历史任务无父子关系的新任务。" }] },
+      callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")
+    );
+  }
   if (view.frozenAt) elements.push({ tag: "note", elements: [{ tag: "plain_text", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` }] });
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },

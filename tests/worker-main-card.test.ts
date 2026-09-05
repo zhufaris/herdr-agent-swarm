@@ -16,7 +16,7 @@ describe("Worker Main card", () => {
       taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null }
     }, queueCount: 1, nextTaskTitle: "Run recovery tests", recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
     const withoutLink = JSON.stringify(renderWorkerMainCard(projected));
-    const withLink = JSON.stringify(renderWorkerMainCard({ ...projected, currentTask: { ...projected.currentTask!, taskCard: { ...projected.currentTask!.taskCard, messageId: "om_task_card" } } }));
+    const withLink = JSON.stringify(renderWorkerMainCard({ ...projected, messageId: "om_worker_main", currentTask: { ...projected.currentTask!, taskCard: { ...projected.currentTask!.taskCard, messageId: "om_task_card" } } }));
 
     expect(withoutLink).toContain("reviewer");
     expect(withoutLink).toContain("🤖 Worker · reviewer");
@@ -29,6 +29,9 @@ describe("Worker Main card", () => {
     expect(withLink).toContain("om_task_card");
     expect(withLink).not.toContain("requestText");
     expect(withLink).not.toContain("answer");
+    expect(withLink).toContain("发起新任务");
+    expect(withLink).toContain("worker_new_task_form");
+    expect(withLink).toContain("新任务将进入 FIFO 队列");
   });
 
   it("exposes no live controls after termination", () => {

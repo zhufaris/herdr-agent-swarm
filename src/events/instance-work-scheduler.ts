@@ -63,6 +63,8 @@ export class InstanceWorkScheduler {
           return;
         }
         if (this.detachedTurns.has(turn.id)) return;
+        const observed = this.options.store.getInstanceTurn(turn.id);
+        if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) continue;
         if (receipt.status === "confirmed-delivered") {
           if (driver.describe().structuredEvents) return;
           this.transition(turn.id, turn.instanceGeneration, "completed", "turn.completed", { type: "completed-without-output", occurredAt: new Date().toISOString(), notice: "该 Worker 不支持结构化输出捕获；请前往对应 Herdr Pane 查看本地会话。" }, null, "");

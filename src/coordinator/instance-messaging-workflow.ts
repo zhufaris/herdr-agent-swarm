@@ -53,8 +53,13 @@ export class InstanceMessagingWorkflow {
     }
   }
 
-  async interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string }): Promise<InterruptReceipt> {
+  async interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string }): Promise<InterruptReceipt> {
     const target = this.authorize(input.actor, undefined, input.targetInstanceId);
+    if (input.targetTurnId) {
+      const turn = this.options.store.getInstanceTurn(input.targetTurnId);
+      const active = this.options.store.getActiveInstanceTurn(target.id, target.generation);
+      if (!turn || turn.instanceId !== target.id || turn.instanceGeneration !== target.generation || turn.state !== "running" || active?.id !== turn.id) return { status: "not-active" };
+    }
     try {
       const outcome = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey });
       if (outcome.mode === "priority") return { status: "failed", reason: "Interrupt unexpectedly resolved to a priority turn" };

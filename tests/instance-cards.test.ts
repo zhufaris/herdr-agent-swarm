@@ -26,8 +26,21 @@ describe("instance cards", () => {
     expect(text).not.toContain("View Worker Main");
     expect(text).not.toContain("card_target_open");
     expect(text).not.toContain("live-secret");
+    if (phase === "running") expect(text).toContain("精确补充到当前任务");
+    if (phase === "blocked") { expect(text).toContain("可补充要求"); expect(text).toContain("审批仍须在对应 Pane 完成"); }
+    if (["completed", "failed", "cancelled"].includes(phase)) expect(text).toContain("FIFO 后续任务");
+    if (["queued", "preparing", "dispatch-uncertain"].includes(phase)) expect(text).not.toContain("worker_task_instruction_form");
     expect(text.length).toBeLessThan(12_000);
     expect(queued.elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+  });
+
+  it("exposes state-legal Task actions only after the card delivery checkpoint", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-actions", instanceId: "i1", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const running = { ...reduceWorkerTurnCard(queued, { type: "running", occurredAt: "2026-09-01T00:00:01.000Z" }), messageId: "task-message" };
+    const completed = { ...reduceWorkerTurnCard(running, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "done" }), messageId: "task-message" };
+    const runningText = JSON.stringify(renderWorkerTurnCard(running)); const completedText = JSON.stringify(renderWorkerTurnCard(completed));
+    expect(runningText).toContain("补充当前任务"); expect(runningText).toContain("停止当前任务");
+    expect(completedText).toContain("继续这个任务"); expect(completedText).not.toContain("停止当前任务");
   });
 
   it("states explicitly when a completed Worker result could not be captured", () => {

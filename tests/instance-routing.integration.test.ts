@@ -6,6 +6,7 @@ import type { IncomingLarkMessage } from "../src/domain/types.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createWorkerMainView } from "../src/domain/worker-main-view.js";
+import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -53,7 +54,13 @@ function taskCard(instanceId: string, state: "queued" | "running" | "completed" 
   const view = createQueuedWorkerTurnCard({ turnId, instanceId, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
   store!.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: worker.projectId, instanceId, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, card: renderWorkerTurnCard(view) });
   store!.markOutboundReplyDelivered(store!.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === turnId)!.id, `card-message-${turnId}`, `card-${turnId}`);
-  if (state !== "queued") store!.updateInstanceTurn({ turnId, expectedGeneration: worker.generation, state, eventKind: `turn.${state}` });
+  if (state !== "queued") {
+    const occurredAt = "2026-09-01T00:01:00.000Z";
+    const change = state === "running" ? { type: "running" as const, occurredAt }
+      : state === "completed" ? { type: "completed" as const, occurredAt, answer: "done" }
+      : { type: state, occurredAt, notice: `${state} notice` } as const;
+    store!.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: worker.generation, state, eventKind: `turn.${state}`, change, render: renderWorkerTurnCard });
+  }
   return { turnId, cardMessageId: `card-message-${turnId}` };
 }
 
@@ -91,6 +98,59 @@ describe("instance routing", () => {
     expect(messaging.submit).not.toHaveBeenCalled();
     expect(messaging.steer).not.toHaveBeenCalled();
     expect(JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2])).toContain(state === "queued" ? "排队" : "无法确认");
+  });
+
+  it("opens and submits an exact-turn supplement from a running Task Card", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "running", "turn-action-running");
+    vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered", durableResult: true });
+    const card = renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!);
+    const open = callbackValue(card, "worker_task_instruction_form");
+    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const submit = callbackValue(form, "worker_task_instruction_submit");
+
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "focus transactions" } })).resolves.toEqual({ toast: { type: "success", content: "已补充到 reviewer 的当前任务。" } });
+    expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId, text: "focus transactions" }));
+    expect(messaging.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed", "cancelled"] as const)("creates one explicit follow-up from a %s Task Card action", async (state) => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker"); const task = taskCard(worker.id, state, `turn-action-${state}`);
+    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 2 } } as never);
+    const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
+    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const submit = callbackValue(form, "worker_task_instruction_submit");
+
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "verify again" } })).resolves.toEqual({ toast: { type: "success", content: "已创建 reviewer 的后续任务，当前排队位置 2。" } });
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ content: { kind: "followup", text: "verify again" }, source: expect.objectContaining({ parentTurnId: task.turnId }) }));
+  });
+
+  it("rejects a Task Card form when the task changes from running to completed", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "running", "turn-action-race");
+    const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
+    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const submit = callbackValue(form, "worker_task_instruction_submit");
+    store!.transitionInstanceTurnWithProjection({ turnId: task.turnId, expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-01T00:02:00.000Z", answer: "done" }, render: renderWorkerTurnCard });
+
+    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "late" } })).resolves.toEqual({ toast: { type: "warning", content: "任务状态已变化，请重新打开 Task Card 后再操作。" } });
+    expect(messaging.steer).not.toHaveBeenCalled(); expect(messaging.submit).not.toHaveBeenCalled();
+  });
+
+  it("starts an independent FIFO task from an owned Worker Main Card", async () => {
+    const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
+    worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
+    worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
+    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
+    store!.saveWorkerMainView({ ...main, messageId: "worker-main-action", cardId: "card-main" });
+    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
+    const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
+    const form = await workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: open });
+    const submit = callbackValue(form, "worker_new_task_submit");
+
+    await expect(workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { task_text: "new independent work" } })).resolves.toEqual({ toast: { type: "success", content: "已向 reviewer 发起新任务，当前排队位置 1。" } });
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ content: { kind: "turn", text: "new independent work" }, source: expect.not.objectContaining({ parentTurnId: expect.anything() }) }));
   });
 
   it("does not route an unmapped direct reply through the selected Worker", async () => {

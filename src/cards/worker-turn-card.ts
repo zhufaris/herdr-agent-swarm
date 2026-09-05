@@ -3,6 +3,7 @@ import { normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown } fr
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
 import { cardSection, lifecycleMarker } from "./card-style.js";
+import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 
 const STATE = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -36,6 +37,12 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   if (view.parentTurnId) elements.push({ tag: "markdown", content: `${cardSection("🔗", "承接任务")}  \`${escapeCode(view.parentTurnId)}\`` });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
+  const interaction = workerTaskInteraction(view.phase);
+  elements.push({ tag: "note", elements: [{ tag: "plain_text", content: interaction.guidance }] });
+  if (interaction.actionLabel && view.messageId) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
+    { tag: "column", width: "auto", elements: [callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")] },
+    ...(interaction.canInterrupt ? [{ tag: "column", width: "auto", elements: [callbackButton("停止当前任务", { action: "worker_task_interrupt", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "danger")] }] : [])
+  ] });
   const targets = [
     view.workerMain.messageId ? callbackButton("View Worker Main", { action: "card_target_open", ...view.workerMain }, "primary") : null,
     view.primaryAnswer?.messageId ? callbackButton("View Primary Answer", { action: "card_target_open", ...view.primaryAnswer }, "default") : null

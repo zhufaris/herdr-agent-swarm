@@ -67,13 +67,29 @@ Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Wo
 完成后摘要随页面冻结，较晚的 Worker 更新只进入 Worker Task、Worker Main 和 Primary Main。
 卡片间的“打开”按钮只在目标卡已成功投递后出现。
 
-要持续给同一个任务补充要求，请直接回复它的 task card 并 `@Bot`：
+Worker prompt 分为三种明确语义，推荐直接围绕卡片操作：
+
+- `补充当前任务`：回复正在运行或 blocked 的 Task Card，或点击卡片上的同名按钮；
+  内容只会 steer 这一个精确 active turn。
+- `继续这个任务`：回复 completed、failed 或 cancelled 的 Task Card，或点击卡片上的
+  同名按钮；系统创建一条带父任务关系的新 follow-up，并按 FIFO 排队。
+- `发起新任务`：点击 Worker Main Card 上的同名按钮，或使用 `/to`；系统创建一条
+  与历史任务无父子关系的独立 FIFO 任务。
+
+要持续给同一个任务补充要求，请直接回复它的 Task Card 并 `@Bot`：
 
 - 回复正在运行或 blocked 的卡片会精确 steer 该 turn。
 - 回复 completed、failed 或 cancelled 的卡片会创建一条带父任务关系的新 follow-up，并进入 FIFO。
 - 回复仍 queued 的卡片会被拒绝，因为任务尚未开始。
 - 回复 `dispatch-uncertain` 的卡片会被拒绝，因为请求可能已到达 Agent；自动重试可能造成重复执行。请先在对应 Herdr Pane 核对。
 - 只有直接父消息能匹配 task card；系统不会根据 Thread、当前选中的 Worker 或更早的父消息猜测目标。
+
+Task Card 仅显示当前状态允许的操作。运行中的卡片提供“补充当前任务”和
+“停止当前任务”；blocked 卡片允许补充要求，但审批仍必须在 Herdr Pane 本地完成；
+终态卡片提供“继续这个任务”；queued、preparing 和 `dispatch-uncertain` 不提供追加按钮。
+若用户打开表单后任务状态发生变化，提交会被拒绝，系统不会把原本的 steer 自动改成
+follow-up，也不会把 follow-up 改成 steer。Worker Main 的“发起新任务”会明确显示任务是
+立即执行还是进入 FIFO。
 
 task card 上的结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
 TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。

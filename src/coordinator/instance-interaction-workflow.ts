@@ -7,12 +7,13 @@ import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import { renderInstanceDirectoryCard } from "../cards/instance-directory-card.js";
 import { renderInstanceDetailCard } from "../cards/instance-detail-card.js";
-import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../cards/instance-control-card.js";
+import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard, renderWorkerNewTaskCard, renderWorkerTaskInstructionCard } from "../cards/instance-control-card.js";
 import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import { renderWorkerMainCard } from "../cards/worker-main-card.js";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../domain/worker-task-interaction.js";
 
 interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: import("../domain/agent-instance.js").AgentKind; model: string | null; start: boolean }): Promise<import("../domain/agent-instance.js").CreateWorkerResult> }
 interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort; workerCreation?: WorkerCreationGateway }
@@ -106,9 +107,11 @@ export class InstanceInteractionWorkflow {
   async handleCardAction(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
     if (!action.value || typeof action.value !== "object") return;
     const value = action.value as Record<string, unknown>;
-    if (typeof value.action !== "string" || (!value.action.startsWith("instance_") && value.action !== "card_target_open")) return;
+    if (typeof value.action !== "string" || (!value.action.startsWith("instance_") && !value.action.startsWith("worker_") && value.action !== "card_target_open")) return;
     if (!this.isOperator(action.operatorOpenId)) return { toast: { type: "error", content: "你没有 Agent 管理权限。" } };
     if (value.action === "card_target_open") return this.openCardTarget(value, action.chatId);
+    if (value.action.startsWith("worker_task_")) return this.handleWorkerTaskAction(action, value);
+    if (value.action.startsWith("worker_new_task_")) return this.handleWorkerNewTaskAction(action, value);
     const actor = { kind: "human" as const, userId: action.operatorOpenId, channel: "feishu" as const };
     const conversationKey = typeof value.conversationKey === "string" && value.conversationKey.length <= 200 ? value.conversationKey : action.chatId;
     const bindingContext = this.boundProjectForConversationKey(conversationKey, action.chatId);
@@ -198,6 +201,76 @@ export class InstanceInteractionWorkflow {
         return { toast: { type: removed ? "success" : "warning", content: removed ? `实例 ${instance.name} 已删除。` : "实例未删除，请刷新后重试。" } };
       } catch (error) { return failed(error); }
     }
+  }
+
+  private async handleWorkerTaskAction(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
+    const owned = this.resolveOwnedTaskAction(action, value);
+    if (!owned) return warning("Worker Task 卡片已过期、状态已变化或不属于当前 Primary。");
+    const { instance, turn, view, intent } = owned;
+    if (value.action === "worker_task_instruction_form") {
+      if (intent === "reject") return warning(workerTaskInteraction(view.phase).guidance);
+      return { card: renderWorkerTaskInstructionCard({ workerName: instance.name, turnId: turn.id, intent, requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+    }
+    if (value.action === "worker_task_interrupt") {
+      if (!workerTaskInteraction(view.phase).canInterrupt) return warning("任务已不处于可停止的运行状态。");
+      const result = await this.options.messaging.interrupt({ idempotencyKey: `card:${action.messageId}:interrupt:${turn.id}`, actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }, targetInstanceId: instance.id, targetTurnId: turn.id });
+      return { toast: { type: result.status === "interrupted" ? "success" : "warning", content: result.status === "interrupted" ? `已停止 ${instance.name} 的当前任务。` : `停止当前任务：${result.status}` } };
+    }
+    if (value.action !== "worker_task_instruction_submit") return warning("未知的 Worker Task 操作。");
+    if (!sameOperator(value, action)) return forbidden();
+    const requestedIntent = value.intent === "steer" || value.intent === "followup" ? value.intent : null;
+    if (!requestedIntent || requestedIntent !== intent) return warning("任务状态已变化，请重新打开 Task Card 后再操作。");
+    const text = action.formValues?.instruction_text?.trim() ?? "";
+    if (!text) return { toast: { type: "error", content: "任务要求不能为空。" } };
+    const actor = { kind: "human" as const, userId: action.operatorOpenId, channel: "feishu" as const };
+    try {
+      if (intent === "steer") {
+        const result = await this.options.messaging.steer({ idempotencyKey: `card:${action.messageId}:task-steer:${turn.id}`, actor, targetInstanceId: instance.id, targetTurnId: turn.id, text, resultTargetMessageId: action.messageId });
+        return { toast: { type: result.status === "delivered" ? "success" : "warning", content: result.status === "delivered" ? `已补充到 ${instance.name} 的当前任务。` : `补充当前任务：${result.status}` } };
+      }
+      const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${action.messageId}:task-followup:${turn.id}`, actor, projectId: turn.projectId, targetInstanceId: instance.id, content: { kind: "followup", text }, source: { messageId: action.messageId, rootMessageId: view.rootMessageId, parentTurnId: turn.id } });
+      return { toast: { type: "success", content: `已创建 ${instance.name} 的后续任务，当前排队位置 ${submitted.card?.queuePosition ?? 1}。` } };
+    } catch (error) { return failed(error); }
+  }
+
+  private async handleWorkerNewTaskAction(action: IncomingLarkCardAction, value: Record<string, unknown>): Promise<LarkCardActionResult> {
+    const owned = this.resolveOwnedMainAction(action, value);
+    if (!owned) return warning("Worker Main 卡片已过期、状态已变化或不属于当前 Primary。");
+    const { instance, view } = owned;
+    if (value.action === "worker_new_task_form") return { card: renderWorkerNewTaskCard({ workerName: instance.name, requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+    if (value.action !== "worker_new_task_submit") return warning("未知的 Worker 新任务操作。");
+    if (!sameOperator(value, action)) return forbidden();
+    const text = action.formValues?.task_text?.trim() ?? "";
+    if (!text) return { toast: { type: "error", content: "新任务内容不能为空。" } };
+    try {
+      const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${action.messageId}:worker-new-task:${instance.id}`, actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }, projectId: instance.projectId, targetInstanceId: instance.id, content: { kind: "turn", text }, source: { messageId: action.messageId, rootMessageId: view.messageId! } });
+      return { toast: { type: "success", content: `已向 ${instance.name} 发起新任务，当前排队位置 ${submitted.card?.queuePosition ?? 1}。` } };
+    } catch (error) { return failed(error); }
+  }
+
+  private resolveOwnedTaskAction(action: IncomingLarkCardAction, value: Record<string, unknown>): { instance: AgentInstance; turn: NonNullable<ReturnType<InstanceStore["getInstanceTurn"]>>; view: NonNullable<ReturnType<InstanceStore["loadWorkerTurnCard"]>>; intent: WorkerTaskReplyIntent } | null {
+    const turnId = typeof value.turnId === "string" ? value.turnId : "";
+    const sourceCardMessageId = typeof value.sourceCardMessageId === "string" ? value.sourceCardMessageId : "";
+    const turn = this.options.store.getInstanceTurn(turnId); const view = this.options.store.loadWorkerTurnCard(turnId);
+    const instance = turn ? this.options.store.getAgentInstance(turn.instanceId) : null;
+    if (!turn || !view || !instance || instance.role !== "worker" || action.chatId !== this.options.store.getBinding(instance.parent?.bindingId ?? "")?.chatId
+      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || view.instanceId !== instance.id || turn.instanceId !== instance.id
+      || instance.generation !== Number(value.generation) || turn.instanceGeneration !== instance.generation || view.instanceGeneration !== instance.generation
+      || instance.workerSessionGeneration !== Number(value.workerSessionGeneration) || view.workerSessionGeneration !== instance.workerSessionGeneration || !instance.parent) return null;
+    const binding = this.options.store.getBinding(instance.parent.bindingId);
+    if (!binding || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== instance.parent.paneId || binding.generation !== (instance.parent.bindingGeneration ?? 1)) return null;
+    return { instance, turn, view, intent: workerTaskInteraction(view.phase).replyIntent };
+  }
+
+  private resolveOwnedMainAction(action: IncomingLarkCardAction, value: Record<string, unknown>): { instance: AgentInstance; view: NonNullable<ReturnType<InstanceStore["loadWorkerMainView"]>> } | null {
+    const instanceId = typeof value.instanceId === "string" ? value.instanceId : ""; const generation = Number(value.generation); const sessionGeneration = Number(value.workerSessionGeneration);
+    const sourceCardMessageId = typeof value.sourceCardMessageId === "string" ? value.sourceCardMessageId : "";
+    const instance = this.options.store.getAgentInstance(instanceId); const view = this.options.store.loadWorkerMainView(instanceId, sessionGeneration);
+    if (!instance || !view || instance.role !== "worker" || instance.generation !== generation || instance.workerSessionGeneration !== sessionGeneration || view.runtimeGeneration !== generation
+      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || view.frozenAt || ["terminated", "failed", "stopped"].includes(view.runtimeState) || !instance.runtimeRef || instance.desiredState !== "running" || !instance.parent) return null;
+    const binding = this.options.store.getBinding(instance.parent.bindingId);
+    if (!binding || binding.chatId !== action.chatId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== instance.parent.paneId || binding.generation !== view.parentBindingGeneration) return null;
+    return { instance, view };
   }
 
   private openCardTarget(value: Record<string, unknown>, chatId: string): LarkCardActionResult {
