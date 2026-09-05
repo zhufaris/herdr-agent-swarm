@@ -146,7 +146,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private recoverTransientDeadLetters(): void {
     const cutoff = new Date(Date.now() - 300_000).toISOString();
     for (const reply of this.store.recoverEligibleDeadLetters(cutoff, 100)) {
-      this.logger.info({ event: "lark-outbox-auto-recovered", replyId: reply.id, replyKind: reply.kind, laneKey: deliveryTargetKey(reply), failureClass: reply.failureClass, autoRecoveryCount: reply.autoRecoveryCount, deadLetteredAt: reply.deadLetteredAt, outcome: "pending" }, "transient Lark outbox dead letter reopened for one recovery round");
+      this.logger.info({ event: "lark-outbox-auto-recovered", replyId: reply.id, replyKind: reply.kind, laneKey: reply.laneKey, failureClass: reply.failureClass, autoRecoveryCount: reply.autoRecoveryCount, deadLetteredAt: reply.deadLetteredAt, outcome: "pending" }, "transient Lark outbox dead letter reopened for one recovery round");
     }
   }
 
@@ -173,7 +173,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       );
       if (batch.length === 0) return outcome;
       const repeated = batch.filter((reply) => attemptedReplyIds.has(reply.id));
-      for (const reply of repeated) blockedTargets.add(deliveryTargetKey(reply));
+      for (const reply of repeated) blockedTargets.add(reply.laneKey);
       const deliverable = batch.filter((reply) => !attemptedReplyIds.has(reply.id));
       if (deliverable.length === 0) continue;
       for (const reply of deliverable) attemptedReplyIds.add(reply.id);
@@ -308,7 +308,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       if (transition?.action === "rebuild_answer" && transition.promptId) {
         for (const listener of this.answerCheckpointListeners) listener(transition.promptId, failed?.viewVersion ?? 0);
       }
-      blockedTargets.add(deliveryTargetKey(reply));
+      blockedTargets.add(reply.laneKey);
       this.lastDeliveryFailureAt = new Date().toISOString();
       return "failed";
     }
