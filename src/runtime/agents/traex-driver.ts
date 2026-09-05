@@ -1,6 +1,7 @@
 import type { AgentRuntimeRef } from "../../domain/agent-instance.js";
 import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
 import type { HerdrPort } from "../../domain/ports/external.js";
+import { classifyPromptSubmissionFailure } from "../../domain/prompt-submission.js";
 import { safeLogError } from "../safe-error.js";
 
 export class TraexDriver implements AgentRuntimeDriver {
@@ -36,6 +37,9 @@ export class TraexDriver implements AgentRuntimeDriver {
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;
+      const outcome = classifyPromptSubmissionFailure(error);
+      if (outcome?.kind === "not_started" || outcome?.kind === "rejected") return { status: "not-delivered", reason };
+      if (outcome?.kind === "uncertain") return { status: "delivery-uncertain", reason };
       return dispatched ? { status: "delivery-uncertain", reason } : { status: "not-delivered", reason };
     }
   }

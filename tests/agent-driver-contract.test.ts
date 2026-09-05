@@ -89,6 +89,16 @@ describe("agent driver contract", () => {
     await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "not-delivered", reason: "agent unavailable" });
   });
 
+  it("maps a sanitized not-started TraeX submission to confirmed non-delivery", async () => {
+    const runPrompt = vi.fn(async () => {
+      throw new Error('{"error":{"code":"agent_prompt_not_started","message":"No matching TraeX turn started"}}');
+    });
+    const driver = new TraexDriver({ runPrompt } as unknown as HerdrPort, "traex", 1_000);
+
+    await expect(driver.submit(runtime, "/unknown")).resolves.toMatchObject({ status: "not-delivered" });
+    expect(runPrompt).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["codex", CodexDriver, "codex", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],
     ["claude-code", ClaudeCodeDriver, "claude", ["--model", "chosen-model"], { structuredEvents: true, nativeResume: true, primaryTools: false, steering: "unsupported", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }],

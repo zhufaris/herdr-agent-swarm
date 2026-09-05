@@ -31,6 +31,7 @@ async function main(): Promise<void> {
     const outcome = await runHerdrTraexPrompt(invocation, {
       resolveAgent: async (target) => projectTraexAgentJson(parseAgent((await run(config.realHerdr, ["agent", "get", target], 10_000)).stdout)) as ReturnType<typeof parseAgent>,
       openTranscript: (session, expectedPrompt) => reader.open(session, expectedPrompt),
+      clearComposer: async (target) => { await run(config.realHerdr, ["agent", "send-keys", target, "ctrl+u"], 10_000); },
       submit: (argv, timeoutMs) => runCaptured(config.realHerdr, argv, timeoutMs === null ? undefined : timeoutMs + 10_000),
       currentAgent: async (target) => projectTraexAgentJson(parseAgent((await run(config.realHerdr, ["agent", "get", target], 10_000)).stdout)) as ReturnType<typeof parseAgent>,
       sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),

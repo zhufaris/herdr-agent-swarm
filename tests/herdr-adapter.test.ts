@@ -246,6 +246,18 @@ describe("Herdr adapter structured control", () => {
     expect(onDispatched).not.toHaveBeenCalled();
   });
 
+  it("does not report dispatch when fenced sanitation rejects before prompt submission", async () => {
+    const onDispatched = vi.fn();
+    const runner = { run: vi.fn(async (_command, _args, _timeout, onSpawn) => {
+      onSpawn?.();
+      throw new Error('{"error":{"code":"agent_prompt_rejected","message":"Target is not settled"}}');
+    }) };
+    const adapter = new HerdrCliAdapter(runner as never, "herdr", 100);
+
+    await expect(adapter.runPrompt("w1:p1", "hello", 2_000, undefined, undefined, onDispatched)).rejects.toThrow("agent_prompt_rejected");
+    expect(onDispatched).not.toHaveBeenCalled();
+  });
+
   it("queries the model catalog with the exact session fence", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

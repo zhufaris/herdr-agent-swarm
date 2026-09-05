@@ -47,6 +47,7 @@ export interface TraexPromptCommandResult {
 export interface TraexPromptDependencies {
   resolveAgent(target: string): Promise<TraexPromptAgent | null>;
   openTranscript(session: { source: string; agent: string; kind: "id"; value: string }, expectedPrompt: string): Promise<TraexTranscriptOpenResult>;
+  clearComposer(target: string): Promise<void>;
   submit(argv: string[], timeoutMs: number | null): Promise<TraexPromptCommandResult>;
   currentAgent(target: string): Promise<TraexPromptAgent | null>;
   sleep(ms: number): Promise<void>;
@@ -163,17 +164,22 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
   const session = managedTraexSession(agent);
   if (!session) return dependencies.submit(input.argv, input.timeoutMs);
   const opened = await dependencies.openTranscript(session, input.text).catch(() => null);
+  if (opened?.mode !== "typed" || !isSettledManagedTraexAgent(agent, session)) return promptRejectedResult("Managed TraeX target is not ready for fenced prompt submission");
+  try { await dependencies.clearComposer(input.target); }
+  catch { return promptUncertainResult("TraeX composer sanitation could not be confirmed"); }
+  const afterPreClear = await dependencies.currentAgent(input.target).catch(() => null);
+  if (!isSettledManagedTraexAgent(afterPreClear, session)) return promptUncertainResult("Managed TraeX target changed after composer sanitation");
   const dispatchStartedMs = dependencies.now();
   const dispatchBoundaryMs = Math.floor(dispatchStartedMs / 1_000) * 1_000;
   const submitted = await dependencies.submit(input.argv, input.timeoutMs);
-  if (submitted.exitCode === 0 || structuredResultErrorCode(submitted.stderr) !== "agent_prompt_stalled" || opened?.mode !== "typed" || !completionMatchesUntil(input.until)) return submitted;
+  if (submitted.exitCode === 0 || structuredResultErrorCode(submitted.stderr) !== "agent_prompt_stalled" || !completionMatchesUntil(input.until)) return submitted;
   const turnDeadline = input.timeoutMs === null ? null : dispatchStartedMs + input.timeoutMs;
   const startDeadline = dispatchStartedMs + Math.min(PROMPT_START_SETTLEMENT_MS, input.timeoutMs ?? PROMPT_START_SETTLEMENT_MS);
   let owned: NonNullable<TraexTranscriptObservation["turnLifecycle"]> | null = null;
   let previousSignature = "";
   for (;;) {
     const currentTime = dependencies.now();
-    if (!owned && currentTime >= startDeadline) return promptNotStartedResult();
+    if (!owned && currentTime >= startDeadline) return settleNotStarted(input.target, session, opened.cursor, dependencies, submitted);
     if (owned && turnDeadline !== null && currentTime >= turnDeadline) return submitted;
     let observation: TraexTranscriptObservation;
     try { observation = opened.cursor.readObservation ? await opened.cursor.readObservation() : { answerDelta: await opened.cursor.readDelta() }; }
@@ -214,12 +220,39 @@ export async function runHerdrTraexPrompt(input: TraexPromptInput, dependencies:
   }
 }
 
+async function settleNotStarted(
+  target: string,
+  session: { source: string; agent: string; kind: "id"; value: string },
+  cursor: TraexTranscriptCursorPort,
+  dependencies: TraexPromptDependencies,
+  uncertain: TraexPromptCommandResult
+): Promise<TraexPromptCommandResult> {
+  const beforeClear = await dependencies.currentAgent(target).catch(() => null);
+  if (!isSettledManagedTraexAgent(beforeClear, session)) return uncertain;
+  const beforeObservation = await readImmediately(cursor).catch(() => null);
+  if (beforeObservation?.freshTurnStart) return uncertain;
+  try { await dependencies.clearComposer(target); } catch { return uncertain; }
+  const afterClear = await dependencies.currentAgent(target).catch(() => null);
+  if (!isSettledManagedTraexAgent(afterClear, session)) return uncertain;
+  const afterObservation = await readImmediately(cursor).catch(() => null);
+  if (afterObservation?.freshTurnStart) return uncertain;
+  return promptNotStartedResult();
+}
+
 function promptNotStartedResult(): TraexPromptCommandResult {
   return {
     exitCode: 1,
     stdout: "",
     stderr: JSON.stringify({ error: { code: "agent_prompt_not_started", message: "No matching TraeX turn started within the settlement window" } })
   };
+}
+
+function promptRejectedResult(message: string): TraexPromptCommandResult {
+  return { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "agent_prompt_rejected", message } }) };
+}
+
+function promptUncertainResult(message: string): TraexPromptCommandResult {
+  return { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "agent_prompt_uncertain", message } }) };
 }
 
 function managedTraexSession(agent: TraexPromptAgent | null): { source: string; agent: string; kind: "id"; value: string } | null {
@@ -230,6 +263,10 @@ function managedTraexSession(agent: TraexPromptAgent | null): { source: string; 
 
 function sameManagedTraexSession(agent: TraexPromptAgent | null, expected: { value: string }): boolean {
   return managedTraexSession(agent)?.value === expected.value;
+}
+
+function isSettledManagedTraexAgent(agent: TraexPromptAgent | null, expected: { value: string }): boolean {
+  return sameManagedTraexSession(agent, expected) && (agent?.agent_status === "idle" || agent?.agent_status === "done");
 }
 
 function completionMatchesUntil(until: readonly string[]): boolean {

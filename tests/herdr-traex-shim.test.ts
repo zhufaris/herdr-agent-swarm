@@ -156,6 +156,84 @@ describe("Herdr TraeX prompt transcript settlement", () => {
     expect(fixture.sleep.mock.calls.length).toBeLessThan(60);
   });
 
+  it("clears the composer before submission and again after proving no turn started", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }]);
+    const order: string[] = [];
+    fixture.clearComposer.mockImplementation(async () => { order.push("ctrl+u"); });
+    fixture.submit.mockImplementation(async () => {
+      order.push("submit");
+      return { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) };
+    });
+
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({
+      exitCode: 1,
+      stderr: expect.stringContaining("agent_prompt_not_started")
+    });
+    expect(order).toEqual(["ctrl+u", "submit", "ctrl+u"]);
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
+  it("does not submit when the exact session changes after pre-clear", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }]);
+    fixture.currentAgent.mockResolvedValueOnce({
+      agent: "traex", display_agent: "traex", agent_status: "idle",
+      agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a06b5e-2a25-7c53-b12e-ed02181a4e0f" }
+    });
+
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({
+      exitCode: 1, stderr: expect.stringContaining("agent_prompt_uncertain")
+    });
+    expect(fixture.clearComposer).toHaveBeenCalledOnce();
+    expect(fixture.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(["working", "blocked", "unknown"] as const)("rejects a %s target without clearing or submitting", async (agentStatus) => {
+    const fixture = promptFixture([{ answerDelta: "" }], { code: "agent_prompt_stalled" }, agentStatus);
+
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({
+      exitCode: 1, stderr: expect.stringContaining("agent_prompt_rejected")
+    });
+    expect(fixture.clearComposer).not.toHaveBeenCalled();
+    expect(fixture.submit).not.toHaveBeenCalled();
+  });
+
+  it("preserves uncertainty when pre-submission composer cleanup cannot be confirmed", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }]);
+    fixture.clearComposer.mockRejectedValueOnce(new Error("lost response"));
+
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({
+      exitCode: 1, stderr: expect.stringContaining("agent_prompt_uncertain")
+    });
+    expect(fixture.submit).not.toHaveBeenCalled();
+  });
+
+  it("preserves uncertainty when post-failure composer cleanup fails", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }]);
+    fixture.clearComposer
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("send keys failed"));
+
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({
+      exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled")
+    });
+    expect(fixture.clearComposer).toHaveBeenCalledTimes(2);
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
+  it("preserves uncertainty when the session changes before post-failure cleanup", async () => {
+    const fixture = promptFixture([{ answerDelta: "" }]);
+    const original = await fixture.dependencies.resolveAgent("reviewer");
+    fixture.currentAgent
+      .mockResolvedValueOnce(original)
+      .mockResolvedValueOnce({ ...original, agent_status: "working" });
+
+    await expect(runHerdrTraexPrompt(promptInput(), fixture.dependencies)).resolves.toMatchObject({
+      exitCode: 1, stderr: expect.stringContaining("agent_prompt_stalled")
+    });
+    expect(fixture.clearComposer).toHaveBeenCalledOnce();
+    expect(fixture.submit).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["no fresh turn", [{ answerDelta: "" }]],
     ["old turn", [{ ...completed, turnLifecycle: { ...completed.turnLifecycle, startedAt: "2026-09-04T07:59:58.000Z" } }]]
@@ -306,18 +384,20 @@ function promptInput() {
   return { target: "reviewer", text: "secret prompt", argv: ["agent", "prompt", "reviewer", "secret prompt", "--wait", "--timeout", "120000"], timeoutMs: 120000, until: [] };
 }
 
-function promptFixture(observations: Array<Record<string, unknown>>, error: { code: string } = { code: "agent_prompt_stalled" }) {
+function promptFixture(observations: Array<Record<string, unknown>>, error: { code: string } = { code: "agent_prompt_stalled" }, agentStatus: "idle" | "done" | "working" | "blocked" | "unknown" = "idle") {
   const submit = vi.fn(async () => ({ exitCode: 1, stdout: "", stderr: JSON.stringify({ error }) }));
+  const clearComposer = vi.fn(async () => undefined);
   const sleep = vi.fn(async () => undefined);
   const openTranscript = vi.fn(async (_session, _expectedPrompt) => {
     const queue = [...observations];
     return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return queue.shift() ?? { answerDelta: "" }; } } };
   });
   let now = Date.parse("2026-09-04T08:00:00.100Z");
-  const agent = { agent: "traex", display_agent: "traex", agent_status: "idle", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a06b5e-2a25-7c53-b12e-ed02181a4e0e" } };
-  return { submit, sleep, openTranscript, dependencies: {
+  const agent = { agent: "traex", display_agent: "traex", agent_status: agentStatus, agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a06b5e-2a25-7c53-b12e-ed02181a4e0e" } };
+  const currentAgent = vi.fn(async () => agent);
+  return { submit, clearComposer, currentAgent, sleep, openTranscript, dependencies: {
     resolveAgent: async () => agent,
-    openTranscript, submit, currentAgent: async () => agent,
+    openTranscript, clearComposer, submit, currentAgent,
     sleep, now: () => { now += 100; return now; }
   } };
 }

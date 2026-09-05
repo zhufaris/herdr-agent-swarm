@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { classifyPromptSubmissionFailure } from "../domain/prompt-submission.js";
 import type { HerdrPort, ModelPromptDispatchOptions } from "../domain/ports/external.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
@@ -495,24 +496,12 @@ function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {
 }
 
 function isExplicitPreDispatchAgentPromptError(error: unknown): boolean {
-  const code = structuredHerdrErrorCode(error);
-  return code === "agent_not_found" || code === "agent_not_ready" || code === "agent_blocked" || code === "agent_prompt_not_started";
+  const outcome = classifyPromptSubmissionFailure(error);
+  return outcome?.kind === "not_started" || outcome?.kind === "rejected";
 }
 
 function isPossiblyDispatchedAgentPromptError(error: unknown): boolean {
-  return structuredHerdrErrorCode(error) === "agent_prompt_stalled";
-}
-
-function structuredHerdrErrorCode(error: unknown): string | null {
-  const message = error instanceof Error ? error.message : String(error);
-  const start = message.indexOf("{");
-  if (start < 0) return null;
-  try {
-    const parsed = JSON.parse(message.slice(start)) as { error?: { code?: unknown } };
-    return typeof parsed.error?.code === "string" ? parsed.error.code : null;
-  } catch {
-    return null;
-  }
+  return classifyPromptSubmissionFailure(error)?.kind === "uncertain";
 }
 
 function promptResultState(stdout: string): AgentState | null {

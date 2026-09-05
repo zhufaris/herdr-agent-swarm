@@ -405,6 +405,14 @@ change during the target decomposition without changing these steps.
    that pane for operator inspection, creates a lifecycle-aware replacement, and
    atomically advances the binding generation only after it owns the replacement
    pane identity. No prompt is replayed as part of this replacement.
+   Ordinary managed TraeX submission is a fenced composer operation shared by
+   Primary and Worker dispatch. The installed shim opens the exact-session
+   transcript cursor, requires an `idle` or `done` target, sends logical
+   `ctrl+u`, rechecks the session, and submits the prompt once. If the native
+   command stalls and the bounded transcript window proves that no turn began,
+   it sends a second fenced `ctrl+u` and returns `agent_prompt_not_started`.
+   That proven non-delivery fails the durable head and releases FIFO; changed or
+   incomplete evidence remains uncertain and is never replayed.
 6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
    process-local lifecycle events. For structured tab/worktree changes, the
    sanitized desired TopicView and Main Card delivery intent are one transaction.
