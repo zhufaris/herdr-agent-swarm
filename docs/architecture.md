@@ -98,6 +98,7 @@ The production implementation uses the following modules and seams.
 | Module | Responsibility | Seam |
 | --- | --- | --- |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
+| `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, and no-replay recovery | Generation-fenced `InstanceStore` transitions and Agent driver hooks |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
@@ -149,11 +150,40 @@ ownership should each depend only on the operations they use. SQLite can
 implement several such ports through one concrete store and one transaction.
 
 SQLite is infrastructure, but it is the durable authority for workflow facts:
-bindings, inbound acceptance, FIFO queue order, dispatch checkpoints, detached
-observation, card projections, outbox intent, audit data, and the fenced
-instance lease. Atomic acceptance and claim transitions must remain atomic
+bindings, inbound acceptance, FIFO queue order, command intents, dispatch
+checkpoints, detached observation, card projections, outbox intent, audit data,
+and the fenced instance lease. Atomic acceptance and claim transitions must remain atomic
 when ports are narrowed; splitting a large store interface must not split a
 workflow transaction.
+
+### Swarm command bounded context
+
+Every parsed `/swarm` command enters `SwarmCommandGateway`; the inbound router no
+longer owns per-command authorization or dispatch branches. The gateway resolves
+one immutable context containing the chat/project scope and, for Primary-scoped
+commands, the binding generation plus both runtime identity dimensions:
+
+```text
+Lark text ───────────────┐
+                        ├─> SwarmCommandGateway
+CardKit Worker create ──┘      |
+                               +─ query -> handler + audit
+                               |           (no CommandIntent)
+                               +─ mutation -> accept -> lane claim -> revalidate
+                                                        -> owning aggregate
+```
+
+Mutation lanes serialize commands for the same chat, project, or Primary while
+allowing unrelated Primary sessions to proceed independently. `CommandIntent`
+records orchestration and references only; Binding, Prompt, Worker, pane-control,
+session-administration, provisioning, and delivery aggregates keep ownership of
+their own state machines.
+
+Startup marks any interrupted `executing` intent `uncertain` and drains only
+intents that never started. A handler error after invocation is also conservative
+`uncertain`, because an external Herdr effect may already have occurred. Neither
+case is blindly replayed. Queries use the same parser, context, policy, and
+authorization path but create no command intent.
 
 A read-only SQLite integrity auditor runs before startup completes and every 15
 minutes afterward. It caches bounded results from `quick_check`,
