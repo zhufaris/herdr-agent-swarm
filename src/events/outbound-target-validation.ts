@@ -4,6 +4,16 @@ import { workerTurnElementId, workerTurnProgressElementId } from "../domain/work
 
 export class PermanentDeliveryError extends Error {}
 
+export function assertWorkerMainCreateTarget(store: Pick<OutboxStore, "loadWorkerMainView">, workerId: string, workerSessionGeneration: number, rootMessageId: string): void {
+  const view = store.loadWorkerMainView(workerId, workerSessionGeneration);
+  if (!view || view.messageId !== null || view.cardId !== null || view.parentBindingId.length === 0 || rootMessageId.length === 0) throw new PermanentDeliveryError(`Worker Main create target mismatch for ${workerId}:${workerSessionGeneration}`);
+}
+
+export function assertWorkerMainMessageTarget(store: Pick<OutboxStore, "loadWorkerMainView">, workerId: string, workerSessionGeneration: number, messageId: string): void {
+  const view = store.loadWorkerMainView(workerId, workerSessionGeneration);
+  if (!view || view.messageId !== messageId) throw new PermanentDeliveryError(`Worker Main message target mismatch for ${workerId}:${workerSessionGeneration}`);
+}
+
 export function assertAnswerCardCreateTarget(
   store: Pick<OutboxStore, "getBinding" | "loadRunCard">, bindingId: string | null, promptId: string | null, rootMessageId: string,
   card: object, stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" }

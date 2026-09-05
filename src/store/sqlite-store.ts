@@ -25,6 +25,7 @@ import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn,
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../domain/worker-main-view.js";
+import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
@@ -196,10 +197,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       this.database.prepare(`
         INSERT INTO agent_instances(
-          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_binding_generation, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
           , provisioning_checkpoint, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent?.bindingId ?? null, input.parent?.paneId ?? null, input.parent?.nativeSessionId ?? null, input.workerSessionLifecycle ?? (input.role === "worker" ? "legacy" : null), input.desiredState, input.workspace.id, timestamp, timestamp);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.role, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent?.bindingId ?? null, input.parent?.bindingGeneration ?? null, input.parent?.paneId ?? null, input.parent?.nativeSessionId ?? null, input.workerSessionLifecycle ?? (input.role === "worker" ? "legacy" : null), input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
@@ -220,10 +221,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (duplicate) { this.database.exec("COMMIT"); return { outcome: "duplicate-name" }; }
       this.database.prepare(`
         INSERT INTO agent_instances(
-          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_binding_generation, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
           provisioning_checkpoint, last_error
-        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, 'active', ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent.bindingId, input.parent.paneId, input.parent.nativeSessionId, input.desiredState, input.workspace.id, timestamp, timestamp);
+        ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 'active', ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
+      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent.bindingId, input.parent.bindingGeneration ?? null, input.parent.paneId, input.parent.nativeSessionId, input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
@@ -255,6 +256,57 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       WHERE worker_main_views.frozen_at IS NULL AND excluded.view_version >= worker_main_views.view_version
     `).run(view.workerId, view.workerSessionGeneration, view.parentBindingId, view.parentBindingGeneration, view.parentPaneId, JSON.stringify(view), view.viewVersion, view.deliveredVersion, view.messageId, view.cardId, view.frozenAt, view.createdAt, view.updatedAt);
     return result.changes === 1 ? this.loadWorkerMainView(view.workerId, view.workerSessionGeneration) : null;
+  }
+
+  reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const saved = this.saveWorkerMainView(view);
+      if (!saved) { if (ownsTransaction) this.database.exec("COMMIT"); return null; }
+      const creating = saved.messageId === null;
+      this.enqueueOutboundReply({
+        id: randomUUID(),
+        idempotencyKey: creating ? `worker-main:create:${saved.workerId}:${saved.workerSessionGeneration}` : `worker-main:update:${saved.workerId}:${saved.workerSessionGeneration}:${saved.viewVersion}`,
+        bindingId: saved.parentBindingId, workerId: saved.workerId, workerSessionGeneration: saved.workerSessionGeneration, viewVersion: saved.viewVersion,
+        rootMessageId: creating ? rootMessageId : saved.messageId!, kind: creating ? "card_reply" : "card_update", payload: JSON.stringify(card)
+      });
+      if (ownsTransaction) this.database.exec("COMMIT");
+      return saved;
+    } catch (error) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
+    if (targets.length === 0) return [];
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const statement = this.database.prepare(`
+        INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
+        VALUES (?, ?, ?, 1, 0, ?, ?, ?)
+        ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
+          requested_dependency_revision = card_context_invalidations.requested_dependency_revision + 1, reason = excluded.reason, updated_at = excluded.updated_at
+      `);
+      for (const target of targets) statement.run(target.targetKind, target.targetId, target.targetGeneration, target.reason, timestamp, timestamp);
+      const invalidations = targets.map((target) => this.loadCardContextInvalidation(target)!).filter(Boolean);
+      this.database.exec("COMMIT");
+      return invalidations;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  listPendingCardContextInvalidations(limit = 100): CardContextInvalidation[] {
+    const bounded = Math.max(1, Math.min(limit, 500));
+    return (this.database.prepare(`SELECT * FROM card_context_invalidations WHERE projected_dependency_revision < requested_dependency_revision ORDER BY updated_at, target_kind, target_id, target_generation LIMIT ?`).all(bounded) as Array<Record<string, unknown>>).map(mapCardContextInvalidation);
+  }
+
+  markCardContextProjected(target: CardContextTarget, dependencyRevision: number): boolean {
+    if (!Number.isInteger(dependencyRevision) || dependencyRevision < 1) return false;
+    return this.database.prepare(`UPDATE card_context_invalidations SET projected_dependency_revision = MAX(projected_dependency_revision, MIN(requested_dependency_revision, ?)), updated_at = ? WHERE target_kind = ? AND target_id = ? AND target_generation = ?`).run(dependencyRevision, now(), target.targetKind, target.targetId, target.targetGeneration).changes === 1;
+  }
+
+  private loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {
+    const row = this.database.prepare("SELECT * FROM card_context_invalidations WHERE target_kind = ? AND target_id = ? AND target_generation = ?").get(target.targetKind, target.targetId, target.targetGeneration) as Record<string, unknown> | undefined;
+    return row ? mapCardContextInvalidation(row) : null;
   }
 
   findAgentInstanceByPane(paneId: string): AgentInstance | null {
@@ -616,8 +668,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
   private saveWorkerTurnCard(view: WorkerTurnCardView): void {
-    this.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, progress_sequence, phase, request_text, answer, status_title, progress_json, queue_position, started_at, finished_at, notice, result_capture, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET message_id=excluded.message_id, card_id=excluded.card_id, phase=excluded.phase, answer=excluded.answer, status_title=excluded.status_title, progress_json=excluded.progress_json, queue_position=excluded.queue_position, started_at=excluded.started_at, finished_at=excluded.finished_at, notice=excluded.notice, result_capture=excluded.result_capture, page_index=excluded.page_index, page_start=excluded.page_start, sequence=excluded.sequence, view_version=excluded.view_version, delivered_version=excluded.delivered_version, updated_at=excluded.updated_at`)
-      .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.progressSequence, view.phase, view.requestText, view.answer, view.statusTitle, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
+    this.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_session_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, progress_sequence, phase, request_text, answer, status_title, progress_json, queue_position, started_at, finished_at, notice, result_capture, worker_main_ref_json, primary_answer_ref_json, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET message_id=excluded.message_id, card_id=excluded.card_id, phase=excluded.phase, answer=excluded.answer, status_title=excluded.status_title, progress_json=excluded.progress_json, queue_position=excluded.queue_position, started_at=excluded.started_at, finished_at=excluded.finished_at, notice=excluded.notice, result_capture=excluded.result_capture, worker_main_ref_json=excluded.worker_main_ref_json, primary_answer_ref_json=excluded.primary_answer_ref_json, page_index=excluded.page_index, page_start=excluded.page_start, sequence=excluded.sequence, view_version=excluded.view_version, delivered_version=excluded.delivered_version, updated_at=excluded.updated_at`)
+      .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerSessionGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.progressSequence, view.phase, view.requestText, view.answer, view.statusTitle, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, JSON.stringify(view.workerMain), view.primaryAnswer ? JSON.stringify(view.primaryAnswer) : null, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
   }
   private getInstanceTurnByKey(key: string): InstanceTurn | null { return this.mapInstanceTurn(this.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
   listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } {
@@ -2344,7 +2396,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "workerTurnId" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
     const timestamp = now();
     const laneKey = outboundLaneKey(input);
     const ownsTransaction = !this.database.isTransaction;
@@ -2365,19 +2417,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
             )
         `).run(input.bindingId, input.rootMessageId, laneKey, input.bindingId, input.rootMessageId, laneKey);
       }
+      if (input.kind === "card_update" && input.workerId && input.workerSessionGeneration !== undefined && input.workerSessionGeneration !== null && input.viewVersion !== undefined && input.viewVersion !== null) {
+        this.database.prepare("DELETE FROM outbound_replies WHERE worker_id = ? AND worker_session_generation = ? AND kind = 'card_update' AND state = 'pending' AND COALESCE(view_version, 0) < ?")
+          .run(input.workerId, input.workerSessionGeneration, input.viewVersion);
+      }
       if (input.kind === "card_update" && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
         this.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?")
           .run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
       this.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
         ON CONFLICT(idempotency_key) DO UPDATE SET
           payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
           view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
           card_sequence = CASE WHEN outbound_replies.state = 'pending' THEN excluded.card_sequence ELSE outbound_replies.card_sequence END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
       const row = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
       if (input.kind === "stream_card_create" && input.promptId) {
@@ -2463,7 +2519,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.database.prepare("SELECT binding_id, prompt_id, worker_turn_id, view_version, card_sequence, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
+      const row = this.database.prepare("SELECT binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
       this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
@@ -2515,6 +2571,18 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
               .run(row.view_version ?? 0, pendingContinuation ? "frozen" : "finished", now(), row.worker_turn_id, pageIndex);
           }
         }
+      }
+      if (row?.worker_id && row.worker_session_generation !== null) {
+        const messageCheckpoint = row.kind === "card_reply" ? messageId : null;
+        const cardCheckpoint = row.kind === "card_reply" ? cardId ?? null : null;
+        this.database.prepare(`
+          UPDATE worker_main_views
+          SET delivered_version = MAX(delivered_version, ?),
+              message_id = COALESCE(?, message_id), card_id = COALESCE(?, card_id),
+              state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?), '$.messageId', COALESCE(?, json_extract(state_json, '$.messageId')), '$.cardId', COALESCE(?, json_extract(state_json, '$.cardId'))),
+              updated_at = ?
+          WHERE worker_id = ? AND worker_session_generation = ?
+        `).run(row.view_version ?? 0, messageCheckpoint, cardCheckpoint, row.view_version ?? 0, messageCheckpoint, cardCheckpoint, now(), row.worker_id, row.worker_session_generation);
       }
       if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       if (row?.binding_id && row.target_role === "session_status") {
@@ -3382,7 +3450,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       );
       CREATE TABLE IF NOT EXISTS agent_instances(
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
-        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_binding_generation INTEGER, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
         desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
         observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
         workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
@@ -3466,7 +3534,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
       CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
       CREATE TABLE IF NOT EXISTS outbound_replies(
-        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
         error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -3585,6 +3653,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerParentIdentity();
     this.ensurePrimaryScopedWorkerNames();
     this.ensureCardContextProjectionTables();
+    this.ensureWorkerTurnContextReferences();
+    this.ensureWorkerMainOutboxIdentity();
     this.ensureWorkerPaneCloseSteps();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
@@ -3756,7 +3826,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, worker_turn_id, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
-      SELECT id, idempotency_key, binding_id, prompt_id, ${workerTurnId}, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql(workerTurnId)}, next_attempt_at, created_at, updated_at FROM outbound_replies;
+      SELECT id, idempotency_key, binding_id, prompt_id, ${workerTurnId}, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql(workerTurnId, "NULL", "NULL")}, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
       CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
     `);
@@ -4176,12 +4246,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     const schema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_instances'").get() as { sql: string } | undefined;
     if (!schema?.sql) throw new Error("agent_instances schema is unavailable");
     if (/UNIQUE\s*\(\s*project_id\s*,\s*name\s*\)/i.test(schema.sql)) {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+      const parentBindingGeneration = columns.has("parent_binding_generation") ? "parent_binding_generation" : "NULL";
+      const workerSessionGeneration = columns.has("worker_session_generation") ? "worker_session_generation" : "1";
       this.database.exec(`
         PRAGMA foreign_keys = OFF;
         BEGIN IMMEDIATE;
         CREATE TABLE agent_instances_next(
           id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
-          agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')),
+        agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_binding_generation INTEGER, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
           desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
           observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
           workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
@@ -4189,10 +4262,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         INSERT INTO agent_instances_next(
-          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle,
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_binding_generation, parent_pane_id, parent_native_session_id, worker_session_lifecycle, worker_session_generation,
           desired_state, observed_state, workspace_lease_id, generation, herdr_workspace_id, pane_id, native_session_id, provisioning_checkpoint, last_error, pending_herdr_workspace_id, pending_pane_id, created_at, updated_at
         ) SELECT
-          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_pane_id, parent_native_session_id, worker_session_lifecycle,
+          id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, ${parentBindingGeneration}, parent_pane_id, parent_native_session_id, worker_session_lifecycle, ${workerSessionGeneration},
           desired_state, observed_state, workspace_lease_id, generation, herdr_workspace_id, pane_id, native_session_id, provisioning_checkpoint, last_error, pending_herdr_workspace_id, pending_pane_id, created_at, updated_at
         FROM agent_instances;
         DROP TABLE agent_instances;
@@ -4216,6 +4289,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       const columns = new Set((this.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("worker_session_generation")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN worker_session_generation INTEGER NOT NULL DEFAULT 1");
+      if (!columns.has("parent_binding_generation")) this.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_binding_generation INTEGER");
       this.database.exec(`
         CREATE TABLE worker_main_views(
           worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER NOT NULL,
@@ -4232,6 +4306,31 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         CREATE INDEX card_context_invalidations_pending ON card_context_invalidations(projected_dependency_revision, requested_dependency_revision, updated_at);
         INSERT INTO schema_migrations(version) VALUES (17);
       `);
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerTurnContextReferences(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 18").get();
+    if (migrated) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("worker_main_ref_json")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN worker_main_ref_json TEXT");
+      if (!columns.has("primary_answer_ref_json")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN primary_answer_ref_json TEXT");
+      if (!columns.has("worker_session_generation")) this.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN worker_session_generation INTEGER NOT NULL DEFAULT 1");
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (18)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerMainOutboxIdentity(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("worker_id")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE");
+      if (!columns.has("worker_session_generation")) this.database.exec("ALTER TABLE outbound_replies ADD COLUMN worker_session_generation INTEGER");
+      this.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (19)").run();
       this.database.exec("COMMIT");
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
@@ -4579,15 +4678,33 @@ function streamContentPageIndex(payload: string): number | null {
 }
 
 function mapWorkerTurnCard(row: Record<string, unknown> | undefined): WorkerTurnCardView | null {
-  return row ? {
-    turnId: String(row.turn_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), workerName: String(row.worker_name),
+  if (!row) return null;
+  return {
+    turnId: String(row.turn_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), workerSessionGeneration: Number(row.worker_session_generation ?? 1), workerName: String(row.worker_name),
     parentTurnId: row.parent_turn_id === null ? null : String(row.parent_turn_id), rootMessageId: String(row.root_message_id),
     messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id), elementId: String(row.element_id), progressSequence: Number(row.progress_sequence ?? 0),
     phase: String(row.phase) as WorkerTurnCardView["phase"], requestText: String(row.request_text), answer: String(row.answer), statusTitle: row.status_title === null || row.status_title === undefined ? null : String(row.status_title), progressEvents: parseWorkerProgress(row.progress_json), progressSummary: summarizeWorkerProgress(parseWorkerProgress(row.progress_json)), queuePosition: Number(row.queue_position),
     startedAt: row.started_at === null ? null : String(row.started_at), finishedAt: row.finished_at === null ? null : String(row.finished_at), notice: row.notice === null ? null : String(row.notice),
-    resultCapture: String(row.result_capture) as WorkerTurnCardView["resultCapture"], pageIndex: Number(row.page_index), pageStart: Number(row.page_start), sequence: Number(row.sequence),
+    resultCapture: String(row.result_capture) as WorkerTurnCardView["resultCapture"],
+    workerMain: parseCardTargetRef(row.worker_main_ref_json) ?? { aggregateKind: "worker-session", aggregateId: String(row.instance_id), generation: 1, messageId: null },
+    primaryAnswer: parseCardTargetRef(row.primary_answer_ref_json), pageIndex: Number(row.page_index), pageStart: Number(row.page_start), sequence: Number(row.sequence),
     viewVersion: Number(row.view_version), deliveredVersion: Number(row.delivered_version), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
-  } : null;
+  };
+}
+function parseCardTargetRef(value: unknown): import("../domain/card-target-ref.js").CardTargetRef | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return typeof parsed.aggregateKind === "string" && typeof parsed.aggregateId === "string" && typeof parsed.generation === "number"
+      ? parsed as unknown as import("../domain/card-target-ref.js").CardTargetRef : null;
+  } catch { return null; }
+}
+function mapCardContextInvalidation(row: Record<string, unknown>): CardContextInvalidation {
+  return {
+    targetKind: String(row.target_kind) as CardContextInvalidation["targetKind"], targetId: String(row.target_id), targetGeneration: Number(row.target_generation),
+    requestedDependencyRevision: Number(row.requested_dependency_revision), projectedDependencyRevision: Number(row.projected_dependency_revision), reason: String(row.reason),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+  };
 }
 function parseWorkerProgress(value: unknown): import("../domain/run-card-view.js").RunProgressEvent[] {
   try {

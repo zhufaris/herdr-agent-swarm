@@ -15,6 +15,7 @@ export type WorkerSessionLifecycle = "active" | "legacy" | "terminated";
 
 export interface WorkerParentIdentity {
   bindingId: string;
+  bindingGeneration?: number;
   paneId: string;
   nativeSessionId: string | null;
 }

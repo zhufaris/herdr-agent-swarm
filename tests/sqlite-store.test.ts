@@ -61,6 +61,44 @@ describe("SQLite store", () => {
     expect(store.loadWorkerMainView(replaced.id, 1)).toEqual(frozen);
   });
 
+  it("durably coalesces card context invalidations and recovers unfinished revisions", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-context-invalidation-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const target = { targetKind: "worker-session" as const, targetId: "worker-1", targetGeneration: 3 };
+
+    expect(store.invalidateCardContexts([{ ...target, reason: "turn.accepted" }])).toEqual([expect.objectContaining({ ...target, requestedDependencyRevision: 1, projectedDependencyRevision: 0, reason: "turn.accepted" })]);
+    expect(store.invalidateCardContexts([{ ...target, reason: "turn.running" }])).toEqual([expect.objectContaining({ ...target, requestedDependencyRevision: 2, projectedDependencyRevision: 0, reason: "turn.running" })]);
+    expect(store.markCardContextProjected(target, 1)).toBe(true);
+    expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ ...target, requestedDependencyRevision: 2, projectedDependencyRevision: 1 })]);
+    store.close(); store = new SqliteBindingStore(path);
+    expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ ...target, requestedDependencyRevision: 2, projectedDependencyRevision: 1 })]);
+    expect(store.markCardContextProjected(target, 2)).toBe(true);
+    expect(store.listPendingCardContextInvalidations()).toEqual([]);
+  });
+
+  it("keeps Worker Main delivery in a session lane independent from Worker Task delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-root", title: "Primary" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 3, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const main = createWorkerMainView({
+      workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 3, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary",
+      runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
+    });
+    store.reserveWorkerMainCard(main, "primary-root", { version: 1 });
+    store.acceptInstanceTurn({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
+    store.enqueueOutboundReply({ id: "task-update", idempotencyKey: "task-update", workerTurnId: "turn-1", rootMessageId: "task-message", kind: "card_update", payload: "{}" });
+
+    expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
+      expect.objectContaining({ lane_key: "worker-main:reviewer:1" }),
+      { id: "task-update", lane_key: "worker-turn:turn-1" }
+    ]);
+  });
+
   it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-parent-migration-"));
     const path = join(temporaryDirectory, "bridge.db");

@@ -1,5 +1,6 @@
 import { stableElementId } from "./stable-element-id.js";
 import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
+import type { PrimaryWorkerActivitySummary } from "./card-context-summary.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
 export type SteeringFailureKind = "rejected" | "uncertain";
@@ -57,6 +58,9 @@ export interface RunCardView {
   startedAt: string | null;
   finishedAt: string | null;
   notice: string | null;
+  workerActivity: PrimaryWorkerActivitySummary[];
+  workerDependencyRevision: number;
+  workerContextFrozenAt: string | null;
   activityAt: string;
   viewVersion: number;
   deliveredVersion: number;
@@ -83,9 +87,20 @@ export function createQueuedRunCard(input: {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, steeringOrigin: input.steeringOrigin ?? null, steeringFailureKind: null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
-    progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, activityAt: input.occurredAt,
+    progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
+}
+
+export function updateRunCardWorkerContext(state: RunCardView, activity: PrimaryWorkerActivitySummary[], dependencyRevision: number, occurredAt: string): RunCardView {
+  if (state.workerContextFrozenAt !== null) return state;
+  const same = JSON.stringify(state.workerActivity) === JSON.stringify(activity);
+  if (same) return state.workerDependencyRevision === dependencyRevision ? state : { ...state, workerDependencyRevision: dependencyRevision, updatedAt: occurredAt };
+  return { ...state, workerActivity: activity, workerDependencyRevision: dependencyRevision, viewVersion: state.viewVersion + 1, updatedAt: occurredAt };
+}
+
+export function freezeRunCardWorkerContext(state: RunCardView, occurredAt: string): RunCardView {
+  return state.workerContextFrozenAt === null ? { ...state, workerContextFrozenAt: occurredAt, updatedAt: occurredAt } : state;
 }
 
 export function answerElementId(promptId: string, pageIndex: number): string {

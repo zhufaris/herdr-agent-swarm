@@ -16,10 +16,34 @@ import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { createWorkerMainView } from "../src/domain/worker-main-view.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("Lark channel publisher", () => {
+  it("checkpoints Worker Main creation and emits a session-scoped convergence hint", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-root", title: "Primary" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 2, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const view = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 2, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.reserveWorkerMainCard(view, "primary-root", { schema: "2.0" });
+    const replyCard = vi.fn(async () => ({ messageId: "worker-main-message", cardId: "worker-main-card" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyCard }), pino({ enabled: false }));
+    const checkpoint = vi.fn();
+    publisher.onWorkerMainCheckpoint(checkpoint);
+
+    await publisher.requestScan(true);
+
+    expect(replyCard).toHaveBeenCalledOnce();
+    expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-main-message", cardId: "worker-main-card", deliveredVersion: 1 });
+    expect(checkpoint).toHaveBeenCalledWith(worker.id, 1, 1);
+    store.close();
+  });
+
   it("checkpoints a delivered Worker task card and emits a turn-scoped convergence hint", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

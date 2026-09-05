@@ -1,5 +1,6 @@
 import { stableElementId } from "./stable-element-id.js";
 import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, type RunProgressEvent, type RunProgressSummary } from "./run-card-view.js";
+import type { CardTargetRef } from "./card-target-ref.js";
 
 export type WorkerTurnCardPhase =
   | "queued"
@@ -17,6 +18,7 @@ export interface WorkerTurnCardView {
   turnId: string;
   instanceId: string;
   instanceGeneration: number;
+  workerSessionGeneration: number;
   workerName: string;
   parentTurnId: string | null;
   rootMessageId: string;
@@ -35,6 +37,8 @@ export interface WorkerTurnCardView {
   finishedAt: string | null;
   notice: string | null;
   resultCapture: WorkerTurnResultCapture;
+  workerMain: CardTargetRef;
+  primaryAnswer: CardTargetRef | null;
   pageIndex: number;
   pageStart: number;
   sequence: number;
@@ -78,14 +82,16 @@ export function createQueuedWorkerTurnCard(input: {
   requestText: string;
   queuePosition: number;
   resultCapture?: WorkerTurnResultCapture;
+  workerSessionGeneration?: number;
+  primaryAnswer?: CardTargetRef | null;
   occurredAt: string;
 }): WorkerTurnCardView {
   return {
-    turnId: input.turnId, instanceId: input.instanceId, instanceGeneration: input.instanceGeneration,
+    turnId: input.turnId, instanceId: input.instanceId, instanceGeneration: input.instanceGeneration, workerSessionGeneration: input.workerSessionGeneration ?? 1,
     workerName: input.workerName, parentTurnId: input.parentTurnId, rootMessageId: input.rootMessageId,
     messageId: null, cardId: null, elementId: workerTurnElementId(input.turnId, 0), progressSequence: 0, phase: "queued",
     requestText: input.requestText, answer: "", statusTitle: null, progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
-    notice: null, resultCapture: input.resultCapture ?? "pending", pageIndex: 0, pageStart: 0, sequence: 0,
+    notice: null, resultCapture: input.resultCapture ?? "pending", workerMain: { aggregateKind: "worker-session", aggregateId: input.instanceId, generation: input.workerSessionGeneration ?? 1, messageId: null }, primaryAnswer: input.primaryAnswer ?? null, pageIndex: 0, pageStart: 0, sequence: 0,
     viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }

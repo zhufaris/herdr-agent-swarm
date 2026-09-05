@@ -7,7 +7,7 @@ import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { classifyDeliveryError } from "./delivery-error-classifier.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMessageTarget, assertWorkerProgressTarget } from "./outbound-target-validation.js";
+import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerProgressTarget } from "./outbound-target-validation.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
@@ -26,6 +26,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private forceRequested = false;
   private readonly answerCheckpointListeners = new Set<(promptId: string, viewVersion: number) => void>();
   private readonly workerTurnCheckpointListeners = new Set<(turnId: string, viewVersion: number) => void>();
+  private readonly workerMainCheckpointListeners = new Set<(workerId: string, workerSessionGeneration: number, viewVersion: number) => void>();
   private readonly mainCardCheckpointListeners = new Set<(bindingId: string, viewVersion: number) => void>();
   private scheduler: PromptWorkScheduler | null = null;
   private lastScanAt: string | null = null;
@@ -63,6 +64,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void {
     this.workerTurnCheckpointListeners.add(listener);
     return () => this.workerTurnCheckpointListeners.delete(listener);
+  }
+
+  onWorkerMainCheckpoint(listener: (workerId: string, workerSessionGeneration: number, viewVersion: number) => void): () => void {
+    this.workerMainCheckpointListeners.add(listener);
+    return () => this.workerMainCheckpointListeners.delete(listener);
   }
 
   onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void {
@@ -218,12 +224,14 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       if (reply.kind === "card_update") {
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         if (reply.workerTurnId) assertWorkerMessageTarget(this.store, reply.workerTurnId, reply.rootMessageId);
+        if (reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainMessageTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
         const card = JSON.parse(reply.payload) as object;
         if (reply.targetRole === "session_status" && this.lark.updateCardKit) {
           await this.lark.updateCardKit(reply.rootMessageId, card, reply.cardSequence ?? 1);
         } else await this.lark.updateCard(reply.rootMessageId, card);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
         if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
+        if (reply.workerId && reply.workerSessionGeneration !== null) for (const listener of this.workerMainCheckpointListeners) listener(reply.workerId, reply.workerSessionGeneration, reply.viewVersion ?? 0);
         if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_card_create") {
         const decoded = decodeStreamingCardPayload(reply.payload);
@@ -269,11 +277,14 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
         if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
       } else {
+        if (reply.kind === "card_reply" && reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainCreateTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
         const sent = reply.kind === "text"
           ? await this.lark.replyText(reply.rootMessageId, reply.payload, reply.idempotencyKey)
           : await this.lark.replyCard(reply.rootMessageId, JSON.parse(reply.payload) as object, reply.idempotencyKey);
-        this.store.markOutboundReplyDelivered(reply.id, sent.messageId);
+        const sentCardId = "cardId" in sent && typeof sent.cardId === "string" ? sent.cardId : undefined;
+        this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sentCardId);
         this.store.recordBridgeMessage(sent.messageId);
+        if (reply.workerId && reply.workerSessionGeneration !== null) for (const listener of this.workerMainCheckpointListeners) listener(reply.workerId, reply.workerSessionGeneration, reply.viewVersion ?? 0);
         if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       }
       this.lastDeliveryAt = new Date().toISOString();
@@ -305,6 +316,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 }
 
 function deliveryTargetKey(reply: OutboundReply): string {
+  if (reply.workerId && reply.workerSessionGeneration !== null) return `worker-main:${reply.workerId}:${reply.workerSessionGeneration}`;
   if (reply.workerTurnId) return `worker-turn:${reply.workerTurnId}`;
   if (reply.cardRole === "answer" && reply.promptId) return `answer:${reply.promptId}`;
   return reply.kind === "stream_content" || reply.kind === "stream_finish"

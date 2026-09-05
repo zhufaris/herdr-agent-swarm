@@ -69,8 +69,9 @@ export function reduceWorkerMainView(state: WorkerMainView, change: WorkerMainCh
   } else {
     const recentTasks = boundedTerminalTasks(change.recentTasks);
     const revision = change.dependencyRevision ?? state.dependencyRevision;
-    if (sameTask(state.currentTask, change.currentTask) && state.queueCount === change.queueCount && state.nextTaskTitle === change.nextTaskTitle
-      && sameTasks(state.recentTasks, recentTasks) && state.dependencyRevision === revision) return state;
+    const samePresentation = sameTask(state.currentTask, change.currentTask) && state.queueCount === change.queueCount && state.nextTaskTitle === change.nextTaskTitle
+      && sameTasks(state.recentTasks, recentTasks);
+    if (samePresentation) return state.dependencyRevision === revision ? state : { ...state, dependencyRevision: revision, updatedAt: change.occurredAt };
     patch = { currentTask: change.currentTask, queueCount: change.queueCount, nextTaskTitle: change.nextTaskTitle, recentTasks, dependencyRevision: revision };
   }
   return { ...state, ...patch, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };

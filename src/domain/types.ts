@@ -297,6 +297,8 @@ export interface OutboundReply {
   bindingId: string | null;
   promptId: string | null;
   workerTurnId: string | null;
+  workerId: string | null;
+  workerSessionGeneration: number | null;
   viewVersion: number | null;
   cardSequence: number | null;
   selectionId: string | null;

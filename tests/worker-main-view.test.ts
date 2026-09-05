@@ -50,5 +50,6 @@ describe("WorkerMainView", () => {
   it("does not advance the view version for an unchanged projection", () => {
     const current = initial();
     expect(reduceWorkerMainView(current, { type: "runtime", runtimeGeneration: 4, runtimeState: "idle", paneId: null, occurredAt: "later" })).toBe(current);
+    expect(reduceWorkerMainView(current, { type: "tasks", currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [], dependencyRevision: 2, occurredAt: "later" })).toMatchObject({ viewVersion: 1, dependencyRevision: 2 });
   });
 });

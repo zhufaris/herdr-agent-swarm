@@ -5,7 +5,7 @@ import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card
 
 export interface OutboxStore {
   checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null;
-  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "workerTurnId" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply;
   getActiveAnswerPage(promptId: string): AnswerPage | null;
   getBinding(id: string): Binding | null;
   getNextOutboundLaneHeadAttemptAt(): string | null;
@@ -18,6 +18,7 @@ export interface OutboxStore {
   recordBridgeMessage(messageId: string): void;
   dismissSupersededAnswerStream(replyId: string): boolean;
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
+  loadWorkerMainView(workerId: string, workerSessionGeneration: number): import("../worker-main-view.js").WorkerMainView | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
 }
 
@@ -40,6 +41,7 @@ export interface OutboundIntentPort {
 export interface OutboundCheckpointSubscriber {
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void;
   onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void;
+  onWorkerMainCheckpoint(listener: (workerId: string, workerSessionGeneration: number, viewVersion: number) => void): () => void;
   onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void;
   requestScan(force?: boolean): Promise<void>;
 }

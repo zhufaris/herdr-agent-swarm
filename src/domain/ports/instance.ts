@@ -6,6 +6,7 @@ import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn,
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../types.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 import type { WorkerMainView } from "../worker-main-view.js";
+import type { CardContextInvalidation, CardContextTarget } from "../card-context-invalidation.js";
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
@@ -47,6 +48,10 @@ export interface InstanceStore {
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
   loadWorkerMainView(workerId: string, workerSessionGeneration: number): WorkerMainView | null;
   saveWorkerMainView(view: WorkerMainView): WorkerMainView | null;
+  reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null;
+  invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[];
+  listPendingCardContextInvalidations(limit?: number): CardContextInvalidation[];
+  markCardContextProjected(target: CardContextTarget, dependencyRevision: number): boolean;
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;

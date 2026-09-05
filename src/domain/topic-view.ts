@@ -2,6 +2,7 @@ import type { AgentState } from "./types.js";
 import type { BridgeEvent } from "./events.js";
 import { normalizeTurnOutputObservation } from "./events.js";
 import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, progressSnapshot, type MainCardLiveStatus, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "./run-card-view.js";
+import type { PrimaryWorkerSummary } from "./card-context-summary.js";
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 
@@ -11,13 +12,20 @@ export interface TopicViewState {
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; progressSummary: RunProgressSummary; model: string | null; context: string | null;
   liveStatus: MainCardLiveStatus | null;
   primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
+  workers: PrimaryWorkerSummary[]; workerOverflowCount: number; workerDependencyRevision: number;
   activityAt: string | null;
   viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, title: "TraeX task", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+}
+
+export function updateTopicWorkerContext(state: TopicViewState, workers: PrimaryWorkerSummary[], overflowCount: number, dependencyRevision: number): TopicViewState {
+  const same = state.workerOverflowCount === overflowCount && sameWorkerSummaries(state.workers, workers);
+  if (same) return state.workerDependencyRevision === dependencyRevision ? state : { ...state, workerDependencyRevision: dependencyRevision };
+  return { ...state, workers, workerOverflowCount: overflowCount, workerDependencyRevision: dependencyRevision, viewVersion: state.viewVersion + 1 };
 }
 
 export function reduceTopicView(state: TopicViewState, event: BridgeEvent): TopicViewState {
@@ -121,9 +129,11 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
     && left.model === right.model && left.context === right.context
     && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice
+    && left.workerOverflowCount === right.workerOverflowCount && sameWorkerSummaries(left.workers, right.workers)
     && sameLiveStatus(left.liveStatus, right.liveStatus)
     && sameVisibleProgress(left.recentProgress, right.recentProgress) && sameProgressSummary(left.progressSummary, right.progressSummary);
 }
+function sameWorkerSummaries(left: readonly PrimaryWorkerSummary[], right: readonly PrimaryWorkerSummary[]): boolean { return JSON.stringify(left) === JSON.stringify(right); }
 function sameProgressSummary(left: RunProgressSummary, right: RunProgressSummary): boolean { return left.total === right.total && left.stepTotal === right.stepTotal && left.stepDone === right.stepDone; }
 
 function mergeLiveStatus(current: MainCardLiveStatus | null, update: Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["observation"]["main"]["status"], occurredAt: string): MainCardLiveStatus | null {
