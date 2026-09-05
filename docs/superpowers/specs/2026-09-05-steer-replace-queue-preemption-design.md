@@ -1,5 +1,11 @@
 # Replace Steering and Queue Preemption Design
 
+> Superseded as an immediate implementation plan by
+> `2026-09-05-native-turn-stop-and-steer-design.md`. Replacement remains a
+> possible higher-level workflow, but it must be composed from the independent
+> native `stop` and `steer` turn-control primitives after those primitives are
+> implemented and verified.
+
 ## Goal
 
 Add an explicit replacement form of native steering that can preempt the active
