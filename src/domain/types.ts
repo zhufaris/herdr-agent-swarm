@@ -668,4 +668,4 @@ export type InstanceCommand =
   | { kind: "instance"; name: string }
   | { kind: "to"; name: string; text: string }
   | { kind: "steer_instance"; name: string; text: string }
-  | { kind: "interrupt_instance"; name: string };
+  | { kind: "stop_instance"; name: string };

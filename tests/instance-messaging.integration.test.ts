@@ -4,7 +4,6 @@ import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging
 import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
-import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
 
@@ -26,8 +25,11 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
   const drivers = new AgentDriverRegistry([driver]);
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
-  const turnControl = { steer: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "delivered" } }, duplicate: false })) };
-  const workflow = new InstanceMessagingWorkflow({ store, drivers, paneHost: { interruptPane: vi.fn(async () => undefined) } as unknown as PaneHost, turnControl: turnControl as never, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
+  const turnControl = {
+    steer: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "delivered" } }, duplicate: false })),
+    interrupt: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "interrupted" } }, duplicate: false }))
+  };
+  const workflow = new InstanceMessagingWorkflow({ store, turnControl: turnControl as never, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
   let scheduler!: InstanceWorkScheduler;
   const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound }) : undefined;
   scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound });
@@ -99,6 +101,16 @@ describe("instance messaging", () => {
     await expect(workflow.steer({ idempotencyKey: "s2", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toEqual({ status: "delivered" });
     expect(turnControl.steer).toHaveBeenCalledWith(expect.objectContaining({ owner: { kind: "instance", id: worker.id }, text: "change" }));
     expect(driver.steer).not.toHaveBeenCalled();
+    expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
+  });
+
+  it("stops only through the shared exact-turn control workflow", async () => {
+    const { create, workflow, driver, turnControl } = setup();
+    const worker = create("worker");
+
+    await expect(workflow.interrupt({ idempotencyKey: "stop-once", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id })).resolves.toEqual({ status: "interrupted" });
+    expect(turnControl.interrupt).toHaveBeenCalledWith(expect.objectContaining({ owner: { kind: "instance", id: worker.id }, idempotencyKey: "stop-once" }));
+    expect(driver.interrupt).not.toHaveBeenCalled();
     expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
   });
 

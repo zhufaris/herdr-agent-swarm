@@ -78,6 +78,13 @@ describe("TurnControlWorkflow", () => {
     expect(payload).not.toContain("Steering 已送达");
   });
 
+  it("allows exact-turn stop when native text steering is unsupported", async () => {
+    const { workflow, interrupt, worker } = setupWorker({ steeringCapability: "unsupported" });
+    await expect(workflow.interrupt({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, idempotencyKey: "stop-no-steer" }))
+      .resolves.toMatchObject({ operation: { state: "delivered" } });
+    expect(interrupt).toHaveBeenCalledOnce();
+  });
+
   it("returns the stored result without resolving or replaying a completed target", async () => {
     const { workflow, getPane, steer, worker } = setupWorker();
     const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, text: "change direction", idempotencyKey: "message-1:steer", sourceMessageId: "message-1" };

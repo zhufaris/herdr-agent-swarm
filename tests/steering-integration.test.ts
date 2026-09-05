@@ -84,17 +84,17 @@ describe("active-turn steering", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
-      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } }]; },
+      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
-        await onObservation?.({ state: "working", stateSource: "structured", output });
+        await onObservation?.({ state: "working", stateSource: "structured", output, turnId: "runtime-1", turnStartedAt: "2026-09-05T00:00:00.000Z" });
         await hold;
         output += "\n◆ parent answer\n────────";
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
-      async sendEscape(paneId) { escapes.push(paneId); }, async renamePane() {}
+      async interruptAgent(input) { escapes.push(input.paneId); return { status: "interrupted" }; }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
@@ -116,12 +116,19 @@ describe("active-turn steering", () => {
 
     await coordinator.handleMessage(message(1, "parent"));
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
+    store.updateBinding(bindingId, { agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    let activePrompt = store.getActiveOrdinaryPrompt(bindingId, 1)!;
+    if (!activePrompt.dispatchedAt) { store.markPromptDispatched(activePrompt.id, new Date().toISOString()); activePrompt = store.getPrompt(activePrompt.id)!; }
+    if (!activePrompt.transcriptTurnId) store.claimPromptTranscriptTurn({ promptId: activePrompt.id, bindingId, turnId: "runtime-1", startedAt: new Date(Date.parse(activePrompt.dispatchedAt!) + 250).toISOString() });
+    expect(store.getBinding(bindingId)).toMatchObject({ agentSessionValue: "session-1" });
+    expect(store.getActiveOrdinaryPrompt(bindingId, 1)).toMatchObject({ transcriptTurnId: "runtime-1" });
     const runningModel = store.acceptPaneControlOperation({ id: "running-model", idempotencyKey: "test:running-model", bindingId, paneId: "w1:p1", terminalId: null, bindingGeneration: 1, kind: "model", actorOpenId: "user", sourceMessageId: "model-message" });
     expect(store.claimPaneControlOperation(runningModel.operation.id)).toMatchObject({ state: "running" });
     const queued = createQueuedRunCard({ promptId: "queued-turn", bindingId, title: "queued turn", workspaceId: "w1", paneId: "w1:p1", requestText: "queued turn", queuePosition: 1, occurredAt: new Date().toISOString() });
     store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
     await publisher.drain();
     await coordinator.handleMessage(message(4, "/swarm stop"));
+    expect(store.database.prepare("SELECT kind, state FROM turn_control_operations").all()).toEqual([expect.objectContaining({ kind: "interrupt", state: "delivered" })]);
     await vi.waitFor(() => expect(escapes).toEqual(["w1:p1"]));
     store.finishPaneControlOperation(runningModel.operation.id, "confirmed");
     expect(store.listRunCards(bindingId).some((view) => view.requestText === "/swarm stop")).toBe(false);
@@ -266,7 +273,7 @@ describe("active-turn steering", () => {
     expect(steering).toEqual([]);
     await send(5, "/swarm stop");
     expect(steering).toEqual([]);
-    expect(escapes).toEqual(["w1:p1", "w1:p1"]); expect(turns).toEqual(["parent"]);
+    expect(escapes).toEqual([]); expect(turns).toEqual(["parent"]);
     expect(store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id)).toBe(pendingBeforeStop);
     expect(store.listRunCards(store.findBindingByPane("w1:p1")!.id).some((view) => view.requestText === "/swarm stop")).toBe(false);
     release();

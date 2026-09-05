@@ -50,7 +50,7 @@ export class InstanceInteractionWorkflow {
       return;
     }
     const result = await this.options.messaging.interrupt({ idempotencyKey: `lark:${message.messageId}:interrupt`, actor, targetInstanceId: instance.id });
-    return this.reply(message, statusCard(`Interrupt: ${result.status}`));
+    return this.reply(message, statusCard(`Stop: ${result.status}`));
   }
 
   async handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean> {
@@ -166,7 +166,7 @@ export class InstanceInteractionWorkflow {
     }
     if (value.action === "instance_interrupt") {
       const result = await this.options.messaging.interrupt({ idempotencyKey: `card:${action.messageId}:interrupt:${instance.generation}`, actor, targetInstanceId: instance.id });
-      return { toast: { type: result.status === "interrupted" ? "success" : "warning", content: `Interrupt: ${result.status}` } };
+      return { toast: { type: result.status === "interrupted" ? "success" : "warning", content: `Stop: ${result.status}` } };
     }
     if (value.action === "instance_steer_form") return { card: renderInstanceSteerCard({ instance, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
     if (value.action === "instance_steer_submit") {

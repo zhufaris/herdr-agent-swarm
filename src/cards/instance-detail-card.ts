@@ -35,9 +35,9 @@ export function renderInstanceDetailCard(input: { instance: AgentInstance; works
   }
   const controls = [callbackButton("设为当前目标", { action: "instance_set_target", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "primary")];
   if (input.instance.desiredState === "stopped") controls.push(callbackButton("启动", { action: "instance_start", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
-  else controls.push(callbackButton("停止", { action: "instance_stop", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
+  else controls.push(callbackButton("停止实例", { action: "instance_stop", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
   if (input.capabilities.steering !== "unsupported" && ["working", "blocked"].includes(input.instance.observedState)) controls.push(callbackButton("Steer", { action: "instance_steer_form", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
-  if (["working", "blocked"].includes(input.instance.observedState)) controls.push(callbackButton("Interrupt", { action: "instance_interrupt", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "danger"));
+  if (input.instance.observedState === "working") controls.push(callbackButton("停止任务", { action: "instance_interrupt", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "danger"));
   if (input.instance.desiredState === "stopped" && !input.instance.runtimeRef) controls.push(callbackButton("删除…", { action: "instance_plan_removal", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "danger"));
   elements.push({
     tag: "column_set", flex_mode: "none", horizontal_spacing: "8px",

@@ -68,6 +68,7 @@ describe("instance commands", () => {
     expect(parseInstanceCommand("/instance reviewer")).toEqual({ kind: "instance", name: "reviewer" });
     expect(parseInstanceCommand("/to reviewer inspect this")).toEqual({ kind: "to", name: "reviewer", text: "inspect this" });
     expect(parseInstanceCommand("/steer reviewer focus tests")).toEqual({ kind: "steer_instance", name: "reviewer", text: "focus tests" });
-    expect(parseInstanceCommand("/interrupt reviewer")).toEqual({ kind: "interrupt_instance", name: "reviewer" });
+    expect(parseInstanceCommand("/stop reviewer")).toEqual({ kind: "stop_instance", name: "reviewer" });
+    expect(parseInstanceCommand("/interrupt reviewer")).toEqual({ kind: "stop_instance", name: "reviewer" });
   });
 });

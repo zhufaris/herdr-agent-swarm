@@ -101,7 +101,7 @@ function unquote(value: string): string {
 
 export function parseInstanceCommand(text: string): InstanceCommand | null {
   const trimmed = text.trim();
-  const match = /^\/(projects|project|instances|instance|to|steer|interrupt)(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  const match = /^\/(projects|project|instances|instance|to|steer|stop|interrupt)(?:\s+([\s\S]*))?$/i.exec(trimmed);
   if (!match) return null;
   const action = match[1]!.toLowerCase();
   const argument = (match[2] ?? "").trim();
@@ -112,7 +112,7 @@ export function parseInstanceCommand(text: string): InstanceCommand | null {
   const parts = /^(\S+)\s+([\s\S]+)$/.exec(argument);
   if (action === "to") return parts ? { kind: "to", name: parts[1]!, text: parts[2]!.trim() } : null;
   if (action === "steer") return parts ? { kind: "steer_instance", name: parts[1]!, text: parts[2]!.trim() } : null;
-  return argument && !/\s/.test(argument) ? { kind: "interrupt_instance", name: argument } : null;
+  return argument && !/\s/.test(argument) ? { kind: "stop_instance", name: argument } : null;
 }
 export function deriveTopicTitle(text: string): string {
   const firstLine = text.trim().split(/\r?\n/, 1)[0] ?? "TraeX task";

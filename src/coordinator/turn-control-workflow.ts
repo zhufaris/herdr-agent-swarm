@@ -16,14 +16,24 @@ interface SteerCommand { owner: { kind: "binding" | "instance"; id: string }; ac
 interface InterruptCommand { owner: SteerCommand["owner"]; actor: ControlActor; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
 
 export class TurnControlWorkflow {
+  private readonly lanes = new Map<string, Promise<SteerOutcome>>();
   constructor(private readonly options: Options) {}
 
   async steer(input: SteerCommand): Promise<SteerOutcome> {
-    return this.control("steer", input);
+    return this.inLane(input.owner, () => this.control("steer", input));
   }
 
   async interrupt(input: InterruptCommand): Promise<SteerOutcome> {
-    return this.control("interrupt", input);
+    return this.inLane(input.owner, () => this.control("interrupt", input));
+  }
+
+  private async inLane(owner: SteerCommand["owner"], operation: () => Promise<SteerOutcome>): Promise<SteerOutcome> {
+    const key = `${owner.kind}:${owner.id}`;
+    const previous = this.lanes.get(key);
+    const current = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(operation);
+    this.lanes.set(key, current);
+    try { return await current; }
+    finally { if (this.lanes.get(key) === current) this.lanes.delete(key); }
   }
 
   private async control(kind: "steer" | "interrupt", input: SteerCommand | InterruptCommand): Promise<SteerOutcome> {
@@ -33,7 +43,7 @@ export class TurnControlWorkflow {
       this.options.wakeOutbound?.();
       return { operation: previous, duplicate: true };
     }
-    const target = await this.resolveTarget(input.owner);
+    const target = await this.resolveTarget(input.owner, kind);
     const payload = kind === "steer" ? (input as SteerCommand).text : null;
     const pending: TurnControlOperation = { id: this.options.idFactory(), idempotencyKey: input.idempotencyKey, kind, target, actor: input.actor, payload, sourceMessageId: input.sourceMessageId ?? null, sourceCardId: input.sourceCardId ?? null, state: "accepted", result: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     const accepted = this.options.store.acceptTurnControlOperation({
@@ -57,7 +67,7 @@ export class TurnControlWorkflow {
     return { resumed, uncertain: recovered.uncertain };
   }
 
-  private async resolveTarget(owner: SteerCommand["owner"]): Promise<TurnTarget> {
+  private async resolveTarget(owner: SteerCommand["owner"], kind: "steer" | "interrupt"): Promise<TurnTarget> {
     if (owner.kind === "binding") {
       const binding = this.options.store.getBinding(owner.id);
       if (!binding?.projectId || !binding.paneId) throw new Error("Primary binding has no active runtime");
@@ -65,20 +75,20 @@ export class TurnControlWorkflow {
       if (!turn?.transcriptTurnId) throw new Error("Primary binding has no exact active runtime turn");
       const session = bindingSession(binding);
       if (!session) throw new Error("Primary binding has no native Agent session");
-      const pane = await this.requireSteerablePane(binding.paneId, session, turn.transcriptTurnId);
+      const pane = await this.requireControllablePane(binding.paneId, session, turn.transcriptTurnId, kind);
       return { owner, projectId: binding.projectId, paneId: binding.paneId, generation: binding.generation, agentSession: pane.agentSession!, logicalTurnId: turn.id, runtimeTurnId: turn.transcriptTurnId };
     }
     const instance = this.options.store.getAgentInstance(owner.id);
     if (!instance?.runtimeRef) throw new Error("Agent instance has no active runtime");
     const turn = this.options.store.getActiveInstanceTurn(instance.id, instance.generation);
     if (!turn?.runtimeTurnId) throw new Error("Agent instance has no exact active runtime turn");
-    const pane = await this.requireSteerablePane(instance.runtimeRef.paneId, null, turn.runtimeTurnId);
+    const pane = await this.requireControllablePane(instance.runtimeRef.paneId, null, turn.runtimeTurnId, kind);
     if (!pane.agentSession || (instance.runtimeRef.nativeSessionId && pane.agentSession.value !== instance.runtimeRef.nativeSessionId)) throw new Error("Agent session identity changed");
     return { owner, projectId: instance.projectId, paneId: instance.runtimeRef.paneId, generation: instance.generation, agentSession: pane.agentSession, logicalTurnId: turn.id, runtimeTurnId: turn.runtimeTurnId };
   }
 
   private async dispatch(operation: TurnControlOperation): Promise<TurnControlOperation> {
-    const rejection = await this.revalidate(operation.target);
+    const rejection = await this.revalidate(operation.target, operation.kind);
     if (rejection) {
       const rejected = { ...operation, state: "rejected" as const, result: { status: "rejected", reason: rejection } };
       return this.options.store.rejectAcceptedTurnControlOperation({ id: operation.id, result: rejected.result, card: renderTurnControlResultCard(rejected) }) ?? this.requireOperation(operation.id);
@@ -107,17 +117,17 @@ export class TurnControlWorkflow {
     return this.options.store.finishTurnControlOperation({ id, state, result: receipt, card: renderTurnControlResultCard({ ...operation, state, result: receipt }) }) ?? this.requireOperation(id);
   }
 
-  private async revalidate(target: TurnTarget): Promise<string | null> {
-    try { await this.requireSteerablePane(target.paneId, target.agentSession, target.runtimeTurnId); return null; }
+  private async revalidate(target: TurnTarget, kind: "steer" | "interrupt"): Promise<string | null> {
+    try { await this.requireControllablePane(target.paneId, target.agentSession, target.runtimeTurnId, kind); return null; }
     catch (error) { return safeLogError(error).message; }
   }
 
-  private async requireSteerablePane(paneId: string, expectedSession: HerdrAgentSession | null, runtimeTurnId: string): Promise<HerdrPane> {
+  private async requireControllablePane(paneId: string, expectedSession: HerdrAgentSession | null, runtimeTurnId: string, kind: "steer" | "interrupt"): Promise<HerdrPane> {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane) throw new Error("Herdr pane is no longer active");
     if (!pane.agentSession) throw new Error("Herdr pane has no native Agent session");
     if (expectedSession && !sameSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
-    if (pane.steeringCapability !== "native") throw new Error("Native steering is unsupported for this pane");
+    if (kind === "steer" && pane.steeringCapability !== "native") throw new Error("Native steering is unsupported for this pane");
     if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
     if (pane.agentState !== "working") throw new Error("Agent turn is not active");
     if (pane.activeTurnId !== null && pane.activeTurnId !== undefined && pane.activeTurnId !== runtimeTurnId) throw new Error("Runtime turn identity changed");
