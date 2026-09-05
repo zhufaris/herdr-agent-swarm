@@ -2,8 +2,10 @@ import type { ObservedInstanceState } from "./agent-instance.js";
 import type { CardTargetRef } from "./card-target-ref.js";
 import type { WorkerTurnCardPhase } from "./worker-turn-card-view.js";
 
+export type PrimaryWorkerState = ObservedInstanceState | "queued";
+
 export interface PrimaryWorkerSummary {
-  workerId: string; workerSessionGeneration: number; name: string; state: ObservedInstanceState; currentTaskTitle: string | null; queueCount: number; workerMain: CardTargetRef; createdAt: string;
+  workerId: string; workerSessionGeneration: number; name: string; state: PrimaryWorkerState; currentTaskTitle: string | null; queueCount: number; workerMain: CardTargetRef; createdAt: string;
 }
 
 export interface PrimaryWorkerActivitySummary {
@@ -13,7 +15,7 @@ export interface PrimaryWorkerActivitySummary {
 export const PRIMARY_MAIN_WORKER_LIMIT = 8;
 
 export function selectPrimaryWorkerSummaries(candidates: readonly PrimaryWorkerSummary[]): { workers: PrimaryWorkerSummary[]; overflowCount: number } {
-  const rank: Record<ObservedInstanceState, number> = { blocked: 0, working: 1, starting: 2, idle: 3, unprovisioned: 4, detached: 5, stopped: 6, failed: 7 };
+  const rank: Record<PrimaryWorkerState, number> = { blocked: 0, working: 1, queued: 2, starting: 3, idle: 4, unprovisioned: 5, detached: 6, stopped: 7, failed: 8 };
   const active = candidates.filter(({ state }) => state !== "stopped").slice().sort((left, right) => rank[left.state] - rank[right.state] || left.createdAt.localeCompare(right.createdAt) || left.workerId.localeCompare(right.workerId));
   return { workers: active.slice(0, PRIMARY_MAIN_WORKER_LIMIT), overflowCount: Math.max(0, active.length - PRIMARY_MAIN_WORKER_LIMIT) };
 }

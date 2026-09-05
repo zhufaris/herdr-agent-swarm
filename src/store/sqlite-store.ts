@@ -394,7 +394,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
     if (!lease) return null;
     const cards = (this.database.prepare("SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? ORDER BY created_at DESC, turn_id DESC").all(workerId, workerSessionGeneration) as Array<Record<string, unknown>>).map(mapWorkerTurnCard).filter((value): value is WorkerTurnCardView => value !== null);
-    const active = ["blocked", "running", "preparing", "dispatch-uncertain"]
+    const active = ["blocked", "running", "preparing"]
       .flatMap((phase) => cards.filter((card) => card.phase === phase))
       .at(0) ?? cards.filter(({ phase }) => phase === "queued").at(-1) ?? null;
     const summary = (view: WorkerTurnCardView): import("../domain/worker-main-view.js").WorkerMainTaskSummary => ({
@@ -417,14 +417,30 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const source = this.loadWorkerMainProjectionSource(worker.id, worker.workerSessionGeneration ?? 1);
       const main = this.loadWorkerMainView(worker.id, worker.workerSessionGeneration ?? 1);
       if (!source) return [];
-      return [{ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration ?? 1, name: worker.name, state: worker.observedState, currentTaskTitle: source.currentTask?.title ?? null, queueCount: source.queueCount, workerMain: { aggregateKind: "worker-session" as const, aggregateId: worker.id, generation: worker.workerSessionGeneration ?? 1, messageId: main?.messageId ?? null }, createdAt: source.createdAt }];
+      const state = source.currentTask?.phase === "blocked" ? "blocked" as const
+        : source.currentTask?.phase === "running" || source.currentTask?.phase === "preparing" ? "working" as const
+          : source.currentTask?.phase === "queued" || (worker.observedState === "idle" && source.queueCount > 0) ? "queued" as const
+            : worker.observedState;
+      return [{ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration ?? 1, name: worker.name, state, currentTaskTitle: source.currentTask?.title ?? null, queueCount: source.queueCount, workerMain: { aggregateKind: "worker-session" as const, aggregateId: worker.id, generation: worker.workerSessionGeneration ?? 1, messageId: main?.messageId ?? null }, createdAt: source.createdAt }];
     });
   }
 
   loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): import("../domain/card-context-summary.js").PrimaryWorkerActivitySummary[] {
     const run = this.loadRunCard(promptId);
-    if (!run || run.bindingGeneration !== bindingGeneration) return [];
-    const rows = this.database.prepare("SELECT c.* FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary' AND json_extract(t.actor_json, '$.parentPromptId') = ? ORDER BY c.updated_at DESC, c.turn_id").all(promptId) as Array<Record<string, unknown>>;
+    const binding = run ? this.getBinding(run.bindingId) : null;
+    if (!run || run.bindingGeneration !== bindingGeneration || !binding || binding.generation !== bindingGeneration || !binding.paneId) return [];
+    const rows = this.database.prepare(`
+      SELECT c.* FROM worker_turn_cards c
+      JOIN instance_turns t ON t.id = c.turn_id
+      JOIN agent_instances worker ON worker.id = c.instance_id
+      WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary'
+        AND json_extract(t.actor_json, '$.parentPromptId') = ?
+        AND json_extract(t.actor_json, '$.bindingId') = ?
+        AND json_extract(t.actor_json, '$.bindingGeneration') = ?
+        AND worker.role = 'worker' AND worker.parent_binding_id = ? AND worker.parent_binding_generation = ? AND worker.parent_pane_id = ?
+        AND worker.worker_session_generation = c.worker_session_generation
+      ORDER BY c.updated_at DESC, c.turn_id
+    `).all(promptId, run.bindingId, bindingGeneration, run.bindingId, bindingGeneration, binding.paneId) as Array<Record<string, unknown>>;
     const grouped = new Map<string, WorkerTurnCardView[]>();
     for (const row of rows) { const view = mapWorkerTurnCard(row); if (view) grouped.set(`${view.instanceId}:${view.workerSessionGeneration}`, [...(grouped.get(`${view.instanceId}:${view.workerSessionGeneration}`) ?? []), view]); }
     return [...grouped.values()].map((cards) => { const latest = cards[0]!; return { workerId: latest.instanceId, workerSessionGeneration: latest.workerSessionGeneration, name: latest.workerName, latestPhase: latest.phase, taskCount: cards.length, latestTaskTitle: summarizeTaskTitle(latest.requestText), latestTaskCard: { aggregateKind: "worker-turn", aggregateId: latest.turnId, generation: latest.instanceGeneration, messageId: latest.messageId }, updatedAt: latest.updatedAt }; });
@@ -3843,6 +3859,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.ensureWorkerTurnContextReferences();
     this.ensureWorkerMainOutboxIdentity();
     this.ensurePrimaryCardContextColumns();
+    this.ensureCardContextStartupInvalidations();
     this.ensureWorkerPaneCloseSteps();
     this.ensureOutboundLaneKey();
     this.ensureOutboxLaneQuarantines();
@@ -4546,6 +4563,54 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     if (!names.has("worker_dependency_revision")) this.database.exec("ALTER TABLE run_cards ADD COLUMN worker_dependency_revision INTEGER NOT NULL DEFAULT 0");
     if (!names.has("worker_context_frozen_at")) this.database.exec("ALTER TABLE run_cards ADD COLUMN worker_context_frozen_at TEXT");
     this.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (20)").run();
+  }
+
+  private ensureCardContextStartupInvalidations(): void {
+    const migrated = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 23").get();
+    if (migrated) return;
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
+        SELECT 'worker-session', worker.id, worker.worker_session_generation, 1, 0, 'startup.worker-backfill', ?, ?
+        FROM agent_instances worker
+        JOIN bindings binding ON binding.id = worker.parent_binding_id
+        WHERE worker.role = 'worker' AND worker.worker_session_lifecycle IN ('active','terminated')
+          AND worker.parent_binding_id IS NOT NULL AND worker.parent_binding_generation IS NOT NULL AND worker.parent_pane_id IS NOT NULL
+          AND binding.generation = worker.parent_binding_generation AND binding.pane_id = worker.parent_pane_id
+        ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
+          requested_dependency_revision = MAX(card_context_invalidations.requested_dependency_revision, 1),
+          reason = excluded.reason, updated_at = excluded.updated_at
+      `).run(timestamp, timestamp);
+      this.database.prepare(`
+        INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
+        SELECT 'primary-session', binding.id, binding.generation, 1, 0, 'startup.primary-backfill', ?, ?
+        FROM bindings binding
+        WHERE binding.pane_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM agent_instances worker
+          WHERE worker.role = 'worker' AND worker.worker_session_lifecycle = 'active'
+            AND worker.parent_binding_id = binding.id AND worker.parent_binding_generation = binding.generation AND worker.parent_pane_id = binding.pane_id
+        )
+        ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
+          requested_dependency_revision = MAX(card_context_invalidations.requested_dependency_revision, 1),
+          reason = excluded.reason, updated_at = excluded.updated_at
+      `).run(timestamp, timestamp);
+      this.database.prepare(`
+        INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
+        SELECT 'primary-turn', run.prompt_id, run.binding_generation, 1, 0, 'startup.answer-backfill', ?, ?
+        FROM run_cards run
+        JOIN bindings binding ON binding.id = run.binding_id AND binding.generation = run.binding_generation
+        LEFT JOIN answer_pages page ON page.prompt_id = run.prompt_id AND page.page_index = run.answer_page_index
+        WHERE run.worker_context_frozen_at IS NULL AND run.phase IN ('queued','running','blocked')
+          AND COALESCE(page.state, 'active') NOT IN ('frozen','finished')
+        ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
+          requested_dependency_revision = MAX(card_context_invalidations.requested_dependency_revision, 1),
+          reason = excluded.reason, updated_at = excluded.updated_at
+      `).run(timestamp, timestamp);
+      this.database.prepare("INSERT INTO schema_migrations(version) VALUES (23)").run();
+      this.database.exec("COMMIT");
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   private ensureWorkerPaneCloseSteps(): void {

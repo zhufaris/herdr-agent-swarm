@@ -19,8 +19,9 @@ function setup(snapshot: HerdrPane[], options: { bulkSnapshot?: boolean } = {}) 
     ...(options.bulkSnapshot ? { snapshotPanes: vi.fn(async () => snapshot) } : {})
   } as unknown as PaneHost;
   const wake = vi.fn();
-  const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake });
-  return { instance, reconciler, wake, paneHost };
+  const wakeCardContext = vi.fn();
+  const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake, wakeCardContext });
+  return { instance, reconciler, wake, wakeCardContext, paneHost };
 }
 
 describe("instance runtime reconciliation", () => {
@@ -58,11 +59,12 @@ describe("instance runtime reconciliation", () => {
   });
 
   it("converges a matching runtime and wakes queued work only after an idle observation", async () => {
-    const { instance, reconciler, wake } = setup([pane({ agentState: "idle" })]);
+    const { instance, reconciler, wake, wakeCardContext } = setup([pane({ agentState: "idle" })]);
     store!.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
     await reconciler.reconcile();
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ generation: instance.generation, observedState: "idle", runtimeRef: { paneId: "herdr-w:p1" } });
     expect(wake).toHaveBeenCalledWith(instance.id);
+    expect(wakeCardContext).toHaveBeenCalledOnce();
   });
 
   it("fails closed when process identity or workspace facts mismatch", async () => {
@@ -79,12 +81,13 @@ describe("instance runtime reconciliation", () => {
   });
 
   it("terminalizes queued work when a Worker pane is missing", async () => {
-    const { instance, reconciler, wake } = setup([]);
+    const { instance, reconciler, wake, wakeCardContext } = setup([]);
     store!.acceptInstanceTurn({ id: "not-started", idempotencyKey: "not-started", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "safe to run after explicit restart" });
     await reconciler.reconcile();
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ desiredState: "stopped", observedState: "stopped", generation: instance.generation + 1, runtimeRef: null, workerSessionLifecycle: "terminated" });
     expect(store!.getInstanceTurn("not-started")).toMatchObject({ state: "cancelled", instanceGeneration: instance.generation });
     expect(wake).not.toHaveBeenCalled();
+    expect(wakeCardContext).toHaveBeenCalledOnce();
   });
 
   it("detaches missing active work as uncertain without replaying it", async () => {

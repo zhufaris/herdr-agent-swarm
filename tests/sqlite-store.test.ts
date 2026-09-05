@@ -33,6 +33,30 @@ describe("SQLite store", () => {
     ]);
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 17").get()).toEqual({ version: 17 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 22").get()).toEqual({ version: 22 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 23").get()).toEqual({ version: 23 });
+  });
+
+  it("backfills safe Worker, Primary Main, and mutable Answer invalidations on upgrade", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-card-context-backfill-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4);
+    const run = createQueuedRunCard({ promptId: "prompt-1", bindingId: "binding-1", bindingGeneration: 1, title: "Task", workspaceId: "w1", paneId: "primary-pane", requestText: "request", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: run.promptId, bindingId: run.bindingId, larkMessageId: "request", actorOpenId: "u1", body: run.requestText }, view: run, rootMessageId: "root", answerCard: {} });
+    store.database.exec("DELETE FROM card_context_invalidations; DELETE FROM schema_migrations WHERE version = 23");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.listPendingCardContextInvalidations()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1 }),
+      expect.objectContaining({ targetKind: "primary-session", targetId: "binding-1", targetGeneration: 1 }),
+      expect.objectContaining({ targetKind: "primary-turn", targetId: "prompt-1", targetGeneration: 1 })
+    ]));
   });
 
   it("migrates pending Primary card updates onto generation-scoped lanes", () => {
@@ -103,11 +127,12 @@ describe("SQLite store", () => {
   it("keeps Worker Main delivery in a session lane independent from Worker Task delivery", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-root", title: "Primary" });
-    const worker = store.createWorkerAgentInstance({
+    const created = store.createWorkerAgentInstance({
       id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
       parent: { bindingId: "binding-1", bindingGeneration: 3, paneId: "primary-pane", nativeSessionId: "primary-session" },
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     const main = createWorkerMainView({
       workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 3, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary",
       runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
@@ -125,17 +150,64 @@ describe("SQLite store", () => {
   it("keeps the running Worker task current when newer work is queued", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
-    const worker = store.createWorkerAgentInstance({
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    const created = store.createWorkerAgentInstance({
       id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
       parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     const running = createQueuedWorkerTurnCard({ turnId: "running", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Running task", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 2, occurredAt: "2026-09-05T00:00:01.000Z" });
     for (const view of [running, queued]) store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, card: {} });
     store.transitionInstanceTurnWithProjection({ turnId: running.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-05T00:00:02.000Z" }, render: renderWorkerTurnCard });
 
     expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running" }, queueCount: 1, nextTaskTitle: "Queued task" });
+    expect(store.loadPrimaryWorkerSummaries("binding-1", 1)).toEqual([expect.objectContaining({ workerId: worker.id, state: "working" })]);
+  });
+
+  it("projects an idle Worker with queued work as queued instead of idle", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    const created = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 1, occurredAt: "2026-09-05T00:00:01.000Z" });
+    store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: queued.turnId, view: queued, card: {} });
+
+    expect(store.loadPrimaryWorkerSummaries("binding-1", 1)).toEqual([expect.objectContaining({ workerId: worker.id, state: "queued", currentTaskTitle: "Queued task", queueCount: 1 })]);
+  });
+
+  it("keeps Primary Answer activity inside the owning binding, pane, and Worker session", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const [bindingId, paneId] of [["binding-1", "primary-pane-1"], ["binding-2", "primary-pane-2"]] as const) {
+      store.createPendingBinding({ id: bindingId, projectId: "p1", workspaceId: "w1", chatId: "c1", topicId: bindingId, rootMessageId: `root-${bindingId}`, title: bindingId });
+      store.updateBinding(bindingId, { paneId, state: "active", lifecycle: "active", attachment: "attached" });
+    }
+    const answer = createQueuedRunCard({ promptId: "prompt-1", bindingId: "binding-1", bindingGeneration: 1, title: "Coordinate", workspaceId: "w1", paneId: "primary-pane-1", requestText: "delegate", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: answer.promptId, bindingId: answer.bindingId, larkMessageId: "request", actorOpenId: "u1", body: answer.requestText }, view: answer, rootMessageId: "root-binding-1", answerCard: {} });
+
+    const createTask = (workerId: string, bindingId: string, paneId: string, actorBindingId: string) => {
+      const created = store!.createWorkerAgentInstance({
+        id: workerId, projectId: "p1", name: workerId, role: "worker", agentKind: "traex", model: null, desiredState: "running",
+        parent: { bindingId, bindingGeneration: 1, paneId, nativeSessionId: `primary-${workerId}` },
+        workspace: { id: `ws-${workerId}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+      }, 4).instance;
+      const worker = store!.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: `worker-${workerId}`, nativeSessionId: `session-${workerId}` })!;
+      const view = createQueuedWorkerTurnCard({ turnId: `turn-${workerId}`, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root-binding-1", requestText: `Task ${workerId}`, queuePosition: 1, occurredAt: "2026-09-05T00:00:01.000Z" });
+      store!.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "thread-primary", projectId: "p1", bindingId: actorBindingId, bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, card: {} });
+      return worker.id;
+    };
+
+    const ownedWorkerId = createTask("owned", "binding-1", "primary-pane-1", "binding-1");
+    createTask("cross-binding", "binding-2", "primary-pane-2", "binding-1");
+    createTask("stale-pane", "binding-1", "retired-primary-pane", "binding-1");
+
+    expect(store.loadPrimaryWorkerActivity(answer.promptId, 1)).toEqual([expect.objectContaining({ workerId: ownedWorkerId, taskCount: 1 })]);
   });
 
   it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {

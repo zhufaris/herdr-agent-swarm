@@ -6,7 +6,7 @@ import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
 
-interface Options { projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; logger?: Pick<Logger, "warn"> }
+interface Options { projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; wake(instanceId: string): void; wakeCardContext?: () => void; logger?: Pick<Logger, "warn"> }
 interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
 
 export class InstanceRuntimeReconciler {
@@ -91,14 +91,15 @@ export class InstanceRuntimeReconciler {
     const runtime = instance.runtimeRef;
     if (!runtime) return;
     const pane = panes.get(runtime.paneId);
-    if (!pane) { this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} is missing` }); return; }
+    if (!pane) { if (this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} is missing` })) this.options.wakeCardContext?.(); return; }
     const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
     if (pane.workspaceId !== runtime.herdrWorkspaceId || pane.workspaceId !== project.workspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
-      this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} identity mismatch` });
+      if (this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} identity mismatch` })) this.options.wakeCardContext?.();
       return;
     }
     const observedState = normalizeState(pane);
     const updated = this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState, lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });
+    if (updated) this.options.wakeCardContext?.();
     if (updated && observedState === "idle" && this.options.store.countPendingInstanceTurns(instance.id) > 0) this.options.wake(instance.id);
   }
 }
