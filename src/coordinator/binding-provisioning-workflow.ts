@@ -181,8 +181,9 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     }
     const project = this.projectsById.get(binding.projectId);
     if (!project) { await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。"); return false; }
-    const paneTitle = requestedTitle?.replace(/\s+/g, " " ).trim() || randomPaneName();
-    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
+    const paneToken = createPrimaryPaneToken();
+    const displayTitle = requestedTitle?.replace(/\s+/g, " " ).trim() || paneToken;
+    const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, displayTitle, "TraeX pane");
     const candidate = store.createResetCandidate({ oldBindingId: binding.id, newBindingId: randomUUID(), title, actorOpenId: message.actorOpenId, resetMessageId: message.messageId });
     try {
       let replacement = candidate.replacement;
@@ -190,7 +191,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       let pane = replacement.paneId ? await herdr.getPane(replacement.paneId) : null;
       if (replacement.provisioningCheckpoint === "selected") {
         const tools = this.options.primaryTools.issueBinding(replacement.id, replacement.generation);
-        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(replacement.id, replacement.generation, project.id, paneTitle, tools));
+        pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(replacement.id, replacement.generation, project.id, paneToken, tools));
         replacement = store.updateBindingMetadata(replacement.id, paneIdentityPatch(pane));
         replacement = store.transitionBinding(replacement.id, { type: "pane_created" });
       }
@@ -292,7 +293,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const { config, herdr, store } = this.options;
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
-    const paneTitle = randomPaneName();
+    const paneTitle = createPrimaryPaneToken();
     const nextGeneration = binding.generation + 1;
     const tools = this.options.primaryTools.issueBinding(binding.id, nextGeneration);
     const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle, tools));
@@ -307,7 +308,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async createSelectedProject(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> {
     const { store, herdr, lark, config, logger } = this.options;
     const bindingId = selection.bindingId ?? randomUUID();
-    const paneTitle = randomPaneName();
+    const paneTitle = createPrimaryPaneToken();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
     let binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
     if (!binding) { binding = store.createPendingBinding({ id: bindingId, projectId: project.id, workspaceId: project.workspaceId, chatId: selection.chatId, topicId: null, rootMessageId: null, title, creatorOpenId: selection.actorOpenId }); store.linkProjectSelectionBinding(selection.id, binding.id); await this.publish(binding.id, "BindingCreated", "lark", { title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: null }); }
@@ -340,7 +341,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
           throw new Error("Primary tool credential provenance is unavailable; use /swarm reset or /swarm replace");
       }
       if (paneCreatedDecision === "replace_pane") {
-        const replacementTitle = randomPaneName();
+        const replacementTitle = createPrimaryPaneToken();
         const tools = this.options.primaryTools.issueBinding(current.id, current.generation + 1);
         const replacement = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(current.id, current.generation + 1, project.id, replacementTitle, tools));
         current = store.replaceProvisioningPane({ bindingId: current.id, expectedPaneId: pane.paneId, expectedGeneration: current.generation, pane: replacement });
@@ -444,7 +445,6 @@ function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSess
     agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
   };
 }
-function randomPaneName(): string { return createPrimaryPaneToken(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 class ProvisionedPaneMissingError extends Error {

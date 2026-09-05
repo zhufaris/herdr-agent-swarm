@@ -141,8 +141,8 @@ blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 H
 ```
 
 `/swarm reset` 与 `/swarm new` 不同：后者会选择项目并创建一个新的飞书话题。
-新 Pane 使用 `task-xxxx` 随机名称，当前话题的主卡标题会更新为
-`项目名 / task-xxxx`；可选说明不会替代这个会话身份。
+新 Pane 使用 `lark_<4 位 token>` 随机名称，当前话题的主卡标题可保留可选说明；
+说明只用于飞书展示，不会替代 Herdr pane 的会话身份。
 
 ### `/swarm stop`
 
@@ -173,9 +173,9 @@ Bridge 会继续重试。
 ```
 
 如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
-`/swarm new` 始终在选择项目后使用短随机 Pane 名，例如 `task-7kq2`；
+`/swarm new` 始终在选择项目后使用短随机 Pane 名，例如 `lark_7kq2`；
 话题主卡标题展示为 `space / pane_name`，例如
-`herdr-agent-swarm / task-7kq2`。自然语言首条请求和可选说明不会作为话题名。
+`herdr-agent-swarm / lark_7kq2`。自然语言首条请求和可选说明不会作为话题名。
 服务启动后的 Herdr 对账也会让已有受管话题按其真实 Pane 名收敛到该格式。
 如需人工命名，使用 `/swarm rename <名称>`，标题将变为 `space / 名称`。
 

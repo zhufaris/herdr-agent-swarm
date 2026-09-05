@@ -199,7 +199,7 @@ export class InstanceControlWorkflow {
 function workerPaneTitle(instance: AgentInstance): string {
   if (!instance.parent) throw new Error("Worker parent identity is missing");
   const primary = primaryPaneToken(instance.sourcePrimaryPaneLabel, instance.parent.paneId);
-  return `lark_${primary}-${paneTitleSegment(instance.name)}`;
+  return `lark_${primary}-${instance.name}`;
 }
 
 function paneTitleSegment(value: string): string {

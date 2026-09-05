@@ -101,7 +101,7 @@ describe("pane/thread lifecycle integration", () => {
       paneId: "w1:new", traexSessionId: "new-terminal", generation: 2, attachment: "attached",
       agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native-session-1"
     });
-    expect(createdOptions).toMatchObject({ bindingId: "orphaned", generation: 2, projectId: "repo", environment: { SWARM_PRIMARY_CAPABILITY: "test-orphaned-2" } });
+    expect(createdOptions).toMatchObject({ bindingId: "orphaned", generation: 2, projectId: "repo", title: expect.stringMatching(/^[a-z0-9]{4}$/), environment: { SWARM_PRIMARY_CAPABILITY: "test-orphaned-2" } });
     expect(startedArgs).toEqual(primaryToolArgs("orphaned", 2));
     expect(store.hasBindingPrimaryToolCapability("orphaned", 2)).toBe(true);
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
@@ -244,8 +244,8 @@ describe("pane/thread lifecycle integration", () => {
     expect(retired).toMatchObject({ id: "old", lifecycle: "archived", topicId: null, retiredTopicId: "topic", paneId: oldPane.paneId });
     expect(replacement).toMatchObject({ lifecycle: "active", topicId: "topic", rootMessageId: "root", paneId: newPane.paneId });
     expect(created).toHaveLength(1);
-    expect(created[0]).toBe("fresh session");
-    expect(replacement.title).toBe(`repo / ${created[0]}`);
+    expect(created[0]).toMatch(/^[a-z0-9]{4}$/);
+    expect(replacement.title).toBe("repo / fresh session");
     expect(oldObserverAborted).toBe(true);
     expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = 'm2'").get()).toEqual({ state: "cancelled" });
     expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs WHERE lark_message_id = 'm1'").get()).toEqual({ state: "running", observation_state: "detached" });

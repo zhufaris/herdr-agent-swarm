@@ -113,6 +113,14 @@ describe("InstanceControlWorkflow", () => {
     expect(vi.mocked(paneHost.allocatePane).mock.calls.map((call) => call[2]?.title)).toEqual(["lark_ilcs-reviewer", "lark_ilcs-tester"]);
   });
 
+  it.each(["task-reviewer", "lark_ops"])("preserves the validated Worker name %s in the pane title", async (name) => {
+    const { workflow, paneHost } = setup();
+
+    await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name, agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
+
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.any(String), expect.objectContaining({ title: `lark_ilcs-${name}`, titlePolicy: "complete" }));
+  });
+
   it.each([null, "primary-ilcs", "prefix-lark_ilcs", "lark_ilcs-extra"])("uses the parent pane ID when the Primary label is noncanonical: %s", async (label) => {
     const { workflow, paneHost } = setup();
     vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? { ...primaryPane, label } : pane);
