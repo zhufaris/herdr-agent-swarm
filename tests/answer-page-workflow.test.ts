@@ -52,7 +52,10 @@ describe("AnswerPageWorkflow", () => {
 
     await Promise.all([workflow.converge("p1"), workflow.converge("p1"), workflow.converge("p1")]);
 
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_finish", viewVersion: 2 })]);
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ kind: "stream_finish", viewVersion: 2 }),
+      expect.objectContaining({ kind: "card_update", cardRole: "answer" })
+    ]);
     expect(store.getActiveAnswerPage("p1")?.sequence).toBe(2);
     expect(wake).toHaveBeenCalledOnce();
     store.close();
@@ -70,7 +73,10 @@ describe("AnswerPageWorkflow", () => {
 
     await new AnswerPageWorkflow(store, vi.fn()).converge("p1");
 
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_finish", viewVersion: 2 })]);
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ kind: "stream_finish", viewVersion: 2 }),
+      expect.objectContaining({ kind: "card_update", cardRole: "answer" })
+    ]);
     expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "active" })]);
     store.close();
   });
@@ -91,6 +97,7 @@ describe("AnswerPageWorkflow", () => {
 
     expect(store.listPendingOutboundReplies()).toEqual([
       expect.objectContaining({ kind: "stream_finish" }),
+      expect.objectContaining({ kind: "card_update", rootMessageId: "answer-1" }),
       expect.objectContaining({ kind: "stream_card_create", payload: expect.stringContaining(`\"pageStart\":${sourceEnd}`) })
     ]);
     expect(store.listAnswerPages("p1")).toEqual([
@@ -166,8 +173,9 @@ describe("AnswerPageWorkflow", () => {
     expect(upgrade).toMatchObject({ kind: "card_update", cardRole: "answer", rootMessageId: "answer-1" });
     expect(upgrade?.payload).toContain("执行输出");
     expect(upgrade?.payload).toContain("81 行");
+    store.markOutboundReplyDelivered(upgrade!.id, "answer-1");
     await workflow.converge("p1");
-    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(store.listPendingOutboundReplies()).toHaveLength(0);
     expect(store.listAnswerPages("p1")[0]).toMatchObject({ state: "finished", sequence: 2 });
     store.close();
   });

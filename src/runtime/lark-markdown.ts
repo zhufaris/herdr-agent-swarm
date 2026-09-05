@@ -1,3 +1,5 @@
+import { compactAnswerToolActivity } from "../cards/final-answer-content.js";
+
 const FENCE = /^ {0,3}(`{3,})([^`]*)$/;
 const TABLE_DELIMITER = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 const TRAEX_DIFF_ROW = /^\s*\d+\s+[+-](?:\s|$)/u;
@@ -54,11 +56,27 @@ export function normalizeLarkMarkdown(source: string): string {
 
 /** Renders one bounded page while keeping continuation offsets in the source string. */
 export function renderLarkMarkdownPage(source: string, pageStart: number, limit: number): RenderedLarkMarkdownPage {
+  return renderLarkMarkdownPageMode(source, pageStart, limit, true);
+}
+
+/** Renders the same canonical page boundary while retaining safe command detail for final cards. */
+export function renderDetailedLarkMarkdownPage(source: string, pageStart: number, limit: number): RenderedLarkMarkdownPage {
+  return renderLarkMarkdownPageMode(source, pageStart, limit, false);
+}
+
+/** Renders one proven canonical range with safe Markdown normalization and command detail. */
+export function renderDetailedLarkMarkdownRange(source: string, pageStart: number, pageEnd: number): string {
+  const start = Math.max(0, Math.min(pageStart, source.length));
+  const end = Math.max(start, Math.min(pageEnd, source.length));
+  return renderDetailedMarkdownRange(source, start, end);
+}
+
+function renderLarkMarkdownPageMode(source: string, pageStart: number, limit: number, compactTools: boolean): RenderedLarkMarkdownPage {
   const start = Math.max(0, Math.min(pageStart, source.length));
   const boundedLimit = Math.max(0, limit);
   const blocks = markdownBlocks(source);
-  const complete = renderCardMarkdownRange(source, start, source.length, blocks);
-  if (complete.length <= boundedLimit) return { page: complete, nextPageStart: null };
+  const complete = renderDetailedMarkdownRange(source, start, source.length, blocks);
+  if (complete.length <= boundedLimit) return { page: compactTools ? compactAnswerToolActivity(complete) : complete, nextPageStart: null };
 
   const lineEnds: number[] = [];
   for (let index = source.indexOf("\n", start); index >= 0; index = source.indexOf("\n", index + 1)) {
@@ -74,22 +92,27 @@ export function renderLarkMarkdownPage(source: string, pageStart: number, limit:
     if (!range || end <= range.start || end >= range.end) candidates.push(end);
   }
   const lineEnd = latestFittingEnd(source, start, boundedLimit, candidates, blocks);
-  if (lineEnd !== null) return { page: renderCardMarkdownRange(source, start, lineEnd, blocks), nextPageStart: lineEnd };
+  if (lineEnd !== null) return { page: renderPageRange(source, start, lineEnd, blocks, compactTools), nextPageStart: lineEnd };
 
   let low = start + 1;
   let high = source.length - 1;
   let hardEnd: number | null = null;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    if (renderCardMarkdownRange(source, start, middle, blocks).length <= boundedLimit) {
+    if (renderDetailedMarkdownRange(source, start, middle, blocks).length <= boundedLimit) {
       hardEnd = middle;
       low = middle + 1;
     } else high = middle - 1;
   }
-  if (hardEnd !== null) return { page: renderCardMarkdownRange(source, start, hardEnd, blocks), nextPageStart: hardEnd };
+  if (hardEnd !== null) return { page: renderPageRange(source, start, hardEnd, blocks, compactTools), nextPageStart: hardEnd };
 
   const forcedEnd = Math.min(source.length, start + Math.max(1, boundedLimit));
   return { page: source.slice(start, forcedEnd).slice(0, boundedLimit), nextPageStart: forcedEnd < source.length ? forcedEnd : null };
+}
+
+function renderPageRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[], compactTools: boolean): string {
+  const detailed = renderDetailedMarkdownRange(source, start, end, blocks);
+  return compactTools ? compactAnswerToolActivity(detailed) : detailed;
 }
 
 function atomicToolActivityRanges(source: string, limit: number): Array<{ start: number; end: number }> {
@@ -309,7 +332,7 @@ function latestFittingEnd(source: string, start: number, limit: number, candidat
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const end = candidates[middle]!;
-    if (renderCardMarkdownRange(source, start, end, blocks).length <= limit) {
+    if (renderDetailedMarkdownRange(source, start, end, blocks).length <= limit) {
       result = end;
       low = middle + 1;
     } else high = middle - 1;
@@ -318,6 +341,10 @@ function latestFittingEnd(source: string, start: number, limit: number, candidat
 }
 
 function renderCardMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {
+  return renderPageRange(source, start, end, blocks, true);
+}
+
+function renderDetailedMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {
   return renderToolActivityResults(renderMarkdownRange(source, start, end, blocks));
 }
 

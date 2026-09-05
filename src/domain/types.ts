@@ -351,6 +351,7 @@ export interface AnswerPageDeliveryFacts {
   latestContent: { content: string; sequence: number; state: OutboundReplyState; sourceEnd?: number | null } | null;
   finishPending: boolean;
   continuationPending: boolean;
+  finalUpdateState: OutboundReplyState | null;
 }
 
 export type AnswerPageReservationOutcome = "reserved" | "waiting" | "stale";

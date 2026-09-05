@@ -461,7 +461,7 @@ describe("Lark channel publisher", () => {
     store.database.prepare("INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES ('p1', 12, 'answer-12', 'cardkit-12', ?, 100000, 0, 'active', 'streaming', 'now', 'now')").run(answerElementId("p1", 12));
     store.database.prepare("UPDATE run_cards SET answer_message_id = 'answer-12', answer_card_id = 'cardkit-12', answer_element_id = ?, answer_page_index = 12, answer_page_start = 100000 WHERE prompt_id = 'p1'").run(answerElementId("p1", 12));
     expect(store.reserveAnswerContinuation({
-      promptId: "p1", pageIndex: 12, cardId: "cardkit-12", summary: "continued", nextPageIndex: 13, nextPageStart: 109_267,
+      promptId: "p1", pageIndex: 12, cardId: "cardkit-12", messageId: "answer-12", summary: "continued", finalizedCard: {}, nextPageIndex: 13, nextPageStart: 109_267,
       nextElementId: answerElementId("p1", 13), rootMessageId: "root-1", viewVersion: 20,
       card: { body: { elements: [{ tag: "markdown", element_id: answerElementId("p1", 13), content: "x".repeat(10_000) }] } }
     })).toBe("reserved");

@@ -18,15 +18,16 @@ describe("Answer page crash recovery", () => {
     directory = mkdtempSync(join(tmpdir(), "answer-page-recovery-"));
     const databasePath = join(directory, "bridge.db");
     const cards = new Map<string, { messageId: string; contents: Array<{ sequence: number; content: string }>; finishes: Array<{ sequence: number; summary: string }> }>();
+    const deliveries: string[] = [];
     let nextCard = 1;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "root-1" }; },
-      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
-      async createStreamingCard() { const cardId = `card-${nextCard++}`; cards.set(cardId, { messageId: "", contents: [], finishes: [] }); return { cardId }; },
+      async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard(messageId) { deliveries.push(`update:${messageId}`); },
+      async createStreamingCard() { const cardId = `card-${nextCard++}`; deliveries.push(`create:${cardId}`); cards.set(cardId, { messageId: "", contents: [], finishes: [] }); return { cardId }; },
       async replyStreamingCardReference(_root, cardId) { const card = cards.get(cardId)!; card.messageId ||= `message-${cardId}`; return { messageId: card.messageId }; },
       async streamCardContent(cardId, _elementId, content, sequence) { cards.get(cardId)!.contents.push({ sequence, content }); },
-      async finishStreamingCard(cardId, sequence, summary) { cards.get(cardId)!.finishes.push({ sequence, summary }); },
+      async finishStreamingCard(cardId, sequence, summary) { deliveries.push(`finish:${cardId}`); cards.get(cardId)!.finishes.push({ sequence, summary }); },
       async shareThread() { return { messageId: "shared" }; }
     };
 
@@ -62,6 +63,14 @@ describe("Answer page crash recovery", () => {
       expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
       expect(new Set(sequences).size).toBe(sequences.length);
       expect(sequences[0]).toBe(1);
+    }
+    for (const page of pages.slice(0, -1)) {
+      const finish = deliveries.indexOf(`finish:${page.cardId}`);
+      const update = deliveries.indexOf(`update:${page.messageId}`);
+      const nextCreate = deliveries.indexOf(`create:${pages[page.pageIndex + 1]!.cardId}`);
+      expect(finish).toBeGreaterThanOrEqual(0);
+      expect(update).toBeGreaterThan(finish);
+      expect(nextCreate).toBeGreaterThan(update);
     }
     const canonical = answerStreamContent(store.loadRunCard("p1")!);
     for (const page of pages) {

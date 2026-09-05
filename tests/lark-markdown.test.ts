@@ -164,7 +164,8 @@ describe("source-aware Lark Markdown pages", () => {
 
     expect(pages.length).toBeGreaterThan(20);
     expect(pages.every((page) => page.length <= 900)).toBe(true);
-    expect(pages.join("\n")).toContain("… 已省略中间 11 行 …");
+    expect(pages.join("\n")).toContain("⚙️ **Ran** · `echo 0` · ✓ command 0");
+    expect(pages.join("\n")).not.toContain("output 0.0");
     expect(starts.every((start, index) => index === 0 || start > starts[index - 1]!)).toBe(true);
   });
 

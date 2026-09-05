@@ -747,7 +747,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts {
     const page = this.database.prepare("SELECT element_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(turnId, pageIndex) as { element_id: string } | undefined;
-    if (!page) return { latestContent: null, finishPending: false, continuationPending: false };
+    if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
     const rows = this.database.prepare("SELECT kind, payload, state, view_version FROM outbound_replies WHERE worker_turn_id = ? AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC").all(turnId) as Array<{ kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
     let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
     let finishPending = false;
@@ -759,7 +759,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
       if (row.kind === "stream_content" && payload.workerElement !== "progress" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null };
     }
-    return { latestContent, finishPending, continuationPending };
+    return { latestContent, finishPending, continuationPending, finalUpdateState: null };
   }
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome {
     return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
@@ -3008,10 +3008,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "laneKey" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"] }): OutboundReply {
+  enqueueOutboundReply(input: Omit<OutboundReply, "laneKey" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"]; laneKeyOverride?: string }): OutboundReply {
     const timestamp = now();
     const bindingGeneration = input.promptId ? this.loadRunCard(input.promptId)?.bindingGeneration ?? null : input.bindingId ? this.getBinding(input.bindingId)?.generation ?? null : null;
-    const laneKey = outboundLaneKey({ ...input, bindingGeneration });
+    const laneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
     const ownsTransaction = !this.database.isTransaction;
     if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -3132,7 +3132,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.database.prepare("SELECT binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, kind, payload FROM outbound_replies WHERE id = ?").get(id) as { binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string } | undefined;
+      const row = this.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, kind, payload, root_message_id FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string; root_message_id: string } | undefined;
       this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
@@ -3155,7 +3155,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
             if (row.kind === "stream_content") this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, now(), row.prompt_id, pageIndex, pageIndex);
             if (row.kind === "stream_finish") {
               const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
-              this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, pendingContinuation ? "frozen" : "finished", now(), row.prompt_id, pageIndex, pageIndex);
+              const pendingFinalUpdate = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'card_update' AND state = 'pending' AND idempotency_key = ? LIMIT 1").get(row.prompt_id, `answer-final-fold:${row.prompt_id}:${pageIndex}:${row.root_message_id}`);
+              this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), state = CASE WHEN ? THEN state ELSE ? END, updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, pendingFinalUpdate ? 1 : 0, pendingContinuation ? "frozen" : "finished", now(), row.prompt_id, pageIndex, pageIndex);
+              if (!pendingContinuation && !pendingFinalUpdate) {
+                const run = this.loadRunCard(row.prompt_id);
+                if (run) this.saveRunCard(freezeRunCardWorkerContext(run, now()));
+              }
+            }
+            if (row.kind === "card_update" && row.idempotency_key.startsWith("answer-final-fold:")) {
+              const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
+              this.database.prepare("UPDATE answer_pages SET state = ?, updated_at = ? WHERE prompt_id = ? AND message_id = ? AND state = 'active'").run(pendingContinuation ? "frozen" : "finished", now(), row.prompt_id, row.root_message_id);
               if (!pendingContinuation) {
                 const run = this.loadRunCard(row.prompt_id);
                 if (run) this.saveRunCard(freezeRunCardWorkerContext(run, now()));
@@ -3834,14 +3843,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   getAnswerPageDeliveryFacts(promptId: string, pageIndex: number): AnswerPageDeliveryFacts {
     const page = this.database.prepare("SELECT card_id, element_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(promptId, pageIndex) as { card_id: string | null; element_id: string } | undefined;
-    if (!page) return { latestContent: null, finishPending: false, continuationPending: false };
-    const rows = this.database.prepare("SELECT kind, payload, state, view_version FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC").all(promptId) as Array<{ kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
+    if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
+    const rows = this.database.prepare("SELECT idempotency_key, kind, payload, state, view_version FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','delivered','dead_letter','dismissed') ORDER BY delivery_order DESC").all(promptId) as Array<{ idempotency_key: string; kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
     let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
     let finishPending = false;
     let continuationPending = false;
+    let finalUpdateState: AnswerPageDeliveryFacts["finalUpdateState"] = null;
     for (const row of rows) {
       const payload = parseJsonRecord(row.payload);
       if (row.kind === "stream_card_create" && row.state === "pending" && Number((payload.stream as Record<string, unknown> | undefined)?.pageIndex) === pageIndex + 1) continuationPending = true;
+      if (row.kind === "card_update" && row.idempotency_key === `answer-final-fold:${promptId}:${pageIndex}:${page.card_id}` && finalUpdateState === null && row.state !== "delivered") finalUpdateState = row.state;
       if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
       if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
       if (row.kind === "stream_content" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) {
@@ -3851,7 +3862,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         };
       }
     }
-    return { latestContent, finishPending, continuationPending };
+    return { latestContent, finishPending, continuationPending, finalUpdateState };
   }
 
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
@@ -3869,9 +3880,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     });
   }
 
-  reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome {
+  reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId) return "stale";
+      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.messageId !== input.messageId) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if (facts.finishPending || page.state === "finished") return "waiting";
       const sequence = page.sequence + 1;
@@ -3880,13 +3891,14 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
         .run(sequence, now(), input.promptId, input.pageIndex);
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.finalizedCard), laneKeyOverride: `answer:${input.promptId}` });
       return "reserved";
     });
   }
 
-  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
+  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
+      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.messageId !== input.messageId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if ((facts.latestContent && facts.latestContent.state !== "delivered") || facts.finishPending || facts.continuationPending) return "waiting";
       const sequence = page.sequence + 1;
@@ -3895,6 +3907,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
         .run(sequence, now(), input.promptId, input.pageIndex);
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
+      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.finalizedCard), laneKeyOverride: `answer:${input.promptId}` });
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) });
       return "reserved";
     });
@@ -3922,10 +3935,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     try {
       const page = this.database.prepare("SELECT state, card_id, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; card_id: string | null; message_id: string | null } | undefined;
       const view = this.loadRunCard(input.promptId);
-      if (!page || !view || page.state !== "finished" || page.card_id !== input.cardId || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
+      if (!page || !view || !["active", "frozen", "finished"].includes(page.state) || page.card_id !== input.cardId || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
       const key = `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`;
-      const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
+      const existing = this.database.prepare("SELECT id, state, view_version, payload FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState; view_version: number | null; payload: string } | undefined;
       if (existing) {
+        if (existing.state === "delivered" && Number(existing.view_version ?? 0) >= view.viewVersion && existing.payload === JSON.stringify(input.card)) {
+          this.database.exec("COMMIT"); return "waiting";
+        }
         if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
           const timestamp = now();
           this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)

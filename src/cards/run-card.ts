@@ -241,9 +241,9 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
     schema: "2.0",
     config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
-      title: { tag: "plain_text", content: pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成" },
+      title: { tag: "plain_text", content: input.phase === "completed" ? (pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成") : (pageNumber > 1 ? `✨ TraeX 回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复") },
       subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
-      template: "green"
+      template: input.phase === "completed" ? "green" : RUN_STATE_VIEW[input.phase].color
     },
     body: { elements: [
       { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },

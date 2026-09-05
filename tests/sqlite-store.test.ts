@@ -2653,12 +2653,12 @@ describe("SQLite store", () => {
     expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId, content: "page one" })).toBe("waiting");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
 
-    expect(store.reserveAnswerContinuation({ promptId: "p1", pageIndex: 0, cardId: "card-1", summary: "Continued", nextPageIndex: 1, nextPageStart: 9_000, nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2, card: {} })).toBe("reserved");
+    expect(store.reserveAnswerContinuation({ promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", summary: "Continued", finalizedCard: { final: true }, nextPageIndex: 1, nextPageStart: 9_000, nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2, card: {} })).toBe("reserved");
     expect(store.listAnswerPages("p1")).toEqual([
       expect.objectContaining({ pageIndex: 0, state: "active", sequence: 2 }),
       expect.objectContaining({ pageIndex: 1, state: "creating", sequence: 0 })
     ]);
-    expect(store.listPendingOutboundReplies().map((reply) => reply.kind)).toEqual(["stream_finish", "stream_card_create"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.kind)).toEqual(["stream_finish", "card_update", "stream_card_create"]);
   });
 
   it("rolls back an Answer reservation when its outbox insert fails", () => {
@@ -3446,7 +3446,7 @@ describe("SQLite store", () => {
     const initialCreate = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(initialCreate.id, "answer-1", "card-1");
     expect(store.reserveAnswerContinuation({
-      promptId: "p1", pageIndex: 0, cardId: "card-1", summary: "continued", nextPageIndex: 1, nextPageStart: 1,
+      promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", summary: "continued", finalizedCard: {}, nextPageIndex: 1, nextPageStart: 1,
       nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2,
       card: { body: { elements: [{ tag: "markdown", element_id: answerElementId("p1", 1), content: "x".repeat(10_000) }] } }
     })).toBe("reserved");
