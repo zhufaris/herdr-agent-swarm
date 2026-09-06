@@ -82,7 +82,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.getBinding(id));
     this.projections = new SqliteProjectionStore(this.context, {
       enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
-      hasPendingAnswerContinuation: (promptId, pageIndex) => this.hasPendingAnswerContinuation(promptId, pageIndex)
+      hasPendingAnswerContinuation: (promptId, pageIndex) => this.hasPendingAnswerContinuation(promptId, pageIndex),
+      getBinding: (id) => this.getBinding(id),
+      refreshOutboxLaneHead: (laneKey) => this.outbox.refreshOutboxLaneHead(laneKey)
     });
     this.outbox = new SqliteOutboxStore(this.context, {
       getBinding: (id) => this.getBinding(id),
@@ -1935,13 +1937,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.saveTopicView(view);
-      const outcome = this.reserveMainCardInTransaction(view, rootMessageId, card);
-      this.database.exec("COMMIT");
-      return outcome;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.projections.reserveMainCard(view, rootMessageId, card);
   }
 
   private matchesRuntimeFence(binding: Binding, expectedPaneId: string, expectedGeneration: number): boolean {
@@ -1950,31 +1946,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   private reserveMainCardInTransaction(view: TopicViewState, rootMessageId: string | null, card: object): MainCardReservationOutcome {
-    if (!rootMessageId) return "current";
-    const current = this.loadTopicView(view.bindingId);
-    if (!current || current.viewVersion !== view.viewVersion) return "waiting";
-    const binding = this.requireBinding(view.bindingId);
-    if (current.viewVersion <= current.deliveredVersion) return "current";
-    const replacementPending = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
-    if (replacementPending) return "waiting";
-    const existingCurrent = this.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND view_version >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
-    if (existingCurrent) return "waiting";
-    if (!binding.statusMessageId) {
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
-    } else {
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, cardSequence: this.nextMainCardSequence(binding), targetRole: "session_status", rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
-    }
-    return "reserved";
-  }
-
-  private nextMainCardSequence(binding: Binding): number {
-    const row = this.database.prepare(`
-      SELECT MAX(COALESCE(card_sequence, 0)) AS sequence
-      FROM outbound_replies
-      WHERE binding_id = ? AND target_role = 'session_status' AND root_message_id = ?
-        AND kind = 'card_update' AND state = 'pending'
-    `).get(binding.id, binding.statusMessageId) as { sequence: number | null };
-    return Math.max(binding.statusCardSequence, Number(row.sequence ?? 0)) + 1;
+    return this.projections.reserveMainCardIntent(view, rootMessageId, card);
   }
 
   saveRunCard(view: RunCardView): RunCardView {
@@ -2018,110 +1990,19 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const page = this.database.prepare("SELECT state, card_id, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; card_id: string | null; message_id: string | null } | undefined;
-      const view = this.loadRunCard(input.promptId);
-      if (!page || !view || !["active", "frozen", "finished"].includes(page.state) || page.card_id !== input.cardId || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
-      const key = `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`;
-      const existing = this.database.prepare("SELECT id, state, view_version, payload FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState; view_version: number | null; payload: string } | undefined;
-      if (existing) {
-        if (existing.state === "delivered" && Number(existing.view_version ?? 0) >= view.viewVersion && existing.payload === JSON.stringify(input.card)) {
-          this.database.exec("COMMIT"); return "waiting";
-        }
-        if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
-          const timestamp = now();
-          this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-            .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
-          this.database.exec("COMMIT"); return "reserved";
-        }
-        this.database.exec("COMMIT"); return "waiting";
-      }
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
-      this.database.exec("COMMIT"); return "reserved";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.projections.reserveFinalAnswerCardUpdate(input);
   }
 
   reserveClosedAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const page = this.database.prepare("SELECT state, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; message_id: string | null } | undefined;
-      const view = this.loadRunCard(input.promptId);
-      if (!page || !view || page.state !== "finished" || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
-      const key = `answer-closed:${input.promptId}:${input.pageIndex}:${input.messageId}`;
-      const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
-      if (existing) {
-        if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
-          const timestamp = now();
-          this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-            .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
-          this.refreshOutboxLaneHead(outboundLaneKey({ cardRole: "answer", promptId: input.promptId, rootMessageId: input.messageId, kind: "card_update" }));
-          this.database.exec("COMMIT"); return "reserved";
-        }
-        this.database.exec("COMMIT"); return "waiting";
-      }
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
-      this.database.exec("COMMIT"); return "reserved";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.projections.reserveClosedAnswerCardUpdate(input);
   }
 
   reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const page = this.database.prepare("SELECT state, message_id, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; message_id: string | null; delivery_mode: string } | undefined;
-      const view = this.loadRunCard(input.promptId);
-      if (!page || !view || page.state !== "active" || page.delivery_mode !== "static" || page.message_id !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
-      const key = `answer-static:${input.promptId}:${input.pageIndex}:${input.messageId}`;
-      const existing = this.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
-      const timestamp = now();
-      if (existing) {
-        if (existing.state === "pending") {
-          this.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE id = ?")
-            .run(JSON.stringify(input.card), view.viewVersion, timestamp, existing.id);
-          this.database.exec("COMMIT"); return "reserved";
-        }
-        this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-          .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
-        this.refreshOutboxLaneHead(outboundLaneKey({ cardRole: "answer", promptId: input.promptId, rootMessageId: input.messageId, kind: "card_update" }));
-        this.database.exec("COMMIT"); return "reserved";
-      }
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
-      this.database.exec("COMMIT"); return "reserved";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.projections.reserveStaticAnswerCardUpdate(input);
   }
 
   reserveStaticAnswerReplacement(input: { promptId: string; previousPageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const previous = this.database.prepare("SELECT state, delivery_mode, source_start FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.previousPageIndex) as { state: string; delivery_mode: string; source_start: number } | undefined;
-      const view = this.loadRunCard(input.promptId);
-      if (!previous || !view || previous.state !== "frozen" || previous.delivery_mode !== "static" || input.nextPageIndex !== input.previousPageIndex + 1 || input.sourceStart !== Number(previous.source_start)) { this.database.exec("COMMIT"); return "stale"; }
-      const existing = this.database.prepare("SELECT state, element_id, source_start, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.nextPageIndex) as { state: string; element_id: string; source_start: number; delivery_mode: string } | undefined;
-      const idempotencyKey = `answer-static-rebuild:${input.promptId}:${input.nextPageIndex}`;
-      const payload = JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId, deliveryMode: "static" } });
-      if (existing) {
-        if (existing.state !== "creating" || existing.element_id !== input.nextElementId || Number(existing.source_start) !== input.sourceStart || existing.delivery_mode !== "static") {
-          this.database.exec("COMMIT"); return "stale";
-        }
-        const failed = this.database.prepare("SELECT id, state, lane_key FROM outbound_replies WHERE idempotency_key = ?").get(idempotencyKey) as { id: string; state: OutboundReplyState; lane_key: string } | undefined;
-        if (!failed || (failed.state !== "dead_letter" && failed.state !== "dismissed")) { this.database.exec("COMMIT"); return "waiting"; }
-        const timestamp = now();
-        this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-          .run(payload, input.viewVersion, timestamp, timestamp, failed.id);
-        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ?
-          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, failed.lane_key, failed.id);
-        this.refreshOutboxLaneHead(failed.lane_key);
-        this.database.exec("COMMIT"); return "reserved";
-      }
-      const replacement = this.enqueueOutboundReply({
-        id: randomUUID(), idempotencyKey, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
-        rootMessageId: input.rootMessageId, kind: "stream_card_create", payload
-      });
-      this.database.prepare("UPDATE answer_pages SET delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'")
-        .run(now(), input.promptId, input.nextPageIndex);
-      this.refreshOutboxLaneHead(replacement.laneKey);
-      this.database.exec("COMMIT"); return "reserved";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.projections.reserveStaticAnswerReplacement(input);
   }
 
   listAnswerPages(promptId: string): AnswerPage[] {
