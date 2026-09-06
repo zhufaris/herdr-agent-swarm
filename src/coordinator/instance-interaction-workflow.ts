@@ -8,7 +8,7 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../domain/worker-task-interaction.js";
-import { canSubmitWorkerMainTask } from "../domain/worker-main-view.js";
+import { decideWorkerCardBindingOwnership, decideWorkerMainCardOwnership, decideWorkerTaskCardOwnership } from "../domain/worker-card-ownership.js";
 import { randomUUID } from "node:crypto";
 
 interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: import("../domain/agent-instance.js").AgentKind; model: string | null; start: boolean }): Promise<import("../domain/agent-instance.js").CreateWorkerResult> }
@@ -254,12 +254,13 @@ export class InstanceInteractionWorkflow {
     const sourceCardMessageId = typeof value.sourceCardMessageId === "string" ? value.sourceCardMessageId : "";
     const turn = this.options.store.getInstanceTurn(turnId); const view = this.options.store.loadWorkerTurnCard(turnId);
     const instance = turn ? this.options.store.getAgentInstance(turn.instanceId) : null;
-    if (!turn || !view || !instance || instance.role !== "worker" || action.chatId !== this.options.store.getBinding(instance.parent?.bindingId ?? "")?.chatId
-      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || view.instanceId !== instance.id || turn.instanceId !== instance.id
-      || instance.generation !== Number(value.generation) || turn.instanceGeneration !== instance.generation || view.instanceGeneration !== instance.generation
-      || instance.workerSessionGeneration !== Number(value.workerSessionGeneration) || view.workerSessionGeneration !== instance.workerSessionGeneration || !instance.parent) return null;
-    const binding = this.options.store.getBinding(instance.parent.bindingId);
-    if (!binding || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== instance.parent.paneId || binding.generation !== (instance.parent.bindingGeneration ?? 1)) return null;
+    const binding = instance?.parent ? this.options.store.getBinding(instance.parent.bindingId) : null;
+    const decision = decideWorkerTaskCardOwnership({
+      chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId,
+      expectedInstanceGeneration: Number(value.generation), expectedWorkerSessionGeneration: Number(value.workerSessionGeneration),
+      instance, turn, view, binding
+    });
+    if (!decision.allowed || !turn || !view || !instance) return null;
     return { instance, turn, view, intent: workerTaskInteraction(view.phase).replyIntent };
   }
 
@@ -267,11 +268,12 @@ export class InstanceInteractionWorkflow {
     const instanceId = typeof value.instanceId === "string" ? value.instanceId : ""; const generation = Number(value.generation); const sessionGeneration = Number(value.workerSessionGeneration);
     const sourceCardMessageId = typeof value.sourceCardMessageId === "string" ? value.sourceCardMessageId : "";
     const instance = this.options.store.getAgentInstance(instanceId); const view = this.options.store.loadWorkerMainView(instanceId, sessionGeneration);
-    if (!instance || !view || instance.role !== "worker" || instance.generation !== generation || instance.workerSessionGeneration !== sessionGeneration || view.runtimeGeneration !== generation
-      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || !instance.parent) return null;
-    const binding = this.options.store.getBinding(instance.parent.bindingId);
-    const parentActive = Boolean(binding && binding.chatId === action.chatId && binding.lifecycle === "active" && binding.state === "active" && binding.attachment === "attached" && binding.paneId === instance.parent.paneId && binding.generation === view.parentBindingGeneration);
-    if (!canSubmitWorkerMainTask({ ...view, runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive })) return null;
+    const binding = instance?.parent ? this.options.store.getBinding(instance.parent.bindingId) : null;
+    const decision = decideWorkerMainCardOwnership({
+      chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId,
+      expectedInstanceGeneration: generation, expectedWorkerSessionGeneration: sessionGeneration, instance, view, binding
+    });
+    if (!decision.allowed || !instance || !view) return null;
     return { instance, view };
   }
 
@@ -308,11 +310,10 @@ export class InstanceInteractionWorkflow {
 
   private isOwnedCardBinding(value: Record<string, unknown>, chatId: string, bindingId: string, bindingGeneration: number, parentPaneId: string): boolean {
     const binding = this.options.store.getBinding(bindingId);
-    if (!binding || binding.chatId !== chatId || binding.generation !== bindingGeneration || binding.paneId !== parentPaneId) return false;
-    if (typeof value.conversationKey === "string" && value.conversationKey !== `binding:${bindingId}`) return false;
-    if (typeof value.bindingId === "string" && value.bindingId !== bindingId) return false;
-    if (value.bindingGeneration !== undefined && Number(value.bindingGeneration) !== bindingGeneration) return false;
-    return true;
+    return decideWorkerCardBindingOwnership({
+      chatId, conversationKey: value.conversationKey, suppliedBindingId: value.bindingId, suppliedBindingGeneration: value.bindingGeneration,
+      bindingId, bindingGeneration, parentPaneId, binding
+    }).allowed;
   }
 
   private async showDirectory(message: IncomingLarkMessage, projectId: string, conversationKey: string): Promise<void> {
