@@ -7,6 +7,8 @@ export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersess
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
 export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
+export type { InboundDispatcherDiagnostics, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, PromptWorkerDiagnostics, ReconciliationDiagnostics, SessionOperationDispatcherDiagnostics, StartupRecoveryDiagnostics } from "../runtime/diagnostics.js";
+export type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../adapters/lark-ingress.js";
 
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PaneCloseOperationState = "executing" | "uncertain";
@@ -74,32 +76,6 @@ export interface HerdrCircuitBreakerStatus {
   lastFailure: string | null;
 }
 
-export interface StartupRecoveryDiagnostics {
-  state: "idle" | "running" | "completed" | "degraded";
-  startedAt: string | null;
-  completedAt: string | null;
-  stages: Array<{ name: string; state: "completed" | "failed"; durationMs: number; error?: string }>;
-}
-
-export interface InboundDispatcherDiagnostics {
-  state: "idle" | "running" | "retry_wait" | "stopping";
-  drainRequested: boolean;
-  retryAttempt: number;
-  nextRetryAt: string | null;
-  lastAcceptedAt: string | null;
-  lastFailureAt: string | null;
-  lastFailure: string | null;
-}
-
-export interface SessionOperationDispatcherDiagnostics {
-  state: "idle" | "running" | "stopping";
-  activeOperations: number;
-  drainRequested: boolean;
-  lastCompletedAt: string | null;
-  lastFailureAt: string | null;
-  lastFailure: string | null;
-}
-
 export interface SessionSummary {
   binding: Binding;
   queueDepth: number;
@@ -121,20 +97,6 @@ export interface ProjectConfig {
   cwd: string;
   maxInstances?: number;
   paneRetention?: { mode: "persistent" | "ephemeral"; idleAfterMs?: number | undefined; graceMs?: number | undefined } | undefined;
-}
-
-export interface IncomingLarkCardAction {
-  messageId: string;
-  chatId: string;
-  operatorOpenId: string;
-  value: unknown;
-  option?: string | null;
-  formValues?: Record<string, string>;
-}
-
-export interface LarkCardActionResult {
-  toast?: { type: "success" | "warning" | "error"; content: string };
-  card?: object;
 }
 
 export type CardInteractionActionKind = "supplement" | "convert_queued_prompt" | "enqueue_failed_steering" | "more_actions" | "session_control";
@@ -189,19 +151,6 @@ export interface PromptLatencySummary {
   queue: PromptLatencyPhaseSummary;
   execution: PromptLatencyPhaseSummary;
   delivery: PromptLatencyPhaseSummary;
-}
-
-export interface ReconciliationDiagnostics {
-  state: "idle" | "running" | "stopping";
-  runCount: number;
-  successCount: number;
-  failureCount: number;
-  coalescedRequestCount: number;
-  lastStartedAt: string | null;
-  lastCompletedAt: string | null;
-  lastDurationMs: number | null;
-  maxDurationMs: number | null;
-  lastOutcome: "succeeded" | "failed" | null;
 }
 
 export interface OperationalSummary {
@@ -272,43 +221,6 @@ export interface SqliteIntegrityDiagnostics extends SqliteIntegrityInspection {
   completedAt: string | null;
   durationMs: number | null;
   error: string | null;
-}
-
-export interface OutboxDispatcherDiagnostics {
-  state: "idle" | "running" | "stopping";
-  activeDeliveries: number;
-  scanPending: boolean;
-  lastScanAt: string | null;
-  lastScanOutcome: "idle" | "delivered" | "failed" | null;
-  lastSuccessfulScanAt: string | null;
-  lastScanFailureAt: string | null;
-  consecutiveScanFailures: number;
-  lastDeliveryAt: string | null;
-  lastDeliveryFailureAt: string | null;
-}
-
-export interface PromptWorkerDiagnostics {
-  state: "idle" | "running" | "stopping";
-  activeTurnWorkers: number;
-  activeSteeringWorkers: number;
-  currentSafetyScanDelayMs: number | null;
-  nextSafetyScanAt: string | null;
-  lastScanAt: string | null;
-  lastScanOutcome: "idle" | "work_found" | "failed" | null;
-  lastDiscovered: { turns: number; steering: number; detached: number; recoveredClaims: number; cancelled: number; failedDetached: number };
-  lastScanFailureAt: string | null;
-}
-
-export interface InstanceWorkerDiagnostics {
-  state: "idle" | "running" | "stopping";
-  activeDispatchWorkers: number;
-  activeObservers: number;
-  queuedTurns: number;
-  activeTurns: number;
-  uncertainTurns: number;
-  lastScanAt: string | null;
-  lastFailureAt: string | null;
-  lastFailure: string | null;
 }
 
 export interface BindingTitleProjectionInput {
@@ -384,20 +296,6 @@ export type RuntimeObservationApplication =
   | { outcome: "applied"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionMismatch: boolean }
   | { outcome: "terminal_identity_changed"; binding: Binding }
   | { outcome: "stale_binding" };
-
-export interface IncomingLarkMessage {
-  eventId: string;
-  messageId: string;
-  parentMessageId: string | null;
-  chatId: string;
-  topicId: string | null;
-  rootMessageId: string | null;
-  actorOpenId: string;
-  text: string;
-  mentionsBot: boolean;
-  isRootMessage: boolean;
-  hasUnsupportedContent?: boolean;
-}
 
 export type BridgeCommand =
   | { kind: "stop" }
