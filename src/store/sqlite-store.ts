@@ -1861,27 +1861,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
-    const ownsTransaction = !this.database.isTransaction;
-    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
-      if (!row) { if (ownsTransaction) this.database.exec("COMMIT"); return null; }
-      const attempts = Number(row.attempt_count) + 1;
-      const timestamp = now();
-      const deadLetteredAt = attempts >= 5 ? timestamp : null;
-      this.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ?`)
-        .run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
-      const result = this.getOutboundReply(id);
-      if (ownsTransaction) this.database.exec("COMMIT");
-      return result;
-    } catch (cause) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw cause; }
+    return this.outbox.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
   }
 
   markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null {
-    const timestamp = now();
-    this.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?")
-      .run(boundedError(error), metadata?.failureClass ?? "permanent", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
-    return this.getOutboundReply(id);
+    return this.outbox.markOutboundReplyDeadLetter(id, error, metadata);
   }
 
   markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null {

@@ -1,5 +1,5 @@
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, OutboundReply } from "../../domain/types.js";
+import type { Binding, DeliveryFailureMetadata, OutboundReply } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
@@ -198,6 +198,24 @@ export class SqliteOutboxStore {
     return this.getOutboundReply(id);
   }
 
+  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
+    return this.context.transaction(() => {
+      const row = this.context.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
+      if (!row) return null;
+      const attempts = Number(row.attempt_count) + 1;
+      const timestamp = now();
+      const deadLetteredAt = attempts >= 5 ? timestamp : null;
+      this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ?`).run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
+      return this.getOutboundReply(id);
+    });
+  }
+
+  markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null {
+    const timestamp = now();
+    this.context.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(boundedError(error), metadata?.failureClass ?? "permanent", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
+    return this.getOutboundReply(id);
+  }
+
   getOutboundReply(id: string): OutboundReply | null {
     const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE id = ?").get(id) as OutboundReplyRow | undefined;
     return row ? mapOutboundReply(row) : null;
@@ -210,6 +228,13 @@ export class SqliteOutboxStore {
 }
 
 function now(): string { return new Date().toISOString(); }
+function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
+function retryAt(attempt: number, explicitDelayMs?: number): string {
+  const exponential = Math.min(60_000, 1_000 * 2 ** (attempt - 1));
+  const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
+  const delay = explicitDelayMs === undefined ? jittered : Math.max(exponential, Math.min(3_600_000, explicitDelayMs));
+  return new Date(Date.now() + delay).toISOString();
+}
 function streamCardState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
   try {
     const decoded = JSON.parse(payload) as { stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };
