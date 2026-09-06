@@ -165,8 +165,9 @@ npm run swarm:status
 `./install.sh` enables `herdr-agent-swarm.service` but deliberately does not
 start it. By default, configuration is stored under
 `~/.config/herdr-agent-swarm` and runtime state under
-`~/.local/state/herdr-agent-swarm`. The `.env` and `projects.json` files are
-private mode-`0600` files; do not commit or copy them into the repository.
+`~/.local/state/herdr-agent-swarm`. The `.env`, `projects.json`, and
+`runtime.yaml` files are private mode-`0600` files; do not commit or copy them
+into the repository.
 
 Finally, verify dependency readiness through the loopback endpoint:
 
@@ -221,7 +222,8 @@ the following `./install.sh` and `npm run swarm:start` commands own those steps.
 Secret input is hidden. When rerunning setup, the existing secret can be kept
 without displaying or re-entering it. Cancelling before save leaves the current
 configuration unchanged; replacing a valid configuration creates a private
-`backup-<UTC timestamp>` directory beside `.env` and `projects.json`.
+`backup-<UTC timestamp>` directory beside `.env`, `projects.json`, and
+`runtime.yaml`.
 
 The read-only checks authenticate the Lark application, confirm that the target
 chat is readable, and compare the configured bot open ID when Lark exposes it.
@@ -364,6 +366,7 @@ directory:
 ```text
 ${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}/.env
 ${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}/projects.json
+${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}/runtime.yaml
 ```
 
 Set at least these values in `.env`:
@@ -392,9 +395,7 @@ COMMAND_TIMEOUT_MS=30000
 LARK_REQUEST_TIMEOUT_MS=30000
 TURN_TIMEOUT_MS=3600000
 RECONCILE_INTERVAL_MS=30000
-HERDR_SNAPSHOT_CACHE_TTL_MS=2000
 OUTBOX_SAFETY_SCAN_INTERVAL_MS=30000
-CARD_UPDATE_DEBOUNCE_MS=500
 HERDR_CIRCUIT_FAILURE_THRESHOLD=3
 HERDR_CIRCUIT_OPEN_MS=15000
 SQLITE_INTEGRITY_AUDIT_INTERVAL_MS=900000
@@ -404,6 +405,35 @@ MAX_QUEUE_DEPTH=20
 LARK_MESSAGE_CHUNK_SIZE=3500
 ```
 
+Operational polling, cache, CardKit sizing, debounce, and pane-close timing live
+in `runtime.yaml`. Setup writes a fully populated file; a missing file preserves
+these defaults, while malformed input or unknown keys prevent startup:
+
+```yaml
+runtime:
+  polling:
+    transcriptIdentityMs: 50
+    attachedTranscriptMs: 250
+    workerTurnMs: 250
+    externalTurnMs: 2000
+  cache:
+    herdrSnapshotTtlMs: 2000
+  cards:
+    updateDebounceMs: 500
+    payloadLimitChars: 12000
+    answerStreamLimitChars: 28000
+    answerPageLimitChars: 9000
+  paneClosure:
+    confirmationTtlMs: 60000
+```
+
+`answerPageLimitChars` is the durable page boundary and must not exceed the
+render safety boundary `answerStreamLimitChars`. Changes require a service
+restart; live reload and per-project overrides are intentionally unsupported.
+The retired `HERDR_SNAPSHOT_CACHE_TTL_MS` and `CARD_UPDATE_DEBOUNCE_MS`
+environment variables are rejected with migration guidance. Validate all three
+files with `npm run config:validate -- <env-file> <projects-file> <runtime-file>`.
+
 `projects.json` is the project allowlist. Every
 entry contains a stable `id`, display name, description, Herdr `workspaceId`,
 absolute `cwd`, and optional `maxInstances`; `maxInstances` limits the number of
@@ -412,7 +442,7 @@ the registry, and `defaultProjectId` must reference one entry. The registry is
 required; a missing or invalid file prevents startup. `npm run swarm:init` can
 write templates into the standalone config directory for non-interactive setup.
 
-The service defaults `PROJECTS_CONFIG_PATH` to its config directory and
+The service defaults `PROJECTS_CONFIG_PATH` and `RUNTIME_CONFIG_PATH` to its config directory and
 `BRIDGE_DATABASE_PATH` to the `bridge.db` file under
 `${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}`.
 Explicit absolute values still override those locations. When managed TraeX starts are enabled,
@@ -489,10 +519,10 @@ session reference, and Agent state. Answer content comes only from an exactly
 identified structured TraeX transcript; `unknown` remains fail-closed and runtime
 Model/Mode selection is unsupported.
 `RECONCILE_INTERVAL_MS` is the full-scan recovery fallback.
-`HERDR_SNAPSHOT_CACHE_TTL_MS`, `OUTBOX_SAFETY_SCAN_INTERVAL_MS`, and
-`CARD_UPDATE_DEBOUNCE_MS` tune cache freshness and background coalescing. Their
-defaults preserve the built-in behavior; they
-do not change durable ordering, replay, or recovery semantics.
+`OUTBOX_SAFETY_SCAN_INTERVAL_MS` tunes the durable outbox fallback scan. The
+remaining polling, cache, card, and close-confirmation timings are validated in
+`runtime.yaml`; their defaults preserve durable ordering, replay, and recovery
+semantics.
 
 Exiting the Herdr TUI does not stop the user service; the Herdr server must remain
 available for pane orchestration. `npm run swarm:stop` preserves configuration

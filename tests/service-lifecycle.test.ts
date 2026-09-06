@@ -85,6 +85,7 @@ describe("service lifecycle", () => {
     const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
     expect(unit).toContain(`EnvironmentFile=${standaloneConfig}/.env`);
     expect(unit).toContain(`Environment=PROJECTS_CONFIG_PATH=${standaloneConfig}/projects.json`);
+    expect(unit).toContain(`Environment=RUNTIME_CONFIG_PATH=${standaloneConfig}/runtime.yaml`);
     expect(unit).toContain(`Environment=BRIDGE_DATABASE_PATH=${standaloneState}/bridge.db`);
     expect(unit).not.toContain("HERDR_PLUGIN_ROOT");
   });

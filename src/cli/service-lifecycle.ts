@@ -208,6 +208,7 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
   const environment = { ...base, ...readEnvironmentFile(paths.environmentFile) };
   if (base.HERDR_SOCKET_PATH) environment.HERDR_SOCKET_PATH = base.HERDR_SOCKET_PATH;
   environment.PROJECTS_CONFIG_PATH = resolve(paths.configDirectory, "projects.json");
+  environment.RUNTIME_CONFIG_PATH = resolve(paths.configDirectory, "runtime.yaml");
   environment.BRIDGE_DATABASE_PATH ||= resolve(paths.stateDirectory, "bridge.db");
   const config = loadConfig(environment);
   validateProjectDirectories(config.projects);
@@ -250,6 +251,7 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     `WorkingDirectory=${systemdEscape(paths.root)}`,
     `EnvironmentFile=${systemdEscape(paths.environmentFile)}`,
     `Environment=PROJECTS_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "projects.json"))}`,
+    `Environment=RUNTIME_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "runtime.yaml"))}`,
     `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(environment.BRIDGE_DATABASE_PATH || resolve(paths.stateDirectory, "bridge.db")))}`,
     ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,

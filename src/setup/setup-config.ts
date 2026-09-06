@@ -4,14 +4,15 @@ import { join } from "node:path";
 import { validateEnvironmentAndRegistry, validateProjectDirectories, validateProjectRegistry } from "../config.js";
 import { readEnvironmentFile, serializeEnvironmentFile } from "../runtime/environment-file.js";
 import type { SetupCheck, SetupConfigPort, SetupContext, SetupDraft } from "./setup-types.js";
+import { defaultRuntimeTuning, loadRuntimeTuning, serializeRuntimeTuning, validateRuntimeTuning } from "../runtime-config.js";
 
 export const setupEnvironmentOrder = [
   "LARK_APP_ID", "LARK_APP_SECRET", "LARK_CHAT_ID", "LARK_BOT_OPEN_ID", "LARK_ALLOWED_OPEN_IDS", "LARK_ADMIN_OPEN_IDS",
-  "PROJECTS_CONFIG_PATH", "BRIDGE_DATABASE_PATH", "TRAEX_SESSIONS_ROOT",
+  "PROJECTS_CONFIG_PATH", "RUNTIME_CONFIG_PATH", "BRIDGE_DATABASE_PATH", "TRAEX_SESSIONS_ROOT",
   "HERDR_BIN", "TRAEX_BIN", "CODEX_BIN", "CLAUDE_CODE_BIN", "PI_BIN", "TRAEX_PERMISSION_MODE",
   "BRIDGE_HTTP_HOST", "BRIDGE_HTTP_PORT", "LOG_LEVEL",
   "COMMAND_TIMEOUT_MS", "LARK_REQUEST_TIMEOUT_MS", "TURN_TIMEOUT_MS", "RECONCILE_INTERVAL_MS",
-  "HERDR_SNAPSHOT_CACHE_TTL_MS", "OUTBOX_SAFETY_SCAN_INTERVAL_MS", "CARD_UPDATE_DEBOUNCE_MS",
+  "OUTBOX_SAFETY_SCAN_INTERVAL_MS",
   "HERDR_CIRCUIT_FAILURE_THRESHOLD", "HERDR_CIRCUIT_OPEN_MS",
   "INSTANCE_LEASE_TTL_MS", "INSTANCE_LEASE_HEARTBEAT_MS", "MAX_QUEUE_DEPTH", "LARK_MESSAGE_CHUNK_SIZE",
   "OUTBOX_RETENTION_DAYS", "OUTBOX_RETENTION_BATCH_SIZE", "OUTBOX_RETENTION_MAX_BATCHES",
@@ -32,6 +33,7 @@ interface RepositoryOptions {
 interface ExistingPair {
   environmentFile: string;
   projectsFile: string;
+  runtimeFile: string;
   exists: boolean;
 }
 
@@ -62,6 +64,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
 
     try {
       validateEnvironmentAndRegistry(draft.environment, validateProjectRegistry(draft.registry));
+      validateRuntimeTuning(draft.runtime ?? defaultRuntimeTuning());
       checks.push({ id: "config.schema", status: "pass", summary: "Configuration schema is valid" });
     } catch {
       checks.push({ id: "config.schema", status: "fail", summary: "Configuration does not satisfy the production schema", remediation: "Review the entered values and try again." });
@@ -114,6 +117,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     const paths = this.paths(context, false);
     const environmentDraft = join(context.configDirectory, ".setup-env.draft");
     const projectsDraft = join(context.configDirectory, ".setup-projects.draft");
+    const runtimeDraft = join(context.configDirectory, ".setup-runtime.draft");
     const marker = join(context.configDirectory, ".setup-transaction.json");
     const existing = await this.inspectExistingPair(context);
     let backupDirectory: string | undefined;
@@ -122,14 +126,16 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     try {
       await writePrivateFile(environmentDraft, renderSetupEnvironment(draft.environment));
       await writePrivateFile(projectsDraft, `${JSON.stringify(draft.registry, null, 2)}\n`);
+      await writePrivateFile(runtimeDraft, serializeRuntimeTuning(validateRuntimeTuning(draft.runtime ?? defaultRuntimeTuning())));
       if (existing.exists) {
         backupDirectory = await this.createBackup(existing, context);
       }
       markerWritten = true;
-      await writePrivateFile(marker, `${JSON.stringify({ backupDirectory: backupDirectory ?? null, environmentFile: paths.environmentFile, projectsFile: paths.projectsFile }, null, 2)}\n`);
+      await writePrivateFile(marker, `${JSON.stringify({ backupDirectory: backupDirectory ?? null, environmentFile: paths.environmentFile, projectsFile: paths.projectsFile, runtimeFile: paths.runtimeFile }, null, 2)}\n`);
       replacementStarted = true;
       await this.replace(environmentDraft, paths.environmentFile, rename);
       await this.replace(projectsDraft, paths.projectsFile, rename);
+      await this.replace(runtimeDraft, paths.runtimeFile, rename);
       await syncDirectory(context.configDirectory);
       await rm(marker, { force: true });
       markerWritten = false;
@@ -143,10 +149,14 @@ export class FileSetupConfigRepository implements SetupConfigPort {
         } else if (existing.exists && backupDirectory) {
           await copyPrivateFile(join(backupDirectory, ".env"), paths.environmentFile);
           await copyPrivateFile(join(backupDirectory, "projects.json"), paths.projectsFile);
+          const backedUpRuntime = join(backupDirectory, "runtime.yaml");
+          if (await pathExists(backedUpRuntime)) await copyPrivateFile(backedUpRuntime, paths.runtimeFile);
+          else await rm(paths.runtimeFile, { force: true });
           recovery = "restored previous configuration";
         } else {
           await rm(paths.environmentFile, { force: true });
           await rm(paths.projectsFile, { force: true });
+          await rm(paths.runtimeFile, { force: true });
           recovery = "removed incomplete configuration";
         }
         if (markerWritten) await rm(marker, { force: true });
@@ -158,6 +168,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     } finally {
       await rm(environmentDraft, { force: true });
       await rm(projectsDraft, { force: true });
+      await rm(runtimeDraft, { force: true });
     }
   }
 
@@ -165,6 +176,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     return {
       environmentFile: context.environmentFile ?? join(context.configDirectory, ".env"),
       projectsFile: context.projectsFile ?? join(context.configDirectory, "projects.json"),
+      runtimeFile: context.runtimeFile ?? join(context.configDirectory, "runtime.yaml"),
       exists
     };
   }
@@ -172,7 +184,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
   private async inspectExistingPair(context: SetupContext): Promise<ExistingPair> {
     const paths = this.paths(context, false);
     const [environmentExists, projectsExist] = await Promise.all([pathExists(paths.environmentFile), pathExists(paths.projectsFile)]);
-    if (environmentExists !== projectsExist) throw new Error(`Incomplete configuration transaction in ${context.configDirectory}; restore the private pair before continuing.`);
+    if (environmentExists !== projectsExist) throw new Error(`Incomplete configuration transaction in ${context.configDirectory}; restore the private configuration set before continuing.`);
     if (await pathExists(join(context.configDirectory, ".setup-transaction.json"))) {
       throw new Error(`Incomplete configuration transaction marker at ${join(context.configDirectory, ".setup-transaction.json")}.`);
     }
@@ -193,7 +205,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     }
     return {
       id: "config.incomplete-transaction", status: "fail", summary: "A prior or partial configuration transaction requires recovery",
-      remediation: `Inspect the private backup at ${backupPath} and restore a complete .env/projects.json pair.`
+      remediation: `Inspect the private backup at ${backupPath} and restore a complete .env/projects.json set; runtime.yaml is optional for legacy installations.`
     };
   }
 
@@ -201,7 +213,8 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     const environment = Object.fromEntries(Object.entries(readEnvironmentFile(pair.environmentFile)).filter((entry): entry is [string, string] => entry[1] !== undefined));
     const registry = validateProjectRegistry(JSON.parse(await readFile(pair.projectsFile, "utf8")));
     validateEnvironmentAndRegistry(environment, registry);
-    return { environment, registry };
+    const runtime = loadRuntimeTuning(pair.runtimeFile);
+    return { environment, registry, runtime };
   }
 
   private async createBackup(existing: ExistingPair, context: SetupContext): Promise<string> {
@@ -211,6 +224,7 @@ export class FileSetupConfigRepository implements SetupConfigPort {
     await chmod(backupDirectory, 0o700);
     await copyPrivateFile(existing.environmentFile, join(backupDirectory, ".env"));
     await copyPrivateFile(existing.projectsFile, join(backupDirectory, "projects.json"));
+    if (await pathExists(existing.runtimeFile)) await copyPrivateFile(existing.runtimeFile, join(backupDirectory, "runtime.yaml"));
     await syncDirectory(backupDirectory);
     return backupDirectory;
   }

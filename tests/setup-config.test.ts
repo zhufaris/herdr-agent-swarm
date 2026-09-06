@@ -52,9 +52,11 @@ describe("file setup configuration repository", () => {
     expect(statSync(context.configDirectory).mode & 0o777).toBe(0o700);
     expect(statSync(result.environmentFile).mode & 0o777).toBe(0o600);
     expect(statSync(result.projectsFile).mode & 0o777).toBe(0o600);
+    expect(statSync(result.runtimeFile).mode & 0o777).toBe(0o600);
     expect(readEnvironmentFile(result.environmentFile).LARK_APP_SECRET).toBe("top-secret");
     expect(JSON.parse(readFileSync(result.projectsFile, "utf8"))).toEqual(draft.registry);
     expect(readFileSync(result.projectsFile, "utf8")).toBe(`${JSON.stringify(draft.registry, null, 2)}\n`);
+    expect(readFileSync(result.runtimeFile, "utf8")).toContain("answerPageLimitChars: 9000");
     expect(existsSync(join(context.configDirectory, ".setup-transaction.json"))).toBe(false);
   });
 
@@ -69,6 +71,7 @@ describe("file setup configuration repository", () => {
     expect(readEnvironmentFile(join(result.backupDirectory!, ".env")).LARK_APP_ID).toBe("cli_test");
     expect(statSync(join(result.backupDirectory!, ".env")).mode & 0o777).toBe(0o600);
     expect(statSync(join(result.backupDirectory!, "projects.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(result.backupDirectory!, "runtime.yaml")).mode & 0o777).toBe(0o600);
   });
 
   it("restores both old files if the second replacement fails", async () => {
@@ -146,7 +149,8 @@ describe("file setup configuration repository", () => {
     expect(await repository.load(context)).toBeNull();
     await repository.commit(draft, context);
     expect(await repository.load(context)).toEqual({
-      environment: expect.objectContaining({ LARK_APP_SECRET: "top-secret" }), registry: draft.registry
+      environment: expect.objectContaining({ LARK_APP_SECRET: "top-secret" }), registry: draft.registry,
+      runtime: expect.objectContaining({ cards: expect.objectContaining({ answerPageLimitChars: 9_000 }) })
     });
     expect(await repository.validate(draft, context)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "config.schema", status: "pass" }),

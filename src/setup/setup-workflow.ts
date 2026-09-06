@@ -141,6 +141,7 @@ function emptyDraft(context: SetupContext): SetupDraft {
   return {
     environment: {
       PROJECTS_CONFIG_PATH: `${context.configDirectory}/projects.json`,
+      RUNTIME_CONFIG_PATH: `${context.configDirectory}/runtime.yaml`,
       BRIDGE_DATABASE_PATH: `${context.stateDirectory}/bridge.db`,
       HERDR_BIN: "herdr", TRAEX_BIN: "traex", TRAEX_PERMISSION_MODE: "auto",
       BRIDGE_HTTP_HOST: "127.0.0.1", BRIDGE_HTTP_PORT: "8787"

@@ -993,11 +993,12 @@ These are concrete correctness or robustness gaps in the current implementation,
 distinct from the architectural evolution priorities above. They do not require a
 boundary change to fix.
 
-- **Polling intervals and size limits**: several timeouts, poll intervals, and
-  payload size limits (25 ms, 50 ms, 250 ms runtime polls, 2 s cache TTL, 500 ms
-  card debounce, 12000/28000 character CardKit limits,
-  60 s close-code TTL) are hardcoded in their respective modules. These should
-  move to the validated configuration surface.
+- **Runtime tuning**: polling intervals, Herdr snapshot cache TTL, CardKit
+  debounce and size limits, Answer render/page boundaries, and pane-close
+  confirmation TTL are loaded from strict `runtime.yaml` at the composition
+  boundary. Missing files preserve defaults; present invalid files fail closed.
+  Production consumers receive normalized values through constructor seams, so
+  domain workflows remain independent of YAML and environment parsing.
 
 ## Current evolution priorities
 
@@ -1005,8 +1006,8 @@ boundary change to fix.
    reconciliation duration, delivery latency) and lane-level backlog
    diagnostics; cross-lane concurrency with strict in-lane ordering is already
    implemented.
-2. Move remaining polling intervals and size limits into validated configuration
-   as operator tuning needs arise.
+2. Add runtime tuning fields only when an operator-facing need is established;
+   keep each new setting validated and injected at the composition boundary.
 
 ## Related documents
 
