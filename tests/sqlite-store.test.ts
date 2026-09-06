@@ -40,6 +40,11 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 29").get()).toEqual({ version: 29 });
     const outboxColumns = (store.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name);
     expect(outboxColumns).toEqual(expect.arrayContaining(["intent_kind", "intent_json", "renderer_revision"]));
+    const typedIntentTriggers = store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'outbound_replies_typed_intent_%' ORDER BY name").all();
+    expect(typedIntentTriggers).toEqual([
+      { name: "outbound_replies_typed_intent_insert" },
+      { name: "outbound_replies_typed_intent_payload_update" }
+    ]);
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('instance_turns_primary_source','worker_turn_cards_session_phase') ORDER BY name").all()).toEqual([
       { name: "instance_turns_primary_source" }, { name: "worker_turn_cards_session_phase" }
     ]);

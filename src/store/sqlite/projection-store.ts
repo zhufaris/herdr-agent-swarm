@@ -6,7 +6,7 @@ import { initialTopicView, type TopicViewState } from "../../domain/topic-view.j
 import { mapAnswerPage, type AnswerPageRow } from "../sqlite-records.js";
 import { outboundLaneKey } from "../outbox-lanes.js";
 import type { SqliteContext } from "./context.js";
-import { materializedDeliveryIntent } from "../../domain/delivery-intent.js";
+import { encodeDeliveryIntent } from "../../domain/delivery-intent.js";
 
 export class SqliteProjectionStore {
   constructor(
@@ -182,13 +182,15 @@ export class SqliteProjectionStore {
       const view = this.loadRunCard(input.promptId);
       if (!page || !view || !["active", "frozen", "finished"].includes(page.state) || page.card_id !== input.cardId || page.message_id !== input.messageId) return "stale";
       const key = `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`;
+      const payload = JSON.stringify(input.card);
+      const intentJson = encodeDeliveryIntent("card_update", payload).intentJson;
       const existing = this.context.database.prepare("SELECT id, state, view_version, payload FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState; view_version: number | null; payload: string } | undefined;
       if (existing) {
-        if (existing.state === "delivered" && Number(existing.view_version ?? 0) >= view.viewVersion && existing.payload === JSON.stringify(input.card)) return "waiting";
+        if (existing.state === "delivered" && Number(existing.view_version ?? 0) >= view.viewVersion && existing.payload === payload) return "waiting";
         if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
           const timestamp = now();
-          this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-            .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
+          this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, intent_json = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+            .run(payload, intentJson, view.viewVersion, timestamp, timestamp, existing.id);
           return "reserved";
         }
         return "waiting";
@@ -204,12 +206,14 @@ export class SqliteProjectionStore {
       const view = this.loadRunCard(input.promptId);
       if (!page || !view || page.state !== "finished" || page.message_id !== input.messageId) return "stale";
       const key = `answer-closed:${input.promptId}:${input.pageIndex}:${input.messageId}`;
+      const payload = JSON.stringify(input.card);
+      const intentJson = encodeDeliveryIntent("card_update", payload).intentJson;
       const existing = this.context.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
       if (existing) {
         if (existing.state === "delivered" || existing.state === "dead_letter" || existing.state === "dismissed") {
           const timestamp = now();
-          this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-            .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
+          this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, intent_json = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+            .run(payload, intentJson, view.viewVersion, timestamp, timestamp, existing.id);
           this.dependencies.refreshOutboxLaneHead(outboundLaneKey({ cardRole: "answer", promptId: input.promptId, rootMessageId: input.messageId, kind: "card_update" }));
           return "reserved";
         }
@@ -229,7 +233,7 @@ export class SqliteProjectionStore {
       const existing = this.context.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
       const timestamp = now();
       const payload = JSON.stringify(input.card);
-      const intentJson = JSON.stringify(materializedDeliveryIntent("card_update", payload));
+      const intentJson = encodeDeliveryIntent("card_update", payload).intentJson;
       if (existing) {
         if (existing.state === "pending") {
           this.context.database.prepare("UPDATE outbound_replies SET payload = ?, intent_json = ?, view_version = ?, updated_at = ? WHERE id = ?").run(payload, intentJson, view.viewVersion, timestamp, existing.id);
@@ -253,13 +257,14 @@ export class SqliteProjectionStore {
       const existing = this.context.database.prepare("SELECT state, element_id, source_start, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.nextPageIndex) as { state: string; element_id: string; source_start: number; delivery_mode: string } | undefined;
       const idempotencyKey = `answer-static-rebuild:${input.promptId}:${input.nextPageIndex}`;
       const payload = JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId, deliveryMode: "static" } });
+      const intentJson = encodeDeliveryIntent("stream_card_create", payload).intentJson;
       if (existing) {
         if (existing.state !== "creating" || existing.element_id !== input.nextElementId || Number(existing.source_start) !== input.sourceStart || existing.delivery_mode !== "static") return "stale";
         const failed = this.context.database.prepare("SELECT id, state, lane_key FROM outbound_replies WHERE idempotency_key = ?").get(idempotencyKey) as { id: string; state: OutboundReplyState; lane_key: string } | undefined;
         if (!failed || (failed.state !== "dead_letter" && failed.state !== "dismissed")) return "waiting";
         const timestamp = now();
-        this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-          .run(payload, input.viewVersion, timestamp, timestamp, failed.id);
+        this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, intent_json = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+          .run(payload, intentJson, input.viewVersion, timestamp, timestamp, failed.id);
         this.context.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, failed.lane_key, failed.id);
         this.dependencies.refreshOutboxLaneHead(failed.lane_key);
         return "reserved";

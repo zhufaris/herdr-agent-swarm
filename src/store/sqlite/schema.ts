@@ -131,6 +131,25 @@ export function createLatestSchema(context: SqliteContext): void {
     error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT
   );
+  CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert
+  AFTER INSERT ON outbound_replies
+  WHEN NEW.intent_json IS NULL
+  BEGIN
+    UPDATE outbound_replies SET
+      intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END,
+      intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload),
+      renderer_revision = 1
+    WHERE id = NEW.id;
+  END;
+  CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_payload_update
+  AFTER UPDATE OF payload ON outbound_replies
+  BEGIN
+    UPDATE outbound_replies SET
+      intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END,
+      intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload),
+      renderer_revision = 1
+    WHERE id = NEW.id;
+  END;
   CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
   CREATE TABLE IF NOT EXISTS project_selections(
     id TEXT PRIMARY KEY, command_message_id TEXT UNIQUE NOT NULL, selector_message_id TEXT, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,

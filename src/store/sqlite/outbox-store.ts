@@ -10,7 +10,7 @@ import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage
 import { outboundLaneKey } from "../outbox-lanes.js";
 import { mapOutboundReply, type OutboundReplyRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
-import { CARD_RENDERER_REVISION, deliveryIntentKind, materializedDeliveryIntent } from "../../domain/delivery-intent.js";
+import { encodeDeliveryIntent } from "../../domain/delivery-intent.js";
 
 type EnqueueInput = Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string };
 
@@ -35,9 +35,10 @@ export class SqliteOutboxStore {
     const bindingGeneration = input.promptId ? this.dependencies.loadRunCard(input.promptId)?.bindingGeneration ?? null : input.bindingId ? this.dependencies.getBinding(input.bindingId)?.generation ?? null : null;
     const laneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
     const streamMetadata = outboundStreamMetadata(input.kind, input.payload);
-    const intentKind = input.intentKind ?? deliveryIntentKind(input.kind);
-    const intentJson = input.intentJson ?? JSON.stringify(materializedDeliveryIntent(input.kind, input.payload));
-    const rendererRevision = input.rendererRevision ?? CARD_RENDERER_REVISION;
+    const encoded = encodeDeliveryIntent(input.kind, input.payload);
+    const intentKind = input.intentKind ?? encoded.intentKind;
+    const intentJson = input.intentJson ?? encoded.intentJson;
+    const rendererRevision = input.rendererRevision ?? encoded.rendererRevision;
     return this.context.transaction(() => {
       if (input.kind === "card_update" && input.bindingId && !input.promptId) {
         this.context.database.prepare(`

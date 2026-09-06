@@ -13,6 +13,10 @@ export function deliveryIntentKind(kind: OutboundReplyKind): DeliveryIntentKind 
   return "card";
 }
 export function materializedDeliveryIntent(kind: OutboundReplyKind, payload: string): MaterializedDeliveryIntent { return { schemaVersion: DELIVERY_INTENT_SCHEMA_VERSION, kind: deliveryIntentKind(kind), materializedPayload: payload }; }
+export function encodeDeliveryIntent(kind: OutboundReplyKind, payload: string): { intentKind: DeliveryIntentKind; intentJson: string; rendererRevision: number } {
+  const intent = materializedDeliveryIntent(kind, payload);
+  return { intentKind: intent.kind, intentJson: JSON.stringify(intent), rendererRevision: CARD_RENDERER_REVISION };
+}
 export function decodeDeliveryIntent(value: string | null): MaterializedDeliveryIntent | null {
   if (!value) return null;
   try { const parsed = JSON.parse(value) as Partial<MaterializedDeliveryIntent>; return parsed.schemaVersion === 1 && typeof parsed.kind === "string" && typeof parsed.materializedPayload === "string" ? parsed as MaterializedDeliveryIntent : null; }
