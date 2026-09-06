@@ -3434,6 +3434,37 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
+  convergeWorkerTaskCardRenderer(revision: string, render: (view: WorkerTurnCardView, page?: WorkerTurnCardPage) => object): string[] {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.database.prepare(`
+        SELECT card.turn_id
+        FROM worker_turn_cards card
+        WHERE card.message_id IS NOT NULL AND card.card_id IS NOT NULL
+          AND card.phase IN ('running', 'blocked', 'completed', 'failed', 'cancelled')
+          AND NOT EXISTS (
+            SELECT 1 FROM outbound_replies reply
+            WHERE reply.idempotency_key = 'worker-turn:renderer:' || ? || ':' || card.turn_id
+          )
+        ORDER BY card.created_at, card.turn_id
+      `).all(revision) as Array<{ turn_id: string }>;
+      const refreshed: string[] = [];
+      for (const row of rows) {
+        const view = this.loadWorkerTurnCard(row.turn_id);
+        if (!view?.messageId || !view.cardId) continue;
+        const page = this.listWorkerTurnCardPages(row.turn_id).find(({ pageIndex }) => pageIndex === view.pageIndex);
+        this.enqueueOutboundReply({
+          id: randomUUID(), idempotencyKey: `worker-turn:renderer:${revision}:${view.turnId}`, bindingId: null,
+          workerTurnId: view.turnId, viewVersion: view.viewVersion, rootMessageId: view.messageId, kind: "card_update",
+          payload: JSON.stringify(render(view, page)), laneKeyOverride: `worker-turn:${view.turnId}`
+        });
+        refreshed.push(view.turnId);
+      }
+      this.database.exec("COMMIT");
+      return refreshed;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   recoverStaleOutboxQuarantines(): import("../domain/types.js").StaleOutboxQuarantineRecovery {
     this.database.exec("BEGIN IMMEDIATE");
     try {

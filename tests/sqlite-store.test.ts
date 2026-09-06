@@ -206,6 +206,31 @@ describe("SQLite store", () => {
     expect(store.recoverUnsupportedWorkerCardCreates(renderWorkerTurnCard)).toEqual([]);
   });
 
+  it("converges a delivered actionable Worker Task card once per renderer revision without replaying its turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: "source", view: queued, card: renderWorkerTurnCard(queued) });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "task-message", "task-card");
+    store.transitionInstanceTurnWithProjection({ turnId: queued.turnId, expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-05T00:01:00.000Z", answer: "done" }, render: renderWorkerTurnCard });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+    const originalTurn = store.getInstanceTurn(queued.turnId);
+
+    expect(store.convergeWorkerTaskCardRenderer("explicit-v1", renderWorkerTurnCard)).toEqual([queued.turnId]);
+    expect(store.convergeWorkerTaskCardRenderer("explicit-v1", renderWorkerTurnCard)).toEqual([]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      idempotencyKey: `worker-turn:renderer:explicit-v1:${queued.turnId}`, kind: "card_update", rootMessageId: "task-message"
+    })]);
+    expect(store.listPendingOutboundReplies()[0]!.payload).toContain("直接回复卡片仍会进入 Primary");
+    expect(store.getInstanceTurn(queued.turnId)).toEqual(originalTurn);
+  });
+
   it("keeps the running Worker task current when newer work is queued", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
