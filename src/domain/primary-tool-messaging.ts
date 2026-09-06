@@ -5,7 +5,7 @@ import type { SteerReceipt } from "./agent-runtime.js";
 
 /** Inbound application capability used by the Primary Tool transport. */
 export interface PrimaryToolMessagingPort {
-  submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string } }): Promise<unknown>;
+  submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string }; source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null } }): Promise<unknown>;
   steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; text: string }): Promise<SteerReceipt>;
   inspect(actor: ControlActor, instanceId: string): { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] };
   list(actor: ControlActor, projectId: string): AgentInstance[];

@@ -18,11 +18,11 @@ function setup() {
     const view = createQueuedRunCard({ promptId: "parent", bindingId: "binding", title: "parent", workspaceId: "w", paneId: "primary:pane", requestText: "coordinate", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store!.acceptPrompt({ prompt: { id: "parent", bindingId: "binding", larkMessageId: "message", actorOpenId: "u", body: "coordinate" }, view, rootMessageId: "root", answerCard: {} });
     store!.updatePrompt("parent", "running");
-    return { projectId, bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent" };
+    return { projectId, bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent", sourceMessageId: "message", rootMessageId: "root" };
   };
   const driver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }), steer: async () => ({ status: "delivered" as const }), interrupt: async () => ({ status: "interrupted" as const }) } satisfies AgentRuntimeDriver;
   const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "turn-1" });
-  return { create, primary, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string }) => new PrimaryToolBroker(identity, messaging) };
+  return { create, primary, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }) => new PrimaryToolBroker(identity, messaging) };
 }
 
 describe("PrimaryToolBroker", () => {

@@ -95,7 +95,9 @@ TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“�
 Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
 目标会失效，必须刷新后重新选择。Primary 可直接调用同项目中已存在的 Worker，不需要
 逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
-触发 Primary turn。
+触发 Primary turn。Primary 通过内置 Worker 工具发起的新任务和 follow-up 也会在当前飞书
+话题创建独立的 Worker Task Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
+不能由工具调用参数伪造。
 
 实例停止不删除 worktree。删除前系统会重新检查 dirty、conflict、ahead、generation 和
 fingerprint；任何不安全或不确定状态都会保留实例/worktree，不提供危险确认按钮。
