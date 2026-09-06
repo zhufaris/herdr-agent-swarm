@@ -16,6 +16,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { decidePaneCreatedCheckpoint, decideSelectedCheckpoint, provisioningRecoveryMessage } from "./binding-provisioning-policy.js";
 import { requireMatchingPane } from "./pane-runtime-identity.js";
+import { ManagedBindingLifecycle, PRIMARY_TOOLS_UNAVAILABLE_NOTICE, paneCreationOptions, primaryToolAgentArgs, type PrimaryToolConfiguration } from "./binding-provisioning/managed-binding-lifecycle.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
@@ -47,29 +48,19 @@ interface Options {
   presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus" | "attachStatus" | "mainCard" | "requestRejected">;
 }
 
-interface PrimaryToolConfiguration { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] }
-const PRIMARY_TOOLS_UNAVAILABLE_NOTICE = "当前 Pane 并非由 Bridge 使用 Primary 工具凭证启动；Primary 工具暂不可用。请使用 `/swarm reset` 或 `/swarm replace` 创建新的受管 Pane。";
-
-function paneCreationOptions(bindingId: string, generation: number, projectId: string, title: string, tools: PrimaryToolConfiguration): import("../domain/types.js").HerdrPaneCreationOptions {
-  return { bindingId, generation, projectId, placement: "dedicated-tab", title, environment: tools.environment };
-}
-
-function primaryToolAgentArgs(tools: PrimaryToolConfiguration): string[] {
-  return [
-    ...(tools.agentArgs ?? []),
-    "-c", `mcp_servers.herdr_agent_swarm.command=${JSON.stringify(tools.command)}`,
-    "-c", `mcp_servers.herdr_agent_swarm.args=${JSON.stringify(tools.args)}`,
-    "-c", 'mcp_servers.herdr_agent_swarm.env_vars=["SWARM_PRIMARY_CAPABILITY"]'
-  ];
-}
-
 export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowPort {
   private readonly projectsById: Map<string, ProjectConfig>;
   private readonly projectsBySpaceName: Map<string, ProjectConfig[]>;
+  private readonly managedLifecycle: ManagedBindingLifecycle;
 
   constructor(private readonly options: Options) {
     this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
     this.projectsBySpaceName = new Map();
+    this.managedLifecycle = new ManagedBindingLifecycle({
+      config: options.config, store: options.store, herdr: options.herdr, projectsById: this.projectsById, primaryTools: options.primaryTools,
+      requireStartedPane: (project, paneId, terminalId) => this.requireStartedPane(project, paneId, terminalId),
+      publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3])
+    });
     for (const project of options.config.projects) {
       const spaceName = project.spaceName;
       if (!spaceName) continue;
@@ -283,27 +274,11 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   async reattach(binding: Binding, paneId: string, actorOpenId: string): Promise<void> {
-    const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, paneId);
-    const next = this.options.store.attachBindingPane(binding.id, pane, false);
-    await this.publish(next.id, "BindingArchived", "lark", { reason: "Pane 已验证并连接；为避免重放不确定任务，发送 `/swarm resume` 后才继续队列。" });
-    await this.publish(next.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
-    this.options.store.audit({ actorOpenId, action: "binding.reattach", target: binding.id, outcome: "success" });
+    return this.managedLifecycle.reattach(binding, paneId, actorOpenId);
   }
 
   async replace(binding: Binding, actorOpenId: string): Promise<void> {
-    const { config, herdr, store } = this.options;
-    const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
-    if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
-    const paneTitle = createPrimaryPaneToken();
-    const nextGeneration = binding.generation + 1;
-    const tools = this.options.primaryTools.issueBinding(binding.id, nextGeneration);
-    const pane = await herdr.createPane(project.workspaceId, project.cwd, paneCreationOptions(binding.id, nextGeneration, project.id, paneTitle, tools));
-    await herdr.startTraex(pane.paneId, config.traex.executable, primaryToolAgentArgs(tools));
-    const startedPane = await this.requireStartedPane(project, pane.paneId, pane.terminalId ?? null);
-    const next = store.transitionBinding(store.attachBindingPane(binding.id, startedPane, true).id, { type: "pane_observed", runtime: startedPane.agentState });
-    await this.publish(next.id, "BindingArchived", "lark", { reason: "Replacement Pane 已创建；为避免重放不确定任务，发送 `/swarm resume` 后才继续队列。" });
-    await this.publish(next.id, "PrimaryToolAvailabilityChanged", "bridge", { available: true, reason: null });
-    store.audit({ actorOpenId, action: "binding.replace", target: binding.id, outcome: "success" });
+    return this.managedLifecycle.replace(binding, actorOpenId);
   }
 
   private async createSelectedProject(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> {
