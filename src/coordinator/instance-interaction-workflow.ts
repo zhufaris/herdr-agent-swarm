@@ -274,9 +274,10 @@ export class InstanceInteractionWorkflow {
     const sourceCardMessageId = typeof value.sourceCardMessageId === "string" ? value.sourceCardMessageId : "";
     const instance = this.options.store.getAgentInstance(instanceId); const view = this.options.store.loadWorkerMainView(instanceId, sessionGeneration);
     if (!instance || !view || instance.role !== "worker" || instance.generation !== generation || instance.workerSessionGeneration !== sessionGeneration || view.runtimeGeneration !== generation
-      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || !canSubmitWorkerMainTask(view) || !instance.runtimeRef || instance.desiredState !== "running" || !instance.parent) return null;
+      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || !instance.parent) return null;
     const binding = this.options.store.getBinding(instance.parent.bindingId);
-    if (!binding || binding.chatId !== action.chatId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== instance.parent.paneId || binding.generation !== view.parentBindingGeneration) return null;
+    const parentActive = Boolean(binding && binding.chatId === action.chatId && binding.lifecycle === "active" && binding.state === "active" && binding.attachment === "attached" && binding.paneId === instance.parent.paneId && binding.generation === view.parentBindingGeneration);
+    if (!canSubmitWorkerMainTask({ ...view, runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive })) return null;
     return { instance, view };
   }
 

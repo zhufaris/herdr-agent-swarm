@@ -29,7 +29,7 @@ describe("Lark channel publisher", () => {
       parent: { bindingId: "binding-1", bindingGeneration: 2, paneId: "primary-pane", nativeSessionId: "primary-session" },
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
-    const view = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 2, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z" });
+    const view = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 2, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, runtimeAttached: false, desiredState: worker.desiredState, parentActive: false, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.reserveWorkerMainCard(view, "primary-root", { schema: "2.0" });
     const replyCard = vi.fn(async () => ({ messageId: "worker-main-message", cardId: "worker-main-card" }));
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyCard }), pino({ enabled: false }));

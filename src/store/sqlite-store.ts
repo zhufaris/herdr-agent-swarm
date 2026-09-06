@@ -323,6 +323,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     ]);
   }
 
+  private invalidateBindingWorkerContexts(bindingId: string, reason: string): void {
+    const workers = this.database.prepare("SELECT id, worker_session_generation FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? ORDER BY created_at, id").all(bindingId) as Array<{ id: string; worker_session_generation: number }>;
+    this.invalidateCardContexts(workers.map((worker) => ({ targetKind: "worker-session" as const, targetId: worker.id, targetGeneration: worker.worker_session_generation, reason })));
+  }
+
   listPendingCardContextInvalidations(limit = 100): CardContextInvalidation[] {
     const bounded = Math.max(1, Math.min(limit, 500));
     return (this.database.prepare(`SELECT * FROM card_context_invalidations WHERE projected_dependency_revision < requested_dependency_revision ORDER BY updated_at, target_kind, target_id, target_generation LIMIT ?`).all(bounded) as Array<Record<string, unknown>>).map(mapCardContextInvalidation);
@@ -406,7 +411,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     });
     const binding = this.getBinding(instance.parent.bindingId);
     return {
-      workerId, workerSessionGeneration, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
+      workerId, workerSessionGeneration, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState,
+      runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState,
+      parentActive: binding?.lifecycle === "active" && binding.state === "active" && binding.attachment === "attached" && binding.paneId === instance.parent.paneId && binding.generation === instance.parent.bindingGeneration,
+      paneId: instance.runtimeRef?.paneId ?? null,
       lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, ownerName: binding?.title ?? "Primary",
       workspace: lease.cwd, branch: lease.branch, currentTask: active ? summary(active) : null, queueCount: cards.filter(({ phase }) => phase === "queued").length, nextTaskTitle: cards.filter(({ phase }) => phase === "queued").reverse().map(({ requestText }) => summarizeTaskTitle(requestText))[0] ?? null,
       recentTasks: cards.filter(({ phase }) => ["completed", "failed", "cancelled", "dispatch-uncertain"].includes(phase)).slice(0, 5).map(summary), createdAt: cards.at(-1)?.createdAt ?? now()
@@ -1733,21 +1741,33 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   updateBinding(id: string, patch: Partial<Binding>): Binding { return this.persistBindingPatch(id, patch); }
 
   private persistBindingPatch(id: string, patch: Partial<Binding>): Binding {
-    const normalized = { ...patch };
-    if (patch.state && patch.lifecycle === undefined) {
-      if (patch.state === "active") { normalized.lifecycle = "active"; normalized.provisioningCheckpoint = "activated"; if (patch.paneId) normalized.attachment = "attached"; }
-      else if (patch.state === "archived") { normalized.lifecycle = "archived"; normalized.archivedAt = patch.archivedAt ?? now(); }
-      else if (patch.state === "orphaned") { normalized.lifecycle = "active"; normalized.attachment = "orphaned"; }
-      else if (patch.state === "failed") normalized.lifecycle = "failed";
-    }
-    const entries = Object.entries(normalized).filter(([key]) => key !== "id" && key !== "createdAt");
-    entries.push(["updatedAt", now()]);
-    if (entries.length === 0) return this.requireBinding(id);
-    const assignments = entries.map(([key]) => `${BINDING_COLUMNS[key as keyof Binding]} = ?`).join(", ");
-    const values = entries.map(([, value]) => typeof value === "boolean" ? Number(value) : value as SqlValue);
-    const result = this.database.prepare(`UPDATE bindings SET ${assignments} WHERE id = ?`).run(...values, id);
-    if (result.changes === 0) throw new Error(`Binding not found: ${id}`);
-    return this.requireBinding(id);
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const normalized = { ...patch };
+      if (patch.state && patch.lifecycle === undefined) {
+        if (patch.state === "active") { normalized.lifecycle = "active"; normalized.provisioningCheckpoint = "activated"; if (patch.paneId) normalized.attachment = "attached"; }
+        else if (patch.state === "archived") { normalized.lifecycle = "archived"; normalized.archivedAt = patch.archivedAt ?? now(); }
+        else if (patch.state === "orphaned") { normalized.lifecycle = "active"; normalized.attachment = "orphaned"; }
+        else if (patch.state === "failed") normalized.lifecycle = "failed";
+      }
+      const entries = Object.entries(normalized).filter(([key]) => key !== "id" && key !== "createdAt");
+      entries.push(["updatedAt", now()]);
+      if (entries.length === 0) {
+        const binding = this.requireBinding(id);
+        if (ownsTransaction) this.database.exec("COMMIT");
+        return binding;
+      }
+      const assignments = entries.map(([key]) => `${BINDING_COLUMNS[key as keyof Binding]} = ?`).join(", ");
+      const values = entries.map(([, value]) => typeof value === "boolean" ? Number(value) : value as SqlValue);
+      const result = this.database.prepare(`UPDATE bindings SET ${assignments} WHERE id = ?`).run(...values, id);
+      if (result.changes === 0) throw new Error(`Binding not found: ${id}`);
+      const binding = this.requireBinding(id);
+      const workerContextChanged = entries.some(([key]) => ["title", "lifecycle", "state", "attachment", "paneId", "generation"].includes(key));
+      if (workerContextChanged) this.invalidateBindingWorkerContexts(id, "parent-binding.changed");
+      if (ownsTransaction) this.database.exec("COMMIT");
+      return binding;
+    } catch (error) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.persistBindingPatch(id, patch); }

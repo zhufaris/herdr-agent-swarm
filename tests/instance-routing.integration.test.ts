@@ -172,7 +172,7 @@ describe("instance routing", () => {
     const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
-    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-action", cardId: "card-main" });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 2 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
@@ -204,7 +204,7 @@ describe("instance routing", () => {
     const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
-    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-repeat", cardId: "card-main-repeat" });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
@@ -423,7 +423,7 @@ describe("instance routing", () => {
     const worker = create("reviewer", "worker");
     const main = createWorkerMainView({
       workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default",
-      workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
+      workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, runtimeAttached: false, desiredState: worker.desiredState, parentActive: true, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
     });
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
     const task = taskCard(worker.id, "completed", "owned-task");

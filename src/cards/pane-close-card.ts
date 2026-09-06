@@ -18,7 +18,7 @@ export function renderPaneCloseResultCard(input: { paneId: string; workerPaneCou
   const uncertain = input.workerPaneUncertainCount ?? 0;
   const succeeded = input.workerPaneSucceededCount ?? Math.max(0, (input.workerPaneCount ?? 0) - uncertain);
   const workerResult = input.workerPaneCount
-    ? uncertain > 0 ? `Worker Pane 级联结果：${succeeded} 个已关闭，${uncertain} 个关闭结果不确定，请在 Herdr 中核实。` : `已级联关闭 ${succeeded} 个 Worker Pane。`
+    ? uncertain > 0 ? `Worker Pane 级联结果：共 ${input.workerPaneCount} 个，${succeeded} 个已关闭，${uncertain} 个关闭结果不确定，请在 Herdr 中核实。` : `已级联关闭 ${succeeded} 个 Worker Pane。`
     : "";
   return {
     schema: "2.0",

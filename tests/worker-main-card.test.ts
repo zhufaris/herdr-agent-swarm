@@ -5,7 +5,7 @@ import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker
 function view() {
   return createWorkerMainView({
     workerId: "worker-1", workerSessionGeneration: 3, parentBindingId: "binding-1", parentBindingGeneration: 7, parentPaneId: "pane-primary", workerName: "reviewer", ownerName: "Primary",
-    runtimeGeneration: 4, runtimeState: "working", workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: "GPT-5", occurredAt: "2026-09-05T00:00:00.000Z"
+    runtimeGeneration: 4, runtimeState: "working", runtimeAttached: true, desiredState: "running", parentActive: true, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: "GPT-5", occurredAt: "2026-09-05T00:00:00.000Z"
   });
 }
 
@@ -51,6 +51,15 @@ describe("Worker Main card", () => {
 
   it.each(["unprovisioned", "starting", "detached", "stopped", "failed", "terminated"] as const)("hides new-task controls while runtime is %s", (runtimeState) => {
     const text = JSON.stringify(renderWorkerMainCard({ ...view(), messageId: "om_worker_main", runtimeState }));
+    expect(text).not.toContain("worker_new_task_form");
+  });
+
+  it.each([
+    { runtimeAttached: false, desiredState: "running" as const, parentActive: true },
+    { runtimeAttached: true, desiredState: "stopped" as const, parentActive: true },
+    { runtimeAttached: true, desiredState: "running" as const, parentActive: false }
+  ])("hides new-task controls when submission ownership is unavailable: %j", (availability) => {
+    const text = JSON.stringify(renderWorkerMainCard({ ...view(), ...availability, messageId: "om_worker_main", runtimeState: "idle" }));
     expect(text).not.toContain("worker_new_task_form");
   });
 });

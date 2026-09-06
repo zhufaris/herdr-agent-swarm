@@ -83,6 +83,8 @@ describe("Lark pane close", () => {
     expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child-uncertain", "w1:p1"]);
     expect(fixture.store.database.prepare("SELECT state FROM worker_pane_close_steps WHERE worker_id = 'child-uncertain'").get()).toEqual({ state: "uncertain" });
     const result = JSON.stringify(fixture.cards.at(-1));
+    expect(result).toContain("共 1 个");
+    expect(result).toContain("0 个已关闭");
     expect(result).toContain("1 个关闭结果不确定");
     expect(result).not.toContain("已级联关闭 1 个 Worker Pane");
     await fixture.close();

@@ -132,7 +132,7 @@ describe("SQLite store", () => {
     expect([created, attached, detached, replaced].map(({ workerSessionGeneration }) => workerSessionGeneration)).toEqual([1, 1, 1, 1]);
     const main = createWorkerMainView({
       workerId: replaced.id, workerSessionGeneration: replaced.workerSessionGeneration!, parentBindingId: "binding-1", parentBindingGeneration: 7, parentPaneId: "primary-pane", workerName: replaced.name, ownerName: "Primary",
-      runtimeGeneration: replaced.generation, runtimeState: replaced.observedState, paneId: replaced.runtimeRef?.paneId ?? null, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: replaced.model, occurredAt: "2026-09-05T00:00:00.000Z"
+      runtimeGeneration: replaced.generation, runtimeState: replaced.observedState, runtimeAttached: true, desiredState: replaced.desiredState, parentActive: false, paneId: replaced.runtimeRef?.paneId ?? null, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: replaced.model, occurredAt: "2026-09-05T00:00:00.000Z"
     });
     expect(store.saveWorkerMainView(main)).toEqual(main);
     expect(store.loadWorkerMainView(replaced.id, 1)).toEqual(main);
@@ -172,7 +172,7 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     const main = createWorkerMainView({
       workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 3, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary",
-      runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
+      runtimeGeneration: worker.generation, runtimeState: worker.observedState, runtimeAttached: true, desiredState: worker.desiredState, parentActive: false, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
     });
     store.reserveWorkerMainCard(main, "primary-root", { version: 1 });
     store.acceptInstanceTurn({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
@@ -201,6 +201,25 @@ describe("SQLite store", () => {
 
     expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running" }, queueCount: 1, nextTaskTitle: "Queued task" });
     expect(store.loadPrimaryWorkerSummaries("binding-1", 1)).toEqual([expect.objectContaining({ workerId: worker.id, state: "working" })]);
+  });
+
+  it("invalidates Worker Main when its parent binding stops being active", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    store.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" });
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ runtimeAttached: true, desiredState: "running", parentActive: true });
+    store.database.exec("DELETE FROM card_context_invalidations");
+
+    store.updateBinding("binding-1", { lifecycle: "archived", state: "archived", attachment: "unattached" });
+
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ parentActive: false });
+    expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ targetKind: "worker-session", targetId: worker.id, targetGeneration: 1, reason: "parent-binding.changed" })]);
   });
 
   it("projects an idle Worker with queued work as queued instead of idle", () => {
