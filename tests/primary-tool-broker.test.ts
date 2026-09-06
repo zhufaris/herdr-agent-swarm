@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { PrimaryToolBroker } from "../src/runtime/primary-tool-broker.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";

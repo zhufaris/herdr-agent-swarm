@@ -7,7 +7,7 @@ import { createBridgeEvent } from "../src/domain/create-bridge-event.js";
 import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { renderRequestAnswerCard } from "../src/cards/run-card.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";

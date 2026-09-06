@@ -8,7 +8,7 @@ import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import type { HerdrPane } from "../src/domain/types.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 describe("space directory command", () => {
   it("groups all panes, keeps empty spaces, and tolerates one failed workspace", async () => {

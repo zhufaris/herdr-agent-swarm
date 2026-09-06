@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { herdrRetryDelay, HerdrCliAdapter } from "../src/adapters/herdr-adapter.js";
 import type { CommandRunner } from "../src/infra/command-runner.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 describe("Herdr adapter structured control", () => {
   afterEach(() => vi.useRealTimers());

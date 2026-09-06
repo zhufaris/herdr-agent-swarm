@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteIntegrityAuditor } from "../src/runtime/sqlite-integrity-auditor.js";
 import { WorkerDatabaseIntegrityStore } from "../src/runtime/sqlite-integrity-worker.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createShutdownContext } from "../src/runtime/shutdown-context.js";
 
 afterEach(() => vi.useRealTimers());

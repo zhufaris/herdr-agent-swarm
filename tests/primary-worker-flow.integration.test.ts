@@ -15,7 +15,7 @@ import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-schedule
 import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation, workerPresentation } from "./helpers/presentation.js";
 
 let directory: string | undefined; let store: SqliteBindingStore | undefined; let gateway: PrimaryToolGateway | undefined; let scheduler: InstanceWorkScheduler | undefined; let promptRun: PromptRunWorkflow | undefined;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WorkerCardDisplayWorkflow } from "../src/coordinator/worker-card-display-workflow.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });

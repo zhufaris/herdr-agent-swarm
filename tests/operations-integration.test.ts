@@ -5,7 +5,7 @@ import { createTestRouter } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 describe("operational commands", () => {
   it("lists chat-scoped sessions and failures and retries only outbound delivery", async () => {

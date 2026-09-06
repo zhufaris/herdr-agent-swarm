@@ -3,7 +3,7 @@ import type { LarkPort, OutboundCheckpointSubscriber, OutboundIntentPort, Outbox
 import { OutboundIntentWriter } from "../../src/events/outbound-intent-writer.js";
 import { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
 import { InProcessOutboundWorkNotifier } from "../../src/events/outbound-work-notifier.js";
-import type { SqliteBindingStore } from "../../src/store/sqlite-store.js";
+import type { SqliteBindingStore } from "./sqlite-binding-store.js";
 
 export function createTestOutbound(store: SqliteBindingStore, dispatcher: LarkOutboxDispatcher): OutboundIntentWriter {
   return new OutboundIntentWriter(store, {

@@ -34,7 +34,7 @@ import type { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatch
 import { OutboundIntentWriter } from "../../src/events/outbound-intent-writer.js";
 import { InProcessOutboundWorkNotifier } from "../../src/events/outbound-work-notifier.js";
 import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../../src/events/prompt-work-scheduler.js";
-import type { SqliteBindingStore } from "../../src/store/sqlite-store.js";
+import type { SqliteBindingStore } from "./sqlite-binding-store.js";
 
 export function createTestRouter(
   config: BridgeConfig,

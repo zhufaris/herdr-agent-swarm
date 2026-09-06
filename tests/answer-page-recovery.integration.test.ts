@@ -9,7 +9,7 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { LarkPort } from "../src/domain/ports.js";
 import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 let directory: string | null = null;
 afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); directory = null; });

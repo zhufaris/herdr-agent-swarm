@@ -4,7 +4,7 @@ import { ExternalTurnObserver } from "../src/coordinator/external-turn-observer.
 import type { TraexTranscriptObservation } from "../src/domain/ports.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("ExternalTurnObserver", () => {

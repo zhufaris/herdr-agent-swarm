@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InstanceRuntimeReconciler } from "../src/coordinator/instance-runtime-reconciler.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import type { HerdrPane, ProjectConfig } from "../src/domain/types.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 

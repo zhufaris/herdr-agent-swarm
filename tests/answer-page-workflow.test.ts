@@ -4,7 +4,7 @@ import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { answerStreamContent } from "../src/runtime/answer-stream.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 function readyStore(): SqliteBindingStore {
   const store = new SqliteBindingStore(":memory:");

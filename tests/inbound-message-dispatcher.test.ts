@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InboundMessageDispatcher } from "../src/coordinator/inbound-message-dispatcher.js";
 import { PermanentInboundMessageRejection } from "../src/domain/permanent-inbound-message-rejection.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 const authorizationMessage = {
   eventId: "event-1", messageId: "message-1", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "message-1",

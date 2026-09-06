@@ -13,7 +13,7 @@ import { ClaudeCodeDriver } from "../src/runtime/agents/claude-code-driver.js";
 import { TraexDriver } from "../src/runtime/agents/traex-driver.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { WorktreeManager } from "../src/runtime/worktree-manager.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteStoreKernel } from "../src/store/sqlite-store-kernel.js";
 import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
 import { InstanceControlWorkflow } from "../src/coordinator/instance-control-workflow.js";
@@ -59,13 +59,13 @@ const state = join(temporary, "state");
 const databasePath = join(state, "bridge.db");
 const socketPath = join(state, "primary-tools.sock");
 const runner = new ExecFileCommandRunner(180_000);
-let store: SqliteBindingStore | undefined; let gateway: PrimaryToolGateway | undefined; let scheduler: InstanceWorkScheduler | undefined; let promptRun: PromptRunWorkflow | undefined; let control: InstanceControlWorkflow | undefined;
+let store: SqliteStoreKernel | undefined; let gateway: PrimaryToolGateway | undefined; let scheduler: InstanceWorkScheduler | undefined; let promptRun: PromptRunWorkflow | undefined; let control: InstanceControlWorkflow | undefined;
 const ownedPanes = new Set<string>();
 try {
   const project = { id: smokeProjectId, displayName: "Smoke Project", description: "isolated acceptance", workspaceId: process.env.HERDR_WORKSPACE_ID, cwd: repository, maxInstances: 4, instances: [] };
   const herdr = new HerdrCliAdapter(runner, herdrBin, 180_000); const paneHost = new HerdrPaneHost(herdr);
   const drivers = new AgentDriverRegistry([new CodexDriver(herdr, codexBin, 180_000, true), new ClaudeCodeDriver(herdr, claudeBin, 180_000, true), new TraexDriver(herdr, traexBin, 180_000)]);
-  store = new SqliteBindingStore(databasePath);
+  store = new SqliteStoreKernel(databasePath);
   const transcriptReader = new TraexTranscriptReader();
   const workerObserver = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: (instanceId) => scheduler?.wake(instanceId), wakeOutbound: () => undefined });
   scheduler = new InstanceWorkScheduler({ store, drivers, observer: workerObserver });
@@ -112,7 +112,7 @@ try {
   if (!dispatchedWorkerTurn.result?.includes("WORKER_OK")) throw new Error(`Worker result did not contain WORKER_OK: ${dispatchedWorkerTurn.result ?? "empty"}`);
   const primaryPromptCountBeforeRestart = countRows(store, "prompt_jobs"); const workerTurnsBeforeRestart = store.listInstanceTurns(worker.id).items.length;
   if (primaryPromptCountBeforeRestart !== 1 || workerTurnsBeforeRestart !== 1) throw new Error("Worker completion unexpectedly triggered a Primary prompt or duplicate Worker turn");
-  await promptRun.stop(); promptRun = undefined; await scheduler.stop(); await gateway.stop(); store.close(); gateway = undefined; store = new SqliteBindingStore(databasePath);
+  await promptRun.stop(); promptRun = undefined; await scheduler.stop(); await gateway.stop(); store.close(); gateway = undefined; store = new SqliteStoreKernel(databasePath);
   scheduler = new InstanceWorkScheduler({ store, drivers });
   const restartedTurnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakeInstance: (instanceId) => scheduler?.wake(instanceId) });
   messaging = new InstanceMessagingWorkflow({ store, turnControl: restartedTurnControl, wake: (instanceId) => scheduler?.wake(instanceId), idFactory: randomUUID });
@@ -185,4 +185,4 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, label: strin
   while (Date.now() < deadline) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 100)); }
   throw new Error(`Timed out waiting for ${label}`);
 }
-function countRows(store: SqliteBindingStore, table: string): number { return (store.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count; }
+function countRows(store: SqliteStoreKernel, table: string): number { return (store.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count; }

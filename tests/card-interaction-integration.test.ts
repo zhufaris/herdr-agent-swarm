@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 

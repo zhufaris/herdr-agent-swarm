@@ -7,7 +7,7 @@ import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("attach existing pane command", () => {

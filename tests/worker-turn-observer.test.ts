@@ -3,7 +3,7 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { workerPresentation } from "./helpers/presentation.js";
 
 const sessionId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";

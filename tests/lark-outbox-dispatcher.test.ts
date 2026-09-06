@@ -9,7 +9,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { OutboundIntentWriter } from "../src/events/outbound-intent-writer.js";
 import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";

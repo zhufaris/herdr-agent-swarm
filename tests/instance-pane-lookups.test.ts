@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });

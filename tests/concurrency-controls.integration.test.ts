@@ -9,7 +9,7 @@ import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../src/doma
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { BridgeEvent } from "../src/domain/events.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";

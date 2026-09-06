@@ -6,7 +6,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
 describe("HerdrRuntimeReconciler", () => {

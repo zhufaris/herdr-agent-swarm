@@ -5,7 +5,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { QueueFeedbackProjector } from "../src/events/queue-feedback-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";

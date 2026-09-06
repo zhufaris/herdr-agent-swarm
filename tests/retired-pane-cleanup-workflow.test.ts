@@ -2,7 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { RetiredPaneCleanupWorkflow } from "../src/coordinator/retired-pane-cleanup-workflow.js";
 import type { HerdrPane, RuntimeObservation } from "../src/domain/types.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 describe("RetiredPaneCleanupWorkflow", () => {
   it("retries only cleanup operations for targeted Panes", async () => {

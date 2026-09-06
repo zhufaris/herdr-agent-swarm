@@ -6,7 +6,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 const UNSUPPORTED = "运行中的 Agent 不支持远程切换模型";

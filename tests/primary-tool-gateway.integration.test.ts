@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";

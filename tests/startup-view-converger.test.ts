@@ -4,7 +4,7 @@ import { StartupViewConverger } from "../src/coordinator/startup-view-converger.
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { OutboundIntentPort } from "../src/domain/ports.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 const config = {

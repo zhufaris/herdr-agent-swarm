@@ -4,7 +4,7 @@ import type { AgentKind } from "../src/domain/agent-instance.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { InstanceControlWorkflow } from "../src/coordinator/instance-control-workflow.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import type { WorktreeManager } from "../src/runtime/worktree-manager.js";
 import { primaryPaneToken } from "../src/domain/pane-title.js";
 

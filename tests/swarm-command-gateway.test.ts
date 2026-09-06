@@ -2,7 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { SwarmCommandContextResolver } from "../src/coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../src/coordinator/swarm-command-gateway.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
 const project = { id: "project", displayName: "Project", spaceName: "space", description: "project", workspaceId: "w1", cwd: "/repo", maxInstances: 4 };

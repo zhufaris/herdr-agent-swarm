@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InstanceTurnSupervisor } from "../src/coordinator/instance-turn-supervisor.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";

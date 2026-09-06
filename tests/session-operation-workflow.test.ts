@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
 import { SessionOperationWorkflow } from "../src/coordinator/session-operation-workflow.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
 function harness() {

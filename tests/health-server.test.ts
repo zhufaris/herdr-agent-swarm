@@ -2,7 +2,7 @@ import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startHealthServer } from "../src/health/server.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 let server: Awaited<ReturnType<typeof startHealthServer>> | undefined;
 let store: SqliteBindingStore | undefined;
