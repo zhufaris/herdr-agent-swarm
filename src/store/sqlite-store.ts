@@ -41,6 +41,7 @@ import { SqlitePromptStore } from "./sqlite/prompt-store.js";
 import { SqliteOutboxStore } from "./sqlite/outbox-store.js";
 import { SqliteInstanceStore } from "./sqlite/instance-store.js";
 import { SqliteCardContextStore } from "./sqlite/card-context-store.js";
+import { SqliteInboundProjectStore } from "./sqlite/inbound-project-store.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -70,6 +71,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private readonly outbox: SqliteOutboxStore;
   private readonly instances: SqliteInstanceStore;
   private readonly cardContexts: SqliteCardContextStore;
+  private readonly inboundProjects: SqliteInboundProjectStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
@@ -126,6 +128,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
     });
+    this.inboundProjects = new SqliteInboundProjectStore(this.context);
     this.approvals = new SqliteApprovalStore(this.context);
     this.leases = new SqliteLeaseStore(this.context);
   }
@@ -547,49 +550,31 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   recordInboundMessage(message: IncomingLarkMessage): boolean {
-    return this.context.transaction(() => {
-      const existing = this.database.prepare("SELECT 1 FROM inbound_messages WHERE event_id = ? OR message_id = ?").get(message.eventId, message.messageId);
-      if (existing) {return false; }
-      const timestamp = now();
-      const result = this.database.prepare(`
-        INSERT INTO inbound_messages(event_id, message_id, payload_json, state, created_at, updated_at)
-        VALUES (?, ?, ?, 'received', ?, ?)
-      `).run(message.eventId, message.messageId, JSON.stringify(message), timestamp, timestamp);
-
-      return result.changes === 1;
-    });
+    return this.inboundProjects.recordInboundMessage(message);
   }
 
   claimNextInboundMessage(): IncomingLarkMessage | null {
-    return this.context.transaction(() => {
-      const row = this.database.prepare("SELECT event_id, payload_json FROM inbound_messages WHERE state = 'received' ORDER BY created_at, event_id LIMIT 1").get() as { event_id: string; payload_json: string } | undefined;
-      if (!row) {return null; }
-      this.database.prepare("UPDATE inbound_messages SET state = 'processing', error = NULL, updated_at = ? WHERE event_id = ?").run(now(), row.event_id);
-
-      return JSON.parse(row.payload_json) as IncomingLarkMessage;
-    });
+    return this.inboundProjects.claimNextInboundMessage();
   }
 
   markInboundMessageAccepted(eventId: string): void {
-    this.database.prepare("UPDATE inbound_messages SET state = 'accepted', error = NULL, updated_at = ? WHERE event_id = ?").run(now(), eventId);
+    this.inboundProjects.markInboundMessageAccepted(eventId);
   }
 
   releaseInboundMessage(eventId: string, error: string): void {
-    this.database.prepare("UPDATE inbound_messages SET state = 'received', error = ?, updated_at = ? WHERE event_id = ?").run(error, now(), eventId);
+    this.inboundProjects.releaseInboundMessage(eventId, error);
   }
 
   recoverProcessingInboundMessages(): number {
-    const result = this.database.prepare("UPDATE inbound_messages SET state = 'received', error = 'Interrupted during inbound acceptance; retrying', updated_at = ? WHERE state = 'processing'").run(now());
-    return Number(result.changes);
+    return this.inboundProjects.recoverProcessingInboundMessages();
   }
 
   isBridgeMessage(messageId: string): boolean {
-    return Boolean(this.database.prepare("SELECT 1 FROM bridge_messages WHERE message_id = ?").get(messageId));
+    return this.inboundProjects.isBridgeMessage(messageId);
   }
 
   recordBridgeMessage(messageId: string): void {
-    this.database.prepare("INSERT OR IGNORE INTO bridge_messages(message_id, created_at) VALUES (?, ?)")
-      .run(messageId, now());
+    this.inboundProjects.recordBridgeMessage(messageId);
   }
 
   createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding {
@@ -753,83 +738,43 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection {
-    return this.context.transaction(() => {
-      const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
-      if (existing) {return mapProjectSelection(existing); }
-      const timestamp = now();
-      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
-        .run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.expiresAt, timestamp, timestamp);
-      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, ?, 'pending', 0, ?, ?, ?)`)
-        .run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), `message:${input.rootMessageId}`, timestamp, timestamp, timestamp);
-
-      return this.getProjectSelection(input.id)!;
-    });
+    return this.inboundProjects.createProjectSelection(input);
   }
 
   getProjectSelection(id: string): ProjectSelection | null {
-    const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(id) as ProjectSelectionRow | undefined;
-    return row ? mapProjectSelection(row) : null;
+    return this.inboundProjects.getProjectSelection(id);
   }
 
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim {
-    return this.context.transaction(() => {
-      const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(input.selectionId) as ProjectSelectionRow | undefined;
-      if (!row) {return { outcome: "missing", selection: null }; }
-      const selection = mapProjectSelection(row);
-      if (selection.chatId !== input.chatId || selection.selectorMessageId !== input.messageId || !input.allowedProjectIds.includes(input.projectId)) {return { outcome: "invalid", selection }; }
-      if (selection.actorOpenId !== input.actorOpenId) {return { outcome: "unauthorized", selection }; }
-      if (selection.state === "completed") {return { outcome: "completed", selection }; }
-      if (selection.state === "processing") {return { outcome: "processing", selection }; }
-      if (selection.state !== "pending") {return { outcome: selection.state === "expired" ? "expired" : "invalid", selection }; }
-      if (Date.parse(selection.expiresAt) <= Date.now()) {
-        this.database.prepare("UPDATE project_selections SET state = 'expired', updated_at = ? WHERE id = ?").run(now(), selection.id);
-
-        return { outcome: "expired", selection: { ...selection, state: "expired" } };
-      }
-      this.database.prepare("UPDATE project_selections SET state = 'processing', selected_project_id = ?, error = NULL, updated_at = ? WHERE id = ?").run(input.projectId, now(), selection.id);
-
-      return { outcome: "claimed", selection: this.getProjectSelection(selection.id)! };
-    });
+    return this.inboundProjects.claimProjectSelection(input);
   }
 
   recoverProcessingProjectSelections(): number {
-    return Number(this.database.prepare("UPDATE project_selections SET state = 'failed', error = 'Interrupted during project creation; inspect Herdr before retrying', updated_at = ? WHERE state = 'processing'").run(now()).changes);
+    return this.inboundProjects.recoverProcessingProjectSelections();
   }
 
   listProcessingProjectSelections(): ProjectSelection[] {
-    return (this.database.prepare("SELECT * FROM project_selections WHERE state = 'processing' ORDER BY created_at").all() as ProjectSelectionRow[]).map(mapProjectSelection);
+    return this.inboundProjects.listProcessingProjectSelections();
   }
 
   listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[] {
-    return (this.database.prepare("SELECT * FROM project_selections WHERE state = 'completed' AND initial_prompt_text IS NOT NULL ORDER BY created_at").all() as ProjectSelectionRow[]).map(mapProjectSelection);
+    return this.inboundProjects.listCompletedProjectSelectionsWithInitialPrompt();
   }
 
   linkProjectSelectionBinding(id: string, bindingId: string): ProjectSelection {
-    this.database.prepare("UPDATE project_selections SET binding_id = ?, updated_at = ? WHERE id = ? AND state = 'processing'").run(bindingId, now(), id);
-    const selection = this.getProjectSelection(id);
-    if (!selection) throw new Error(`Project selection not found: ${id}`);
-    return selection;
+    return this.inboundProjects.linkProjectSelectionBinding(id, bindingId);
   }
 
   pauseProjectSelection(id: string, error: string): ProjectSelection {
-    this.database.prepare("UPDATE project_selections SET error = ?, updated_at = ? WHERE id = ? AND state = 'processing'").run(error, now(), id);
-    const selection = this.getProjectSelection(id);
-    if (!selection) throw new Error(`Project selection not found: ${id}`);
-    return selection;
+    return this.inboundProjects.pauseProjectSelection(id, error);
   }
 
   completeProjectSelection(id: string, bindingId: string): ProjectSelection {
-    this.database.prepare("UPDATE project_selections SET state = 'completed', binding_id = ?, error = NULL, updated_at = ? WHERE id = ? AND state = 'processing'").run(bindingId, now(), id);
-    const selection = this.getProjectSelection(id);
-    if (!selection) throw new Error(`Project selection not found: ${id}`);
-    return selection;
+    return this.inboundProjects.completeProjectSelection(id, bindingId);
   }
 
   failProjectSelection(id: string, error: string): ProjectSelection {
-    this.database.prepare("UPDATE project_selections SET state = 'failed', error = ?, updated_at = ? WHERE id = ?").run(error, now(), id);
-    const selection = this.getProjectSelection(id);
-    if (!selection) throw new Error(`Project selection not found: ${id}`);
-    return selection;
+    return this.inboundProjects.failProjectSelection(id, error);
   }
 
   createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void {
