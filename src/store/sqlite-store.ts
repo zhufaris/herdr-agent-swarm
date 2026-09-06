@@ -38,6 +38,7 @@ import { SqliteApprovalStore } from "./sqlite/approval-store.js";
 import { SqliteLeaseStore } from "./sqlite/lease-store.js";
 import { SqliteMigrations } from "./sqlite/migrations.js";
 import { SqliteOperationsStore } from "./sqlite/operations-store.js";
+import { SqliteCommandIntentStore } from "./sqlite/command-intent-store.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
 
@@ -60,6 +61,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private readonly leases: SqliteLeaseStore;
   private readonly migrations: SqliteMigrations;
   private readonly operations: SqliteOperationsStore;
+  private readonly commandIntents: SqliteCommandIntentStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
@@ -67,6 +69,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.migrations = new SqliteMigrations(this.context);
     this.migrations.run();
     this.operations = new SqliteOperationsStore(this.context);
+    this.commandIntents = new SqliteCommandIntentStore(this.context);
     this.approvals = new SqliteApprovalStore(this.context);
     this.leases = new SqliteLeaseStore(this.context);
   }
@@ -1298,72 +1301,27 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   acceptCommandIntent(input: AcceptCommandIntentInput): AcceptCommandIntentResult {
-    const commandJson = JSON.stringify(input.command);
-    const contextJson = JSON.stringify(input.context);
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const existing = this.database.prepare("SELECT * FROM swarm_command_intents WHERE idempotency_key = ?").get(input.idempotencyKey) as CommandIntentRow | undefined;
-      if (existing) {
-        const intent = mapCommandIntent(existing);
-        const exact = existing.lane_key === input.laneKey && existing.command_json === commandJson
-          && existing.context_json === contextJson && existing.replay_policy === input.replayPolicy;
-        this.database.exec("COMMIT");
-        return { outcome: exact ? "duplicate" : "conflict", intent };
-      }
-      this.database.prepare(`
-        INSERT INTO swarm_command_intents(
-          id, idempotency_key, lane_key, command_json, context_json, replay_policy, state, attempt_count, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
-      `).run(input.id, input.idempotencyKey, input.laneKey, commandJson, contextJson, input.replayPolicy, input.acceptedAt, input.acceptedAt);
-      const intent = this.getCommandIntent(input.id);
-      if (!intent) throw new Error(`Command intent insertion was not observable: ${input.id}`);
-      this.database.exec("COMMIT");
-      return { outcome: "accepted", intent };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.commandIntents.accept(input);
   }
 
   getCommandIntent(id: string): CommandIntent | null {
-    const row = this.database.prepare("SELECT * FROM swarm_command_intents WHERE id = ?").get(id) as CommandIntentRow | undefined;
-    return row ? mapCommandIntent(row) : null;
+    return this.commandIntents.get(id);
   }
 
   claimNextCommandIntent(laneKey?: string): CommandIntent | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare(`
-        SELECT candidate.* FROM swarm_command_intents candidate
-        WHERE candidate.state = 'accepted' ${laneKey ? "AND candidate.lane_key = ?" : ""}
-          AND NOT EXISTS (
-            SELECT 1 FROM swarm_command_intents active
-            WHERE active.lane_key = candidate.lane_key AND active.state = 'executing'
-          )
-        ORDER BY candidate.created_at, candidate.rowid LIMIT 1
-      `).get(...(laneKey ? [laneKey] : [])) as CommandIntentRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
-      const claimedAt = now();
-      const changed = this.database.prepare("UPDATE swarm_command_intents SET state = 'executing', attempt_count = attempt_count + 1, claimed_at = ?, updated_at = ? WHERE id = ? AND state = 'accepted'")
-        .run(claimedAt, claimedAt, row.id);
-      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
-      const intent = this.getCommandIntent(row.id);
-      this.database.exec("COMMIT");
-      return intent;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.commandIntents.claimNext(laneKey);
   }
 
   finishCommandIntent(id: string, state: CommandIntentTerminalState, outcome: CommandIntent["outcome"]): CommandIntent | null {
-    const changed = this.database.prepare("UPDATE swarm_command_intents SET state = ?, outcome_json = ?, updated_at = ? WHERE id = ? AND state IN ('executing','uncertain')")
-      .run(state, outcome === null ? null : JSON.stringify(outcome), now(), id);
-    return changed.changes === 1 ? this.getCommandIntent(id) : null;
+    return this.commandIntents.finish(id, state, outcome);
   }
 
   listRecoverableCommandIntents(): CommandIntent[] {
-    return (this.database.prepare("SELECT * FROM swarm_command_intents WHERE state IN ('accepted','uncertain') ORDER BY created_at, rowid").all() as CommandIntentRow[]).map(mapCommandIntent);
+    return this.commandIntents.listRecoverable();
   }
 
   recoverExecutingCommandIntents(recoveredAt: string): number {
-    const outcome = JSON.stringify({ code: "restart_during_execution", detail: "Command execution outcome is uncertain after restart", operationKind: null, operationId: null });
-    return Number(this.database.prepare("UPDATE swarm_command_intents SET state = 'uncertain', outcome_json = COALESCE(outcome_json, ?), updated_at = ? WHERE state = 'executing'")
-      .run(outcome, recoveredAt).changes);
+    return this.commandIntents.recoverExecuting(recoveredAt);
   }
 
   pruneTerminalSessionOperations(cutoff: string, limit: number): number {
