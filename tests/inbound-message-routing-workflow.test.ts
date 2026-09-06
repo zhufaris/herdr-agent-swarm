@@ -2,6 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { InboundMessageRoutingWorkflow } from "../src/coordinator/inbound-message-routing-workflow.js";
 import { PermanentInboundMessageRejection } from "../src/domain/permanent-inbound-message-rejection.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("turns a stopped Worker rejection into a durable terminal disposition", async () => {
@@ -10,7 +11,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
       store: { findBindingByLarkScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null) },
-      outbound, instanceInteractions, logger: pino({ enabled: false })
+      outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "/to test continue", mentionsBot: false, isRootMessage: true };
 

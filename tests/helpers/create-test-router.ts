@@ -26,6 +26,7 @@ import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway
 import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
 import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import { cardKitPanePresentation } from "../../src/cards/cardkit-pane-presentation.js";
+import { cardKitPrimaryPresentation } from "../../src/cards/cardkit-primary-presentation.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
 import type { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
@@ -51,16 +52,16 @@ export function createTestRouter(
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   outboundWork.subscribe(() => outbound.requestScan());
   const writer = new OutboundIntentWriter(store, outboundWork);
-  const mainCards = new MainCardWorkflow(store, () => outboundWork.wake(), logger);
+  const mainCards = new MainCardWorkflow(store, () => outboundWork.wake(), cardKitPrimaryPresentation, logger);
   outbound.connectPromptScheduler(scheduler);
   let promptRun!: PromptRunWorkflow;
   const externalTurns = transcriptReader && observeExternalTurns ? new ExternalTurnObserver({
-    store, transcriptReader, bus, outboundWork, logger,
+    store, transcriptReader, bus, outboundWork, logger, presentation: cardKitPrimaryPresentation,
     isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId),
     wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
   }) : undefined;
   promptRun = new PromptRunWorkflow({
-    store, herdr, bus, scheduler, outboundWork, logger, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
+    store, herdr, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
     handoffExternalTurns: externalTurns ? (bindingId) => externalTurns.handoff(bindingId) : undefined,
     observeSupersedingExternalTurn: externalTurns ? (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation) : undefined,
     recoverExternalTurns: externalTurns ? (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt) : undefined
@@ -92,9 +93,9 @@ export function createTestRouter(
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store, inboundWork, logger });
   const commandResolver = new SwarmCommandContextResolver({ config, store, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const swarmCommands = new SwarmCommandGateway({ store, resolver: commandResolver, outbound: writer, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: { createWorker: async () => { throw new Error("Worker creation is not configured in this test fixture"); }, inspect: () => { throw new Error("Worker inspection is not configured in this test fixture"); } } });
-  const messageRouting = new InboundMessageRoutingWorkflow({ config, store, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, promptRun, provisioning, swarmCommands });
+  const messageRouting = new InboundMessageRoutingWorkflow({ config, store, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, presentation: cardKitPrimaryPresentation, promptRun, provisioning, swarmCommands });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
-  const startupViews = new StartupViewConverger(config, store, writer, outboundWork, undefined, undefined, logger);
+  const startupViews = new StartupViewConverger(config, store, writer, outboundWork, cardKitPrimaryPresentation, undefined, undefined, logger);
   const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
   const router = new InboundRouter({ lark, modelSelection, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
   return router;

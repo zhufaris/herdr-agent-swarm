@@ -9,6 +9,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("project provisioning recovery", () => {
   it("marks a pre-feature active binding unavailable without restarting its pane", async () => {
@@ -197,7 +198,7 @@ function createHarness(options: { terminalId?: string; paneMissing?: boolean; oc
   };
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   return { store, coordinator, get created() { return created; }, get createdCalls() { return createdCalls; }, get started() { return started; }, get startedPaneIds() { return startedPaneIds; }, get startedCalls() { return startedCalls; }, get topics() { return topics; }, get topicKeys() { return topicKeys; }, async close() { await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close(); } };
 }

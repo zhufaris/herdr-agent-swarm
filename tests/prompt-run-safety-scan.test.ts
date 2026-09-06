@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PromptRunWorkflow } from "../src/coordinator/prompt-run-workflow.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("PromptRunWorkflow durable safety scan", () => {
   afterEach(() => vi.useRealTimers());
@@ -75,7 +76,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       } as never,
       scheduler: { subscribe: () => () => {}, wake }, safetyScanIntervalMs: 100, staleClaimGraceMs: 1_000, turnTimeoutMs: 1_000,
       herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     workflow.requestSafetyScan();
@@ -105,7 +106,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       scheduler: { subscribe: () => () => {}, wake: vi.fn() }, safetyScanIntervalMs: 100, staleClaimGraceMs: 1_000, turnTimeoutMs: 1_000,
       transcriptReader: { async open() { return new Promise(() => undefined); } },
       herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
@@ -192,7 +193,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       store: { scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }), claimNextDispatchablePrompt: claim } as never,
       scheduler: new InProcessPromptWorkScheduler(), safetyScanIntervalMs: 100, turnTimeoutMs: 1_000,
       herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never, handoffExternalTurns: handoff
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never, handoffExternalTurns: handoff
     });
 
     workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
@@ -237,7 +238,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       turnTimeoutMs: 1_000,
       herdr: {} as never, bus: { async publish() {} },
       outboundWork: { wake() {}, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     workflow.wake({ kind: "detached-observer-ready", bindingId: "b1", promptId: "p1" });
@@ -259,7 +260,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "unavailable" as const, reason: "transcript_not_found" as const }; } },
       herdr: { observeRuntime } as never, bus: { async publish() {} },
       outboundWork: { wake() {}, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     workflow.wake({ kind: "detached-observer-ready", bindingId: "b1", promptId: "p1" });
@@ -296,7 +297,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       } }; } },
       herdr: { async observeRuntime() { return { pane: { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }, traexProcess: true, composerReady: true, evidenceSource: "structured" }; } } as never,
       bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     workflow.wake({ kind: "detached-observer-ready", bindingId: "b1", promptId: "p1" });
@@ -318,7 +319,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       scheduler: { subscribe: () => () => {}, wake: schedulerWake },
       turnTimeoutMs: 1_000, herdr: {} as never, bus: { async publish() {} },
       outboundWork: { wake: outboundWake, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     expect(workflow.skipDetached("b1", 4, "creator", "skip-message", "root")).toEqual({ outcome: "skipped", promptId: "p1", outboxReserved: true });
@@ -337,7 +338,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const workflow = new PromptRunWorkflow({
       store: { skipOldestDetachedPrompt } as never, scheduler: { subscribe: () => () => {}, wake: schedulerWake },
       turnTimeoutMs: 1_000, herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake: outboundWake, subscribe() { return () => {}; } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
 
     expect(workflow.skipDetached("b1", 1, "creator", "skip-message", "root")).toEqual({ outcome: "none" });
@@ -352,6 +353,6 @@ function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanInter
   return new PromptRunWorkflow({
     store: store as never, scheduler, safetyScanIntervalMs, turnTimeoutMs: 1_000,
     herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
-    logger: { info, warn: vi.fn(), error } as never
+    presentation: primaryPresentation, logger: { info, warn: vi.fn(), error } as never
   });
 }

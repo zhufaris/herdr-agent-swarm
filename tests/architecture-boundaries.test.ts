@@ -17,6 +17,22 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("keeps Primary workflows and projectors behind the application-owned presentation seam", () => {
+    for (const path of [
+      "coordinator/external-turn-observer.ts",
+      "coordinator/inbound-message-routing-workflow.ts",
+      "coordinator/main-card-workflow.ts",
+      "coordinator/prompt-run-workflow.ts",
+      "coordinator/startup-view-converger.ts",
+      "events/conversation-view-projector.ts",
+      "events/queue-feedback-projector.ts"
+    ]) {
+      const source = readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
+      expect(source).not.toContain('../cards/');
+      expect(source).toContain('ports/presentation.js');
+    }
+  });
+
   it("keeps durable prompt safety scans out of Herdr reconciliation", () => {
     const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     expect(reconciler).not.toContain("scanDurablePromptWork");

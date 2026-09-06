@@ -9,4 +9,4 @@ export type { ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, Outboun
 export type { DatabaseIntegrityStore, HealthStore, LeaseStore } from "./ports/health.js";
 export type { AdoptExternalTurnInput, CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "./ports/workflow.js";
 export type { CommandIntentStore } from "./ports/swarm-command.js";
-export type { PanePresentation } from "./ports/presentation.js";
+export type { PanePresentation, PrimaryPresentation } from "./ports/presentation.js";

@@ -10,6 +10,7 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -51,7 +52,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
   const scheduler = new InProcessPromptWorkScheduler(logger);
   const schedulerWake = vi.spyOn(scheduler, "wake");
   const publisher = createTestPublisher(store, lark, logger); publisher.start();
-  const projector = new ConversationViewProjector(bus, store, publisher, publisher, logger); projector.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, logger, primaryPresentation); projector.start();
   const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger, 30_000, scheduler);
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;
@@ -107,7 +108,7 @@ describe("active-turn steering", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
     projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
     await coordinator.start();
@@ -179,7 +180,7 @@ describe("active-turn steering", () => {
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
     const message = (n: number, text: string) => ({ eventId: `e${n}`, messageId: `m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
@@ -218,7 +219,7 @@ describe("active-turn steering", () => {
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
     const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `approval-e${n}`, messageId: `approval-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 
@@ -260,7 +261,7 @@ describe("active-turn steering", () => {
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
     const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `blocked-e${n}`, messageId: `blocked-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 

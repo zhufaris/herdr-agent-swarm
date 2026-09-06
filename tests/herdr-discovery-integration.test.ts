@@ -8,6 +8,7 @@ import { ConversationViewProjector } from "../src/events/conversation-view-proje
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -98,7 +99,7 @@ describe("Herdr discovery", () => {
     });
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -155,7 +156,7 @@ describe("Herdr discovery", () => {
     });
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -197,7 +198,7 @@ describe("Herdr discovery", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -237,7 +238,7 @@ describe("Herdr discovery", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -286,7 +287,7 @@ describe("Herdr discovery", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     output = "initial terminal\n❯ next prompt";
@@ -370,7 +371,7 @@ describe("Herdr discovery", () => {
     const stopInboundObserver = inboundWork.subscribe((event) => { inboundEvents.push(event.type); });
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopChannelPublisher = publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
     const stopProjector = projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, inboundWork);
     await coordinator.start();
@@ -429,7 +430,7 @@ describe("Herdr discovery", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
@@ -488,7 +489,7 @@ describe("Herdr discovery", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
@@ -537,7 +538,7 @@ describe("Herdr discovery", () => {
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
-    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stopProjector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 

@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
 import { transcriptObserverIdentity, transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, ExternalTurnSupersessionFence, PromptJob } from "../domain/types.js";
@@ -24,6 +24,7 @@ interface ExternalTurnObserverOptions {
   isBindingBusy(bindingId: string): boolean;
   wakePrompt(bindingId: string): void;
   idFactory?: () => string;
+  presentation: Pick<PrimaryPresentation, "answerCard">;
 }
 
 interface TurnProjectionState {
@@ -192,7 +193,7 @@ export class ExternalTurnObserver {
         bindingId: binding.id, expectedGeneration: binding.generation, expectedPaneId: binding.paneId!, expectedSession: session,
         turnId, startedAt, requestText: observation.requestText, externalPromptId, externalMessageId: `herdr-turn:${session.value}:${turnId}`,
         ...(supersede ? { supersede } : {}),
-        externalView, answerCardFor: renderRequestAnswerCard
+        externalView, answerCardFor: this.options.presentation.answerCard
       });
       if ((result.outcome !== "adopted_queued" && result.outcome !== "created_external" && result.outcome !== "already_owned") || !result.prompt) return "ignored";
       if (result.outcome === "already_owned" && result.prompt.executionOrigin === "bridge") {

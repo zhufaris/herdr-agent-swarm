@@ -9,6 +9,7 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("event-driven card projection", () => {
   it("persists the newest Main view immediately and coalesces delivery within the Main budget", async () => {
@@ -18,7 +19,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const mainConverge = vi.fn(async () => undefined);
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { cardUpdateDebounceMs: 1_500, mainCardUpdateDebounceMs: 2_500 });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { cardUpdateDebounceMs: 1_500, mainCardUpdateDebounceMs: 2_500 });
     projector.start();
 
     await bus.publish({ eventId: "rename-1", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { title: "First" } });
@@ -42,7 +43,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const mainConverge = vi.fn(async () => undefined);
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { mainCardUpdateDebounceMs: 2_500 });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { mainCardUpdateDebounceMs: 2_500 });
     projector.start();
 
     await bus.publish({ eventId: "degraded", bindingId: "b1", type: "BindingDegraded", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { reason: "pane unavailable" } });
@@ -58,7 +59,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const bus = new BridgeEventBus();
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
     projector.start();
 
     await bus.publish({ eventId: "active", bindingId: "b1", type: "BindingActivated", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { paneId: "w1:p1", tabId: null, topicId: "t1" } });
@@ -85,7 +86,7 @@ describe("event-driven card projection", () => {
       requestScan: async () => {}
     };
     const publisher = { async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, checkpoints, pino({ enabled: false }), { converge: answerConverge }, { project: async () => undefined, converge: mainConverge });
+    const projector = new ConversationViewProjector(bus, store, publisher, checkpoints, pino({ enabled: false }), primaryPresentation, { converge: answerConverge }, { project: async () => undefined, converge: mainConverge });
     projector.start();
 
     answerCheckpoint?.("p1", 7);
@@ -105,7 +106,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const converge = vi.fn(async () => undefined);
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
     projector.start();
 
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "短首段", answerUpdate: "replace", progressEvents: [] } });
@@ -130,7 +131,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const converge = vi.fn(async () => undefined);
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 10_000 });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 10_000 });
     projector.start();
 
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "first", answerUpdate: "replace", progressEvents: [] } });
@@ -154,7 +155,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const converge = vi.fn(async () => undefined);
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
     projector.start();
 
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "a", answerUpdate: "replace", progressEvents: [] } });
@@ -175,7 +176,7 @@ describe("event-driven card projection", () => {
     store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "cancelled", occurredAt: "later", rootMessageId: null, renderRunCard: () => ({}) });
     const version = store.loadRunCard("p1")!.viewVersion; const converge = vi.fn(async () => undefined);
     const bus = new BridgeEventBus(); const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge }, { project: async () => undefined, converge: async () => undefined });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge }, { project: async () => undefined, converge: async () => undefined });
     projector.start();
 
     await bus.publish({ eventId: "cancel", bindingId: "b1", type: "PromptCancelled", origin: "bridge", occurredAt: "later", payload: { promptId: "p1", reason: "cancelled" } });
@@ -197,8 +198,8 @@ describe("event-driven card projection", () => {
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "card" }; },
       async updateCard() {}
-    }, pino({ enabled: false }));
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+    }, pino({ enabled: false }), primaryPresentation);
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
     projector.start();
 
     await bus.publish({ eventId: "queued", bindingId: "b1", type: "PromptQueued", origin: "bridge", occurredAt: "later", payload: { promptId: "p1", queueDepth: 2, actorOpenId: "u1" } });
@@ -222,7 +223,7 @@ describe("event-driven card projection", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m-p1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "m1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.promptId === "p1" ? "answer-1" : "active-answer", reply.promptId === "p1" ? "card-1" : "active-card");
     const outboundWork = { subscribe: () => () => {}, wake: vi.fn() };
-    const projector = new QueueFeedbackProjector({ store, outboundWork, logger: pino({ enabled: false }), now: () => clock });
+    const projector = new QueueFeedbackProjector({ store, outboundWork, logger: pino({ enabled: false }), presentation: primaryPresentation, now: () => clock });
 
     await projector.refresh("b1");
     clock = "2026-08-29T12:00:31.000Z";
@@ -248,9 +249,9 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation);
     const stopPublisher = publisher.start();
-    const stop = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })).start();
+    const stop = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation).start();
 
     await bus.publish({ eventId: "e1", bindingId: "b1", type: "BindingCreated", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Task", workspaceId: "w1", paneId: "w1:p2" } });
     await bus.publish({ eventId: "e2", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer: "Finished", queueDepth: 0 } });
@@ -283,9 +284,9 @@ describe("event-driven card projection", () => {
     store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation);
     const stopPublisher = publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
     const stopProjector = projector.start();
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
@@ -326,9 +327,9 @@ describe("event-driven card projection", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation);
     const stopPublisher = publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), undefined, undefined, { cardUpdateDebounceMs: 1_500 });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, undefined, undefined, { cardUpdateDebounceMs: 1_500 });
     const stopProjector = projector.start();
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
@@ -371,8 +372,8 @@ describe("event-driven card projection", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     await publisher.drain();
 
     const pageHalf = Math.ceil(ANSWER_STREAM_PAGE_LIMIT / 2);
@@ -434,7 +435,7 @@ describe("event-driven card projection", () => {
       async enqueueStreamFinish() { pendingWrites.push("stream_finish"); },
       async enqueueStreamContent() { pendingWrites.push("stream_content"); }
     };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
 
     await bus.publish({ eventId: "output-after-rollover", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: "new live output", answerUpdate: "replace", progressEvents: [] } });
     await vi.advanceTimersByTimeAsync(1_000);
@@ -461,8 +462,8 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     await publisher.drain();
 
     const answer = ["Run this:", "```bash", "echo hello"].join("\n");
@@ -491,8 +492,8 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     await publisher.drain();
 
     const answer = ["```bash", ...Array.from({ length: 3_500 }, (_, index) => `echo line-${index}`), "```"].join("\n");
@@ -534,8 +535,8 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     await publisher.drain();
 
     const latestMarker = "LATEST_MESSAGE_MUST_REMAIN_VISIBLE";
@@ -570,8 +571,8 @@ describe("event-driven card projection", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     await publisher.drain();
 
     const firstAnswer = `${"a".repeat(ANSWER_STREAM_PAGE_LIMIT - 100)}\n${"b".repeat(600)}`;
@@ -604,9 +605,9 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation);
     publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
     projector.start();
 
     const publishing = bus.publish({ eventId: "e-stop", bindingId: "b1", type: "BindingCreated", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Task", workspaceId: "w1", paneId: "w1:p2" } });
@@ -633,7 +634,7 @@ describe("event-driven card projection", () => {
     const bus = new BridgeEventBus();
     const mainConverge = vi.fn(async () => convergeBlocked);
     const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge });
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge });
     projector.start();
 
     await bus.publish({ eventId: "degraded-stop", bindingId: "b1", type: "BindingDegraded", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { reason: "pane unavailable" } });
@@ -665,8 +666,8 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p2", state: "active", statusMessageId: "card1" });
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), undefined, undefined, { mainCardUpdateDebounceMs: 2_500 }); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, undefined, undefined, { mainCardUpdateDebounceMs: 2_500 }); projector.start();
 
     const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "First" } });
     const second = bus.publish({ eventId: "second", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:01Z", payload: { title: "Second" } });
@@ -690,8 +691,8 @@ describe("event-driven card projection", () => {
     store.saveTopicView = (view) => { if (failOnce) { failOnce = false; throw new Error("projection failed"); } originalSave(view); };
     const bus = new BridgeEventBus();
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
 
     await expect(bus.publish({ eventId: "failed", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Failed" } })).resolves.toBeUndefined();
     expect(store.loadTopicView("b1")).toBeNull();
@@ -715,8 +716,8 @@ describe("event-driven card projection", () => {
       async updateCard(messageId) { if (messageId === "card-b1") await firstBlocked; }
     };
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
 
     const first = bus.publish({ eventId: "first", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload: { title: "Blocked" } });
     await new Promise((resolve) => setTimeout(resolve, 0));

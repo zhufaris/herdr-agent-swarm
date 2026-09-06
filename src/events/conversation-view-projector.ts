@@ -1,8 +1,8 @@
 import type { Logger } from "pino";
-import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { normalizeTurnOutputObservation, type BridgeEvent } from "../domain/events.js";
 import type { OutboundCheckpointSubscriber, OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { AnswerPageStore, MainCardStore, ProjectionStore } from "../domain/ports/projection.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageWorkflowPort } from "../coordinator/answer-page-workflow.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import type { MainCardWorkflowPort } from "../coordinator/main-card-workflow.js";
@@ -43,12 +43,13 @@ export class ConversationViewProjector {
     private readonly channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
+    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">,
     answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
     options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}
   ) {
     this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, logger);
-    this.mainCards = mainCards ?? new MainCardWorkflow(store as ProjectionStore & MainCardStore, () => { void checkpoints.requestScan(); }, logger);
+    this.mainCards = mainCards ?? new MainCardWorkflow(store as ProjectionStore & MainCardStore, () => { void checkpoints.requestScan(); }, presentation, logger);
     this.answerUpdateDelayMs = Math.min(options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, ANSWER_UPDATE_BUDGET_MS);
     this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? MAIN_CARD_UPDATE_INTERVAL_MS;
     this.scheduler = new CardUpdateScheduler(async (cardKey) => {
@@ -60,7 +61,7 @@ export class ConversationViewProjector {
       const promptId = id;
       const view = this.store.loadRunCard(promptId);
       if (!view?.answerCardId && view?.answerMessageId) {
-        await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", renderRequestAnswerCard(view));
+        await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", this.presentation.answerCard(view));
         this.answerContentLengths.set(promptId, view.answer.length);
         return;
       }

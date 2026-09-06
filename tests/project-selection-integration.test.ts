@@ -8,6 +8,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("project selection flow", () => {
   for (const command of ["/swarm new", "/swarm projects"] as const) {
@@ -118,7 +119,7 @@ describe("project selection flow", () => {
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -209,7 +210,7 @@ describe("project selection flow", () => {
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     store.createPendingBinding({ id: "existing-binding", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", title: "bridge / Existing" });
@@ -297,7 +298,7 @@ describe("project selection flow", () => {
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -372,7 +373,7 @@ describe("project selection flow", () => {
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 

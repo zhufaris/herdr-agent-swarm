@@ -16,6 +16,7 @@ import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js"
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 let directory: string | undefined; let store: SqliteBindingStore | undefined; let gateway: PrimaryToolGateway | undefined; let scheduler: InstanceWorkScheduler | undefined; let promptRun: PromptRunWorkflow | undefined;
 afterEach(async () => { await promptRun?.stop(); await scheduler?.stop(); await gateway?.stop(); store?.close(); if (directory) await rm(directory, { recursive: true, force: true }); promptRun = undefined; scheduler = undefined; gateway = undefined; store = undefined; directory = undefined; });
@@ -69,7 +70,7 @@ describe("Primary to Worker product flow", () => {
     } as never;
     const promptScheduler = new InProcessPromptWorkScheduler();
     const primaryTurnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9"; let transcriptRead = false;
-    promptRun = new PromptRunWorkflow({ store, herdr: primaryHerdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, logger: pino({ enabled: false }), turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
+    promptRun = new PromptRunWorkflow({ store, herdr: primaryHerdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, presentation: primaryPresentation, logger: pino({ enabled: false }), turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
       async readDelta() { return ""; },
       async readObservation() {
         const answerDelta = transcriptRead ? "" : primaryAnswer; transcriptRead = true; primaryAnswer = "";
