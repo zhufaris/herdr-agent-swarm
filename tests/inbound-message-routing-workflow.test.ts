@@ -46,6 +46,29 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     expect(store.acceptClassifiedPrompt).toHaveBeenCalledOnce();
   });
 
+  it("keeps a Lark-flattened Task Card reply on the Primary FIFO instead of guessing a Worker", async () => {
+    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "primary-root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
+    const store = {
+      findBindingByLarkScope: vi.fn(() => binding), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
+      acceptClassifiedPrompt: vi.fn(() => ({ decision: "ordinary", inserted: false, prompt: { id: "primary-prompt" } }))
+    };
+    const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
+      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, logger: pino({ enabled: false })
+    } as never);
+    const message = {
+      eventId: "event-flattened-card-reply", messageId: "text-created-from-task-card-reply",
+      parentMessageId: "primary-root", rootMessageId: "primary-root", topicId: "topic-1",
+      chatId: "chat", actorOpenId: "operator", text: "continue the worker", mentionsBot: true, isRootMessage: false
+    };
+
+    await workflow.handle(message);
+
+    expect(instanceInteractions.handleOrdinaryMessage).toHaveBeenCalledWith(message);
+    expect(store.acceptClassifiedPrompt).toHaveBeenCalledOnce();
+  });
+
   it("turns a stopped Worker rejection into a durable terminal disposition", async () => {
     const outbound = { enqueueCard: vi.fn(async () => undefined) };
     const instanceInteractions = { handleCommand: vi.fn(async () => { throw new Error("Target instance is not running"); }) };

@@ -69,20 +69,17 @@ Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Wo
 
 Worker prompt 分为三种明确语义，推荐直接围绕卡片操作：
 
-- `补充当前任务`：回复正在运行或 blocked 的 Task Card，或点击卡片上的同名按钮；
+- `补充当前任务`：点击正在运行或 blocked 的 Task Card 上的同名按钮并提交表单；
   内容只会 steer 这一个精确 active turn。
-- `继续这个任务`：回复 completed、failed 或 cancelled 的 Task Card，或点击卡片上的
-  同名按钮；系统创建一条带父任务关系的新 follow-up，并按 FIFO 排队。
+- `继续这个任务`：点击 completed、failed 或 cancelled 的 Task Card 上的同名按钮并
+  提交表单；系统创建一条带父任务关系的新 follow-up，并按 FIFO 排队。
 - `发起新任务`：点击 Worker Main Card 上的同名按钮，或使用 `/to`；系统创建一条
   与历史任务无父子关系的独立 FIFO 任务。
 
-要持续给同一个任务补充要求，请直接回复它的 Task Card 并 `@Bot`：
-
-- 回复正在运行或 blocked 的卡片会精确 steer 该 turn。
-- 回复 completed、failed 或 cancelled 的卡片会创建一条带父任务关系的新 follow-up，并进入 FIFO。
-- 回复仍 queued 的卡片会被拒绝，因为任务尚未开始。
-- 回复 `dispatch-uncertain` 的卡片会被拒绝，因为请求可能已到达 Agent；自动重试可能造成重复执行。请先在对应 Herdr Pane 核对。
-- 只有直接父消息能匹配 task card；系统不会根据 Thread、当前选中的 Worker 或更早的父消息猜测目标。
+要持续给同一个任务补充要求，必须使用 Task Card 上的按钮。飞书话题会把“回复卡片”
+产生的文本消息关联到话题根消息，而不是被回复的 Worker Task Card；因此直接回复卡片、
+即使 `@Bot`，也会作为 Primary prompt 处理。系统不会根据 Thread、最近卡片、当前选中的
+Worker 或视觉上的回复位置猜测 Worker 目标。也可使用 `/to <worker> <任务>` 发起独立任务。
 
 Task Card 仅显示当前状态允许的操作。运行中的卡片提供“补充当前任务”和
 “停止当前任务”；blocked 卡片允许补充要求，但审批仍必须在 Herdr Pane 本地完成；
