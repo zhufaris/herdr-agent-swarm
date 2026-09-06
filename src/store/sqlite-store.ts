@@ -18,17 +18,12 @@ import { mapAnswerPage, mapBinding, mapCardInteraction, mapCommandIntent, mapIns
 import type { ModelPreference } from "../domain/model-selection.js";
 import { acceptModelSelection } from "../domain/model-selection.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
-import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "./instance-records.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
 import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
-import { reduceWorkerTurnCard, updateWorkerTurnCardTargets, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
+import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../domain/worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
-import { selectPrimaryWorkerActivity, selectPrimaryWorkerSummaries } from "../domain/card-context-summary.js";
-import { selectWorkerMainView } from "../domain/worker-main-selector.js";
-import { updateTopicWorkerContext } from "../domain/topic-view.js";
-import { updateRunCardWorkerContext } from "../domain/run-card-view.js";
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
@@ -45,6 +40,7 @@ import { SqliteProjectionStore } from "./sqlite/projection-store.js";
 import { SqlitePromptStore } from "./sqlite/prompt-store.js";
 import { SqliteOutboxStore } from "./sqlite/outbox-store.js";
 import { SqliteInstanceStore } from "./sqlite/instance-store.js";
+import { SqliteCardContextStore } from "./sqlite/card-context-store.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -73,6 +69,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private readonly prompts: SqlitePromptStore;
   private readonly outbox: SqliteOutboxStore;
   private readonly instances: SqliteInstanceStore;
+  private readonly cardContexts: SqliteCardContextStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
@@ -110,10 +107,24 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.getAgentInstance(id),
       enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
-      invalidateWorkerCardContexts: (view, reason) => this.invalidateWorkerCardContexts(view, reason)
+      invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason)
     });
     this.instances = new SqliteInstanceStore(this.context, {
-      invalidateWorkerInstanceContexts: (instance, reason) => this.invalidateWorkerInstanceContexts(instance, reason)
+      invalidateWorkerInstanceContexts: (instance, reason) => this.cardContexts.invalidateWorkerInstanceContexts(instance, reason)
+    });
+    this.cardContexts = new SqliteCardContextStore(this.context, {
+      getAgentInstance: (id) => this.instances.getAgentInstance(id),
+      getWorkspaceLease: (id) => this.instances.getWorkspaceLease(id),
+      getBinding: (id) => this.getBinding(id),
+      listWorkerInstancesByParent: (input) => this.instances.listWorkerInstancesByParent(input),
+      loadWorkerTurnCard: (id) => this.workerTurns.loadWorkerTurnCard(id),
+      saveWorkerTurnCard: (view) => this.workerTurns.saveWorkerTurnCard(view),
+      loadTopicView: (id) => this.projections.loadTopicView(id),
+      saveTopicView: (view) => this.projections.saveTopicView(view),
+      loadRunCard: (id) => this.projections.loadRunCard(id),
+      saveRunCard: (view) => this.projections.saveRunCard(view),
+      reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
     });
     this.approvals = new SqliteApprovalStore(this.context);
     this.leases = new SqliteLeaseStore(this.context);
@@ -166,197 +177,47 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   loadWorkerMainView(workerId: string, workerSessionGeneration: number): WorkerMainView | null {
-    const row = this.database.prepare("SELECT state_json FROM worker_main_views WHERE worker_id = ? AND worker_session_generation = ?").get(workerId, workerSessionGeneration) as { state_json: string } | undefined;
-    return row ? JSON.parse(row.state_json) as WorkerMainView : null;
+    return this.cardContexts.loadWorkerMainView(workerId, workerSessionGeneration);
   }
 
   saveWorkerMainView(view: WorkerMainView): WorkerMainView | null {
-    const instance = this.getAgentInstance(view.workerId);
-    if (!instance || instance.role !== "worker" || instance.workerSessionGeneration !== view.workerSessionGeneration
-      || instance.parent?.bindingId !== view.parentBindingId || instance.parent.paneId !== view.parentPaneId) return null;
-    const result = this.database.prepare(`
-      INSERT INTO worker_main_views(worker_id, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id, state_json, view_version, delivered_version, message_id, card_id, frozen_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(worker_id, worker_session_generation) DO UPDATE SET
-        state_json=excluded.state_json, view_version=excluded.view_version, delivered_version=excluded.delivered_version, message_id=excluded.message_id, card_id=excluded.card_id, frozen_at=excluded.frozen_at, updated_at=excluded.updated_at
-      WHERE worker_main_views.frozen_at IS NULL AND excluded.view_version >= worker_main_views.view_version
-    `).run(view.workerId, view.workerSessionGeneration, view.parentBindingId, view.parentBindingGeneration, view.parentPaneId, JSON.stringify(view), view.viewVersion, view.deliveredVersion, view.messageId, view.cardId, view.frozenAt, view.createdAt, view.updatedAt);
-    return result.changes === 1 ? this.loadWorkerMainView(view.workerId, view.workerSessionGeneration) : null;
+    return this.cardContexts.saveWorkerMainView(view);
   }
 
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
-    return this.context.transaction(() => {
-      const saved = this.saveWorkerMainView(view);
-      if (!saved) return null;
-      const creating = saved.messageId === null;
-      this.enqueueOutboundReply({
-        id: randomUUID(),
-        idempotencyKey: creating ? `worker-main:create:${saved.workerId}:${saved.workerSessionGeneration}` : `worker-main:update:${saved.workerId}:${saved.workerSessionGeneration}:${saved.viewVersion}`,
-        bindingId: saved.parentBindingId, workerId: saved.workerId, workerSessionGeneration: saved.workerSessionGeneration, viewVersion: saved.viewVersion,
-        rootMessageId: creating ? rootMessageId : saved.messageId!, kind: creating ? "card_reply" : "card_update", payload: JSON.stringify(card)
-      });
-      return saved;
-    });
+    return this.cardContexts.reserveWorkerMainCard(view, rootMessageId, card);
   }
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
-    if (targets.length === 0) return [];
-    const timestamp = now();
-    return this.context.transaction(() => {
-      const statement = this.database.prepare(`
-        INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
-        VALUES (?, ?, ?, 1, 0, ?, ?, ?)
-        ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
-          requested_dependency_revision = card_context_invalidations.requested_dependency_revision + 1, reason = excluded.reason, updated_at = excluded.updated_at
-      `);
-      for (const target of targets) statement.run(target.targetKind, target.targetId, target.targetGeneration, target.reason, timestamp, timestamp);
-      const invalidations = targets.map((target) => this.loadCardContextInvalidation(target)!).filter(Boolean);
-      return invalidations;
-    });
-  }
-
-  private invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void {
-    const instance = this.getAgentInstance(view.instanceId);
-    const targets: Array<CardContextTarget & { reason: string }> = [
-      { targetKind: "worker-turn", targetId: view.turnId, targetGeneration: view.instanceGeneration, reason },
-      { targetKind: "worker-session", targetId: view.instanceId, targetGeneration: view.workerSessionGeneration, reason }
-    ];
-    if (instance?.parent?.bindingGeneration) targets.push({ targetKind: "primary-session", targetId: instance.parent.bindingId, targetGeneration: instance.parent.bindingGeneration, reason });
-    if (view.primaryAnswer) targets.push({ targetKind: "primary-turn", targetId: view.primaryAnswer.aggregateId, targetGeneration: view.primaryAnswer.generation, reason });
-    this.invalidateCardContexts(targets);
-  }
-
-  private invalidateWorkerInstanceContexts(instance: AgentInstance, reason: string): void {
-    if (instance.role !== "worker" || !instance.parent?.bindingGeneration) return;
-    this.invalidateCardContexts([
-      { targetKind: "worker-session", targetId: instance.id, targetGeneration: instance.workerSessionGeneration, reason },
-      { targetKind: "primary-session", targetId: instance.parent.bindingId, targetGeneration: instance.parent.bindingGeneration, reason }
-    ]);
+    return this.cardContexts.invalidateCardContexts(targets);
   }
 
   listPendingCardContextInvalidations(limit = 100): CardContextInvalidation[] {
-    const bounded = Math.max(1, Math.min(limit, 500));
-    return (this.database.prepare(`SELECT * FROM card_context_invalidations WHERE projected_dependency_revision < requested_dependency_revision ORDER BY updated_at, target_kind, target_id, target_generation LIMIT ?`).all(bounded) as Array<Record<string, unknown>>).map(mapCardContextInvalidation);
+    return this.cardContexts.listPendingCardContextInvalidations(limit);
   }
 
   markCardContextProjected(target: CardContextTarget, dependencyRevision: number): boolean {
-    if (!Number.isInteger(dependencyRevision) || dependencyRevision < 1) return false;
-    return this.database.prepare(`UPDATE card_context_invalidations SET projected_dependency_revision = MAX(projected_dependency_revision, MIN(requested_dependency_revision, ?)), updated_at = ? WHERE target_kind = ? AND target_id = ? AND target_generation = ?`).run(dependencyRevision, now(), target.targetKind, target.targetId, target.targetGeneration).changes === 1;
+    return this.cardContexts.markCardContextProjected(target, dependencyRevision);
   }
 
   projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
-    return this.context.transaction(() => {
-      const currentInvalidation = this.loadCardContextInvalidation(invalidation);
-      if (!currentInvalidation || currentInvalidation.projectedDependencyRevision >= invalidation.requestedDependencyRevision) {return "current"; }
-      let reserved = false;
-      if (invalidation.targetKind === "worker-session") {
-        const source = this.loadWorkerMainProjectionSource(invalidation.targetId, invalidation.targetGeneration);
-        if (!source) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
-        const previous = this.loadWorkerMainView(invalidation.targetId, invalidation.targetGeneration);
-        const next = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
-        const binding = this.getBinding(source.parentBindingId);
-        if (!binding?.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
-        if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
-      } else if (invalidation.targetKind === "worker-turn") {
-        const previous = this.loadWorkerTurnCard(invalidation.targetId);
-        if (!previous || previous.instanceGeneration !== invalidation.targetGeneration) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
-        const main = this.loadWorkerMainView(previous.instanceId, previous.workerSessionGeneration);
-        const answer = previous.primaryAnswer ? this.loadRunCard(previous.primaryAnswer.aggregateId) : null;
-        const workerMain = { ...previous.workerMain, messageId: main?.messageId ?? null };
-        const primaryAnswer = previous.primaryAnswer ? { ...previous.primaryAnswer, messageId: answer?.answerMessageId ?? null } : null;
-        const next = updateWorkerTurnCardTargets(previous, workerMain, primaryAnswer, now());
-        if (next !== previous) this.saveWorkerTurnCard(next);
-        if (next.messageId && next.viewVersion > next.deliveredVersion) {
-          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(renderers.workerTask(next)) });
-          reserved = true;
-        }
-      } else if (invalidation.targetKind === "primary-session") {
-        const binding = this.getBinding(invalidation.targetId);
-        const previous = this.loadTopicView(invalidation.targetId);
-        if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
-        const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
-        const next = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
-        this.saveTopicView(next);
-        reserved = this.reserveMainCardInTransaction(next, binding.rootMessageId, renderers.primaryMain(next)) === "reserved";
-      } else if (invalidation.targetKind === "primary-turn") {
-        const previous = this.loadRunCard(invalidation.targetId);
-        const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;
-        if (!previous || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null || page?.state === "frozen" || page?.state === "finished") { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
-        const activity = selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(previous.promptId, invalidation.targetGeneration));
-        const next = updateRunCardWorkerContext(previous, activity, invalidation.requestedDependencyRevision, now());
-        if (next !== previous) this.saveRunCard(next);
-        if (next.answerMessageId && next.viewVersion > next.answerDeliveredVersion) {
-          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(renderers.primaryAnswer(next)) });
-          reserved = true;
-        }
-      }
-      this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
-
-      return reserved ? "reserved" : "current";
-    });
+    return this.cardContexts.projectCardContext(invalidation, renderers);
   }
 
   private loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {
-    const row = this.database.prepare("SELECT * FROM card_context_invalidations WHERE target_kind = ? AND target_id = ? AND target_generation = ?").get(target.targetKind, target.targetId, target.targetGeneration) as Record<string, unknown> | undefined;
-    return row ? mapCardContextInvalidation(row) : null;
+    return this.cardContexts.loadCardContextInvalidation(target);
   }
 
   loadWorkerMainProjectionSource(workerId: string, workerSessionGeneration: number): import("../domain/worker-main-selector.js").WorkerMainProjectionSource | null {
-    const instance = this.getAgentInstance(workerId);
-    if (!instance || instance.role !== "worker" || instance.workerSessionGeneration !== workerSessionGeneration || !instance.parent?.bindingGeneration) return null;
-    const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
-    if (!lease) return null;
-    const cards = (this.database.prepare("SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? ORDER BY created_at DESC, turn_id DESC").all(workerId, workerSessionGeneration) as Array<Record<string, unknown>>).map(mapWorkerTurnCard).filter((value): value is WorkerTurnCardView => value !== null);
-    const active = ["blocked", "running", "preparing"]
-      .flatMap((phase) => cards.filter((card) => card.phase === phase))
-      .at(0) ?? cards.filter(({ phase }) => phase === "queued").at(-1) ?? null;
-    const summary = (view: WorkerTurnCardView): import("../domain/worker-main-view.js").WorkerMainTaskSummary => ({
-      turnId: view.turnId, title: summarizeTaskTitle(view.requestText), phase: view.phase, durationSeconds: durationSeconds(view.startedAt, view.finishedAt),
-      taskCard: { aggregateKind: "worker-turn", aggregateId: view.turnId, generation: view.instanceGeneration, messageId: view.messageId }, updatedAt: view.updatedAt
-    });
-    const binding = this.getBinding(instance.parent.bindingId);
-    return {
-      workerId, workerSessionGeneration, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
-      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, ownerName: binding?.title ?? "Primary",
-      workspace: lease.cwd, branch: lease.branch, currentTask: active ? summary(active) : null, queueCount: cards.filter(({ phase }) => phase === "queued").length, nextTaskTitle: cards.filter(({ phase }) => phase === "queued").reverse().map(({ requestText }) => summarizeTaskTitle(requestText))[0] ?? null,
-      recentTasks: cards.filter(({ phase }) => ["completed", "failed", "cancelled", "dispatch-uncertain"].includes(phase)).slice(0, 5).map(summary), createdAt: cards.at(-1)?.createdAt ?? now()
-    };
+    return this.cardContexts.loadWorkerMainProjectionSource(workerId, workerSessionGeneration);
   }
 
   loadPrimaryWorkerSummaries(bindingId: string, bindingGeneration: number): import("../domain/card-context-summary.js").PrimaryWorkerSummary[] {
-    const binding = this.getBinding(bindingId);
-    if (!binding || binding.generation !== bindingGeneration || !binding.paneId) return [];
-    return this.listWorkerInstancesByParent({ bindingId, paneId: binding.paneId }).filter((worker) => worker.parent?.bindingGeneration === bindingGeneration).flatMap((worker) => {
-      const source = this.loadWorkerMainProjectionSource(worker.id, worker.workerSessionGeneration ?? 1);
-      const main = this.loadWorkerMainView(worker.id, worker.workerSessionGeneration ?? 1);
-      if (!source) return [];
-      const state = source.currentTask?.phase === "blocked" ? "blocked" as const
-        : source.currentTask?.phase === "running" || source.currentTask?.phase === "preparing" ? "working" as const
-          : source.currentTask?.phase === "queued" || (worker.observedState === "idle" && source.queueCount > 0) ? "queued" as const
-            : worker.observedState;
-      return [{ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration ?? 1, name: worker.name, state, currentTaskTitle: source.currentTask?.title ?? null, queueCount: source.queueCount, workerMain: { aggregateKind: "worker-session" as const, aggregateId: worker.id, generation: worker.workerSessionGeneration ?? 1, messageId: main?.messageId ?? null }, createdAt: source.createdAt }];
-    });
+    return this.cardContexts.loadPrimaryWorkerSummaries(bindingId, bindingGeneration);
   }
 
   loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): import("../domain/card-context-summary.js").PrimaryWorkerActivitySummary[] {
-    const run = this.loadRunCard(promptId);
-    const binding = run ? this.getBinding(run.bindingId) : null;
-    if (!run || run.bindingGeneration !== bindingGeneration || !binding || binding.generation !== bindingGeneration || !binding.paneId) return [];
-    const rows = this.database.prepare(`
-      SELECT c.* FROM worker_turn_cards c
-      JOIN instance_turns t ON t.id = c.turn_id
-      JOIN agent_instances worker ON worker.id = c.instance_id
-      WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary'
-        AND json_extract(t.actor_json, '$.parentPromptId') = ?
-        AND json_extract(t.actor_json, '$.bindingId') = ?
-        AND json_extract(t.actor_json, '$.bindingGeneration') = ?
-        AND worker.role = 'worker' AND worker.parent_binding_id = ? AND worker.parent_binding_generation = ? AND worker.parent_pane_id = ?
-        AND worker.worker_session_generation = c.worker_session_generation
-      ORDER BY c.updated_at DESC, c.turn_id
-    `).all(promptId, run.bindingId, bindingGeneration, run.bindingId, bindingGeneration, binding.paneId) as Array<Record<string, unknown>>;
-    const grouped = new Map<string, WorkerTurnCardView[]>();
-    for (const row of rows) { const view = mapWorkerTurnCard(row); if (view) grouped.set(`${view.instanceId}:${view.workerSessionGeneration}`, [...(grouped.get(`${view.instanceId}:${view.workerSessionGeneration}`) ?? []), view]); }
-    return [...grouped.values()].map((cards) => { const latest = cards[0]!; return { workerId: latest.instanceId, workerSessionGeneration: latest.workerSessionGeneration, name: latest.workerName, latestPhase: latest.phase, taskCount: cards.length, latestTaskTitle: summarizeTaskTitle(latest.requestText), latestTaskCard: { aggregateKind: "worker-turn", aggregateId: latest.turnId, generation: latest.instanceGeneration, messageId: latest.messageId }, updatedAt: latest.updatedAt }; });
+    return this.cardContexts.loadPrimaryWorkerActivity(promptId, bindingGeneration);
   }
 
   findAgentInstanceByPane(paneId: string): AgentInstance | null {
@@ -601,7 +462,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (input.turn.view && input.turn.card) {
         this.saveWorkerTurnCard(input.turn.view);
         this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turn.id}:0`, bindingId: null, workerTurnId: input.turn.id, viewVersion: input.turn.view.viewVersion, rootMessageId: input.turn.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.turn.card, stream: { pageIndex: 0, pageStart: 0, elementId: input.turn.view.elementId } }) });
-        this.invalidateWorkerCardContexts(input.turn.view, "turn.accepted");
+        this.cardContexts.invalidateWorkerCardContexts(input.turn.view, "turn.accepted");
       }
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
       const converted = this.getTurnControlOperation(input.operationId)!;
@@ -1862,12 +1723,6 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 }
 
 function now(): string { return new Date().toISOString(); }
-function summarizeTaskTitle(text: string): string { return text.trim().split(/\r?\n/, 1)[0]!.slice(0, 120) || "Untitled task"; }
-function durationSeconds(startedAt: string | null, finishedAt: string | null): number | null {
-  if (!startedAt) return null;
-  const start = Date.parse(startedAt); const finish = Date.parse(finishedAt ?? now());
-  return Number.isFinite(start) && Number.isFinite(finish) ? Math.max(0, Math.floor((finish - start) / 1_000)) : null;
-}
 function normalizeLiveStatus(value: unknown): MainCardLiveStatus | null {
   if (!isRecord(value)) return null;
   const statusTitle = typeof value.statusTitle === "string" ? value.statusTitle : null;
@@ -1911,54 +1766,6 @@ function streamContentPageIndex(payload: string): number | null {
   } catch { return null; }
 }
 
-function mapWorkerTurnCard(row: Record<string, unknown> | undefined): WorkerTurnCardView | null {
-  if (!row) return null;
-  return {
-    turnId: String(row.turn_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), workerSessionGeneration: Number(row.worker_session_generation ?? 1), workerName: String(row.worker_name),
-    parentTurnId: row.parent_turn_id === null ? null : String(row.parent_turn_id), rootMessageId: String(row.root_message_id),
-    messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id), elementId: String(row.element_id), progressSequence: Number(row.progress_sequence ?? 0),
-    phase: String(row.phase) as WorkerTurnCardView["phase"], requestText: String(row.request_text), answer: String(row.answer), statusTitle: row.status_title === null || row.status_title === undefined ? null : String(row.status_title), progressEvents: parseWorkerProgress(row.progress_json), progressSummary: summarizeWorkerProgress(parseWorkerProgress(row.progress_json)), queuePosition: Number(row.queue_position),
-    startedAt: row.started_at === null ? null : String(row.started_at), finishedAt: row.finished_at === null ? null : String(row.finished_at), notice: row.notice === null ? null : String(row.notice),
-    resultCapture: String(row.result_capture) as WorkerTurnCardView["resultCapture"],
-    workerMain: parseCardTargetRef(row.worker_main_ref_json) ?? { aggregateKind: "worker-session", aggregateId: String(row.instance_id), generation: 1, messageId: null },
-    primaryAnswer: parseCardTargetRef(row.primary_answer_ref_json), pageIndex: Number(row.page_index), pageStart: Number(row.page_start), sequence: Number(row.sequence),
-    viewVersion: Number(row.view_version), deliveredVersion: Number(row.delivered_version), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
-  };
-}
-function parseCardTargetRef(value: unknown): import("../domain/card-target-ref.js").CardTargetRef | null {
-  if (typeof value !== "string") return null;
-  try {
-    const parsed = JSON.parse(value) as Record<string, unknown>;
-    return typeof parsed.aggregateKind === "string" && typeof parsed.aggregateId === "string" && typeof parsed.generation === "number"
-      ? parsed as unknown as import("../domain/card-target-ref.js").CardTargetRef : null;
-  } catch { return null; }
-}
-function mapCardContextInvalidation(row: Record<string, unknown>): CardContextInvalidation {
-  return {
-    targetKind: String(row.target_kind) as CardContextInvalidation["targetKind"], targetId: String(row.target_id), targetGeneration: Number(row.target_generation),
-    requestedDependencyRevision: Number(row.requested_dependency_revision), projectedDependencyRevision: Number(row.projected_dependency_revision), reason: String(row.reason),
-    createdAt: String(row.created_at), updatedAt: String(row.updated_at)
-  };
-}
-function parseWorkerProgress(value: unknown): import("../domain/run-card-view.js").RunProgressEvent[] {
-  try {
-    const parsed = JSON.parse(typeof value === "string" ? value : "[]") as unknown;
-    return Array.isArray(parsed) ? parsed.filter((entry): entry is import("../domain/run-card-view.js").RunProgressEvent => isRecord(entry) && typeof entry.key === "string" && typeof entry.label === "string" && typeof entry.kind === "string" && typeof entry.state === "string" && typeof entry.occurredAt === "string") : [];
-  } catch { return []; }
-}
-function summarizeWorkerProgress(events: readonly import("../domain/run-card-view.js").RunProgressEvent[]): import("../domain/run-card-view.js").RunProgressSummary {
-  let stepTotal = 0; let stepDone = 0;
-  for (const event of events) if (event.kind === "step") { stepTotal += 1; if (event.state === "done") stepDone += 1; }
-  return { total: events.length, stepTotal, stepDone };
-}
-
-function mapWorkerTurnCardPage(row: Record<string, unknown>): WorkerTurnCardPage {
-  return {
-    id: String(row.id), turnId: String(row.turn_id), pageIndex: Number(row.page_index), pageStart: Number(row.page_start), elementId: String(row.element_id),
-    messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id),
-    state: String(row.state) as WorkerTurnCardPage["state"], sequence: Number(row.sequence), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
-  };
-}
 function matchesExpectedRuntimeTurn(turn: InstanceTurn, input: { expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string }): boolean {
   return (input.expectedRuntimeTurnId === undefined || turn.runtimeTurnId === input.expectedRuntimeTurnId)
     && (input.expectedRuntimeTurnStartedAt === undefined || turn.runtimeTurnStartedAt === input.expectedRuntimeTurnStartedAt);
