@@ -39,6 +39,7 @@ import { SqliteLeaseStore } from "./sqlite/lease-store.js";
 import { SqliteMigrations } from "./sqlite/migrations.js";
 import { SqliteOperationsStore } from "./sqlite/operations-store.js";
 import { SqliteCommandIntentStore } from "./sqlite/command-intent-store.js";
+import { SqliteSessionOperationStore } from "./sqlite/session-operation-store.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
 
@@ -62,6 +63,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private readonly migrations: SqliteMigrations;
   private readonly operations: SqliteOperationsStore;
   private readonly commandIntents: SqliteCommandIntentStore;
+  private readonly sessionOperations: SqliteSessionOperationStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
@@ -70,6 +72,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.migrations.run();
     this.operations = new SqliteOperationsStore(this.context);
     this.commandIntents = new SqliteCommandIntentStore(this.context);
+    this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.getBinding(id));
     this.approvals = new SqliteApprovalStore(this.context);
     this.leases = new SqliteLeaseStore(this.context);
   }
@@ -1196,109 +1199,24 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   createCardInteraction(input: { id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind; parentPromptId: string | null; targetPromptId: string | null; expiresAt: string }): CardInteraction {
-    const timestamp = now();
-    this.database.prepare(`INSERT INTO card_interactions(id, binding_id, binding_generation, actor_open_id, action_kind, parent_prompt_id, target_prompt_id, state, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)` )
-      .run(input.id, input.bindingId, input.bindingGeneration, input.actorOpenId, input.actionKind, input.parentPromptId, input.targetPromptId, input.expiresAt, timestamp);
-    return this.getCardInteraction(input.id)!;
+    return this.sessionOperations.createInteraction(input);
   }
 
   getCardInteraction(id: string): CardInteraction | null {
-    const row = this.database.prepare("SELECT * FROM card_interactions WHERE id = ?").get(id) as CardInteractionRow | undefined;
-    return row ? mapCardInteraction(row) : null;
+    return this.sessionOperations.getInteraction(id);
   }
 
-  consumeCardInteraction(input: { id: string; actorOpenId: string; bindingId: string; bindingGeneration: number; now: string; resultCode: string }): { outcome: "consumed" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const current = this.getCardInteraction(input.id);
-      if (!current) { this.database.exec("COMMIT"); return { outcome: "missing", interaction: null }; }
-      if (current.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", interaction: current }; }
-      if (current.state === "consumed") { this.database.exec("COMMIT"); return { outcome: "duplicate", interaction: current }; }
-      if (current.expiresAt <= input.now) { this.database.prepare("UPDATE card_interactions SET state = 'expired' WHERE id = ?").run(input.id); this.database.exec("COMMIT"); return { outcome: "expired", interaction: this.getCardInteraction(input.id) }; }
-      if (current.bindingId !== input.bindingId || current.bindingGeneration !== input.bindingGeneration) { this.database.exec("COMMIT"); return { outcome: "stale", interaction: current }; }
-      this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = ?, consumed_at = ? WHERE id = ? AND state = 'active'").run(input.resultCode, input.now, input.id);
-      this.database.exec("COMMIT");
-      return { outcome: "consumed", interaction: this.getCardInteraction(input.id) };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
-  }
+  consumeCardInteraction(input: { id: string; actorOpenId: string; bindingId: string; bindingGeneration: number; now: string; resultCode: string }): { outcome: "consumed" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } { return this.sessionOperations.consumeInteraction(input); }
 
-  acceptSessionOperation(input: { id: string; idempotencyKey: string; interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; expectedPaneId: string | null; expectedTerminalId: string | null; kind: SessionOperationKind; argument: string | null; now: string }): { outcome: "accepted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; operation: SessionOperation | null } {
-    const requiresArgument = input.kind === "rename" || input.kind === "reattach";
-    if (requiresArgument && (!input.argument || input.argument !== input.argument.trim())) throw new Error(`Session operation ${input.kind} requires a trimmed argument`);
-    if (!requiresArgument && input.argument !== null) throw new Error(`Session operation ${input.kind} does not accept an argument`);
-    if (input.argument !== null && input.argument.length > 500) throw new Error("Session operation argument exceeds 500 characters");
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const interaction = this.getCardInteraction(input.interactionId);
-      if (!interaction) { this.database.exec("COMMIT"); return { outcome: "missing", operation: null }; }
-      if (interaction.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", operation: null }; }
-      const existing = this.database.prepare("SELECT * FROM session_operations WHERE interaction_id = ?").get(input.interactionId) as SessionOperationRow | undefined;
-      if (existing) {
-        const exactDuplicate = existing.idempotency_key === input.idempotencyKey && existing.kind === input.kind
-          && existing.binding_id === input.bindingId && existing.binding_generation === input.bindingGeneration;
-        this.database.exec("COMMIT");
-        return exactDuplicate ? { outcome: "duplicate", operation: mapSessionOperation(existing) } : { outcome: "stale", operation: null };
-      }
-      // A consumed interaction without its operation predates atomic Session
-      // acceptance (or was consumed by another workflow). Treat it as stale:
-      // reporting a successful duplicate would claim durability we cannot prove.
-      if (interaction.state === "consumed") { this.database.exec("COMMIT"); return { outcome: "stale", operation: null }; }
-      if (interaction.expiresAt <= input.now) {
-        this.database.prepare("UPDATE card_interactions SET state = 'expired' WHERE id = ? AND state = 'active'").run(input.interactionId);
-        this.database.exec("COMMIT"); return { outcome: "expired", operation: null };
-      }
-      const binding = this.getBinding(input.bindingId);
-      const identityMatches = interaction.state === "active" && interaction.actionKind === "more_actions"
-        && interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
-        && binding?.generation === input.bindingGeneration && binding.paneId === input.expectedPaneId
-        && binding.traexSessionId === input.expectedTerminalId;
-      if (!identityMatches) { this.database.exec("COMMIT"); return { outcome: "stale", operation: null }; }
-      if (sessionOperationRejection(binding, input.kind)) { this.database.exec("COMMIT"); return { outcome: "stale", operation: null }; }
-      this.database.prepare(`
-        INSERT INTO session_operations(
-          id, idempotency_key, interaction_id, binding_id, binding_generation, expected_pane_id, expected_terminal_id,
-          actor_open_id, kind, argument, state, attempt_count, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
-      `).run(input.id, input.idempotencyKey, input.interactionId, input.bindingId, input.bindingGeneration, input.expectedPaneId, input.expectedTerminalId, input.actorOpenId, input.kind, input.argument, input.now, input.now);
-      const consumed = this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = ?, consumed_at = ? WHERE id = ? AND state = 'active'")
-        .run(input.kind, input.now, input.interactionId);
-      if (consumed.changes !== 1) throw new Error(`Session interaction acceptance lost ownership: ${input.interactionId}`);
-      const operation = this.getSessionOperation(input.id);
-      this.database.exec("COMMIT");
-      return { outcome: "accepted", operation };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
-  }
+  acceptSessionOperation(input: { id: string; idempotencyKey: string; interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; expectedPaneId: string | null; expectedTerminalId: string | null; kind: SessionOperationKind; argument: string | null; now: string }): { outcome: "accepted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; operation: SessionOperation | null } { return this.sessionOperations.accept(input); }
 
-  getSessionOperation(id: string): SessionOperation | null {
-    const row = this.database.prepare("SELECT * FROM session_operations WHERE id = ?").get(id) as SessionOperationRow | undefined;
-    return row ? mapSessionOperation(row) : null;
-  }
+  getSessionOperation(id: string): SessionOperation | null { return this.sessionOperations.get(id); }
 
-  claimNextSessionOperation(bindingId?: string): SessionOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare(`
-        SELECT operation.* FROM session_operations operation
-        WHERE operation.state = 'accepted' ${bindingId ? "AND operation.binding_id = ?" : ""}
-        ORDER BY operation.created_at, operation.rowid LIMIT 1
-      `).get(...(bindingId ? [bindingId] : [])) as SessionOperationRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
-      const changed = this.database.prepare("UPDATE session_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), row.id);
-      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
-      const operation = this.getSessionOperation(row.id);
-      this.database.exec("COMMIT"); return operation;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
-  }
+  claimNextSessionOperation(bindingId?: string): SessionOperation | null { return this.sessionOperations.claimNext(bindingId); }
 
-  finishSessionOperation(id: string, state: Extract<SessionOperationState, "succeeded" | "rejected" | "failed" | "uncertain">, detail: string | null = null): SessionOperation | null {
-    const changed = this.database.prepare("UPDATE session_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('running','uncertain')")
-      .run(state, detail?.slice(0, 500) ?? null, now(), id);
-    return changed.changes === 1 ? this.getSessionOperation(id) : null;
-  }
+  finishSessionOperation(id: string, state: Extract<SessionOperationState, "succeeded" | "rejected" | "failed" | "uncertain">, detail: string | null = null): SessionOperation | null { return this.sessionOperations.finish(id, state, detail); }
 
-  listRecoverableSessionOperations(): SessionOperation[] {
-    return (this.database.prepare("SELECT * FROM session_operations WHERE state IN ('accepted','running','uncertain') ORDER BY created_at, rowid").all() as SessionOperationRow[]).map(mapSessionOperation);
-  }
+  listRecoverableSessionOperations(): SessionOperation[] { return this.sessionOperations.listRecoverable(); }
 
   acceptCommandIntent(input: AcceptCommandIntentInput): AcceptCommandIntentResult {
     return this.commandIntents.accept(input);
@@ -1324,10 +1242,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return this.commandIntents.recoverExecuting(recoveredAt);
   }
 
-  pruneTerminalSessionOperations(cutoff: string, limit: number): number {
-    if (!Number.isInteger(limit) || limit <= 0) return 0;
-    return Number(this.database.prepare(`DELETE FROM session_operations WHERE id IN (SELECT id FROM session_operations WHERE state IN ('succeeded','rejected','failed') AND updated_at < ? ORDER BY updated_at, rowid LIMIT ?)` ).run(cutoff, limit).changes);
-  }
+  pruneTerminalSessionOperations(cutoff: string, limit: number): number { return this.sessionOperations.pruneTerminal(cutoff, limit); }
 
   convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
     this.database.exec("BEGIN IMMEDIATE");
