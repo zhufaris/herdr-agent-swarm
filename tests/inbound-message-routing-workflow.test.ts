@@ -5,7 +5,7 @@ import { PermanentInboundMessageRejection } from "../src/domain/permanent-inboun
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
-  it("routes an active-topic reply to an exact Worker Task Card before the Primary FIFO", async () => {
+  it("routes an active-topic reply to the Primary FIFO without consulting Worker targeting", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
     const store = {
       findBindingByLarkScope: vi.fn(() => binding),
@@ -13,9 +13,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
       countPendingPrompts: vi.fn(() => 0),
       acceptClassifiedPrompt: vi.fn(() => ({ decision: "ordinary", inserted: false, prompt: { id: "primary-prompt" } }))
     };
-    const instanceInteractions = {
-      handleOrdinaryMessage: vi.fn(async () => true)
-    };
+    const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => true) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
       store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
@@ -24,8 +22,8 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
     await workflow.handle(message);
 
-    expect(instanceInteractions.handleOrdinaryMessage).toHaveBeenCalledWith(message);
-    expect(store.acceptClassifiedPrompt).not.toHaveBeenCalled();
+    expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
+    expect(store.acceptClassifiedPrompt).toHaveBeenCalledOnce();
   });
 
   it("falls back to the active Primary FIFO when the replied card is not a Worker Task Card", async () => {
@@ -43,7 +41,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
     await workflow.handle(message);
 
-    expect(instanceInteractions.handleOrdinaryMessage).toHaveBeenCalledWith(message);
+    expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
     expect(store.acceptClassifiedPrompt).toHaveBeenCalledOnce();
   });
 
@@ -66,7 +64,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
     await workflow.handle(message);
 
-    expect(instanceInteractions.handleOrdinaryMessage).toHaveBeenCalledWith(message);
+    expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
     expect(store.acceptClassifiedPrompt).toHaveBeenCalledOnce();
   });
 

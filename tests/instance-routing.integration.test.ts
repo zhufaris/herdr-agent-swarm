@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { InstanceInteractionWorkflow } from "../src/coordinator/instance-interaction-workflow.js";
 import { normalizeCardActionEvent } from "../src/adapters/lark-adapter.js";
 import type { IncomingLarkMessage } from "../src/domain/types.js";
@@ -67,87 +67,20 @@ function taskCard(instanceId: string, state: "queued" | "running" | "completed" 
 }
 
 describe("instance routing", () => {
-  it("routes a direct reply to the exact active Worker turn as steering", async () => {
-    const { create, workflow, messaging } = setup();
-    const worker = create("reviewer", "worker");
-    const task = taskCard(worker.id, "running");
-    vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
+  it.each(["queued", "running", "completed", "failed", "cancelled", "dispatch-uncertain"] as const)(
+    "leaves an ordinary reply to a %s Worker Task Card on the Primary message path",
+    async (state) => {
+      const { create, workflow, messaging, outbound } = setup();
+      const worker = create("reviewer", "worker");
+      const task = taskCard(worker.id, state);
 
-    await expect(workflow.handleOrdinaryMessage({ ...message("focus on transactions", "reply-1"), parentMessageId: task.cardMessageId })).resolves.toBe(true);
+      await expect(workflow.handleOrdinaryMessage({ ...message("continue primary", `reply-${state}`), parentMessageId: task.cardMessageId })).resolves.toBe(false);
 
-    expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId, text: "focus on transactions" }));
-    expect(messaging.submit).not.toHaveBeenCalled();
-  });
-
-  it("routes by the replied Task Card when multiple Workers exist and another Worker is selected", async () => {
-    const { create, workflow, messaging } = setup();
-    const repliedWorker = create("reviewer", "worker");
-    const selectedWorker = create("implementer", "worker");
-    const task = taskCard(repliedWorker.id, "completed", "turn-reviewer-completed");
-    store!.setConversationTarget({ chatId: "binding:binding-default", projectId: "p1", target: { kind: "instance", instanceId: selectedWorker.id, expectedGeneration: selectedWorker.generation } });
-
-    await expect(workflow.handleOrdinaryMessage({ ...message("continue the review", "reply-reviewer"), parentMessageId: task.cardMessageId })).resolves.toBe(true);
-
-    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({
-      targetInstanceId: repliedWorker.id,
-      content: { kind: "followup", text: "continue the review" },
-      source: expect.objectContaining({ parentTurnId: task.turnId })
-    }));
-    expect(messaging.submit).not.toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: selectedWorker.id }));
-  });
-
-  it("uses the shared task policy for blocked and preparing direct replies", async () => {
-    const { create, workflow, messaging, outbound } = setup();
-    const worker = create("reviewer", "worker");
-    const blocked = taskCard(worker.id, "running", "turn-blocked");
-    store!.transitionInstanceTurnWithProjection({ turnId: blocked.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-01T00:02:00.000Z", notice: "local approval" }, render: renderWorkerTurnCard });
-    vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
-
-    await workflow.handleOrdinaryMessage({ ...message("more context", "reply-blocked"), parentMessageId: blocked.cardMessageId });
-    expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetTurnId: blocked.turnId, text: "more context" }));
-
-    const preparing = taskCard(worker.id, "queued", "turn-preparing");
-    store!.transitionInstanceTurnWithProjection({ turnId: preparing.turnId, expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching", change: { type: "preparing", occurredAt: "2026-09-01T00:03:00.000Z" }, render: renderWorkerTurnCard });
-    await workflow.handleOrdinaryMessage({ ...message("do not guess", "reply-preparing"), parentMessageId: preparing.cardMessageId });
-    expect(messaging.submit).not.toHaveBeenCalled();
-    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain("准备");
-  });
-
-  it("rejects a direct reply to a Task Card from an old Worker generation", async () => {
-    const { create, workflow, messaging, outbound } = setup();
-    const worker = create("reviewer", "worker");
-    const task = taskCard(worker.id, "completed", "turn-old-generation");
-    store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:replacement", nativeSessionId: "replacement" });
-
-    await expect(workflow.handleOrdinaryMessage({ ...message("continue old work", "reply-old-generation"), parentMessageId: task.cardMessageId })).resolves.toBe(true);
-
-    expect(messaging.submit).not.toHaveBeenCalled();
-    expect(messaging.steer).not.toHaveBeenCalled();
-    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain("过期");
-  });
-
-  it.each(["completed", "failed", "cancelled"] as const)("routes a direct reply to a %s Worker card as a follow-up", async (state) => {
-    const { create, workflow, messaging } = setup();
-    const worker = create("reviewer", "worker");
-    const task = taskCard(worker.id, state);
-
-    await expect(workflow.handleOrdinaryMessage({ ...message("check the fix", `reply-${state}`), parentMessageId: task.cardMessageId })).resolves.toBe(true);
-
-    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, content: { kind: "followup", text: "check the fix" }, source: { messageId: `reply-${state}`, rootMessageId: "root", parentTurnId: task.turnId } }));
-    expect(messaging.steer).not.toHaveBeenCalled();
-  });
-
-  it.each(["queued", "dispatch-uncertain"] as const)("rejects a direct reply to a %s Worker card without guessing another target", async (state) => {
-    const { create, workflow, messaging, outbound } = setup();
-    const worker = create("reviewer", "worker");
-    const task = taskCard(worker.id, state);
-
-    await expect(workflow.handleOrdinaryMessage({ ...message("do not reroute", `reply-${state}`), parentMessageId: task.cardMessageId })).resolves.toBe(true);
-
-    expect(messaging.submit).not.toHaveBeenCalled();
-    expect(messaging.steer).not.toHaveBeenCalled();
-    expect(JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2])).toContain(state === "queued" ? "排队" : "无法确认");
-  });
+      expect(messaging.submit).not.toHaveBeenCalled();
+      expect(messaging.steer).not.toHaveBeenCalled();
+      expect(outbound.enqueueCard).not.toHaveBeenCalled();
+    }
+  );
 
   it("opens and submits an exact-turn supplement from a running Task Card", async () => {
     const { create, workflow, messaging } = setup();
