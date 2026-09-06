@@ -28,6 +28,11 @@ export class SqliteInboundProjectStore {
   markInboundMessageAccepted(eventId: string): void { this.database.prepare("UPDATE inbound_messages SET state = 'accepted', error = NULL, updated_at = ? WHERE event_id = ?").run(now(), eventId); }
   releaseInboundMessage(eventId: string, error: string): void { this.database.prepare("UPDATE inbound_messages SET state = 'received', error = ?, updated_at = ? WHERE event_id = ?").run(error, now(), eventId); }
   recoverProcessingInboundMessages(): number { return Number(this.database.prepare("UPDATE inbound_messages SET state = 'received', error = 'Interrupted during inbound acceptance; retrying', updated_at = ? WHERE state = 'processing'").run(now()).changes); }
+  pruneAcceptedInboundMessages(cutoff: string, limit: number): number {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    const result = this.database.prepare(`DELETE FROM inbound_messages WHERE event_id IN (SELECT event_id FROM inbound_messages WHERE state = 'accepted' AND updated_at < ? ORDER BY updated_at, event_id LIMIT ?)` ).run(cutoff, limit);
+    return Number(result.changes);
+  }
   isBridgeMessage(messageId: string): boolean { return Boolean(this.database.prepare("SELECT 1 FROM bridge_messages WHERE message_id = ?").get(messageId)); }
   recordBridgeMessage(messageId: string): void { this.database.prepare("INSERT OR IGNORE INTO bridge_messages(message_id, created_at) VALUES (?, ?)").run(messageId, now()); }
 

@@ -20,6 +20,15 @@ export class SqliteBindingLifecycleStore {
 
   updateBinding(id: string, patch: Partial<Binding>): Binding { return this.persistBindingPatch(id, patch); }
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.persistBindingPatch(id, patch); }
+  setPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
+    const binding = this.getBinding(input.bindingId);
+    if (!binding || (binding.generation !== input.expectedGeneration && binding.generation + 1 !== input.expectedGeneration)) return false;
+    this.database.prepare("INSERT INTO primary_tool_capabilities(binding_id, binding_generation, capability_hash, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(binding_id, binding_generation) DO UPDATE SET capability_hash = excluded.capability_hash, created_at = excluded.created_at").run(input.bindingId, input.expectedGeneration, input.capabilityHash, now());
+    return true;
+  }
+  verifyPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean { return Boolean(this.database.prepare("SELECT 1 FROM primary_tool_capabilities c JOIN bindings b ON b.id = c.binding_id WHERE c.binding_id = ? AND c.binding_generation = ? AND c.capability_hash = ? AND b.generation = c.binding_generation AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached'").get(input.bindingId, input.expectedGeneration, input.capabilityHash)); }
+  hasPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean { return Boolean(this.database.prepare("SELECT 1 FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").get(bindingId, expectedGeneration)); }
+  revokePrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean { return Number(this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(bindingId, expectedGeneration).changes) > 0; }
   persistBindingPatch(id: string, patch: Partial<Binding>): Binding {
     const normalized = { ...patch };
     if (patch.state && patch.lifecycle === undefined) {

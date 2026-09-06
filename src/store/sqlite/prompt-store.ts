@@ -3,7 +3,9 @@ import { estimateQueueWait } from "../../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../../domain/ports.js";
 import type { DetachedPromptSkipResult } from "../../domain/ports/prompt.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { Binding, CardInteraction, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { ModelPreference } from "../../domain/model-selection.js";
+import { acceptModelSelection } from "../../domain/model-selection.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import { freezeRunCardWorkerContext, reduceRunCard, updateRunCardWorkerContext, type RunCardChange } from "../../domain/run-card-view.js";
 import { mirrorRunCardToTopic } from "../../domain/topic-view.js";
@@ -20,7 +22,8 @@ export interface PromptStoreDependencies {
   transitionBinding(id: string, transition: SessionTransition): Binding;
   loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null;
   loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): PrimaryWorkerActivitySummary[];
-  enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
+  enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): OutboundReply;
+  getCardInteraction(id: string): CardInteraction | null;
 }
 
 export class SqlitePromptStore {
@@ -92,6 +95,73 @@ export class SqlitePromptStore {
       ORDER BY p.created_at, p.rowid LIMIT 1
     `).get(bindingId) as { started_at: string | null } | undefined;
     return { activeStartedAt: active?.started_at ?? null, queued: this.listQueuedTurnRunCards(bindingId), durationsMs: this.listCompletedOrdinaryTurnDurations(bindingId, 10) };
+  }
+
+  projectQueuedRunCards(input: { bindingId: string; projections: Array<{ expectedViewVersion: number; view: RunCardView; card: object | null }> }): { projected: RunCardView[]; stalePromptIds: string[]; outboxReserved: boolean } {
+    if (input.projections.length === 0) return { projected: [], stalePromptIds: [], outboxReserved: false };
+    return this.context.transaction(() => {
+      const projected: RunCardView[] = [];
+      const stalePromptIds: string[] = [];
+      let outboxReserved = false;
+      for (const projection of input.projections) {
+        const current = this.projections.loadRunCard(projection.view.promptId);
+        if (!current || current.bindingId !== input.bindingId || current.phase !== "queued" || current.viewVersion !== projection.expectedViewVersion) { stalePromptIds.push(projection.view.promptId); continue; }
+        const view = this.projections.saveRunCard(projection.view);
+        projected.push(view);
+        if (view.answerMessageId && projection.card) {
+          const reply = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${view.promptId}:answer:${view.viewVersion}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: view.answerMessageId, kind: "card_update", payload: JSON.stringify(projection.card) });
+          outboxReserved ||= reply.state === "pending";
+        }
+      }
+      return { projected, stalePromptIds, outboxReserved };
+    });
+  }
+
+  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
+    const view = this.projections.loadRunCard(promptId);
+    if (!view || view.answerMessageId) return;
+    const existing = this.context.database.prepare("SELECT view_version FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`) as { view_version: number | null } | undefined;
+    if (existing && (existing.view_version ?? 0) >= view.viewVersion) return;
+    const prompt = this.requirePrompt(promptId);
+    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.bindingId, promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+  }
+
+  getModelPreference(bindingId: string): ModelPreference | null {
+    const row = this.context.database.prepare("SELECT * FROM binding_model_preferences WHERE binding_id = ?").get(bindingId) as ModelPreferenceRow | undefined;
+    return row ? mapModelPreference(row) : null;
+  }
+
+  acceptModelPreference(input: { bindingId: string; bindingGeneration: number; model: string }): { outcome: "accepted" | "busy" | "stale"; preference: ModelPreference | null } {
+    return this.context.transaction(() => {
+      const binding = this.context.database.prepare("SELECT generation FROM bindings WHERE id = ?").get(input.bindingId) as { generation: number } | undefined;
+      const decision = acceptModelSelection(this.getModelPreference(input.bindingId), { ...input, currentBindingGeneration: Number(binding?.generation ?? -1), updatedAt: now() });
+      if (decision.outcome !== "accepted") return decision;
+      const next = decision.preference;
+      this.context.database.prepare(`INSERT INTO binding_model_preferences(binding_id, binding_generation, desired_model, desired_revision, effective_model, effective_revision, state, dispatch_prompt_id, prepared_operation_id, updated_at) VALUES (?, ?, ?, ?, NULL, NULL, 'pending', NULL, NULL, ?) ON CONFLICT(binding_id) DO UPDATE SET binding_generation = excluded.binding_generation, desired_model = excluded.desired_model, desired_revision = excluded.desired_revision, effective_model = CASE WHEN binding_model_preferences.binding_generation = excluded.binding_generation THEN binding_model_preferences.effective_model ELSE NULL END, effective_revision = CASE WHEN binding_model_preferences.binding_generation = excluded.binding_generation THEN binding_model_preferences.effective_revision ELSE NULL END, state = 'pending', dispatch_prompt_id = NULL, prepared_operation_id = NULL, updated_at = excluded.updated_at`).run(next.bindingId, next.bindingGeneration, next.desiredModel, next.desiredRevision, next.updatedAt);
+      return { outcome: "accepted", preference: this.getModelPreference(input.bindingId) };
+    });
+  }
+
+  convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
+    return this.context.transaction(() => {
+      const interaction = this.dependencies.getCardInteraction(input.interactionId);
+      if (!interaction) return { outcome: "missing", prompt: null };
+      if (interaction.actorOpenId !== input.actorOpenId) return { outcome: "unauthorized", prompt: null };
+      const source = this.context.database.prepare(`SELECT p.*, c.steering_origin AS card_steering_origin, c.steering_failure_kind FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.id = ?`).get(input.sourcePromptId) as (PromptRow & { card_steering_origin: string | null; steering_failure_kind: string | null }) | undefined;
+      if (source && source.actor_open_id !== input.actorOpenId) return { outcome: "unauthorized", prompt: null };
+      const existing = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE source_prompt_id = ?").get(input.sourcePromptId) as PromptRow | undefined;
+      if (interaction.state === "consumed" || existing) return { outcome: "duplicate", prompt: existing ? mapPrompt(existing) : null };
+      const binding = this.dependencies.getBinding(input.bindingId);
+      const valid = interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration && interaction.actionKind === "enqueue_failed_steering" && interaction.targetPromptId === input.sourcePromptId && binding?.generation === input.bindingGeneration && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.rootMessageId === input.rootMessageId && source?.binding_id === input.bindingId && source.state === "failed" && source.dispatch_kind === "steering" && source.steering_origin === "automatic" && source.card_steering_origin === "automatic" && source.steering_failure_kind === "rejected";
+      if (!valid) return { outcome: "stale", prompt: null };
+      const queuePosition = Number((this.context.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn'").get(input.bindingId) as { count: number }).count) + 1;
+      const view: RunCardView = { ...input.view, steeringOrigin: null, steeringFailureKind: null, queuePosition, createdAt: input.now, updatedAt: input.now, activityAt: input.now };
+      this.context.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'turn', NULL, NULL, ?, 0, 'queued', 'not_started', 0, NULL, ?, ?)`).run(input.newPromptId, input.bindingId, input.newLarkMessageId, input.actorOpenId, source.body, input.sourcePromptId, input.now, input.now);
+      this.projections.insertRunCard(view);
+      this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), `run-card:create:${input.newPromptId}:answer`, input.bindingId, input.newPromptId, view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCardFor(view)), `answer:${input.newPromptId}`, input.now, input.now, input.now);
+      this.context.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = 'converted', consumed_at = ? WHERE id = ? AND state = 'active'").run(input.now, input.interactionId);
+      return { outcome: "converted", prompt: this.requirePrompt(input.newPromptId) };
+    });
   }
 
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {

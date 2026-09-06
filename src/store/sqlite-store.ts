@@ -119,7 +119,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       transitionBinding: (id, transition) => this.transitionBinding(id, transition),
       loadCardContextInvalidation: (target) => this.loadCardContextInvalidation(target),
       loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.loadPrimaryWorkerActivity(promptId, bindingGeneration),
-      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input)
+      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
+      getCardInteraction: (id) => this.sessionOperations.getInteraction(id)
     });
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.getAgentInstance(id),
@@ -349,20 +350,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null { return this.workerTurns.getActiveInstanceTurn(instanceId, expectedGeneration); }
   private saveWorkerTurnCard(view: WorkerTurnCardView): void { this.workerTurns.saveWorkerTurnCard(view); }
   setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
-    const binding = this.getBinding(input.bindingId);
-    if (!binding || (binding.generation !== input.expectedGeneration && binding.generation + 1 !== input.expectedGeneration)) return false;
-    this.database.prepare("INSERT INTO primary_tool_capabilities(binding_id, binding_generation, capability_hash, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(binding_id, binding_generation) DO UPDATE SET capability_hash = excluded.capability_hash, created_at = excluded.created_at").run(input.bindingId, input.expectedGeneration, input.capabilityHash, now());
-    return true;
+    return this.bindings.setPrimaryToolCapability(input);
   }
   verifyBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
-    const row = this.database.prepare("SELECT 1 FROM primary_tool_capabilities c JOIN bindings b ON b.id = c.binding_id WHERE c.binding_id = ? AND c.binding_generation = ? AND c.capability_hash = ? AND b.generation = c.binding_generation AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached'").get(input.bindingId, input.expectedGeneration, input.capabilityHash);
-    return Boolean(row);
+    return this.bindings.verifyPrimaryToolCapability(input);
   }
   hasBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean {
-    return Boolean(this.database.prepare("SELECT 1 FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").get(bindingId, expectedGeneration));
+    return this.bindings.hasPrimaryToolCapability(bindingId, expectedGeneration);
   }
   revokeBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean {
-    return Number(this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(bindingId, expectedGeneration).changes) > 0;
+    return this.bindings.revokePrimaryToolCapability(bindingId, expectedGeneration);
   }
   getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
     return this.prompts.getActiveOrdinaryPrompt(bindingId, expectedGeneration);
@@ -519,33 +516,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   pruneTerminalSessionOperations(cutoff: string, limit: number): number { return this.sessionOperations.pruneTerminal(cutoff, limit); }
 
   convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
-    return this.context.transaction(() => {
-      const interaction = this.getCardInteraction(input.interactionId);
-      if (!interaction) {return { outcome: "missing", prompt: null }; }
-      if (interaction.actorOpenId !== input.actorOpenId) {return { outcome: "unauthorized", prompt: null }; }
-      const source = this.database.prepare(`SELECT p.*, c.steering_origin AS card_steering_origin, c.steering_failure_kind FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.id = ?`).get(input.sourcePromptId) as (PromptRow & { card_steering_origin: string | null; steering_failure_kind: string | null }) | undefined;
-      if (source && source.actor_open_id !== input.actorOpenId) {return { outcome: "unauthorized", prompt: null }; }
-      const existing = this.database.prepare("SELECT * FROM prompt_jobs WHERE source_prompt_id = ?").get(input.sourcePromptId) as PromptRow | undefined;
-      if (interaction.state === "consumed" || existing) {return { outcome: "duplicate", prompt: existing ? mapPrompt(existing) : null }; }
-      const binding = this.getBinding(input.bindingId);
-      const valid = interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
-        && interaction.actionKind === "enqueue_failed_steering" && interaction.targetPromptId === input.sourcePromptId
-        && binding?.generation === input.bindingGeneration && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.rootMessageId === input.rootMessageId
-        && source?.binding_id === input.bindingId && source.state === "failed" && source.dispatch_kind === "steering"
-        && source.steering_origin === "automatic" && source.card_steering_origin === "automatic" && source.steering_failure_kind === "rejected";
-      if (!valid) {return { outcome: "stale", prompt: null }; }
-      const queuePosition = Number((this.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn'").get(input.bindingId) as { count: number }).count) + 1;
-      const view: RunCardView = { ...input.view, steeringOrigin: null, steeringFailureKind: null, queuePosition, createdAt: input.now, updatedAt: input.now, activityAt: input.now };
-      this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'turn', NULL, NULL, ?, 0, 'queued', 'not_started', 0, NULL, ?, ?)`)
-        .run(input.newPromptId, input.bindingId, input.newLarkMessageId, input.actorOpenId, source.body, input.sourcePromptId, input.now, input.now);
-      this.insertRunCard(view);
-      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`)
-        .run(randomUUID(), `run-card:create:${input.newPromptId}:answer`, input.bindingId, input.newPromptId, view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCardFor(view)), `answer:${input.newPromptId}`, input.now, input.now, input.now);
-      this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = 'converted', consumed_at = ? WHERE id = ? AND state = 'active'").run(input.now, input.interactionId);
-      const prompt = this.requirePrompt(input.newPromptId);
-
-      return { outcome: "converted", prompt };
-    });
+    return this.prompts.convertFailedSteeringToTurn(input);
   }
 
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
@@ -744,27 +715,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   projectQueuedRunCards(input: { bindingId: string; projections: Array<{ expectedViewVersion: number; view: RunCardView; card: object | null }> }): { projected: RunCardView[]; stalePromptIds: string[]; outboxReserved: boolean } {
-    if (input.projections.length === 0) return { projected: [], stalePromptIds: [], outboxReserved: false };
-    return this.context.transaction(() => {
-      const projected: RunCardView[] = [];
-      const stalePromptIds: string[] = [];
-      let outboxReserved = false;
-      for (const projection of input.projections) {
-        const current = this.loadRunCard(projection.view.promptId);
-        if (!current || current.bindingId !== input.bindingId || current.phase !== "queued" || current.viewVersion !== projection.expectedViewVersion) {
-          stalePromptIds.push(projection.view.promptId);
-          continue;
-        }
-        const view = this.saveRunCard(projection.view);
-        projected.push(view);
-        if (view.answerMessageId && projection.card) {
-          const reply = this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${view.promptId}:answer:${view.viewVersion}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: view.answerMessageId, kind: "card_update", payload: JSON.stringify(projection.card) });
-          outboxReserved ||= reply.state === "pending";
-        }
-      }
-
-      return { projected, stalePromptIds, outboxReserved };
-    });
+    return this.prompts.projectQueuedRunCards(input);
   }
 
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {
@@ -867,22 +818,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   recoverLegacyElementIdDeadLetters(): number {
-    const timestamp = now();
-    return this.context.transaction(() => {
-      this.migrations.canonicalizeLegacyAnswerTargets(timestamp);
-      const result = this.database.prepare(`
-        UPDATE outbound_replies
-        SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, updated_at = ?
-        WHERE state = 'dead_letter' AND kind = 'stream_card_create' AND card_role = 'answer'
-          AND error LIKE '%elementID format error%'
-          AND prompt_id IN (
-            SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
-            WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL
-          )
-      `).run(timestamp, timestamp);
-
-      return Number(result.changes);
-    });
+    return this.operations.recoverLegacyElementIdDeadLetters((timestamp) => this.migrations.canonicalizeLegacyAnswerTargets(timestamp));
   }
 
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
@@ -898,15 +834,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
-    const view = this.loadRunCard(promptId);
-    if (!view || view.answerMessageId) return;
-    const existing = this.database.prepare("SELECT view_version FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`) as { view_version: number | null } | undefined;
-    if (existing && (existing.view_version ?? 0) >= view.viewVersion) return;
-    const prompt = this.requirePrompt(promptId);
-    this.enqueueOutboundReply({
-      id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.bindingId, promptId, viewVersion: view.viewVersion,
-      cardRole: "answer", rootMessageId, kind: "card_reply", payload: JSON.stringify(card)
-    });
+    this.prompts.ensureAnswerCard(promptId, rootMessageId, card);
   }
 
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob; model: { name: string; revision: number } | null } | null {
@@ -947,6 +875,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   listPendingOutboundReplies(): OutboundReply[] {
     return this.outbox.listPendingOutboundReplies();
+  }
+
+  getOutboundReply(id: string): OutboundReply | null {
+    return this.outbox.getOutboundReply(id);
   }
 
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean {
@@ -1019,17 +951,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   pruneAcceptedInboundMessages(cutoff: string, limit: number): number {
-    if (!Number.isInteger(limit) || limit <= 0) return 0;
-    const result = this.database.prepare(`
-      DELETE FROM inbound_messages
-      WHERE event_id IN (
-        SELECT event_id FROM inbound_messages
-        WHERE state = 'accepted' AND updated_at < ?
-        ORDER BY updated_at, event_id
-        LIMIT ?
-      )
-    `).run(cutoff, limit);
-    return Number(result.changes);
+    return this.inboundProjects.pruneAcceptedInboundMessages(cutoff, limit);
   }
 
   inspectIntegrity(limit: number): SqliteIntegrityInspection { return this.operations.inspectIntegrity(limit); }
@@ -1119,10 +1041,6 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return this.projections.listAnswerPages(promptId);
   }
 
-  private insertRunCard(view: RunCardView): void {
-    this.projections.insertRunCard(view);
-  }
-
   private requireBinding(id: string): Binding {
     const binding = this.bindings.getBinding(id);
     if (!binding) throw new Error(`Binding not found: ${id}`);
@@ -1134,99 +1052,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   getModelPreference(bindingId: string): ModelPreference | null {
-    const row = this.database.prepare("SELECT * FROM binding_model_preferences WHERE binding_id = ?").get(bindingId) as ModelPreferenceRow | undefined;
-    return row ? mapModelPreference(row) : null;
+    return this.prompts.getModelPreference(bindingId);
   }
 
   acceptModelPreference(input: { bindingId: string; bindingGeneration: number; model: string }): { outcome: "accepted" | "busy" | "stale"; preference: ModelPreference | null } {
-    return this.context.transaction(() => {
-      const binding = this.database.prepare("SELECT generation FROM bindings WHERE id = ?").get(input.bindingId) as { generation: number } | undefined;
-      const existing = this.getModelPreference(input.bindingId);
-      const decision = acceptModelSelection(existing, { ...input, currentBindingGeneration: Number(binding?.generation ?? -1), updatedAt: now() });
-      if (decision.outcome !== "accepted") {
-
-        return decision;
-      }
-      const next = decision.preference;
-      this.database.prepare(`
-        INSERT INTO binding_model_preferences(binding_id, binding_generation, desired_model, desired_revision, effective_model, effective_revision, state, dispatch_prompt_id, prepared_operation_id, updated_at)
-        VALUES (?, ?, ?, ?, NULL, NULL, 'pending', NULL, NULL, ?)
-        ON CONFLICT(binding_id) DO UPDATE SET binding_generation = excluded.binding_generation, desired_model = excluded.desired_model, desired_revision = excluded.desired_revision,
-          effective_model = CASE WHEN binding_model_preferences.binding_generation = excluded.binding_generation THEN binding_model_preferences.effective_model ELSE NULL END,
-          effective_revision = CASE WHEN binding_model_preferences.binding_generation = excluded.binding_generation THEN binding_model_preferences.effective_revision ELSE NULL END,
-          state = 'pending', dispatch_prompt_id = NULL, prepared_operation_id = NULL, updated_at = excluded.updated_at
-      `).run(next.bindingId, next.bindingGeneration, next.desiredModel, next.desiredRevision, next.updatedAt);
-      const preference = this.getModelPreference(input.bindingId);
-
-      return { outcome: "accepted", preference };
-    });
-  }
-
-  private requirePrompt(id: string): PromptJob {
-    const prompt = this.getPrompt(id);
-    if (!prompt) throw new Error(`Prompt not found: ${id}`);
-    return prompt;
-  }
-
-  private getOutboundReply(id: string): OutboundReply | null {
-    const row = this.database.prepare("SELECT * FROM outbound_replies WHERE id = ?").get(id) as OutboundReplyRow | undefined;
-    return row ? mapOutboundReply(row) : null;
+    return this.prompts.acceptModelPreference(input);
   }
 
 }
 
 function now(): string { return new Date().toISOString(); }
-function normalizeLiveStatus(value: unknown): MainCardLiveStatus | null {
-  if (!isRecord(value)) return null;
-  const statusTitle = typeof value.statusTitle === "string" ? value.statusTitle : null;
-  const elapsedSeconds = typeof value.elapsedSeconds === "number" && Number.isFinite(value.elapsedSeconds) && value.elapsedSeconds >= 0 ? Math.floor(value.elapsedSeconds) : null;
-  const tokenCount = typeof value.tokenCount === "number" && Number.isFinite(value.tokenCount) && value.tokenCount >= 0 ? Math.floor(value.tokenCount) : null;
-  const planSteps = Array.isArray(value.planSteps) ? value.planSteps.filter((step): step is MainCardLiveStatus["planSteps"][number] => {
-    if (!isRecord(step)) return false;
-    return typeof step.key === "string" && step.kind === "step" && typeof step.label === "string"
-      && ["pending", "active", "done", "failed"].includes(String(step.state)) && typeof step.occurredAt === "string";
-  }) : [];
-  return statusTitle || planSteps.length || elapsedSeconds !== null || tokenCount !== null
-    ? { statusTitle, planSteps, elapsedSeconds, tokenCount } : null;
-}
-function boundedError(value: string | null): string { return (value ?? "Unknown failure").slice(0, 500); }
-function retryAt(attempt: number, explicitDelayMs?: number): string {
-  const exponential = Math.min(60_000, 1_000 * 2 ** (attempt - 1));
-  const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
-  const delay = explicitDelayMs === undefined ? jittered : Math.max(exponential, Math.min(3_600_000, explicitDelayMs));
-  return new Date(Date.now() + delay).toISOString();
-}
-
-function outboundLaneClass(reply: OutboundReply): OutboxLaneClass {
-  if (reply.cardRole === "answer" && reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish")) return "answer_stream";
-  if (reply.targetRole === "session_status" && reply.kind === "card_update") return "main_card";
-  if (reply.kind === "card_update") return "replaceable_card";
-  return "immutable";
-}
-function streamCardState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
-  try {
-    const decoded = JSON.parse(payload) as { stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };
-    const stream = decoded.stream;
-    return stream && Number.isInteger(stream.pageIndex) && Number.isInteger(stream.pageStart) && typeof stream.elementId === "string"
-      ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
-  } catch { return null; }
-}
-
-function streamContentPageIndex(payload: string): number | null {
-  try {
-    const decoded = JSON.parse(payload) as { pageIndex?: unknown };
-    return Number.isInteger(decoded.pageIndex) ? Number(decoded.pageIndex) : null;
-  } catch { return null; }
-}
-
-function matchesExpectedRuntimeTurn(turn: InstanceTurn, input: { expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string }): boolean {
-  return (input.expectedRuntimeTurnId === undefined || turn.runtimeTurnId === input.expectedRuntimeTurnId)
-    && (input.expectedRuntimeTurnStartedAt === undefined || turn.runtimeTurnStartedAt === input.expectedRuntimeTurnStartedAt);
-}
-function parseJsonRecord(payload: string): Record<string, unknown> {
-  try { const value = JSON.parse(payload) as unknown; return isRecord(value) ? value : {}; } catch { return {}; }
-}
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function isTraexCompatibleNativeAgent(pane: HerdrPane): boolean {
-  return pane.agentKind !== null && pane.agentKind !== undefined && TRAEX_COMPATIBLE_AGENT_KINDS.has(pane.agentKind);
-}
