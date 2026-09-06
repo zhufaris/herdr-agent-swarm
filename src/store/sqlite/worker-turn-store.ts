@@ -7,6 +7,7 @@ import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome, OutboundReplyState } from "../../domain/types.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { SqliteContext } from "./context.js";
+import { turnActorProvenance } from "./turn-actor-provenance.js";
 
 export interface WorkerTurnStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
@@ -31,8 +32,9 @@ export class SqliteWorkerTurnStore {
       if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
-      const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, timestamp, timestamp).changes === 1;
+      const actor = turnActorProvenance(input.actor);
+      const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id, kind, priority, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), actor.actorKind, actor.sourceBindingId, actor.sourceBindingGeneration, actor.sourceParentPromptId, input.kind, priority, input.text, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
       if (!turn) throw new Error("Accepted instance turn could not be loaded");
       if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
@@ -66,8 +68,9 @@ export class SqliteWorkerTurnStore {
       const queuePosition = priority === "priority" ? 0 : Number((this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").get(input.instanceId, input.instanceGeneration) as { count: number }).count) + 1;
       const acceptedView = { ...input.view, queuePosition };
       const card = input.render(acceptedView);
-      const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
+      const actor = turnActorProvenance(input.actor);
+      const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
+        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), actor.actorKind, actor.sourceBindingId, actor.sourceBindingGeneration, actor.sourceParentPromptId, input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
       if (!turn) throw new Error("Accepted instance turn could not be loaded");
       if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority || turn.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");

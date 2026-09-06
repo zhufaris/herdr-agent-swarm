@@ -35,6 +35,10 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 22").get()).toEqual({ version: 22 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 23").get()).toEqual({ version: 23 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 24").get()).toEqual({ version: 24 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 27").get()).toEqual({ version: 27 });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('instance_turns_primary_source','worker_turn_cards_session_phase') ORDER BY name").all()).toEqual([
+      { name: "instance_turns_primary_source" }, { name: "worker_turn_cards_session_phase" }
+    ]);
   });
 
   it("deduplicates Command intents and serializes claims by lane", () => {
@@ -250,6 +254,32 @@ describe("SQLite store", () => {
     expect(store.loadPrimaryWorkerSummaries("binding-1", 1)).toEqual([expect.objectContaining({ workerId: worker.id, state: "working" })]);
   });
 
+  it("bounds Worker Main history and uses the Worker-session index", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    for (let index = 0; index < 8; index += 1) {
+      const turnId = `turn-${index}`;
+      const occurredAt = `2026-09-05T00:0${index}:00.000Z`;
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: `Task ${index}`, queuePosition: index + 1, occurredAt });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: turnId, view, render: renderWorkerTurnCard });
+      store.database.prepare("UPDATE worker_turn_cards SET phase = 'completed', created_at = ?, updated_at = ?, answer = ? WHERE turn_id = ?").run(occurredAt, occurredAt, "large-history-answer".repeat(100), turnId);
+    }
+
+    const source = store.loadWorkerMainProjectionSource(worker.id, 1)!;
+    expect(source.currentTask).toBeNull();
+    expect(source.queueCount).toBe(0);
+    expect(source.recentTasks.map(({ turnId }) => turnId)).toEqual(["turn-7", "turn-6", "turn-5", "turn-4", "turn-3"]);
+    expect(source.createdAt).toBe("2026-09-05T00:00:00.000Z");
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT turn_id FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'completed' ORDER BY created_at DESC, turn_id DESC LIMIT 5").all(worker.id, 1) as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("worker_turn_cards_session_phase"))).toBe(true);
+  });
+
   it("projects an idle Worker with queued work as queued instead of idle", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
@@ -292,6 +322,45 @@ describe("SQLite store", () => {
     createTask("stale-pane", "binding-1", "retired-primary-pane", "binding-1");
 
     expect(store.loadPrimaryWorkerActivity(answer.promptId, 1)).toEqual([expect.objectContaining({ workerId: ownedWorkerId, taskCount: 1 })]);
+    expect(store.database.prepare("SELECT actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id FROM instance_turns WHERE id = ?").get(`turn-${ownedWorkerId}`)).toEqual({ actor_kind: "thread-primary", source_binding_id: "binding-1", source_binding_generation: 1, source_parent_prompt_id: answer.promptId });
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT id FROM instance_turns WHERE actor_kind = 'thread-primary' AND source_parent_prompt_id = ? AND source_binding_id = ? AND source_binding_generation = ?").all(answer.promptId, "binding-1", 1) as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("instance_turns_primary_source"))).toBe(true);
+  });
+
+  it("backfills indexed turn actor provenance without rejecting malformed legacy JSON", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-turn-actor-provenance-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store.acceptInstanceTurn({ id: "primary-turn", idempotencyKey: "primary-turn", actor: { kind: "thread-primary", projectId: "p1", bindingId: "binding-1", bindingGeneration: 3, parentPromptId: "prompt-1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "work" });
+    store.acceptInstanceTurn({ id: "malformed-turn", idempotencyKey: "malformed-turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "legacy" });
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 27; UPDATE instance_turns SET actor_kind = NULL, source_binding_id = NULL, source_binding_generation = NULL, source_parent_prompt_id = NULL; UPDATE instance_turns SET actor_json = 'not-json' WHERE id = 'malformed-turn';");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id FROM instance_turns WHERE id = 'primary-turn'").get()).toEqual({ actor_kind: "thread-primary", source_binding_id: "binding-1", source_binding_generation: 3, source_parent_prompt_id: "prompt-1" });
+    expect(store.database.prepare("SELECT actor_kind, source_binding_id FROM instance_turns WHERE id = 'malformed-turn'").get()).toEqual({ actor_kind: null, source_binding_id: null });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 27").get()).toEqual({ version: 27 });
+  });
+
+  it("adds turn provenance columns before creating their indexes on a legacy database", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-turn-provenance-schema-order-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+      CREATE TABLE instance_turns(
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, instance_id TEXT NOT NULL, instance_generation INTEGER NOT NULL, actor_json TEXT NOT NULL,
+        kind TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal', text TEXT NOT NULL, state TEXT NOT NULL, result TEXT, error TEXT,
+        parent_turn_id TEXT, source_message_id TEXT, runtime_turn_id TEXT, runtime_turn_started_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+
+    const columns = (store.database.prepare("PRAGMA table_info(instance_turns)").all() as Array<{ name: string }>).map(({ name }) => name);
+    expect(columns).toEqual(expect.arrayContaining(["actor_kind", "source_binding_id", "source_binding_generation", "source_parent_prompt_id"]));
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'instance_turns_primary_source'").get()).toEqual({ name: "instance_turns_primary_source" });
   });
 
   it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {
@@ -1392,6 +1461,7 @@ describe("SQLite store", () => {
 
     expect(converted).toMatchObject({ operation: { state: "delivered", result: { status: "priority-accepted", logicalTurnId: "priority-1" } }, logicalTurnId: "priority-1" });
     expect(store.getInstanceTurn("priority-1")).toMatchObject({ state: "queued", priority: "priority", text: "continue safely" });
+    expect(store.database.prepare("SELECT actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id FROM instance_turns WHERE id = 'priority-1'").get()).toEqual({ actor_kind: "human", source_binding_id: null, source_binding_generation: null, source_parent_prompt_id: null });
     expect(store.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
   });
 

@@ -62,6 +62,7 @@ export class SqliteMigrations {
     this.ensureCardContextProjectionTables();
     this.ensureActiveWorkerScopedNames();
     this.ensureWorkerTurnContextReferences();
+    this.ensureInstanceTurnActorProvenance();
     this.ensureWorkerMainOutboxIdentity();
     this.ensurePrimaryCardContextColumns();
     this.ensureCardContextStartupInvalidations();
@@ -497,6 +498,31 @@ export class SqliteMigrations {
     const names = new Set((this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!names.has("execution_origin")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr'))");
     this.context.database.exec("CREATE INDEX IF NOT EXISTS prompt_jobs_transcript_turn ON prompt_jobs(transcript_turn_id) WHERE transcript_turn_id IS NOT NULL");
+  }
+
+  private ensureInstanceTurnActorProvenance(): void {
+    const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 27").get();
+    if (migrated) return;
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      const names = new Set((this.context.database.prepare("PRAGMA table_info(instance_turns)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!names.has("actor_kind")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN actor_kind TEXT CHECK(actor_kind IN ('human','thread-primary'))");
+      if (!names.has("source_binding_id")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN source_binding_id TEXT");
+      if (!names.has("source_binding_generation")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN source_binding_generation INTEGER");
+      if (!names.has("source_parent_prompt_id")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN source_parent_prompt_id TEXT");
+      this.context.database.exec(`
+        UPDATE instance_turns SET
+          actor_kind = CASE WHEN json_valid(actor_json) AND json_extract(actor_json, '$.kind') IN ('human','thread-primary') THEN json_extract(actor_json, '$.kind') ELSE NULL END,
+          source_binding_id = CASE WHEN json_valid(actor_json) AND json_extract(actor_json, '$.kind') = 'thread-primary' THEN json_extract(actor_json, '$.bindingId') ELSE NULL END,
+          source_binding_generation = CASE WHEN json_valid(actor_json) AND json_extract(actor_json, '$.kind') = 'thread-primary' THEN json_extract(actor_json, '$.bindingGeneration') ELSE NULL END,
+          source_parent_prompt_id = CASE WHEN json_valid(actor_json) AND json_extract(actor_json, '$.kind') = 'thread-primary' THEN json_extract(actor_json, '$.parentPromptId') ELSE NULL END
+        WHERE actor_kind IS NULL AND json_valid(actor_json);
+        CREATE INDEX IF NOT EXISTS instance_turns_primary_source ON instance_turns(source_parent_prompt_id, source_binding_id, source_binding_generation) WHERE actor_kind = 'thread-primary';
+        CREATE INDEX IF NOT EXISTS worker_turn_cards_session_phase ON worker_turn_cards(instance_id, worker_session_generation, phase, created_at, turn_id);
+        INSERT INTO schema_migrations(version) VALUES (27);
+      `);
+      this.context.database.exec("COMMIT");
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
   }
 
   private ensureRunCardActivityColumn(): void {

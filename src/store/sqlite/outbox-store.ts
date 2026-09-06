@@ -183,7 +183,7 @@ export class SqliteOutboxStore {
         }
       }
       if (row?.prompt_id && row.card_role === "answer" && (row.kind === "card_reply" || row.kind === "stream_card_create")) {
-        const tasks = this.context.database.prepare("SELECT c.turn_id, c.instance_generation FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary' AND json_extract(t.actor_json, '$.parentPromptId') = ?").all(row.prompt_id) as Array<{ turn_id: string; instance_generation: number }>;
+        const tasks = this.context.database.prepare("SELECT c.turn_id, c.instance_generation FROM instance_turns t INDEXED BY instance_turns_primary_source JOIN worker_turn_cards c ON c.turn_id = t.id WHERE t.actor_kind = 'thread-primary' AND t.source_parent_prompt_id = ?").all(row.prompt_id) as Array<{ turn_id: string; instance_generation: number }>;
         this.dependencies.invalidateCardContexts(tasks.map((task) => ({ targetKind: "worker-turn" as const, targetId: task.turn_id, targetGeneration: Number(task.instance_generation), reason: "primary-answer.delivered" })));
       }
       if (row?.selection_id && row.kind === "card_reply") this.context.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
