@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { ControlActor } from "../../domain/commands.js";
-import type { InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../../domain/instance-turn.js";
+import type { InstanceEvent, InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../../domain/instance-turn.js";
 import type { AcceptInstanceTurnWithCardInput } from "../../domain/ports.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome, OutboundReplyState } from "../../domain/types.js";
@@ -12,7 +12,6 @@ export interface WorkerTurnStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
   invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void;
-  countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number;
 }
 
 export class SqliteWorkerTurnStore {
@@ -30,7 +29,7 @@ export class SqliteWorkerTurnStore {
         if (existing.instanceId !== input.instanceId || existing.text !== input.text || existing.kind !== input.kind || existing.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
         this.context.database.exec("COMMIT"); return { turn: existing, inserted: false };
       }
-      if (input.maxQueueDepth !== undefined && this.dependencies.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
       const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
@@ -57,7 +56,7 @@ export class SqliteWorkerTurnStore {
         if (!view) throw new Error("Accepted Worker turn card could not be loaded");
         this.context.database.exec("COMMIT"); return { turn: existing, view, inserted: false };
       }
-      if (input.maxQueueDepth !== undefined && this.dependencies.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
       if (input.kind === "turn" && input.parentTurnId !== null) throw new Error("Ordinary Worker turn cannot have a parent");
@@ -290,6 +289,78 @@ export class SqliteWorkerTurnStore {
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
     const row = this.context.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked') ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as Record<string, unknown> | undefined;
     return mapInstanceTurn(row);
+  }
+  claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      const instance = this.dependencies.getAgentInstance(instanceId);
+      if (!instance || instance.generation !== expectedGeneration || instance.desiredState !== "running" || !instance.runtimeRef || !["idle", "working", "blocked"].includes(instance.observedState)) { this.context.database.exec("COMMIT"); return null; }
+      const active = this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
+      if (active) { this.context.database.exec("COMMIT"); return null; }
+      const row = this.context.database.prepare("SELECT id FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state = 'queued' ORDER BY CASE priority WHEN 'priority' THEN 0 ELSE 1 END, created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as { id: string } | undefined;
+      if (!row) { this.context.database.exec("COMMIT"); return null; }
+      this.context.database.prepare("UPDATE instance_turns SET state = 'claimed', updated_at = ? WHERE id = ? AND state = 'queued'").run(now(), row.id);
+      const turn = this.getInstanceTurn(row.id)!; this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.claimed", {});
+      this.context.database.exec("COMMIT"); return turn;
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+  }
+
+  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] } {
+    const timestamp = now();
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = this.context.database.prepare(`SELECT t.id, t.project_id, t.instance_id FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state = 'claimed' ORDER BY t.created_at, t.rowid`).all() as Array<{ id: string; project_id: string; instance_id: string }>;
+      for (const turn of claimed) {
+        this.context.database.prepare("UPDATE instance_turns SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'claimed'").run(timestamp, turn.id);
+        this.insertInstanceEvent(turn.project_id, turn.instance_id, turn.id, "turn.requeued-after-restart", {});
+      }
+      const rows = this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>;
+      this.context.database.exec("COMMIT");
+      return { requeuedTurnIds: claimed.map(({ id }) => id), observableTurns: rows.map((row) => mapInstanceTurn(row)!) };
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+  }
+
+  listObservableInstanceTurns(): InstanceTurn[] {
+    return (this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>).map((row) => mapInstanceTurn(row)!);
+  }
+
+  listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[] {
+    const uniquePaneIds = [...new Set(paneIds)];
+    if (uniquePaneIds.length === 0) return [];
+    const placeholders = uniquePaneIds.map(() => "?").join(",");
+    return (this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') AND i.pane_id IN (${placeholders}) ORDER BY t.created_at, t.rowid`).all(...uniquePaneIds) as Array<Record<string, unknown>>).map((row) => mapInstanceTurn(row)!);
+  }
+
+  getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number } {
+    const row = this.context.database.prepare(`SELECT
+      SUM(CASE WHEN t.state = 'queued' THEN 1 ELSE 0 END) AS queued_turns,
+      SUM(CASE WHEN t.state IN ('claimed','dispatching','running','blocked') THEN 1 ELSE 0 END) AS active_turns,
+      SUM(CASE WHEN t.state = 'dispatch-uncertain' THEN 1 ELSE 0 END) AS uncertain_turns
+      FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation`).get() as { queued_turns: number | null; active_turns: number | null; uncertain_turns: number | null };
+    return { queuedTurns: row.queued_turns ?? 0, activeTurns: row.active_turns ?? 0, uncertainTurns: row.uncertain_turns ?? 0 };
+  }
+
+  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind }): InstanceTurn | null {
+    const timestamp = now();
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getInstanceTurn(input.turnId);
+      if (!current || current.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(current, input)) { this.context.database.exec("COMMIT"); return null; }
+      const changed = this.context.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)").run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
+      if (changed.changes !== 1) { this.context.database.exec("COMMIT"); return null; }
+      this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state });
+      this.context.database.exec("COMMIT"); return this.getInstanceTurn(input.turnId);
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+  }
+  completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null { return this.updateInstanceTurn({ ...input, state: "completed", eventKind: "turn.completed" }); }
+  listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] {
+    return (this.context.database.prepare("SELECT * FROM instance_events WHERE instance_id = ? AND id > ? ORDER BY id LIMIT 100").all(instanceId, afterId) as Array<Record<string, unknown>>).map((row) => ({ id: Number(row.id), projectId: String(row.project_id), instanceId: String(row.instance_id), turnId: row.turn_id === null ? null : String(row.turn_id), kind: String(row.kind) as InstanceEventKind, payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>, createdAt: String(row.created_at) }));
+  }
+  countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number {
+    const row = expectedGeneration === undefined
+      ? this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId)
+      : this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
+    return Number((row as { count: number }).count);
   }
 }
 
