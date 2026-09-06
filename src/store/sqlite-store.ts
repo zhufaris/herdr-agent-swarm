@@ -87,7 +87,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.outbox = new SqliteOutboxStore(this.context, {
       getBinding: (id) => this.getBinding(id),
       loadRunCard: (promptId) => this.projections.loadRunCard(promptId),
-      loadWorkerTurnCard: (turnId) => this.workerTurns.loadWorkerTurnCard(turnId)
+      loadWorkerTurnCard: (turnId) => this.workerTurns.loadWorkerTurnCard(turnId),
+      loadWorkerMainView: (workerId, generation) => this.loadWorkerMainView(workerId, generation),
+      saveRunCard: (view) => this.projections.saveRunCard(view),
+      persistBindingPatch: (id, patch) => this.persistBindingPatch(id, patch),
+      invalidateCardContexts: (targets) => this.invalidateCardContexts(targets)
     });
     this.prompts = new SqlitePromptStore(this.context, this.projections, {
       getBinding: (id) => this.getBinding(id),
@@ -1848,123 +1852,12 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, kind, payload, root_message_id FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string; root_message_id: string } | undefined;
-      this.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
-      if (row?.prompt_id) {
-        if (row.card_role === "answer") {
-          if (row.kind === "card_reply" || row.kind === "stream_card_create") {
-            const stream = row.kind === "stream_card_create" ? streamCardState(row.payload) : null;
-            const expectedPageIndex = stream && stream.pageIndex > 0 ? stream.pageIndex - 1 : null;
-            const pageIndex = stream?.pageIndex ?? 0;
-            const updated = this.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ? AND (? IS NULL OR answer_page_index = ?)")
-              .run(messageId, cardId ?? null, stream?.elementId ?? null, stream ? 1 : null, stream?.pageIndex ?? null, stream?.pageStart ?? null, cardId ?? null, messageId, row.view_version ?? 0, now(), row.prompt_id, expectedPageIndex, expectedPageIndex);
-            if (updated.changes > 0) {
-              if (pageIndex > 0) this.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND state = 'active' AND page_index < ?").run(now(), row.prompt_id, pageIndex);
-              this.database.prepare("UPDATE answer_pages SET message_id = ?, card_id = COALESCE(?, card_id), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, state = 'active', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'")
-                .run(messageId, cardId ?? null, cardId ?? null, now(), row.prompt_id, pageIndex);
-            }
-          }
-          else {
-            this.database.prepare("UPDATE run_cards SET answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
-            const payload = parseJsonRecord(row.payload);
-            const pageIndex = Number.isInteger(payload.pageIndex) ? Number(payload.pageIndex) : null;
-            if (row.kind === "stream_content") this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, now(), row.prompt_id, pageIndex, pageIndex);
-            if (row.kind === "stream_finish") {
-              const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
-              const pendingFinalUpdate = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'card_update' AND state = 'pending' AND idempotency_key = ? LIMIT 1").get(row.prompt_id, `answer-final-fold:${row.prompt_id}:${pageIndex}:${row.root_message_id}`);
-              this.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), state = CASE WHEN ? THEN state ELSE ? END, updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, pendingFinalUpdate ? 1 : 0, pendingContinuation ? "frozen" : "finished", now(), row.prompt_id, pageIndex, pageIndex);
-              if (!pendingContinuation && !pendingFinalUpdate) {
-                const run = this.loadRunCard(row.prompt_id);
-                if (run) this.saveRunCard(freezeRunCardWorkerContext(run, now()));
-              }
-            }
-            if (row.kind === "card_update" && row.idempotency_key.startsWith("answer-final-fold:")) {
-              const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
-              this.database.prepare("UPDATE answer_pages SET state = ?, updated_at = ? WHERE prompt_id = ? AND message_id = ? AND state = 'active'").run(pendingContinuation ? "frozen" : "finished", now(), row.prompt_id, row.root_message_id);
-              if (!pendingContinuation) {
-                const run = this.loadRunCard(row.prompt_id);
-                if (run) this.saveRunCard(freezeRunCardWorkerContext(run, now()));
-              }
-            }
-          }
-        } else if (row.kind === "card_reply") this.database.prepare("UPDATE run_cards SET lark_message_id = ?, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(messageId, row.view_version ?? 0, now(), row.prompt_id);
-        else this.database.prepare("UPDATE run_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
-      }
-      if (row?.worker_turn_id) {
-        const stream = streamCardState(row.payload);
-        const pageIndex = stream?.pageIndex ?? 0;
-        if (row.kind === "stream_card_create") {
-          const expectedPageIndex = pageIndex > 0 ? pageIndex - 1 : pageIndex;
-          const updated = this.database.prepare("UPDATE worker_turn_cards SET message_id = ?, card_id = COALESCE(?, card_id), element_id = COALESCE(?, element_id), page_index = ?, page_start = COALESCE(?, page_start), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?")
-            .run(messageId, cardId ?? null, stream?.elementId ?? null, pageIndex, stream?.pageStart ?? null, cardId ?? null, row.view_version ?? 0, now(), row.worker_turn_id, expectedPageIndex);
-          if (updated.changes > 0) {
-            if (pageIndex > 0) this.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, pageIndex);
-            this.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'")
-              .run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, pageIndex);
-            const task = this.loadWorkerTurnCard(row.worker_turn_id);
-            if (task) this.invalidateWorkerCardContexts(task, "worker-task.delivered");
-          }
-        } else {
-          this.database.prepare("UPDATE worker_turn_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ?")
-            .run(row.view_version ?? 0, now(), row.worker_turn_id);
-          if (row.kind === "stream_content") this.database.prepare("UPDATE worker_turn_card_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?")
-            .run(row.view_version ?? 0, now(), row.worker_turn_id, pageIndex);
-          if (row.kind === "stream_finish") {
-            const pendingContinuation = this.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.worker_turn_id);
-            this.database.prepare("UPDATE worker_turn_card_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active'")
-              .run(row.view_version ?? 0, pendingContinuation ? "frozen" : "finished", now(), row.worker_turn_id, pageIndex);
-          }
-        }
-      }
-      if (row?.worker_id && row.worker_session_generation !== null) {
-        const messageCheckpoint = row.kind === "card_reply" ? messageId : null;
-        const cardCheckpoint = row.kind === "card_reply" ? cardId ?? null : null;
-        this.database.prepare(`
-          UPDATE worker_main_views
-          SET delivered_version = MAX(delivered_version, ?),
-              message_id = COALESCE(?, message_id), card_id = COALESCE(?, card_id),
-              state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?), '$.messageId', COALESCE(?, json_extract(state_json, '$.messageId')), '$.cardId', COALESCE(?, json_extract(state_json, '$.cardId'))),
-              updated_at = ?
-          WHERE worker_id = ? AND worker_session_generation = ?
-        `).run(row.view_version ?? 0, messageCheckpoint, cardCheckpoint, row.view_version ?? 0, messageCheckpoint, cardCheckpoint, now(), row.worker_id, row.worker_session_generation);
-        if (messageCheckpoint) {
-          const main = this.loadWorkerMainView(row.worker_id, row.worker_session_generation);
-          if (main) {
-            const taskRows = this.database.prepare("SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ?").all(row.worker_id, row.worker_session_generation) as Array<Record<string, unknown>>;
-            for (const taskRow of taskRows) {
-              const task = mapWorkerTurnCard(taskRow);
-              if (!task) continue;
-              this.invalidateCardContexts([{ targetKind: "worker-turn", targetId: task.turnId, targetGeneration: task.instanceGeneration, reason: "worker-main.delivered" }]);
-            }
-            this.invalidateCardContexts([{ targetKind: "primary-session", targetId: main.parentBindingId, targetGeneration: main.parentBindingGeneration, reason: "worker-main.delivered" }]);
-          }
-        }
-      }
-      if (row?.prompt_id && row.card_role === "answer" && (row.kind === "card_reply" || row.kind === "stream_card_create")) {
-        const taskRows = this.database.prepare("SELECT c.turn_id, c.instance_generation FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE json_extract(t.actor_json, '$.kind') = 'thread-primary' AND json_extract(t.actor_json, '$.parentPromptId') = ?").all(row.prompt_id) as Array<{ turn_id: string; instance_generation: number }>;
-        this.invalidateCardContexts(taskRows.map((task) => ({ targetKind: "worker-turn" as const, targetId: task.turn_id, targetGeneration: Number(task.instance_generation), reason: "primary-answer.delivered" })));
-      }
-      if (row?.selection_id && row.kind === "card_reply") this.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
-      if (row?.binding_id && row.target_role === "session_status") {
-        if (row.kind === "card_reply") this.persistBindingPatch(row.binding_id, { statusMessageId: messageId, statusCardSequence: 0 });
-        else if (row.kind === "card_update" && row.card_sequence !== null) this.persistBindingPatch(row.binding_id, { statusCardSequence: Math.max(this.requireBinding(row.binding_id).statusCardSequence, row.card_sequence) });
-        this.database.prepare(`
-          UPDATE topic_views
-          SET state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?)),
-              updated_at = ?
-          WHERE binding_id = ?
-        `).run(row.view_version ?? 0, now(), row.binding_id);
-      }
-      this.database.exec("COMMIT");
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    this.outbox.markOutboundReplyDelivered(id, messageId, cardId);
   }
 
+
   checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null {
-    this.database.prepare("UPDATE outbound_replies SET card_id_checkpoint = COALESCE(card_id_checkpoint, ?), updated_at = ? WHERE id = ? AND state = 'pending'")
-      .run(cardId, now(), id);
-    return this.getOutboundReply(id);
+    return this.outbox.checkpointOutboundReplyCard(id, cardId);
   }
 
   markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
