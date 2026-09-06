@@ -6,6 +6,7 @@ import { initialTopicView, type TopicViewState } from "../../domain/topic-view.j
 import { mapAnswerPage, type AnswerPageRow } from "../sqlite-records.js";
 import { outboundLaneKey } from "../outbox-lanes.js";
 import type { SqliteContext } from "./context.js";
+import { materializedDeliveryIntent } from "../../domain/delivery-intent.js";
 
 export class SqliteProjectionStore {
   constructor(
@@ -227,13 +228,15 @@ export class SqliteProjectionStore {
       const key = `answer-static:${input.promptId}:${input.pageIndex}:${input.messageId}`;
       const existing = this.context.database.prepare("SELECT id, state FROM outbound_replies WHERE idempotency_key = ?").get(key) as { id: string; state: OutboundReplyState } | undefined;
       const timestamp = now();
+      const payload = JSON.stringify(input.card);
+      const intentJson = JSON.stringify(materializedDeliveryIntent("card_update", payload));
       if (existing) {
         if (existing.state === "pending") {
-          this.context.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(input.card), view.viewVersion, timestamp, existing.id);
+          this.context.database.prepare("UPDATE outbound_replies SET payload = ?, intent_json = ?, view_version = ?, updated_at = ? WHERE id = ?").run(payload, intentJson, view.viewVersion, timestamp, existing.id);
           return "reserved";
         }
-        this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-          .run(JSON.stringify(input.card), view.viewVersion, timestamp, timestamp, existing.id);
+        this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, intent_json = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+          .run(payload, intentJson, view.viewVersion, timestamp, timestamp, existing.id);
         this.dependencies.refreshOutboxLaneHead(outboundLaneKey({ cardRole: "answer", promptId: input.promptId, rootMessageId: input.messageId, kind: "card_update" }));
         return "reserved";
       }

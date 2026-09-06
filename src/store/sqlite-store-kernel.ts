@@ -883,7 +883,7 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
     return this.prompts.cancelQueuedPromptsWithProjection(input);
   }
 
-  enqueueOutboundReply(input: Omit<OutboundReply, "laneKey" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"]; laneKeyOverride?: string }): OutboundReply {
+  enqueueOutboundReply(input: Parameters<import("../domain/ports/outbox.js").OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): OutboundReply {
     return this.outbox.enqueueOutboundReply(input);
   }
 

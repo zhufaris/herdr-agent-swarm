@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports/external.js";
 import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports/outbox.js";
 import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
+import { materializeOutboundReply } from "./outbound-intent-materializer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
@@ -217,6 +218,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 
   private async deliverReply(reply: OutboundReply, blockedTargets: Set<string>): Promise<"delivered" | "failed"> {
     try {
+      const materializedPayload = materializeOutboundReply(reply);
       if ((reply.kind === "stream_content" || reply.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(reply.id)) {
         this.logger.info({ event: "lark-outbox-answer-stream-dismissed", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, replyKind: reply.kind, outcome: "dismissed" }, "dismissed an Answer stream event superseded by a continuation page");
         return "delivered";
@@ -225,7 +227,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         if (reply.workerTurnId) assertWorkerMessageTarget(this.store, reply.workerTurnId, reply.rootMessageId);
         if (reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainMessageTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
-        const card = JSON.parse(reply.payload) as object;
+        const card = JSON.parse(materializedPayload) as object;
         if (reply.targetRole === "session_status" && this.lark.updateCardKit) {
           await this.lark.updateCardKit(reply.rootMessageId, card, reply.cardSequence ?? 1);
         } else await this.lark.updateCard(reply.rootMessageId, card);
@@ -234,7 +236,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.workerId && reply.workerSessionGeneration !== null) for (const listener of this.workerMainCheckpointListeners) listener(reply.workerId, reply.workerSessionGeneration, reply.viewVersion ?? 0);
         if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_card_create") {
-        const decoded = decodeStreamingCardPayload(reply.payload);
+        const decoded = decodeStreamingCardPayload(materializedPayload);
         if (reply.workerTurnId) assertWorkerCardCreateTarget(this.store, reply.workerTurnId, reply.rootMessageId, decoded.card, decoded.stream);
         else assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.card, decoded.stream);
         const card = decoded.card;
@@ -256,7 +258,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.workerTurnId && decoded.stream) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, (reply.viewVersion ?? 0) + 1);
       } else if (reply.kind === "stream_content") {
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
-        const payload = JSON.parse(reply.payload) as { elementId: string; content: string; sequence: number; pageIndex: number; workerElement?: "progress" };
+        const payload = JSON.parse(materializedPayload) as { elementId: string; content: string; sequence: number; pageIndex: number; workerElement?: "progress" };
         if (reply.workerTurnId) {
           if (payload.workerElement === "progress") assertWorkerProgressTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId, payload.pageIndex);
           else assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId);
@@ -269,7 +271,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
       } else if (reply.kind === "stream_finish") {
         if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
-        const payload = JSON.parse(reply.payload) as { summary: string; sequence: number };
+        const payload = JSON.parse(materializedPayload) as { summary: string; sequence: number };
         if (reply.workerTurnId) assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId);
         else assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
@@ -279,8 +281,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       } else {
         if (reply.kind === "card_reply" && reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainCreateTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
         const sent = reply.kind === "text"
-          ? await this.lark.replyText(reply.rootMessageId, reply.payload, reply.idempotencyKey)
-          : await this.lark.replyCard(reply.rootMessageId, JSON.parse(reply.payload) as object, reply.idempotencyKey);
+          ? await this.lark.replyText(reply.rootMessageId, materializedPayload, reply.idempotencyKey)
+          : await this.lark.replyCard(reply.rootMessageId, JSON.parse(materializedPayload) as object, reply.idempotencyKey);
         const sentCardId = "cardId" in sent && typeof sent.cardId === "string" ? sent.cardId : undefined;
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sentCardId);
         this.store.recordBridgeMessage(sent.messageId);

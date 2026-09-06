@@ -318,6 +318,9 @@ export interface OutboundReply {
   rootMessageId: string;
   kind: OutboundReplyKind;
   payload: string;
+  intentKind: import("./delivery-intent.js").DeliveryIntentKind | null;
+  intentJson: string | null;
+  rendererRevision: number | null;
   state: OutboundReplyState;
   attemptCount: number;
   error: string | null;

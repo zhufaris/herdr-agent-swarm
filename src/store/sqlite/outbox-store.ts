@@ -10,6 +10,7 @@ import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage
 import { outboundLaneKey } from "../outbox-lanes.js";
 import { mapOutboundReply, type OutboundReplyRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
+import { CARD_RENDERER_REVISION, deliveryIntentKind, materializedDeliveryIntent } from "../../domain/delivery-intent.js";
 
 type EnqueueInput = Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string };
 
@@ -34,6 +35,9 @@ export class SqliteOutboxStore {
     const bindingGeneration = input.promptId ? this.dependencies.loadRunCard(input.promptId)?.bindingGeneration ?? null : input.bindingId ? this.dependencies.getBinding(input.bindingId)?.generation ?? null : null;
     const laneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
     const streamMetadata = outboundStreamMetadata(input.kind, input.payload);
+    const intentKind = input.intentKind ?? deliveryIntentKind(input.kind);
+    const intentJson = input.intentJson ?? JSON.stringify(materializedDeliveryIntent(input.kind, input.payload));
+    const rendererRevision = input.rendererRevision ?? CARD_RENDERER_REVISION;
     return this.context.transaction(() => {
       if (input.kind === "card_update" && input.bindingId && !input.promptId) {
         this.context.database.prepare(`
@@ -54,16 +58,19 @@ export class SqliteOutboxStore {
         this.context.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?").run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
       this.context.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
         ON CONFLICT(idempotency_key) DO UPDATE SET
           payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
           view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
           card_sequence = CASE WHEN outbound_replies.state = 'pending' THEN excluded.card_sequence ELSE outbound_replies.card_sequence END,
           stream_page_index = CASE WHEN outbound_replies.state = 'pending' THEN excluded.stream_page_index ELSE outbound_replies.stream_page_index END,
           stream_element_id = CASE WHEN outbound_replies.state = 'pending' THEN excluded.stream_element_id ELSE outbound_replies.stream_element_id END,
+          intent_kind = CASE WHEN outbound_replies.state = 'pending' THEN excluded.intent_kind ELSE outbound_replies.intent_kind END,
+          intent_json = CASE WHEN outbound_replies.state = 'pending' THEN excluded.intent_json ELSE outbound_replies.intent_json END,
+          renderer_revision = CASE WHEN outbound_replies.state = 'pending' THEN excluded.renderer_revision ELSE outbound_replies.renderer_revision END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
       const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
       if (input.kind === "stream_card_create" && input.promptId) {

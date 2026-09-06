@@ -74,6 +74,7 @@ export class SqliteMigrations {
     this.ensureIndependentReplyLanes();
     this.ensureCardContextOutboxLanes();
     this.ensureOutboundFailureMetadata();
+    this.ensureTypedDeliveryIntents();
     this.ensurePaneCloseOperationState();
     this.ensurePaneControlOperationState();
     this.ensureTurnControlOperations();
@@ -1258,6 +1259,14 @@ export class SqliteMigrations {
       CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at);
       COMMIT;
     `);
+  }
+
+  private ensureTypedDeliveryIntents(): void {
+    const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!names.has("intent_kind")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN intent_kind TEXT");
+    if (!names.has("intent_json")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN intent_json TEXT");
+    if (!names.has("renderer_revision")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN renderer_revision INTEGER");
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (29)").run();
   }
 }
 
