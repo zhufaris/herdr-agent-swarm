@@ -1,10 +1,24 @@
+import { randomUUID } from "node:crypto";
+import { estimateQueueWait } from "../../domain/queue-wait-estimate.js";
+import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../../domain/ports.js";
+import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { Binding, PromptJob, PromptObservationState, PromptState } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import { mapBinding, mapModelPreference, mapPrompt, type BindingRow, type ModelPreferenceRow, type PromptRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
+import type { SqliteProjectionStore } from "./projection-store.js";
+
+export interface PromptStoreDependencies {
+  getBinding(id: string): Binding | null;
+  enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
+}
 
 export class SqlitePromptStore {
-  constructor(private readonly context: SqliteContext) {}
+  constructor(
+    private readonly context: SqliteContext,
+    private readonly projections: SqliteProjectionStore,
+    private readonly dependencies: PromptStoreDependencies
+  ) {}
 
   getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
     const rows = this.context.database.prepare(`SELECT p.* FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id JOIN run_cards r ON r.prompt_id = p.id
@@ -82,6 +96,72 @@ export class SqlitePromptStore {
     const row = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.larkMessageId) as PromptRow | undefined;
     if (!row) throw new Error(`Prompt not found: ${input.larkMessageId}`);
     return { prompt: mapPrompt(row), inserted };
+  }
+
+  acceptPrompt(input: Parameters<BindingStorePort["acceptPrompt"]>[0]): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
+    return this.context.transaction(() => {
+      const existing = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.prompt.larkMessageId) as PromptRow | undefined;
+      if (existing) {
+        const view = this.projections.loadRunCard(existing.id);
+        if (!view) throw new Error(`Run card missing for prompt: ${existing.id}`);
+        return { prompt: mapPrompt(existing), view, inserted: false };
+      }
+      if (input.expectedBindingGeneration !== undefined) {
+        const binding = this.dependencies.getBinding(input.prompt.bindingId);
+        if (!binding || binding.generation !== input.expectedBindingGeneration || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") throw new Error("Binding generation changed before prompt acceptance");
+      }
+      if (input.maxQueueDepth !== undefined && this.countPendingPrompts(input.prompt.bindingId) >= input.maxQueueDepth) throw new Error("This topic's prompt queue is full");
+      if (input.prompt.priority === "priority") {
+        if (this.context.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND priority = 'priority' AND state IN ('queued','running') LIMIT 1").get(input.prompt.bindingId)) throw new Error("Primary binding already has a live priority turn");
+        if (this.context.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND state = 'running' LIMIT 1").get(input.prompt.bindingId)) throw new Error("Primary binding already has an active runtime turn");
+      }
+      const timestamp = now();
+      const dispatchKind = input.prompt.dispatchKind ?? "turn";
+      const steeringOrigin = input.prompt.steeringOrigin ?? (dispatchKind === "steering" ? "explicit" : null);
+      this.context.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, priority, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`)
+        .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, dispatchKind, input.prompt.priority ?? "normal", input.prompt.parentPromptId ?? null, steeringOrigin, input.prompt.sourcePromptId ?? null, input.prompt.wasDetached ? 1 : 0, timestamp, timestamp);
+      const view = { ...input.view, steeringOrigin, steeringFailureKind: null };
+      this.projections.insertRunCard(view);
+      this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
+        .run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
+      return { prompt: this.requirePrompt(input.prompt.id), view: this.projections.loadRunCard(input.prompt.id)!, inserted: true };
+    });
+  }
+
+  acceptClassifiedPrompt(input: ClassifiedPromptInput): ClassifiedPromptAcceptance {
+    return this.context.transaction(() => {
+      const existing = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.prompt.larkMessageId) as PromptRow | undefined;
+      if (existing) {
+        const view = this.projections.loadRunCard(existing.id);
+        if (!view) throw new Error(`Run card missing for prompt: ${existing.id}`);
+        return { prompt: mapPrompt(existing), view, inserted: false, decision: existing.steering_origin === "automatic" ? "automatic_steering" : "ordinary", fallbackReason: null };
+      }
+      const binding = this.context.database.prepare("SELECT generation, last_agent_state, state, lifecycle, attachment FROM bindings WHERE id = ?").get(input.prompt.bindingId) as { generation: number; last_agent_state: string; state: string; lifecycle: string; attachment: string } | undefined;
+      const parent = input.candidateParentPromptId === null ? undefined : this.context.database.prepare(`SELECT p.id, p.state, p.dispatch_kind, p.observation_state, p.was_detached, c.activity_at FROM prompt_jobs p LEFT JOIN run_cards c ON c.prompt_id = p.id WHERE p.id = ? AND p.binding_id = ?`).get(input.candidateParentPromptId, input.prompt.bindingId) as { id: string; state: string; dispatch_kind: string; observation_state: string; was_detached: number; activity_at: string | null } | undefined;
+      const runningOrdinary = Number((this.context.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'running' AND dispatch_kind = 'turn'").get(input.prompt.bindingId) as { count: number }).count);
+      let fallbackReason: ClassifiedPromptAcceptance["fallbackReason"] = null;
+      if (input.candidateParentPromptId === null) fallbackReason = "no_candidate";
+      else if (!binding || Number(binding.generation) !== input.expectedBindingGeneration) fallbackReason = "binding_changed";
+      else if (binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") fallbackReason = "parent_inactive";
+      else if (!parent || parent.state !== "running" || parent.dispatch_kind !== "turn" || runningOrdinary !== 1) fallbackReason = "parent_inactive";
+      else if (parent.observation_state !== "attached" || Boolean(parent.was_detached)) fallbackReason = "parent_detached";
+      else if (binding.last_agent_state !== "working" && binding.last_agent_state !== "blocked") fallbackReason = "parent_state";
+      else if (parent.activity_at === null || parent.activity_at < input.activeAfter) fallbackReason = "parent_stale";
+      const automatic = fallbackReason === null;
+      const pendingDepth = automatic ? 0 : this.countPendingPrompts(input.prompt.bindingId);
+      if (!automatic && pendingDepth >= input.maxQueueDepth) return { inserted: false, decision: "queue_full", fallbackReason };
+      const queuePosition = automatic ? 0 : this.listQueuedTurnPromptIds(input.prompt.bindingId).length + 1;
+      const feedbackInputs = automatic ? null : this.loadQueueFeedbackInputs(input.prompt.bindingId);
+      const queueFeedback = feedbackInputs ? estimateQueueWait({ queuePosition, activeStartedAt: feedbackInputs.activeStartedAt, now: input.acceptedAt, completedDurationsMs: feedbackInputs.durationsMs }) : null;
+      const view: RunCardView = { ...(automatic ? input.steeringView : input.ordinaryView), steeringOrigin: automatic ? "automatic" : null, steeringFailureKind: null, queuePosition, queueFeedback, activityAt: input.acceptedAt, createdAt: input.acceptedAt, updatedAt: input.acceptedAt };
+      const dispatchKind = automatic ? "steering" : "turn";
+      const parentPromptId = automatic ? input.candidateParentPromptId : null;
+      const steeringOrigin = automatic ? "automatic" : null;
+      this.context.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'queued', 'not_started', 0, NULL, ?, ?)`).run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, dispatchKind, parentPromptId, steeringOrigin, input.acceptedAt, input.acceptedAt);
+      this.projections.insertRunCard(view);
+      this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCardFor(view)), `answer:${input.prompt.id}`, input.acceptedAt, input.acceptedAt, input.acceptedAt);
+      return { prompt: this.requirePrompt(input.prompt.id), view: this.projections.loadRunCard(input.prompt.id)!, inserted: true, decision: automatic ? "automatic_steering" : "ordinary", fallbackReason };
+    });
   }
 
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob; model: { name: string; revision: number } | null } | null {
