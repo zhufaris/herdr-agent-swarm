@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { estimateQueueWait } from "../../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../../domain/ports.js";
+import type { DetachedPromptSkipResult } from "../../domain/ports/prompt.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, DurablePromptWorkScan, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import { freezeRunCardWorkerContext, reduceRunCard, updateRunCardWorkerContext, type RunCardChange } from "../../domain/run-card-view.js";
 import { mirrorRunCardToTopic } from "../../domain/topic-view.js";
@@ -369,6 +370,65 @@ export class SqlitePromptStore {
     });
   }
 
+  adoptExternalTurn(input: Parameters<BindingStorePort["adoptExternalTurn"]>[0]): ExternalTurnAdoption {
+    return this.context.transaction(() => {
+      const binding = this.context.database.prepare("SELECT * FROM bindings WHERE id = ?").get(input.bindingId) as BindingRow | undefined;
+      if (!binding || !binding.root_message_id || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || Number(binding.generation) !== input.expectedGeneration || binding.pane_id !== input.expectedPaneId
+        || binding.agent_session_source !== input.expectedSession.source || binding.agent_session_agent !== input.expectedSession.agent || binding.agent_session_kind !== input.expectedSession.kind || binding.agent_session_value !== input.expectedSession.value) {
+        return { outcome: "stale_binding", prompt: null, supersededPromptIds: [], outboxReserved: false };
+      }
+      const owners = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE transcript_turn_id = ? ORDER BY id LIMIT 2").all(input.turnId) as PromptRow[];
+      const owned = owners[0];
+      if (owned) return { outcome: owners.length === 1 && owned.binding_id === input.bindingId ? "already_owned" : "conflict", prompt: mapPrompt(owned), supersededPromptIds: [], outboxReserved: false };
+      const active = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE binding_id = ? AND dispatch_kind = 'turn' AND state = 'running' ORDER BY created_at, id").all(input.bindingId) as PromptRow[];
+      const superseded = input.supersede;
+      const supersessionIsFenced = superseded !== undefined
+        && active.length === 1
+        && active[0]!.id === superseded.promptId
+        && active[0]!.observation_state === "detached"
+        && active[0]!.transcript_turn_id === superseded.turnId
+        && active[0]!.transcript_turn_started_at === superseded.startedAt
+        && Date.parse(input.startedAt) > Date.parse(superseded.startedAt);
+      const identitylessDetached = active.every((row) => row.observation_state === "detached" && row.transcript_turn_id === null);
+      if (!identitylessDetached && !supersessionIsFenced) return { outcome: "conflict", prompt: null, supersededPromptIds: [], outboxReserved: false };
+      const timestamp = now();
+      const supersededPromptIds = active.map((row) => row.id);
+      for (const row of active) {
+        this.context.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run("Superseded by a newer external Herdr turn; prior outcome is uncertain", timestamp, row.id);
+        this.context.database.prepare("UPDATE run_cards SET phase = 'failed', finished_at = ?, notice = ?, queue_position = 0, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ? AND phase IN ('running','blocked')").run(input.startedAt, "A newer Herdr turn started while this detached turn had an uncertain outcome.", timestamp, row.id);
+      }
+      const normalizedRequest = normalizeExternalRequest(input.requestText);
+      const candidates = input.supersede ? [] : (this.context.database.prepare(`
+        SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
+        WHERE p.binding_id = ? AND p.dispatch_kind = 'turn' AND p.state = 'queued' AND p.observation_state = 'not_started'
+          AND c.binding_generation = ? AND c.pane_id = ? AND p.created_at <= ?
+        ORDER BY p.created_at, p.id
+      `).all(input.bindingId, input.expectedGeneration, input.expectedPaneId, input.startedAt) as PromptRow[])
+        .filter((row) => normalizeExternalRequest(row.body) === normalizedRequest);
+      let promptId: string;
+      let outcome: ExternalTurnAdoption["outcome"];
+      let outboxReserved = false;
+      if (candidates.length === 1) {
+        promptId = candidates[0]!.id;
+        outcome = "adopted_queued";
+        this.context.database.prepare(`UPDATE prompt_jobs SET execution_origin = 'herdr', state = 'running', observation_state = 'attached', dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ?, error = NULL, updated_at = ? WHERE id = ?`).run(input.startedAt, input.turnId, input.startedAt, timestamp, promptId);
+        const queuedView = this.projections.loadRunCard(promptId)!;
+        const runningView = reduceRunCard(queuedView, { type: "started", occurredAt: input.startedAt });
+        outboxReserved = Number(this.context.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE prompt_id = ? AND kind = 'stream_card_create' AND card_role = 'answer' AND state = 'pending'").run(JSON.stringify(input.answerCardFor(runningView)), runningView.viewVersion, timestamp, promptId).changes) > 0;
+      } else {
+        promptId = input.externalPromptId;
+        outcome = "created_external";
+        this.context.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, execution_origin, dispatch_kind, state, observation_state, dispatched_at, transcript_turn_id, transcript_turn_started_at, attempt_count, created_at, updated_at) VALUES (?, ?, ?, 'herdr', ?, 'herdr', 'turn', 'running', 'attached', ?, ?, ?, 1, ?, ?)`).run(promptId, input.bindingId, input.externalMessageId, input.requestText, input.startedAt, input.turnId, input.startedAt, input.startedAt, timestamp);
+        const view = { ...input.externalView, promptId, bindingId: input.bindingId, bindingGeneration: input.expectedGeneration, paneId: input.expectedPaneId, requestText: input.requestText, queuePosition: 0 };
+        const runningView = reduceRunCard(view, { type: "started", occurredAt: input.startedAt });
+        this.projections.insertRunCard(view);
+        this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), `run-card:create:${promptId}:answer`, input.bindingId, promptId, runningView.viewVersion, binding.root_message_id, JSON.stringify(input.answerCardFor(runningView)), `answer:${promptId}`, timestamp, timestamp, timestamp);
+        outboxReserved = true;
+      }
+      return { outcome, prompt: this.requirePrompt(promptId), supersededPromptIds, outboxReserved };
+    });
+  }
+
   listStaleUndispatchedPromptClaims(updatedBefore: string, limit: number): StalePromptClaim[] {
     if (!Number.isFinite(Date.parse(updatedBefore))) throw new Error("Invalid stale prompt cutoff");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new Error("Invalid stale prompt claim limit");
@@ -462,6 +522,64 @@ export class SqlitePromptStore {
     return (this.context.database.prepare("SELECT * FROM prompt_jobs WHERE state = 'running' AND observation_state = 'detached' ORDER BY created_at, id").all() as PromptRow[]).map(mapPrompt);
   }
 
+  skipOldestDetachedPrompt(input: { bindingId: string; expectedBindingGeneration: number; actorOpenId: string; sourceMessageId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): DetachedPromptSkipResult {
+    return this.context.transaction(() => {
+      const binding = this.context.database.prepare("SELECT generation, lifecycle, state FROM bindings WHERE id = ?").get(input.bindingId) as { generation: number; lifecycle: string; state: string } | undefined;
+      if (!binding || Number(binding.generation) !== input.expectedBindingGeneration || binding.lifecycle !== "active" || binding.state !== "active") return { outcome: "stale" };
+      const candidate = this.context.database.prepare(`SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.binding_id = ? AND c.binding_generation = ? AND p.dispatch_kind = 'turn' AND p.state = 'running' AND p.observation_state = 'detached' ORDER BY p.created_at, p.rowid LIMIT 1`).get(input.bindingId, input.expectedBindingGeneration) as { id: string } | undefined;
+      if (!candidate) return { outcome: "none" };
+      const changed = this.context.database.prepare(`UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ? AND binding_id = ? AND dispatch_kind = 'turn' AND state = 'running' AND observation_state = 'detached' AND EXISTS (SELECT 1 FROM run_cards c WHERE c.prompt_id = prompt_jobs.id AND c.binding_generation = ?)`).run(input.reason, input.occurredAt, candidate.id, input.bindingId, input.expectedBindingGeneration);
+      if (Number(changed.changes) !== 1) return { outcome: "stale" };
+      const current = this.projections.loadRunCard(candidate.id);
+      if (!current) throw new Error(`Run card missing for prompt: ${candidate.id}`);
+      const next = reduceRunCard(current, { type: "failed", occurredAt: input.occurredAt, notice: input.reason });
+      this.projections.saveRunCard(next);
+      const topic = this.projections.loadTopicView(input.bindingId);
+      if (topic) this.projections.saveTopicView(mirrorRunCardToTopic(topic, next));
+      let outboxReserved = false;
+      if (next.answerMessageId) {
+        this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(input.renderRunCard(next)) });
+        outboxReserved = true;
+      } else if (input.rootMessageId) {
+        const pendingCreate = this.context.database.prepare("SELECT idempotency_key FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' ORDER BY delivery_order LIMIT 1").get(next.promptId) as { idempotency_key: string } | undefined;
+        if (pendingCreate) {
+          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: pendingCreate.idempotency_key, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
+          outboxReserved = true;
+        }
+      }
+      this.context.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'swarm.skip', ?, 'skipped', ?)").run(input.actorOpenId, `binding:${input.bindingId}:prompt:${candidate.id}:message:${input.sourceMessageId}`, input.occurredAt);
+      return { outcome: "skipped", promptId: candidate.id, outboxReserved };
+    });
+  }
+
+  cancelQueuedPromptsWithProjection(input: { bindingId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): { cancelledPromptIds: string[]; outboxReserved: boolean } {
+    return this.context.transaction(() => {
+      const rows = this.context.database.prepare(`SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.binding_id = ? AND p.state = 'queued' ORDER BY p.created_at, p.rowid`).all(input.bindingId) as Array<{ id: string }>;
+      if (rows.length === 0) return { cancelledPromptIds: [], outboxReserved: false };
+      let outboxReserved = false;
+      for (const row of rows) {
+        const updated = this.context.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ? AND binding_id = ? AND state = 'queued'").run(input.reason, input.occurredAt, row.id, input.bindingId);
+        if (Number(updated.changes) !== 1) throw new Error(`Queued prompt changed during cancellation: ${row.id}`);
+        const current = this.projections.loadRunCard(row.id);
+        if (!current) throw new Error(`Run card missing for prompt: ${row.id}`);
+        const next = reduceRunCard(current, { type: "failed", occurredAt: input.occurredAt, notice: input.reason });
+        this.projections.saveRunCard(next);
+        const card = input.renderRunCard(next);
+        if (!next.answerCardId && next.answerMessageId) {
+          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(card) });
+          outboxReserved = true;
+        } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
+          const create = this.context.database.prepare("SELECT card_id_checkpoint FROM outbound_replies WHERE idempotency_key = ? AND state = 'pending'").get(`run-card:create:${next.promptId}:answer`) as { card_id_checkpoint: string | null } | undefined;
+          if (create && !create.card_id_checkpoint) {
+            this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${next.promptId}:answer`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(card) });
+            outboxReserved = true;
+          }
+        }
+      }
+      return { cancelledPromptIds: rows.map((row) => row.id), outboxReserved };
+    });
+  }
+
   getPrompt(id: string): PromptJob | null {
     const row = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE id = ?").get(id) as PromptRow | undefined;
     return row ? mapPrompt(row) : null;
@@ -475,3 +593,4 @@ export class SqlitePromptStore {
 }
 
 function now(): string { return new Date().toISOString(); }
+function normalizeExternalRequest(value: string): string { return value.replace(/\r\n?/g, "\n"); }
