@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, DeliveryFailureMetadata, OutboundFailureTransition, OutboundReply, OutboxLaneClass } from "../../domain/types.js";
+import type { Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, OutboundFailureTransition, OutboundReply, OutboxLaneClass } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
@@ -19,6 +19,7 @@ export class SqliteOutboxStore {
       getBinding(id: string): Binding | null;
       loadRunCard(promptId: string): RunCardView | null;
       loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
+      listWorkerTurnCardPages(turnId: string): import("../../domain/worker-turn-card-view.js").WorkerTurnCardPage[];
       loadWorkerMainView(workerId: string, workerSessionGeneration: number): WorkerMainView | null;
       saveRunCard(view: RunCardView): RunCardView;
       persistBindingPatch(id: string, patch: Partial<Binding>): Binding;
@@ -267,6 +268,77 @@ export class SqliteOutboxStore {
   refreshOutboxLaneHead(laneKey: string): void {
     this.context.database.prepare("DELETE FROM outbox_lane_heads WHERE lane_key = ?").run(laneKey);
     this.context.database.prepare(`INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at) SELECT lane_key, id, delivery_order, next_attempt_at, created_at FROM outbound_replies WHERE lane_key = ? AND state = 'pending' AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = ? AND q.state = 'active') ORDER BY delivery_order LIMIT 1`).run(laneKey, laneKey);
+  }
+
+  recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] {
+    if (!Number.isInteger(limit) || limit <= 0) return [];
+    return this.context.transaction(() => {
+      const rows = this.context.database.prepare(`SELECT o.id FROM outbound_replies o WHERE o.state = 'dead_letter' AND o.failure_class = 'transient' AND o.auto_recovery_count = 0 AND o.dead_lettered_at IS NOT NULL AND o.dead_lettered_at <= ? AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = o.lane_key AND q.state = 'active') ORDER BY o.dead_lettered_at, o.delivery_order LIMIT ?`).all(cutoff, limit) as Array<{ id: string }>;
+      const recovered: OutboundReply[] = [];
+      for (const row of rows) {
+        const timestamp = now();
+        const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, auto_recovery_count = 1, updated_at = ? WHERE id = ? AND state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at <= ?`).run(timestamp, timestamp, row.id, cutoff);
+        if (updated.changes === 1) { const reply = this.getOutboundReply(row.id); if (reply) recovered.push(reply); }
+      }
+      return recovered;
+    });
+  }
+
+  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[] {
+    return this.context.transaction(() => {
+      const rows = this.context.database.prepare(`SELECT o.id, o.worker_turn_id, o.lane_key FROM outbound_replies o JOIN worker_turn_cards card ON card.turn_id = o.worker_turn_id WHERE o.state = 'dead_letter' AND o.kind = 'stream_card_create' AND o.idempotency_key = 'worker-turn:create:' || o.worker_turn_id || ':0' AND card.message_id IS NULL AND card.card_id IS NULL AND o.lark_error_code IN ('200861', '230099') AND instr(o.payload, '"tag":"note"') > 0 ORDER BY o.delivery_order`).all() as Array<{ id: string; worker_turn_id: string; lane_key: string }>;
+      const timestamp = now();
+      const recovered: string[] = [];
+      for (const row of rows) {
+        const view = this.dependencies.loadWorkerTurnCard(row.worker_turn_id);
+        if (!view) continue;
+        const payload = JSON.stringify({ card: render(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } });
+        const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'`).run(payload, view.viewVersion, timestamp, timestamp, row.id);
+        if (updated.changes !== 1) continue;
+        this.context.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.id);
+        this.refreshOutboxLaneHead(row.lane_key); recovered.push(row.worker_turn_id);
+      }
+      return recovered;
+    });
+  }
+
+  convergeWorkerTaskCardRenderer(revision: string, render: (view: WorkerTurnCardView, page?: import("../../domain/worker-turn-card-view.js").WorkerTurnCardPage) => object): string[] {
+    return this.context.transaction(() => {
+      const rows = this.context.database.prepare(`SELECT card.turn_id FROM worker_turn_cards card WHERE card.message_id IS NOT NULL AND card.card_id IS NOT NULL AND card.phase IN ('running', 'blocked', 'completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM outbound_replies reply WHERE reply.idempotency_key = 'worker-turn:renderer:' || ? || ':' || card.turn_id) ORDER BY card.created_at, card.turn_id`).all(revision) as Array<{ turn_id: string }>;
+      const refreshed: string[] = [];
+      for (const row of rows) {
+        const view = this.dependencies.loadWorkerTurnCard(row.turn_id);
+        if (!view?.messageId || !view.cardId) continue;
+        const page = this.dependencies.listWorkerTurnCardPages(row.turn_id).find(({ pageIndex }) => pageIndex === view.pageIndex);
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:renderer:${revision}:${view.turnId}`, bindingId: null, workerTurnId: view.turnId, viewVersion: view.viewVersion, rootMessageId: view.messageId, kind: "card_update", payload: JSON.stringify(render(view, page)), laneKeyOverride: `worker-turn:${view.turnId}` });
+        refreshed.push(view.turnId);
+      }
+      return refreshed;
+    });
+  }
+
+  retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome { return this.changeDeadLetter(id, chatId, actorOpenId, "retry"); }
+  dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome { return this.changeDeadLetter(id, chatId, actorOpenId, "dismiss"); }
+
+  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    return Number(this.context.database.prepare(`DELETE FROM outbound_replies WHERE id IN (SELECT id FROM outbound_replies WHERE state IN ('delivered', 'dismissed') AND updated_at < ? ORDER BY updated_at, delivery_order LIMIT ?)`).run(cutoff, limit).changes);
+  }
+
+  private changeDeadLetter(id: string, chatId: string, actorOpenId: string, action: "retry" | "dismiss"): DeadLetterActionOutcome {
+    return this.context.transaction(() => {
+      const row = this.context.database.prepare(`SELECT o.state, COALESCE(b.chat_id, s.chat_id) AS chat_id FROM outbound_replies o LEFT JOIN bindings b ON b.id = o.binding_id LEFT JOIN project_selections s ON s.id = o.selection_id WHERE o.id = ?`).get(id) as { state: OutboundReply["state"]; chat_id: string | null } | undefined;
+      let outcome: DeadLetterActionOutcome;
+      if (!row) outcome = "missing"; else if (row.chat_id !== chatId) outcome = "unauthorized"; else if (row.state !== "dead_letter") outcome = "stale"; else {
+        const lane = this.context.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(id) as { lane_key: string } | undefined;
+        const nextState = action === "retry" ? "pending" : "dismissed";
+        this.context.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, attempt_count = CASE WHEN ? = 'pending' THEN 0 ELSE attempt_count END, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, nextState, now(), now(), id);
+        if (lane) { this.context.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', action = ?, released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'").run(action === "retry" ? "manual_retry" : "manual_dismiss", now(), now(), lane.lane_key, id); this.refreshOutboxLaneHead(lane.lane_key); }
+        outcome = action === "retry" ? "retried" : "dismissed";
+      }
+      this.context.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(actorOpenId, `outbound.${action}`, id, outcome, now());
+      return outcome;
+    });
   }
 
   private outboundDeliveryOrder(id: string): number {
