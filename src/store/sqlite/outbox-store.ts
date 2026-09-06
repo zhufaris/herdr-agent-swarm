@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, DeliveryFailureMetadata, OutboundReply } from "../../domain/types.js";
+import type { Binding, DeliveryFailureMetadata, OutboundFailureTransition, OutboundReply, OutboxLaneClass } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
@@ -216,6 +217,64 @@ export class SqliteOutboxStore {
     return this.getOutboundReply(id);
   }
 
+  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null {
+    return this.context.transaction(() => {
+      const before = this.getOutboundReply(id);
+      if (!before) return null;
+      if (before.state === "dead_letter") {
+        const existing = this.context.database.prepare("SELECT lane_class, action FROM outbox_lane_quarantines WHERE lane_key = ? AND failed_reply_id = ?").get(before.laneKey, id) as { lane_class: OutboxLaneClass; action: OutboundFailureTransition["action"] } | undefined;
+        if (existing) return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
+      }
+      const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && (metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
+      const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && metadata.larkErrorCode === "300309";
+      const failed = metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream
+        ? this.markOutboundReplyDeadLetter(id, error, metadata)
+        : this.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
+      if (!failed) return null;
+      const laneClass = outboundLaneClass(failed);
+      if (failed.state !== "dead_letter" || (metadata.failureClass === "transient" && failed.autoRecoveryCount === 0)) return { state: failed.state, action: "retry", laneClass, promptId: failed.promptId, reply: failed };
+      const timestamp = now();
+      let action: OutboundFailureTransition["action"] = "blocked";
+      let quarantineState: "active" | "released" = "active";
+      if (closedAnswerStream && failed.promptId) {
+        const pageIndex = streamContentPageIndex(failed.payload);
+        if (pageIndex === null) throw new Error(`Closed Answer stream ${failed.id} has invalid page metadata`);
+        this.context.database.prepare(`UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND card_id = ?`).run(timestamp, failed.promptId, pageIndex, failed.rootMessageId);
+        this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Dismissed after Lark closed the Answer stream', updated_at = ? WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, failed.laneKey, this.outboundDeliveryOrder(id));
+        action = "rebuild_answer"; quarantineState = "released";
+      } else if (laneClass === "answer_stream" && failed.promptId) {
+        this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ? WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, failed.laneKey, this.outboundDeliveryOrder(id));
+      } else if (laneClass === "main_card" && staleMainCard && failed.bindingId) {
+        const replacement = this.context.database.prepare(`SELECT payload, COALESCE(view_version, 0) AS view_version FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND (id = ? OR state = 'pending') ORDER BY COALESCE(view_version, 0) DESC, delivery_order DESC LIMIT 1`).get(failed.bindingId, id) as { payload: string; view_version: number } | undefined;
+        const binding = this.dependencies.getBinding(failed.bindingId);
+        if (!binding) throw new Error(`Binding not found: ${failed.bindingId}`);
+        if (replacement && binding.rootMessageId) {
+          this.context.database.prepare(`DELETE FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_update' AND state = 'pending'`).run(failed.bindingId);
+          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:rebuild:${failed.bindingId}:${replacement.view_version}`, bindingId: failed.bindingId, viewVersion: replacement.view_version, targetRole: "session_status", rootMessageId: binding.rootMessageId, kind: "card_reply", payload: replacement.payload });
+          action = "rebuild_main"; quarantineState = "released";
+        }
+      } else if (laneClass === "main_card" || laneClass === "replaceable_card") {
+        action = "released_newer_snapshot"; quarantineState = "released";
+      }
+      const laneKey = failed.laneKey;
+      this.context.database.prepare(`INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(lane_key) DO UPDATE SET failed_reply_id = excluded.failed_reply_id, lane_class = excluded.lane_class, failure_class = excluded.failure_class, state = excluded.state, action = excluded.action, reason = excluded.reason, updated_at = excluded.updated_at, released_at = excluded.released_at`).run(laneKey, id, laneClass, metadata.failureClass, quarantineState, action, boundedError(error), timestamp, timestamp, quarantineState === "released" ? timestamp : null);
+      if (quarantineState === "released") this.refreshOutboxLaneHead(laneKey);
+      else this.context.database.prepare("DELETE FROM outbox_lane_heads WHERE lane_key = ?").run(laneKey);
+      return { state: failed.state, action, laneClass, promptId: failed.promptId, reply: failed };
+    });
+  }
+
+  refreshOutboxLaneHead(laneKey: string): void {
+    this.context.database.prepare("DELETE FROM outbox_lane_heads WHERE lane_key = ?").run(laneKey);
+    this.context.database.prepare(`INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at) SELECT lane_key, id, delivery_order, next_attempt_at, created_at FROM outbound_replies WHERE lane_key = ? AND state = 'pending' AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = ? AND q.state = 'active') ORDER BY delivery_order LIMIT 1`).run(laneKey, laneKey);
+  }
+
+  private outboundDeliveryOrder(id: string): number {
+    const row = this.context.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = ?").get(id) as { delivery_order: number } | undefined;
+    if (!row) throw new Error(`Outbound reply not found: ${id}`);
+    return Number(row.delivery_order);
+  }
+
   getOutboundReply(id: string): OutboundReply | null {
     const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE id = ?").get(id) as OutboundReplyRow | undefined;
     return row ? mapOutboundReply(row) : null;
@@ -234,6 +293,15 @@ function retryAt(attempt: number, explicitDelayMs?: number): string {
   const jittered = Math.round(exponential * (0.8 + Math.random() * 0.4));
   const delay = explicitDelayMs === undefined ? jittered : Math.max(exponential, Math.min(3_600_000, explicitDelayMs));
   return new Date(Date.now() + delay).toISOString();
+}
+function outboundLaneClass(reply: OutboundReply): OutboxLaneClass {
+  if (reply.cardRole === "answer" && reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish")) return "answer_stream";
+  if (reply.targetRole === "session_status" && reply.kind === "card_update") return "main_card";
+  if (reply.kind === "card_update") return "replaceable_card";
+  return "immutable";
+}
+function streamContentPageIndex(payload: string): number | null {
+  try { const decoded = JSON.parse(payload) as { pageIndex?: unknown }; return Number.isInteger(decoded.pageIndex) ? Number(decoded.pageIndex) : null; } catch { return null; }
 }
 function streamCardState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
   try {
