@@ -14,9 +14,10 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { decidePaneCreatedCheckpoint, decideSelectedCheckpoint, provisioningRecoveryMessage } from "./binding-provisioning-policy.js";
+import { decidePaneCreatedCheckpoint, decideSelectedCheckpoint } from "./binding-provisioning-policy.js";
 import { requireMatchingPane } from "./pane-runtime-identity.js";
 import { ManagedBindingLifecycle, PRIMARY_TOOLS_UNAVAILABLE_NOTICE, paneCreationOptions, primaryToolAgentArgs, type PrimaryToolConfiguration } from "./binding-provisioning/managed-binding-lifecycle.js";
+import { ProjectSelectionUseCase, ProvisionedPaneMissingError } from "./binding-provisioning/project-selection-use-case.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
@@ -52,6 +53,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private readonly projectsById: Map<string, ProjectConfig>;
   private readonly projectsBySpaceName: Map<string, ProjectConfig[]>;
   private readonly managedLifecycle: ManagedBindingLifecycle;
+  private readonly projectSelection: ProjectSelectionUseCase;
 
   constructor(private readonly options: Options) {
     this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
@@ -61,6 +63,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       requireStartedPane: (project, paneId, terminalId) => this.requireStartedPane(project, paneId, terminalId),
       publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3])
     });
+    this.projectSelection = new ProjectSelectionUseCase({ projects: options.config.projects, store: options.store, outbound: options.outbound, outboundWork: options.outboundWork, immediateOutbound: options.immediateOutbound, logger: options.logger, presentation: options.presentation, provision: (selection, project, allowPaneCreation) => this.createSelectedProject(selection, project, allowPaneCreation) });
     for (const project of options.config.projects) {
       const spaceName = project.spaceName;
       if (!spaceName) continue;
@@ -71,64 +74,16 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   async selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null = null): Promise<void> {
-    const selectionId = randomUUID();
-    this.options.store.createProjectSelection({
-      id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId,
-      rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText,
-      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: this.options.presentation.projectSelector({ selectionId, projects: this.options.config.projects })
-    });
-    this.options.outboundWork.wake();
-    try { await this.options.immediateOutbound.requestScan(); }
-    catch (error) {
-      this.options.logger.warn({ event: "project-selector-immediate-delivery-failed", err: safeLogError(error), selectionId, eventId: message.eventId, outcome: "deferred" }, "immediate project selector delivery failed; durable outbox retry remains scheduled");
-    }
+    return this.projectSelection.begin(message, requestedTitle, initialPromptText);
   }
 
   async completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {
-    const { store, config, outbound, logger } = this.options;
-    const claim = store.claimProjectSelection({
-      selectionId, projectId, messageId: action.messageId, chatId: action.chatId, actorOpenId: action.operatorOpenId,
-      allowedProjectIds: config.projects.map((project) => project.id)
-    });
-    logger.info({ event: "project-selection-decided", selectionId, projectId, messageId: action.messageId, outcome: claim.outcome }, "processed project selection action");
-    store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${selectionId}:${projectId}`, outcome: claim.outcome });
-    if (!claim.selection || claim.outcome === "missing" || claim.outcome === "invalid" || claim.outcome === "unauthorized" || claim.outcome === "processing") return null;
-    if (claim.outcome === "expired") {
-      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:expired`, this.options.presentation.projectSelectionStatus({ status: "expired", message: "请重新发送 /swarm new。" }));
-      return null;
-    }
-    const selection = claim.selection;
-    if (claim.outcome === "completed") {
-      const binding = selection.bindingId ? store.getBinding(selection.bindingId) : null;
-      const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) : undefined;
-      if (binding && project) {
-        await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
-        return { binding, selection };
-      }
-      return null;
-    }
-    const project = this.projectsById.get(projectId);
-    if (!project) return null;
-    await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:processing`, this.options.presentation.projectSelectionStatus({ status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) }));
-    try {
-      const binding = await this.createSelectedProject(selection, project, true);
-      const completedSelection = store.completeProjectSelection(selection.id, binding.id);
-      await this.publishSelectionSuccess(selection.id, action.messageId, project, binding);
-      store.audit({ actorOpenId: action.operatorOpenId, action: "binding.create", target: binding.id, outcome: "success" });
-      return { binding, selection: completedSelection };
-    } catch (error) {
-      store.pauseProjectSelection(selection.id, errorMessage(error));
-      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:recoverable`, this.options.presentation.projectSelectionStatus({
-        status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: provisioningRecoveryMessage(error)
-      }));
-      logger.error({ event: "project-selection-paused", err: safeLogError(error), selectionId, projectId, outcome: "retry_on_restart" }, "project selection paused at a recoverable checkpoint");
-      return null;
-    }
+    return this.projectSelection.complete(action, selectionId, projectId);
   }
 
   async recover(): Promise<void> {
     const selections = this.options.store.listProcessingProjectSelections();
-    for (const selection of selections) await this.recoverProjectSelection(selection);
+    for (const selection of selections) await this.projectSelection.recover(selection);
     const selectionBindingIds = new Set(selections.flatMap((selection) => selection.bindingId ? [selection.bindingId] : []));
     for (const binding of this.options.store.listBindingsByState("pending").filter((candidate) =>
       candidate.lifecycle === "provisioning" && candidate.provisioningCheckpoint === "runtime_started" && !selectionBindingIds.has(candidate.id)
@@ -340,26 +295,6 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     } catch (error) { logger.warn({ event: "project-provisioning-paused", err: safeLogError(error), selectionId: selection.id, bindingId: current.id, checkpoint: current.provisioningCheckpoint, outcome: "retry_on_restart" }, "project provisioning paused at a durable checkpoint"); throw error; }
   }
 
-  private async recoverProjectSelection(selection: ProjectSelection): Promise<void> {
-    const { store, outbound, logger } = this.options;
-    const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) ?? null : null;
-    if (!selection.bindingId || !project) { store.failProjectSelection(selection.id, "Interrupted before recoverable project identity was persisted"); return; }
-    try { const binding = await this.createSelectedProject(selection, project, false); store.completeProjectSelection(selection.id, binding.id); if (selection.selectorMessageId) await this.publishSelectionSuccess(selection.id, selection.selectorMessageId, project, binding); logger.info({ event: "project-selection-recovered", selectionId: selection.id, bindingId: binding.id, paneId: binding.paneId, outcome: "completed" }, "resumed interrupted project provisioning"); }
-    catch (error) {
-      if (error instanceof ProvisionedPaneMissingError) {
-        const binding = store.getBinding(selection.bindingId);
-        if (binding?.lifecycle === "provisioning") store.transitionBinding(binding.id, { type: "provisioning_failed" });
-        store.failProjectSelection(selection.id, error.message);
-        if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:failed`, this.options.presentation.projectSelectionStatus({ status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: error.message }));
-        logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "failed_missing_pane" }, "project provisioning cannot resume because its pane no longer exists");
-        return;
-      }
-      store.pauseProjectSelection(selection.id, errorMessage(error));
-      if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:recoverable`, this.options.presentation.projectSelectionStatus({ status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) }));
-      logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "retry_on_restart" }, "project provisioning remains recoverable");
-    }
-  }
-
   private async recoverDiscoveredBinding(binding: Binding): Promise<void> {
     if (!binding.paneId || !binding.projectId) return;
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; if (!project) return;
@@ -403,7 +338,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     await this.publish(handoff.replacement.id, "BindingActivated", "lark", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: handoff.replacement.topicId! });
     return handoff.replacement;
   }
-  private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> { await this.options.outbound.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, this.options.presentation.projectSelectionStatus({ status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId } : {}) })); }
+  private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> { await this.projectSelection.success(selectionId, selectorMessageId, project, binding); }
   private async publishAttachSuccess(message: IncomingLarkMessage, binding: Binding, spaceName: string, alreadyAttached: boolean, resumeRequired = false, toolsUnavailable = !this.options.store.hasBindingPrimaryToolCapability(binding.id, binding.generation)): Promise<void> {
     if (!binding.paneId) return;
     if (toolsUnavailable) await this.publish(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
@@ -422,7 +357,3 @@ function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSess
   };
 }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-
-class ProvisionedPaneMissingError extends Error {
-  constructor(paneId: string | null) { super(`Provisioned Herdr pane ${paneId ?? "unknown"} no longer exists`); this.name = "ProvisionedPaneMissingError"; }
-}
