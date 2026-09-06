@@ -1,6 +1,4 @@
-import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { AcceptInstanceTurnWithCardInput, BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
@@ -36,6 +34,7 @@ import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
 import type { AcceptCommandIntentInput, AcceptCommandIntentResult, CommandIntent, CommandIntentTerminalState } from "../domain/command-intent.js";
+import { SqliteContext } from "./sqlite/context.js";
 
 const FENCED_TABLES = [
   "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
@@ -59,15 +58,15 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
 
 export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   readonly database: DatabaseSync;
+  private readonly context: SqliteContext;
 
   constructor(path: string) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.database = new DatabaseSync(path);
-    this.database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+    this.context = new SqliteContext(path);
+    this.database = this.context.database;
     this.migrate();
   }
 
-  close(): void { this.database.close(); }
+  close(): void { this.context.close(); }
 
   createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest {
     const instance = this.getAgentInstance(input.instanceId);
