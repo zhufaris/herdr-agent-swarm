@@ -2,6 +2,13 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
+  it("does not retain the legacy wide persistence port", () => {
+    const barrel = readFileSync(new URL("../src/domain/ports.ts", import.meta.url), "utf8");
+    const store = readFileSync(new URL("../src/store/sqlite-store.ts", import.meta.url), "utf8");
+    expect(barrel).not.toContain("interface BindingStorePort");
+    expect(store).not.toContain("BindingStorePort");
+  });
+
   it("keeps durable prompt safety scans out of Herdr reconciliation", () => {
     const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     expect(reconciler).not.toContain("scanDurablePromptWork");

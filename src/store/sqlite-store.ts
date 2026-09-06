@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
-import type { AcceptInstanceTurnWithCardInput, BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
+import type { AcceptInstanceTurnWithCardInput } from "../domain/ports/instance.js";
+import type { AcceptPromptInput, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports/prompt.js";
+import type { AdoptExternalTurnInput } from "../domain/ports/workflow.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
 import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
@@ -53,7 +55,7 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
   createdAt: "created_at", updatedAt: "updated_at"
 };
 
-export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
+export class SqliteBindingStore implements TurnControlStore {
   readonly database: DatabaseSync;
   private readonly instanceLease: SqliteInstanceLease;
 
@@ -1054,7 +1056,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   finishTurnControlOperation(input: { id: string; state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">; result: Record<string, unknown>; card?: object }): TurnControlOperation | null {
     return this.finishTurnControlTransition(input.id, "dispatching", input.state, input.result, input.card);
   }
-  convertTurnControlToPrimaryPriority(input: { operationId: string; prompt: Parameters<BindingStorePort["acceptPrompt"]>[0]["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
+  convertTurnControlToPrimaryPriority(input: { operationId: string; prompt: AcceptPromptInput["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const operation = this.getTurnControlOperation(input.operationId);
@@ -2604,7 +2606,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  adoptExternalTurn(input: Parameters<BindingStorePort["adoptExternalTurn"]>[0]): ExternalTurnAdoption {
+  adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const binding = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(input.bindingId) as BindingRow | undefined;
@@ -2710,7 +2712,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return { prompt: mapPrompt(row), inserted };
   }
 
-  acceptPrompt(input: Parameters<BindingStorePort["acceptPrompt"]>[0]): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
+  acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.prompt.larkMessageId) as PromptRow | undefined;

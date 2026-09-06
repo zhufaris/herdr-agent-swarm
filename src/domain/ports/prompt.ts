@@ -1,4 +1,3 @@
-import type { ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../ports.js";
 import type { Binding, BindingMetadataPatch, DurablePromptWorkScan, OperationalSummary, PromptJob, StaleOutboxQuarantineRecovery, StalePromptClaim } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { MainCardReservationOutcome } from "../types.js";
@@ -17,8 +16,45 @@ export type DetachedPromptSkipResult =
   | { outcome: "skipped"; promptId: string; outboxReserved: boolean }
   | { outcome: "none" | "stale" };
 
+export interface AcceptPromptInput {
+  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>;
+  view: RunCardView;
+  rootMessageId: string;
+  taskCard?: object;
+  answerCard: object;
+  maxQueueDepth?: number;
+  expectedBindingGeneration?: number;
+}
+
+export interface ClassifiedPromptInput {
+  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin">;
+  ordinaryView: RunCardView;
+  steeringView: RunCardView;
+  rootMessageId: string;
+  maxQueueDepth: number;
+  expectedBindingGeneration: number;
+  candidateParentPromptId: string | null;
+  activeAfter: string;
+  acceptedAt: string;
+  answerCardFor(view: RunCardView): object;
+}
+
+type ClassifiedPromptFallbackReason = "no_candidate" | "binding_changed" | "parent_inactive" | "parent_detached" | "parent_state" | "parent_stale" | null;
+
+export type ClassifiedPromptAcceptance = {
+  prompt: PromptJob;
+  view: RunCardView;
+  inserted: boolean;
+  decision: "automatic_steering" | "ordinary";
+  fallbackReason: ClassifiedPromptFallbackReason;
+} | {
+  inserted: false;
+  decision: "queue_full";
+  fallbackReason: ClassifiedPromptFallbackReason;
+};
+
 export interface PromptAcceptanceStore {
-  acceptPrompt(input: { prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>; view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object; maxQueueDepth?: number; expectedBindingGeneration?: number }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
+  acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   acceptClassifiedPrompt(input: ClassifiedPromptInput): ClassifiedPromptAcceptance;
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   countPendingPrompts(bindingId: string): number;
