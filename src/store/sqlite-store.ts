@@ -150,8 +150,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
     const timestamp = now();
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       this.database.prepare(`
         INSERT INTO agent_instances(
           id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_binding_generation, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at
@@ -162,35 +161,35 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
       `).run(input.workspace.id, input.projectId, input.id, input.workspace.kind, input.workspace.cwd, input.workspace.branch, input.workspace.baseCommit, timestamp, timestamp);
-      this.database.exec("COMMIT");
+
       return this.getAgentInstance(input.id)!;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } | { outcome: "duplicate-name" } {
     if (!input.parent) throw new Error("Worker parent identity is required");
+    const parent = input.parent;
     const timestamp = now();
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const count = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE project_id = ? AND role = 'worker' AND worker_session_lifecycle = 'active'").get(input.projectId) as { count: number };
-      if (count.count >= maxWorkers) { this.database.exec("COMMIT"); return { outcome: "limit-reached" }; }
-      const duplicate = this.database.prepare("SELECT 1 FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? AND parent_pane_id = ? AND name = ? LIMIT 1").get(input.parent.bindingId, input.parent.paneId, input.name);
-      if (duplicate) { this.database.exec("COMMIT"); return { outcome: "duplicate-name" }; }
+      if (count.count >= maxWorkers) {return { outcome: "limit-reached" }; }
+      const duplicate = this.database.prepare("SELECT 1 FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? AND parent_pane_id = ? AND name = ? LIMIT 1").get(parent.bindingId, parent.paneId, input.name);
+      if (duplicate) {return { outcome: "duplicate-name" }; }
       this.database.prepare(`
         INSERT INTO agent_instances(
           id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_binding_generation, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
           provisioning_checkpoint, last_error
         ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 'active', ?, 'unprovisioned', ?, 1, ?, ?, 'recorded', NULL)
-      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, input.parent.bindingId, input.parent.bindingGeneration ?? null, input.parent.paneId, input.parent.nativeSessionId, input.desiredState, input.workspace.id, timestamp, timestamp);
+      `).run(input.id, input.projectId, input.name, input.agentKind, input.model, input.sourcePrimaryPaneLabel ?? null, parent.bindingId, parent.bindingGeneration ?? null, parent.paneId, parent.nativeSessionId, input.desiredState, input.workspace.id, timestamp, timestamp);
       this.database.prepare(`
         INSERT INTO workspace_leases(id, project_id, instance_id, kind, cwd, branch, base_commit, state, generation, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)
       `).run(input.workspace.id, input.projectId, input.id, input.workspace.kind, input.workspace.cwd, input.workspace.branch, input.workspace.baseCommit, timestamp, timestamp);
       const instance = this.getAgentInstance(input.id)!;
       this.invalidateWorkerInstanceContexts(instance, "worker.created");
-      this.database.exec("COMMIT");
+
       return { outcome: "created", instance };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   getAgentInstance(id: string): AgentInstance | null {
@@ -218,11 +217,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
-    const ownsTransaction = !this.database.isTransaction;
-    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const saved = this.saveWorkerMainView(view);
-      if (!saved) { if (ownsTransaction) this.database.exec("COMMIT"); return null; }
+      if (!saved) return null;
       const creating = saved.messageId === null;
       this.enqueueOutboundReply({
         id: randomUUID(),
@@ -230,17 +227,14 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         bindingId: saved.parentBindingId, workerId: saved.workerId, workerSessionGeneration: saved.workerSessionGeneration, viewVersion: saved.viewVersion,
         rootMessageId: creating ? rootMessageId : saved.messageId!, kind: creating ? "card_reply" : "card_update", payload: JSON.stringify(card)
       });
-      if (ownsTransaction) this.database.exec("COMMIT");
       return saved;
-    } catch (error) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     if (targets.length === 0) return [];
     const timestamp = now();
-    const ownsTransaction = !this.database.isTransaction;
-    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const statement = this.database.prepare(`
         INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
         VALUES (?, ?, ?, 1, 0, ?, ?, ?)
@@ -249,9 +243,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       `);
       for (const target of targets) statement.run(target.targetKind, target.targetId, target.targetGeneration, target.reason, timestamp, timestamp);
       const invalidations = targets.map((target) => this.loadCardContextInvalidation(target)!).filter(Boolean);
-      if (ownsTransaction) this.database.exec("COMMIT");
       return invalidations;
-    } catch (error) { if (ownsTransaction && this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   private invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void {
@@ -284,22 +277,21 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const currentInvalidation = this.loadCardContextInvalidation(invalidation);
-      if (!currentInvalidation || currentInvalidation.projectedDependencyRevision >= invalidation.requestedDependencyRevision) { this.database.exec("COMMIT"); return "current"; }
+      if (!currentInvalidation || currentInvalidation.projectedDependencyRevision >= invalidation.requestedDependencyRevision) {return "current"; }
       let reserved = false;
       if (invalidation.targetKind === "worker-session") {
         const source = this.loadWorkerMainProjectionSource(invalidation.targetId, invalidation.targetGeneration);
-        if (!source) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        if (!source) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
         const previous = this.loadWorkerMainView(invalidation.targetId, invalidation.targetGeneration);
         const next = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
         const binding = this.getBinding(source.parentBindingId);
-        if (!binding?.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        if (!binding?.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
         if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
       } else if (invalidation.targetKind === "worker-turn") {
         const previous = this.loadWorkerTurnCard(invalidation.targetId);
-        if (!previous || previous.instanceGeneration !== invalidation.targetGeneration) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        if (!previous || previous.instanceGeneration !== invalidation.targetGeneration) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
         const main = this.loadWorkerMainView(previous.instanceId, previous.workerSessionGeneration);
         const answer = previous.primaryAnswer ? this.loadRunCard(previous.primaryAnswer.aggregateId) : null;
         const workerMain = { ...previous.workerMain, messageId: main?.messageId ?? null };
@@ -313,7 +305,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       } else if (invalidation.targetKind === "primary-session") {
         const binding = this.getBinding(invalidation.targetId);
         const previous = this.loadTopicView(invalidation.targetId);
-        if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
         const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
         const next = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
         this.saveTopicView(next);
@@ -321,7 +313,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       } else if (invalidation.targetKind === "primary-turn") {
         const previous = this.loadRunCard(invalidation.targetId);
         const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;
-        if (!previous || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null || page?.state === "frozen" || page?.state === "finished") { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); this.database.exec("COMMIT"); return "stale"; }
+        if (!previous || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null || page?.state === "frozen" || page?.state === "finished") { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);return "stale"; }
         const activity = selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(previous.promptId, invalidation.targetGeneration));
         const next = updateRunCardWorkerContext(previous, activity, invalidation.requestedDependencyRevision, now());
         if (next !== previous) this.saveRunCard(next);
@@ -331,9 +323,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         }
       }
       this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
-      this.database.exec("COMMIT");
+
       return reserved ? "reserved" : "current";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   private loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {
@@ -422,91 +414,84 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const target = this.database.prepare("SELECT project_id FROM agent_instances WHERE id = ?").get(instanceId) as { project_id: string } | undefined;
       if (!target || target.project_id !== projectId) throw new Error(`Agent instance not found in project: ${instanceId}`);
       const timestamp = now();
       this.database.prepare("UPDATE agent_instances SET role = 'worker', updated_at = ? WHERE project_id = ? AND role = 'primary' AND id <> ?").run(timestamp, projectId, instanceId);
       this.database.prepare("UPDATE agent_instances SET role = 'primary', updated_at = ? WHERE id = ? AND project_id = ?").run(timestamp, instanceId, projectId);
-      this.database.exec("COMMIT");
+
       return this.getAgentInstance(instanceId)!;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null {
     const nextGeneration = input.expectedGeneration + 1;
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const result = this.database.prepare(`
         UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, generation = ?, observed_state = 'idle', provisioning_checkpoint = 'verified', last_error = NULL, updated_at = ?
         WHERE id = ? AND generation = ?
       `).run(input.herdrWorkspaceId, input.paneId, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
       const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
       if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.runtime-attached");
-      this.database.exec("COMMIT");
+
       return instance;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const result = this.database.prepare(`UPDATE agent_instances SET provisioning_checkpoint = ?, observed_state = COALESCE(?, observed_state), pending_pane_id = COALESCE(?, pending_pane_id), pending_herdr_workspace_id = COALESCE(?, pending_herdr_workspace_id), last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
         .run(input.checkpoint, input.observedState ?? null, input.pendingPaneId ?? null, input.pendingWorkspaceId ?? null, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
       const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
       if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.provisioning-changed");
-      this.database.exec("COMMIT");
+
       return instance;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
         .run(input.desiredState, input.observedState, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.clearRuntime ? 1 : 0, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
       const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
       if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.lifecycle-changed");
-      this.database.exec("COMMIT");
+
       return instance;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const result = this.database.prepare("UPDATE agent_instances SET observed_state = ?, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.observedState, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
       const instance = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
       if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.runtime-observed");
-      this.database.exec("COMMIT");
+
       return instance;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const instance = this.getAgentInstance(instanceId);
-      if (!instance || instance.generation !== expectedGeneration) { this.database.exec("COMMIT"); return { outcome: "stale" }; }
+      if (!instance || instance.generation !== expectedGeneration) {return { outcome: "stale" }; }
       const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(instanceId, expectedGeneration);
-      if (active) { this.database.exec("COMMIT"); return { outcome: "busy" }; }
+      if (active) {return { outcome: "busy" }; }
       const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', last_error = NULL, updated_at = ? WHERE id = ? AND generation = ?").run(now(), instanceId, expectedGeneration);
       const reserved = changed.changes === 1 ? this.getAgentInstance(instanceId) : null;
-      this.database.exec("COMMIT");
+
       return reserved ? { outcome: "reserved", instance: reserved } : { outcome: "stale" };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);
       const instance = result.changes === 1 ? this.getAgentInstance(instanceId) : null;
       if (instance) this.invalidateWorkerInstanceContexts(instance, "worker.stopped");
-      this.database.exec("COMMIT");
+
       return instance;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null {
@@ -515,10 +500,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const instance = this.getAgentInstance(input.instanceId);
-      if (!instance || instance.generation !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      if (!instance || instance.generation !== input.expectedGeneration) {return null; }
       const nextGeneration = input.expectedGeneration + 1;
       this.database.prepare(`UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')`)
         .run(input.reason, now(), instance.id, input.expectedGeneration);
@@ -528,16 +512,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(nextGeneration, input.reason, now(), instance.id, input.expectedGeneration);
       const detached = changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
       if (detached) this.invalidateWorkerInstanceContexts(detached, "worker.runtime-detached");
-      this.database.exec("COMMIT");
+
       return detached;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const instance = this.getAgentInstance(input.instanceId);
-      if (!instance || instance.role !== "worker" || instance.generation !== input.expectedGeneration) { this.database.exec("COMMIT"); return null; }
+      if (!instance || instance.role !== "worker" || instance.generation !== input.expectedGeneration) {return null; }
       const turns = this.database.prepare("SELECT id, state FROM instance_turns WHERE instance_id = ? AND instance_generation = ? ORDER BY created_at, rowid").all(instance.id, instance.generation) as Array<{ id: string; state: string }> ;
       const cancelledTurnIds = turns.filter(({ state }) => state === "queued").map(({ id }) => id);
       const uncertainTurnIds = turns.filter(({ state }) => ["claimed", "dispatching", "running", "blocked"].includes(state)).map(({ id }) => id);
@@ -548,9 +531,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = ?, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(nextGeneration, input.reason, timestamp, instance.id, instance.generation);
       const terminated = changed.changes === 1 ? this.getAgentInstance(instance.id) : null;
       if (terminated) this.invalidateWorkerInstanceContexts(terminated, "worker.terminated");
-      this.database.exec("COMMIT");
+
       return terminated ? { instance: terminated, cancelledTurnIds, uncertainTurnIds } : null;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   getWorkspaceLease(id: string): WorkspaceLease | null {
@@ -584,16 +567,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const instance = this.getAgentInstance(input.instanceId);
-      if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef || instance.pendingRuntimeRef) { this.database.exec("COMMIT"); return false; }
+      if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef || instance.pendingRuntimeRef) {return false; }
       const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
-      if (!lease || lease.generation !== input.expectedWorkspaceGeneration) { this.database.exec("COMMIT"); return false; }
+      if (!lease || lease.generation !== input.expectedWorkspaceGeneration) {return false; }
       this.database.prepare("DELETE FROM workspace_leases WHERE id = ? AND generation = ?").run(lease.id, lease.generation);
       const removed = this.database.prepare("DELETE FROM agent_instances WHERE id = ? AND generation = ?").run(instance.id, instance.generation).changes === 1;
-      this.database.exec("COMMIT"); return removed;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+     return removed;
+    });
   }
 
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean } { return this.workerTurns.acceptInstanceTurn(input); }
@@ -674,8 +656,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   acceptTurnControlOperation(input: AcceptTurnControlOperationInput): { operation: TurnControlOperation; inserted: boolean } {
     if ((input.kind === "steer") !== (input.payload !== null)) throw new Error("Steer requires a payload and interrupt forbids one");
     const timestamp = now();
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       if (!this.turnTargetExists(input.target)) throw new Error("Turn control target changed before acceptance");
       const inserted = this.database.prepare(`INSERT INTO turn_control_operations(
         id, idempotency_key, kind, owner_kind, owner_id, project_id, pane_id, generation,
@@ -691,9 +672,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       const operation = mapTurnControlOperation(row);
       if (!sameTurnControlRequest(operation, input)) throw new Error("Idempotency key belongs to a different turn control operation");
       if (inserted && input.result) this.enqueueTurnControlResult(operation, input.result.card, input.result.targetMessageId, input.result.bindingId ?? null);
-      this.database.exec("COMMIT");
+
       return { operation, inserted };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
   getTurnControlOperation(id: string): TurnControlOperation | null {
     const row = this.database.prepare("SELECT * FROM turn_control_operations WHERE id = ?").get(id) as TurnControlOperationRow | undefined;
@@ -712,14 +693,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return row ? { logicalTurnId: row.id, text: row.text } : null;
   }
   claimTurnControlOperation(id: string): TurnControlOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const operation = this.getTurnControlOperation(id);
-      if (!operation || operation.state !== "accepted" || !this.turnTargetExists(operation.target)) { this.database.exec("COMMIT"); return null; }
+      if (!operation || operation.state !== "accepted" || !this.turnTargetExists(operation.target)) {return null; }
       const changed = this.database.prepare("UPDATE turn_control_operations SET state = 'dispatching', updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), id);
-      this.database.exec("COMMIT");
+
       return changed.changes === 1 ? this.getTurnControlOperation(id) : null;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
   rejectAcceptedTurnControlOperation(input: { id: string; result: Record<string, unknown>; card?: object }): TurnControlOperation | null {
     return this.finishTurnControlTransition(input.id, "accepted", "rejected", input.result, input.card);
@@ -728,12 +708,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return this.finishTurnControlTransition(input.id, "dispatching", input.state, input.result, input.card);
   }
   convertTurnControlToPrimaryPriority(input: { operationId: string; prompt: Parameters<BindingStorePort["acceptPrompt"]>[0]["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const operation = this.getTurnControlOperation(input.operationId);
-      if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "binding" || operation.target.owner.id !== input.prompt.bindingId) { this.database.exec("COMMIT"); return null; }
+      if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "binding" || operation.target.owner.id !== input.prompt.bindingId) {return null; }
       const binding = this.getBinding(input.prompt.bindingId);
-      if (!binding || binding.generation !== input.expectedBindingGeneration || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || binding.paneId !== operation.target.paneId || !bindingSessionMatches(binding, operation.target.agentSession)) { this.database.exec("COMMIT"); return null; }
+      if (!binding || binding.generation !== input.expectedBindingGeneration || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || binding.paneId !== operation.target.paneId || !bindingSessionMatches(binding, operation.target.agentSession)) {return null; }
       if (this.countPendingPrompts(input.prompt.bindingId) >= input.maxQueueDepth) throw new Error("This topic's prompt queue is full");
       if (this.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND priority = 'priority' AND state IN ('queued','running') LIMIT 1").get(input.prompt.bindingId)) throw new Error("Primary binding already has a live priority turn");
       const timestamp = now();
@@ -745,17 +724,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
       const converted = this.getTurnControlOperation(input.operationId)!;
       if (input.card) this.updateTurnControlResult(converted, input.card);
-      this.database.exec("COMMIT");
+
       return { operation: converted, prompt: this.requirePrompt(input.prompt.id) };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
   convertTurnControlToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "card"> & { view?: AcceptInstanceTurnWithCardInput["view"]; card?: object }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const operation = this.getTurnControlOperation(input.operationId);
-      if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "instance" || operation.target.owner.id !== input.turn.instanceId) { this.database.exec("COMMIT"); return null; }
+      if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "instance" || operation.target.owner.id !== input.turn.instanceId) {return null; }
       const instance = this.getAgentInstance(input.turn.instanceId);
-      if (!instance || instance.generation !== input.turn.instanceGeneration || instance.projectId !== input.turn.projectId || instance.runtimeRef?.paneId !== operation.target.paneId || instance.runtimeRef.nativeSessionId !== operation.target.agentSession.value) { this.database.exec("COMMIT"); return null; }
+      if (!instance || instance.generation !== input.turn.instanceGeneration || instance.projectId !== input.turn.projectId || instance.runtimeRef?.paneId !== operation.target.paneId || instance.runtimeRef.nativeSessionId !== operation.target.agentSession.value) {return null; }
       if (this.countPendingInstanceTurns(input.turn.instanceId, input.turn.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
       if (this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.turn.instanceId, input.turn.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
       const timestamp = now();
@@ -771,33 +749,31 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
       const converted = this.getTurnControlOperation(input.operationId)!;
       if (input.card) this.updateTurnControlResult(converted, input.card);
-      this.database.exec("COMMIT");
+
       return { operation: converted, logicalTurnId: input.turn.id };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
   recoverTurnControlOperations(renderResult?: (operation: TurnControlOperation) => object): { accepted: TurnControlOperation[]; uncertain: TurnControlOperation[] } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       this.database.prepare("UPDATE turn_control_operations SET state = 'uncertain', result_json = ?, updated_at = ? WHERE state = 'dispatching'")
         .run(JSON.stringify({ status: "delivery-uncertain", reason: "Bridge restarted after native control dispatch began" }), now());
       const accepted = (this.database.prepare("SELECT * FROM turn_control_operations WHERE state = 'accepted' ORDER BY created_at, rowid").all() as TurnControlOperationRow[]).map(mapTurnControlOperation);
       const uncertain = (this.database.prepare("SELECT * FROM turn_control_operations WHERE state = 'uncertain' ORDER BY created_at, rowid").all() as TurnControlOperationRow[]).map(mapTurnControlOperation);
       if (renderResult) for (const operation of uncertain) this.updateTurnControlResult(operation, renderResult(operation));
-      this.database.exec("COMMIT");
+
       return { accepted, uncertain };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
   private finishTurnControlTransition(id: string, source: TurnControlState, state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">, result: Record<string, unknown>, card?: object): TurnControlOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const changed = this.database.prepare("UPDATE turn_control_operations SET state = ?, result_json = ?, updated_at = ? WHERE id = ? AND state = ?")
         .run(state, JSON.stringify(result), now(), id, source);
-      if (changed.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      if (changed.changes !== 1) {return null; }
       const operation = this.getTurnControlOperation(id)!;
       if (card) this.updateTurnControlResult(operation, card);
-      this.database.exec("COMMIT");
+
       return operation;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
   private enqueueTurnControlResult(operation: TurnControlOperation, card: object, targetMessageId: string, bindingId: string | null): void {
     this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `turn-control:${operation.id}:result`, bindingId, targetRole: "operation_result", rootMessageId: targetMessageId, kind: "card_reply", payload: JSON.stringify(card) });
@@ -853,32 +829,27 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   recordInboundMessage(message: IncomingLarkMessage): boolean {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const existing = this.database.prepare("SELECT 1 FROM inbound_messages WHERE event_id = ? OR message_id = ?").get(message.eventId, message.messageId);
-      if (existing) { this.database.exec("COMMIT"); return false; }
+      if (existing) {return false; }
       const timestamp = now();
       const result = this.database.prepare(`
         INSERT INTO inbound_messages(event_id, message_id, payload_json, state, created_at, updated_at)
         VALUES (?, ?, ?, 'received', ?, ?)
       `).run(message.eventId, message.messageId, JSON.stringify(message), timestamp, timestamp);
-      this.database.exec("COMMIT");
+
       return result.changes === 1;
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   claimNextInboundMessage(): IncomingLarkMessage | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const row = this.database.prepare("SELECT event_id, payload_json FROM inbound_messages WHERE state = 'received' ORDER BY created_at, event_id LIMIT 1").get() as { event_id: string; payload_json: string } | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
+      if (!row) {return null; }
       this.database.prepare("UPDATE inbound_messages SET state = 'processing', error = NULL, updated_at = ? WHERE event_id = ?").run(now(), row.event_id);
-      this.database.exec("COMMIT");
+
       return JSON.parse(row.payload_json) as IncomingLarkMessage;
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   markInboundMessageAccepted(eventId: string): void {
@@ -960,22 +931,21 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   pruneTerminalSessionOperations(cutoff: string, limit: number): number { return this.sessionOperations.pruneTerminal(cutoff, limit); }
 
   convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const interaction = this.getCardInteraction(input.interactionId);
-      if (!interaction) { this.database.exec("COMMIT"); return { outcome: "missing", prompt: null }; }
-      if (interaction.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", prompt: null }; }
+      if (!interaction) {return { outcome: "missing", prompt: null }; }
+      if (interaction.actorOpenId !== input.actorOpenId) {return { outcome: "unauthorized", prompt: null }; }
       const source = this.database.prepare(`SELECT p.*, c.steering_origin AS card_steering_origin, c.steering_failure_kind FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.id = ?`).get(input.sourcePromptId) as (PromptRow & { card_steering_origin: string | null; steering_failure_kind: string | null }) | undefined;
-      if (source && source.actor_open_id !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", prompt: null }; }
+      if (source && source.actor_open_id !== input.actorOpenId) {return { outcome: "unauthorized", prompt: null }; }
       const existing = this.database.prepare("SELECT * FROM prompt_jobs WHERE source_prompt_id = ?").get(input.sourcePromptId) as PromptRow | undefined;
-      if (interaction.state === "consumed" || existing) { this.database.exec("COMMIT"); return { outcome: "duplicate", prompt: existing ? mapPrompt(existing) : null }; }
+      if (interaction.state === "consumed" || existing) {return { outcome: "duplicate", prompt: existing ? mapPrompt(existing) : null }; }
       const binding = this.getBinding(input.bindingId);
       const valid = interaction.bindingId === input.bindingId && interaction.bindingGeneration === input.bindingGeneration
         && interaction.actionKind === "enqueue_failed_steering" && interaction.targetPromptId === input.sourcePromptId
         && binding?.generation === input.bindingGeneration && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.rootMessageId === input.rootMessageId
         && source?.binding_id === input.bindingId && source.state === "failed" && source.dispatch_kind === "steering"
         && source.steering_origin === "automatic" && source.card_steering_origin === "automatic" && source.steering_failure_kind === "rejected";
-      if (!valid) { this.database.exec("COMMIT"); return { outcome: "stale", prompt: null }; }
+      if (!valid) {return { outcome: "stale", prompt: null }; }
       const queuePosition = Number((this.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn'").get(input.bindingId) as { count: number }).count) + 1;
       const view: RunCardView = { ...input.view, steeringOrigin: null, steeringFailureKind: null, queuePosition, createdAt: input.now, updatedAt: input.now, activityAt: input.now };
       this.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'turn', NULL, NULL, ?, 0, 'queued', 'not_started', 0, NULL, ?, ?)`)
@@ -985,17 +955,16 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(randomUUID(), `run-card:create:${input.newPromptId}:answer`, input.bindingId, input.newPromptId, view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCardFor(view)), `answer:${input.newPromptId}`, input.now, input.now, input.now);
       this.database.prepare("UPDATE card_interactions SET state = 'consumed', result_code = 'converted', consumed_at = ? WHERE id = ? AND state = 'active'").run(input.now, input.interactionId);
       const prompt = this.requirePrompt(input.newPromptId);
-      this.database.exec("COMMIT");
+
       return { outcome: "converted", prompt };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const previous = this.requireBinding(input.oldBindingId);
       const existing = this.database.prepare("SELECT * FROM bindings WHERE reset_message_id = ?").get(input.resetMessageId) as BindingRow | undefined;
-      if (existing) { this.database.exec("COMMIT"); return { previous, replacement: mapBinding(existing), created: false }; }
+      if (existing) {return { previous, replacement: mapBinding(existing), created: false }; }
       if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId) throw new Error("Binding is not eligible for in-topic reset");
       const timestamp = now();
       this.database.prepare(`INSERT INTO bindings(id, project_id, workspace_id, chat_id, topic_id, root_message_id, replaces_binding_id, reserved_topic_id, reserved_root_message_id, reset_message_id, title, runtime, state, last_agent_state, lifecycle, attachment, generation, provisioning_checkpoint, degradation_count, has_completed_turn, last_activity_at, created_at, updated_at)
@@ -1003,14 +972,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(input.newBindingId, previous.projectId, previous.workspaceId, previous.chatId, previous.id, previous.topicId, previous.rootMessageId, input.resetMessageId, input.title, timestamp, timestamp, timestamp);
       this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset.candidate', ?, 'created', ?)")
         .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
-      this.database.exec("COMMIT");
+
       return { previous, replacement: this.requireBinding(input.newBindingId), created: true };
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   cutoverResetCandidate(input: { oldBindingId: string; newBindingId: string; cleanupOperationId: string; actorOpenId: string; expectedCwd: string }): { previous: Binding; replacement: Binding; cleanup: RetiredPaneCleanupOperation; cancelledPromptIds: string[] } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const previous = this.requireBinding(input.oldBindingId);
       const candidate = this.requireBinding(input.newBindingId);
       if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId || !previous.paneId || !previous.traexSessionId) throw new Error("Binding is not eligible for reset cutover");
@@ -1031,9 +999,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(input.cleanupOperationId, previous.id, candidate.id, previous.paneId, previous.workspaceId, previous.projectId, input.expectedCwd, previous.traexSessionId, input.actorOpenId, timestamp, timestamp);
       this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset', ?, 'cutover', ?)")
         .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
-      this.database.exec("COMMIT");
+
       return { previous: this.requireBinding(previous.id), replacement: this.requireBinding(input.newBindingId), cleanup: this.requireRetiredPaneCleanup(input.cleanupOperationId), cancelledPromptIds };
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   listRetiredPaneCleanupOperations(states: readonly RetiredPaneCleanupState[] = ["pending", "waiting_busy", "executing"]): RetiredPaneCleanupOperation[] {
@@ -1053,33 +1021,31 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const operation = this.requireRetiredPaneCleanup(id);
-      if (operation.state !== "executing") { this.database.exec("COMMIT"); return null; }
+      if (operation.state !== "executing") {return null; }
       const binding = this.requireBinding(operation.oldBindingId);
       if (binding.lifecycle !== "archived" || binding.paneId !== operation.paneId) throw new Error("Retired pane cleanup binding identity changed");
       const timestamp = now();
       this.database.prepare("UPDATE bindings SET lifecycle = 'closed', attachment = 'unattached', state = 'archived', last_agent_state = 'unknown', updated_at = ? WHERE id = ?").run(timestamp, binding.id);
       this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'succeeded', detail = NULL, updated_at = ? WHERE id = ? AND state = 'executing'").run(timestamp, id);
-      this.database.exec("COMMIT");
+
       return this.requireRetiredPaneCleanup(id);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
-      if (existing) { this.database.exec("COMMIT"); return mapProjectSelection(existing); }
+      if (existing) {return mapProjectSelection(existing); }
       const timestamp = now();
       this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
         .run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.expiresAt, timestamp, timestamp);
       this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, ?, 'pending', 0, ?, ?, ?)`)
         .run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), `message:${input.rootMessageId}`, timestamp, timestamp, timestamp);
-      this.database.exec("COMMIT");
+
       return this.getProjectSelection(input.id)!;
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   getProjectSelection(id: string): ProjectSelection | null {
@@ -1088,25 +1054,24 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(input.selectionId) as ProjectSelectionRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return { outcome: "missing", selection: null }; }
+      if (!row) {return { outcome: "missing", selection: null }; }
       const selection = mapProjectSelection(row);
-      if (selection.chatId !== input.chatId || selection.selectorMessageId !== input.messageId || !input.allowedProjectIds.includes(input.projectId)) { this.database.exec("COMMIT"); return { outcome: "invalid", selection }; }
-      if (selection.actorOpenId !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", selection }; }
-      if (selection.state === "completed") { this.database.exec("COMMIT"); return { outcome: "completed", selection }; }
-      if (selection.state === "processing") { this.database.exec("COMMIT"); return { outcome: "processing", selection }; }
-      if (selection.state !== "pending") { this.database.exec("COMMIT"); return { outcome: selection.state === "expired" ? "expired" : "invalid", selection }; }
+      if (selection.chatId !== input.chatId || selection.selectorMessageId !== input.messageId || !input.allowedProjectIds.includes(input.projectId)) {return { outcome: "invalid", selection }; }
+      if (selection.actorOpenId !== input.actorOpenId) {return { outcome: "unauthorized", selection }; }
+      if (selection.state === "completed") {return { outcome: "completed", selection }; }
+      if (selection.state === "processing") {return { outcome: "processing", selection }; }
+      if (selection.state !== "pending") {return { outcome: selection.state === "expired" ? "expired" : "invalid", selection }; }
       if (Date.parse(selection.expiresAt) <= Date.now()) {
         this.database.prepare("UPDATE project_selections SET state = 'expired', updated_at = ? WHERE id = ?").run(now(), selection.id);
-        this.database.exec("COMMIT");
+
         return { outcome: "expired", selection: { ...selection, state: "expired" } };
       }
       this.database.prepare("UPDATE project_selections SET state = 'processing', selected_project_id = ?, error = NULL, updated_at = ? WHERE id = ?").run(input.projectId, now(), selection.id);
-      this.database.exec("COMMIT");
+
       return { outcome: "claimed", selection: this.getProjectSelection(selection.id)! };
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   recoverProcessingProjectSelections(): number {
@@ -1150,8 +1115,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const timestamp = now();
       this.database.prepare("UPDATE pane_close_requests SET state = 'cancelled', updated_at = ? WHERE binding_id = ? AND state = 'pending'")
         .run(timestamp, input.bindingId);
@@ -1159,8 +1123,8 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         INSERT INTO pane_close_requests(id, binding_id, pane_id, actor_open_id, code_hash, state, expires_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
       `).run(input.id, input.bindingId, input.paneId, input.actorOpenId, input.codeHash, input.expiresAt, timestamp, timestamp);
-      this.database.exec("COMMIT");
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+
+    });
   }
 
   createAutomaticPaneCloseOperation(input: { id: string; bindingId: string; paneId: string; now: string }): void {
@@ -1171,23 +1135,22 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }):
     | { outcome: "consumed"; operationId: string; paneId: string }
     | { outcome: "invalid" | "unauthorized" | "expired" | "stale" } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const row = this.database.prepare("SELECT id, pane_id, actor_open_id, code_hash, expires_at FROM pane_close_requests WHERE binding_id = ? AND state = 'pending' ORDER BY created_at DESC, id DESC LIMIT 1")
         .get(input.bindingId) as { id: string; pane_id: string; actor_open_id: string; code_hash: string; expires_at: string } | undefined;
-      if (!row) { this.database.exec("COMMIT"); return { outcome: "stale" }; }
-      if (row.actor_open_id !== input.actorOpenId) { this.database.exec("COMMIT"); return { outcome: "unauthorized" }; }
-      if (row.pane_id !== input.paneId || row.code_hash !== input.codeHash) { this.database.exec("COMMIT"); return { outcome: "invalid" }; }
+      if (!row) {return { outcome: "stale" }; }
+      if (row.actor_open_id !== input.actorOpenId) {return { outcome: "unauthorized" }; }
+      if (row.pane_id !== input.paneId || row.code_hash !== input.codeHash) {return { outcome: "invalid" }; }
       if (row.expires_at <= input.now) {
         this.database.prepare("UPDATE pane_close_requests SET state = 'expired', updated_at = ? WHERE id = ? AND state = 'pending'").run(input.now, row.id);
-        this.database.exec("COMMIT");
+
         return { outcome: "expired" };
       }
       const result = this.database.prepare("UPDATE pane_close_requests SET state = 'executing', consumed_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'")
         .run(input.now, input.now, row.id);
-      this.database.exec("COMMIT");
+
       return result.changes === 1 ? { outcome: "consumed", operationId: row.id, paneId: row.pane_id } : { outcome: "stale" };
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail: string | undefined = undefined): void {
@@ -1196,8 +1159,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; paneId: string; reason: string }): Array<{ workerId: string; paneId: string }> {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const workers = (this.database.prepare("SELECT id, generation, pane_id FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? AND worker_session_lifecycle = 'active' ORDER BY created_at, id").all(input.bindingId, input.paneId) as Array<{ id: string; generation: number; pane_id: string | null }>);
       const timestamp = now();
       for (const worker of workers) {
@@ -1206,9 +1168,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = generation + 1, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.reason, timestamp, worker.id, worker.generation);
         if (worker.pane_id) this.database.prepare("INSERT OR IGNORE INTO worker_pane_close_steps(operation_id, binding_id, parent_pane_id, worker_id, pane_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'executing', ?, ?)").run(input.operationId, input.bindingId, input.paneId, worker.id, worker.pane_id, timestamp, timestamp);
       }
-      this.database.exec("COMMIT");
+
       return workers.filter((worker): worker is { id: string; generation: number; pane_id: string } => worker.pane_id !== null).map((worker) => ({ workerId: worker.id, paneId: worker.pane_id }));
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; state: "executing" | "uncertain" }> {
@@ -1283,11 +1245,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       let binding = this.requireBinding(input.bindingId);
       if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || (binding.lifecycle !== "active" && binding.lifecycle !== "draining") || binding.attachment === "orphaned") {
-        this.database.exec("COMMIT");
+
         return { outcome: "stale_binding" };
       }
       const persistedSession = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
@@ -1299,7 +1260,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
       const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
       if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) {
-        this.database.exec("COMMIT");
+
         return { outcome: "terminal_identity_changed", binding };
       }
       const nativeSessionMismatch = Boolean(persistedSession && observedSession && !sameSession);
@@ -1308,73 +1269,64 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         ...(!persistedSession && observedSession ? { agentSessionSource: observedSession.source, agentSessionAgent: observedSession.agent, agentSessionKind: observedSession.kind, agentSessionValue: observedSession.value } : {})
       });
       binding = this.transitionBinding(binding.id, { type: "pane_observed", runtime: input.pane.agentState });
-      this.database.exec("COMMIT");
+
       return { outcome: "applied", binding, terminalIdentityRefreshed, nativeSessionMismatch };
-    } catch (error) {
-      if (this.database.isTransaction) this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   reconcileBindingTitleWithProjection(input: BindingTitleProjectionInput): BindingTitleProjectionResult {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       let binding = this.requireBinding(input.bindingId);
       if (!this.matchesRuntimeFence(binding, input.expectedPaneId, input.expectedGeneration)) {
-        this.database.exec("COMMIT");
+
         return { outcome: "stale_binding", binding, outboxReserved: false };
       }
       if (binding.title === input.title) {
-        this.database.exec("COMMIT");
+
         return { outcome: "unchanged", binding, outboxReserved: false };
       }
       this.database.prepare("UPDATE bindings SET title = ?, updated_at = ? WHERE id = ?").run(input.title, now(), input.bindingId);
       binding = this.requireBinding(input.bindingId);
       this.saveTopicView(input.view);
       const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.card);
-      this.database.exec("COMMIT");
+
       return { outcome: "projected", binding, outboxReserved: reservation === "reserved" };
-    } catch (error) {
-      if (this.database.isTransaction) this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   degradeBindingWithProjection(input: RuntimeDegradationInput): RuntimeDegradationResult {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       let binding = this.requireBinding(input.bindingId);
       if (!this.matchesRuntimeFence(binding, input.expectedPaneId, input.expectedGeneration)) {
-        this.database.exec("COMMIT");
+
         return { outcome: "stale", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
       }
       const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
       if (binding.attachment === "degraded" && current.phase === input.view.phase && current.notice === input.view.notice) {
-        this.database.exec("COMMIT");
+
         return { outcome: "unchanged", binding, view: current, outboxReserved: false };
       }
       if (current.viewVersion > input.view.viewVersion) {
-        this.database.exec("COMMIT");
+
         return { outcome: "stale", binding, view: current, outboxReserved: false };
       }
       binding = this.transitionBinding(input.bindingId, { type: "agent_unregistered" });
       this.saveTopicView(input.view);
       const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
-      this.database.exec("COMMIT");
+
       return { outcome: "degraded", binding, view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   orphanBindingWithProjection(input: OrphanBindingProjectionInput): OrphanBindingProjectionResult {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       let binding = this.requireBinding(input.bindingId);
-      if (binding.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration) { this.database.exec("COMMIT"); return { outcome: "stale", binding: null, view: null, updatedPromptIds: [], outboxReserved: false }; }
-      if (binding.attachment === "orphaned") { this.database.exec("COMMIT"); return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
+      if (binding.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration) {return { outcome: "stale", binding: null, view: null, updatedPromptIds: [], outboxReserved: false }; }
+      if (binding.attachment === "orphaned") {return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
       const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
-      if (current.viewVersion > input.view.viewVersion) { this.database.exec("COMMIT"); return { outcome: "stale", binding, view: current, updatedPromptIds: [], outboxReserved: false }; }
+      if (current.viewVersion > input.view.viewVersion) {return { outcome: "stale", binding, view: current, updatedPromptIds: [], outboxReserved: false }; }
       binding = this.transitionBinding(input.bindingId, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
-      if (binding.attachment !== "orphaned") { this.database.exec("COMMIT"); return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
+      if (binding.attachment !== "orphaned") {return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
       this.database.prepare(`
         UPDATE prompt_jobs SET
           state = CASE state WHEN 'queued' THEN 'cancelled' ELSE 'failed' END,
@@ -1397,18 +1349,17 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       }
       this.saveTopicView(input.view);
       const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
-      this.database.exec("COMMIT");
+
       return { outcome: "orphaned", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds, outboxReserved: answerOutboxReserved || reservation === "reserved" };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   recoverOrphanBindingWithProjection(input: RecoverOrphanBindingProjectionInput): RecoverOrphanBindingProjectionResult {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       let binding = this.requireBinding(input.bindingId);
       if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration
         || binding.lifecycle !== "active" || binding.attachment !== "orphaned" || binding.workspaceId !== input.pane.workspaceId) {
-        this.database.exec("COMMIT");
+
         return { outcome: "stale", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
       }
       const persistedSession = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
@@ -1420,32 +1371,28 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
       if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId
         || !nativeSessionMatches || !isTraexCompatibleNativeAgent(input.pane)) {
-        this.database.exec("COMMIT");
+
         return { outcome: "identity_mismatch", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
       }
       binding = this.transitionBinding(input.bindingId, { type: "pane_reattached", replacement: false });
       binding = this.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.pane.agentState });
       this.saveTopicView(input.view);
       const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
-      this.database.exec("COMMIT");
+
       return { outcome: "recovered", binding, view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
-    } catch (error) {
-      if (this.database.isTransaction) this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const binding = this.transitionBinding(input.id, input.transition);
       this.database.prepare("INSERT OR IGNORE INTO lifecycle_events(event_id, binding_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)")
         .run(input.event.eventId, input.id, input.event.type, JSON.stringify(input.event.payload), input.event.occurredAt);
       this.saveTopicView(input.view);
       this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${input.id}:${input.view.viewVersion}`, bindingId: input.id, viewVersion: input.view.viewVersion, targetRole: "session_status", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
-      this.database.exec("COMMIT");
+
       return binding;
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   attachBindingPane(id: string, pane: import("../domain/types.js").HerdrPane, replacement: boolean): Binding {
@@ -1455,14 +1402,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       provisioningCheckpoint: binding.provisioningCheckpoint, degradationCount: binding.degradationCount, hasCompletedTurn: binding.hasCompletedTurn
     }, { type: "pane_reattached", replacement });
     const suspended = transitionSession(next, { type: "archive_requested", hasActiveTurn: false });
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
         .run(pane.paneId, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
       if (!replacement) this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(id, suspended.generation);
-      this.database.exec("COMMIT");
+
       return this.requireBinding(id);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   findBindingByTopic(topicId: string): Binding | null {
@@ -1550,8 +1496,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   projectQueuedRunCards(input: { bindingId: string; projections: Array<{ expectedViewVersion: number; view: RunCardView; card: object | null }> }): { projected: RunCardView[]; stalePromptIds: string[]; outboxReserved: boolean } {
     if (input.projections.length === 0) return { projected: [], stalePromptIds: [], outboxReserved: false };
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const projected: RunCardView[] = [];
       const stalePromptIds: string[] = [];
       let outboxReserved = false;
@@ -1568,17 +1513,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
           outboxReserved ||= reply.state === "pending";
         }
       }
-      this.database.exec("COMMIT");
+
       return { projected, stalePromptIds, outboxReserved };
-    } catch (error) {
-      if (this.database.isTransaction) this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const timestamp = now();
       const result = this.database.prepare(`
         INSERT INTO pane_control_operations(id, idempotency_key, binding_id, pane_id, terminal_id, binding_generation, kind, payload, parent_prompt_id, state, attempt_count, actor_open_id, source_message_id, created_at, updated_at)
@@ -1587,14 +1528,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       `).run(input.id, input.idempotencyKey, input.bindingId, input.paneId, input.terminalId, input.bindingGeneration, input.kind, input.payload ?? null, input.parentPromptId ?? null, input.actorOpenId, input.sourceMessageId, timestamp, timestamp);
       const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE idempotency_key = ?").get(input.idempotencyKey) as PaneControlOperationRow | undefined;
       if (!row) throw new Error(`Pane control operation not found: ${input.idempotencyKey}`);
-      this.database.exec("COMMIT");
+
       return { operation: mapPaneControlOperation(row), inserted: result.changes === 1 };
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const scope = bindingId ? "AND operation.binding_id = ?" : "";
       const row = this.database.prepare(`
         SELECT operation.* FROM pane_control_operations AS operation
@@ -1613,39 +1553,37 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         ORDER BY CASE operation.kind WHEN 'stop' THEN 0 WHEN 'steer' THEN 1 ELSE 2 END, operation.created_at, operation.rowid
         LIMIT 1
       `).get(...(bindingId ? [bindingId] : [])) as PaneControlOperationRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
+      if (!row) {return null; }
       const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), row.id);
       if (result.changes !== 1) throw new Error(`Pane control operation ${row.id} was not atomically claimed`);
       const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(row.id) as PaneControlOperationRow;
-      this.database.exec("COMMIT");
+
       return mapPaneControlOperation(claimed);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   claimPaneControlOperation(id: string): PaneControlOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ? AND state = 'accepted'").get(id) as PaneControlOperationRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
+      if (!row) {return null; }
       const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), id);
-      if (result.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      if (result.changes !== 1) {return null; }
       const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow;
-      this.database.exec("COMMIT");
+
       return mapPaneControlOperation(claimed);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   claimAppliedPaneControlOperation(id: string): PaneControlOperation | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ? AND state = 'applied'").get(id) as PaneControlOperationRow | undefined;
-      if (!row) { this.database.exec("COMMIT"); return null; }
+      if (!row) {return null; }
       const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'applied'").run(now(), id);
-      if (result.changes !== 1) { this.database.exec("COMMIT"); return null; }
+      if (result.changes !== 1) {return null; }
       const claimed = this.database.prepare("SELECT * FROM pane_control_operations WHERE id = ?").get(id) as PaneControlOperationRow;
-      this.database.exec("COMMIT");
+
       return mapPaneControlOperation(claimed);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   rejectAppliedPaneControlOperation(id: string, detail: string): PaneControlOperation | null {
@@ -1676,12 +1614,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     detail?: string | null;
     result: { kind: "card_reply" | "card_update"; targetMessageId: string; idempotencyKey: string; targetRole?: OutboundTargetRole | null; card: object };
   }): boolean {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const operation = this.getPaneControlOperation(input.operationId);
       if (!operation) throw new Error(`Pane control operation not found: ${input.operationId}`);
       if (operation.state !== input.state && !this.finishPaneControlOperation(input.operationId, input.state, input.detail ?? null)) {
-        this.database.exec("COMMIT");
+
         return false;
       }
       this.enqueueOutboundReply({
@@ -1689,12 +1626,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         targetRole: input.result.targetRole ?? null, rootMessageId: input.result.targetMessageId,
         kind: input.result.kind, payload: JSON.stringify(input.result.card)
       });
-      this.database.exec("COMMIT");
+
       return true;
-    } catch (error) {
-      if (this.database.isTransaction) this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   recoverRunningPrompts(): number {
@@ -1757,8 +1691,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
 
   recoverLegacyElementIdDeadLetters(): number {
     const timestamp = now();
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       this.migrations.canonicalizeLegacyAnswerTargets(timestamp);
       const result = this.database.prepare(`
         UPDATE outbound_replies
@@ -1770,9 +1703,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
             WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL
           )
       `).run(timestamp, timestamp);
-      this.database.exec("COMMIT");
+
       return Number(result.changes);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
@@ -2029,13 +1962,12 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   acceptModelPreference(input: { bindingId: string; bindingGeneration: number; model: string }): { outcome: "accepted" | "busy" | "stale"; preference: ModelPreference | null } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    return this.context.transaction(() => {
       const binding = this.database.prepare("SELECT generation FROM bindings WHERE id = ?").get(input.bindingId) as { generation: number } | undefined;
       const existing = this.getModelPreference(input.bindingId);
       const decision = acceptModelSelection(existing, { ...input, currentBindingGeneration: Number(binding?.generation ?? -1), updatedAt: now() });
       if (decision.outcome !== "accepted") {
-        this.database.exec("COMMIT");
+
         return decision;
       }
       const next = decision.preference;
@@ -2048,9 +1980,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
           state = 'pending', dispatch_prompt_id = NULL, prepared_operation_id = NULL, updated_at = excluded.updated_at
       `).run(next.bindingId, next.bindingGeneration, next.desiredModel, next.desiredRevision, next.updatedAt);
       const preference = this.getModelPreference(input.bindingId);
-      this.database.exec("COMMIT");
+
       return { outcome: "accepted", preference };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   private requirePrompt(id: string): PromptJob {
