@@ -69,6 +69,18 @@ describe("application composition boundaries", () => {
     expect(productionFiles).not.toContain('from "../store/sqlite-store.js"');
   });
 
+  it("provides capability-oriented test construction without the compatibility facade", () => {
+    const helper = readFileSync(new URL("./helpers/create-test-store-bundle.ts", import.meta.url), "utf8");
+    const mainCardTests = readFileSync(new URL("./main-card-workflow.test.ts", import.meta.url), "utf8");
+    const workerCardTests = readFileSync(new URL("./worker-turn-card-workflow.test.ts", import.meta.url), "utf8");
+    expect(helper).toContain("createTestStoreBundle");
+    expect(helper).toContain("SqliteStoreKernel");
+    expect(helper).not.toContain("SqliteBindingStore");
+    expect(mainCardTests).toContain("stores.mainCards");
+    expect(workerCardTests).toContain("stores.workerTurnCards");
+    expect(`${mainCardTests}\n${workerCardTests}`).not.toContain("SqliteBindingStore");
+  });
+
   it("keeps ordered startup recovery and diagnostics outside the inbound facade", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");

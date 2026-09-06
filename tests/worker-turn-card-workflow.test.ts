@@ -4,24 +4,25 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { WorkerTurnCardWorkflow } from "../src/coordinator/worker-turn-card-workflow.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { workerTurnElementId, workerTurnProgressElementId } from "../src/domain/worker-turn-card-view.js";
-import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { workerPresentation } from "./helpers/presentation.js";
+import { createTestStoreBundle } from "./helpers/create-test-store-bundle.js";
 
 function setup(turnId = "turn-1") {
-  const store = new SqliteBindingStore(":memory:");
+  const stores = createTestStoreBundle();
+  const store = stores.driver;
   store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
   const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
   const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
   store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: `lark:${turnId}`, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: `message:${turnId}`, view, render: renderWorkerTurnCard });
-  return { store, worker, view };
+  return { stores, store, worker, view };
 }
 
 describe("WorkerTurnCardWorkflow", () => {
   it("patches visible progress on its own ordered element without consuming the answer lane", async () => {
-    const { store, worker } = setup();
+    const { stores, store, worker } = setup();
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "worker-message-1", "worker-card-1");
     expect(store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-03T00:00:01.000Z", answer: "", statusTitle: "Checking files", progressEvents: [{ key: "tool:1", kind: "tool", label: "rg source", state: "active", occurredAt: "2026-09-03T00:00:01.000Z" }] }, render: renderWorkerTurnCard })).not.toBeNull();
-    await new WorkerTurnCardWorkflow(store, () => {}, workerPresentation, pino({ enabled: false })).converge("turn-1");
+    await new WorkerTurnCardWorkflow(stores.workerTurnCards, () => {}, workerPresentation, pino({ enabled: false })).converge("turn-1");
 
     const [progress] = store.listPendingOutboundReplies();
     expect(progress).toMatchObject({ workerTurnId: "turn-1", kind: "stream_content", selectionId: "worker-progress", rootMessageId: "worker-card-1" });
@@ -31,10 +32,10 @@ describe("WorkerTurnCardWorkflow", () => {
   });
 
   it("keeps partial output durable but does not publish it before completion", async () => {
-    const { store, worker } = setup();
+    const { stores, store, worker } = setup();
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "worker-message-1", "worker-card-1");
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-03T00:00:01.000Z", answer: "partial private draft", statusTitle: "Checking files", progressEvents: [{ key: "tool:1", kind: "tool", label: "rg source", state: "active", occurredAt: "2026-09-03T00:00:01.000Z" }] }, render: renderWorkerTurnCard });
-    const workflow = new WorkerTurnCardWorkflow(store, () => {}, workerPresentation, pino({ enabled: false }));
+    const workflow = new WorkerTurnCardWorkflow(stores.workerTurnCards, () => {}, workerPresentation, pino({ enabled: false }));
 
     await workflow.converge("turn-1");
     const progress = store.listPendingOutboundReplies().find(({ selectionId }) => selectionId === "worker-progress")!;
@@ -47,10 +48,10 @@ describe("WorkerTurnCardWorkflow", () => {
     store.close();
   });
   it("coalesces the latest state into an undelivered initial card", async () => {
-    const { store, worker } = setup();
+    const { stores, store, worker } = setup();
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "running", occurredAt: "2026-09-01T00:00:01.000Z" }, render: renderWorkerTurnCard });
     const wake = vi.fn();
-    await new WorkerTurnCardWorkflow(store, wake, workerPresentation, pino({ enabled: false })).converge("turn-1");
+    await new WorkerTurnCardWorkflow(stores.workerTurnCards, wake, workerPresentation, pino({ enabled: false })).converge("turn-1");
 
     const pending = store.listPendingOutboundReplies();
     expect(pending).toHaveLength(1);
@@ -62,12 +63,12 @@ describe("WorkerTurnCardWorkflow", () => {
   });
 
   it("streams owned output and freezes a terminal page", async () => {
-    const { store, worker } = setup();
+    const { stores, store, worker } = setup();
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "worker-message-1", "worker-card-1");
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "finding" }, render: renderWorkerTurnCard });
     const wake = vi.fn();
-    const workflow = new WorkerTurnCardWorkflow(store, wake, workerPresentation, pino({ enabled: false }));
+    const workflow = new WorkerTurnCardWorkflow(stores.workerTurnCards, wake, workerPresentation, pino({ enabled: false }));
 
     await workflow.converge("turn-1");
     const completionUpdate = store.listPendingOutboundReplies().find(({ kind }) => kind === "card_update")!;
@@ -103,11 +104,11 @@ describe("WorkerTurnCardWorkflow", () => {
   });
 
   it("creates exactly one continuation for long Worker output", async () => {
-    const { store, worker } = setup();
+    const { stores, store, worker } = setup();
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "worker-message-1", "worker-card-1");
     const answer = Array.from({ length: 2_000 }, (_, index) => `finding-${index}`).join("\n");
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer }, render: renderWorkerTurnCard });
-    const workflow = new WorkerTurnCardWorkflow(store, () => {}, workerPresentation, pino({ enabled: false }));
+    const workflow = new WorkerTurnCardWorkflow(stores.workerTurnCards, () => {}, workerPresentation, pino({ enabled: false }));
 
     await workflow.converge("turn-1");
     const completionUpdate = store.listPendingOutboundReplies().find(({ kind }) => kind === "card_update")!;
@@ -157,11 +158,11 @@ describe("WorkerTurnCardWorkflow", () => {
   });
 
   it.each(["failed", "cancelled"] as const)("finishes a %s card without publishing partial output", async (phase) => {
-    const { store, worker } = setup();
+    const { stores, store, worker } = setup();
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "worker-message-1", "worker-card-1");
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-01T00:00:01.000Z", answer: "partial private draft", statusTitle: "Working", progressEvents: [] }, render: renderWorkerTurnCard });
     store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: phase, occurredAt: "2026-09-01T00:01:00.000Z", notice: `${phase} reason` }, render: renderWorkerTurnCard });
-    const workflow = new WorkerTurnCardWorkflow(store, () => {}, workerPresentation, pino({ enabled: false }));
+    const workflow = new WorkerTurnCardWorkflow(stores.workerTurnCards, () => {}, workerPresentation, pino({ enabled: false }));
 
     await workflow.converge("turn-1");
     const terminalUpdate = store.listPendingOutboundReplies().find(({ kind }) => kind === "card_update")!;
