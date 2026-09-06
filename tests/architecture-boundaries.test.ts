@@ -46,6 +46,29 @@ describe("application composition boundaries", () => {
     expect(factory).not.toContain("startHealthServer(");
   });
 
+  it("keeps context-owned delivery, runtime, and project-selection models out of the compatibility type barrel", () => {
+    const types = readFileSync(new URL("../src/domain/types.ts", import.meta.url), "utf8");
+    expect(types).toContain('export type { AnswerPage');
+    expect(types).toContain('from "./delivery.js"');
+    expect(types).toContain('from "./runtime-observation.js"');
+    expect(types).toContain('from "./project-selection.js"');
+    expect(types).not.toMatch(/export interface (?:OutboundReply|AnswerPage|ProjectSelection|HerdrPane|RuntimeObservation)\b/);
+  });
+
+  it("keeps production composition off the broad SQLite compatibility facade", () => {
+    const productionFiles = [
+      "../src/main.ts",
+      "../src/composition/create-bridge-runtime.ts",
+      "../src/composition/create-application-runtime.ts",
+      "../src/composition/create-primary-runtime.ts",
+      "../src/composition/create-worker-runtime.ts",
+      "../src/composition/create-outbound-runtime.ts",
+      "../src/store/sqlite-store-bundle.ts"
+    ].map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
+    expect(productionFiles).not.toContain("SqliteBindingStore");
+    expect(productionFiles).not.toContain('from "../store/sqlite-store.js"');
+  });
+
   it("keeps ordered startup recovery and diagnostics outside the inbound facade", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");
@@ -72,8 +95,11 @@ describe("application composition boundaries", () => {
   it("keeps reconciliation metrics behind one runtime module", () => {
     const herdrReconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     const instanceReconciler = readFileSync(new URL("../src/coordinator/instance-runtime-reconciler.ts", import.meta.url), "utf8");
+    const scheduler = readFileSync(new URL("../src/coordinator/reconciliation-scheduler.ts", import.meta.url), "utf8");
     const metrics = readFileSync(new URL("../src/runtime/reconciliation-run-metrics.ts", import.meta.url), "utf8");
-    expect(herdrReconciler).toContain("ReconciliationRunMetrics");
+    expect(herdrReconciler).toContain("ReconciliationScheduler");
+    expect(herdrReconciler).not.toContain("ReconciliationRunMetrics");
+    expect(scheduler).toContain("ReconciliationRunMetrics");
     expect(instanceReconciler).toContain("ReconciliationRunMetrics");
     expect(herdrReconciler).not.toContain("private runCount");
     expect(instanceReconciler).not.toContain("private runCount");

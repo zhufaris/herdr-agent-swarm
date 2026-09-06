@@ -1,28 +1,17 @@
 import type { AttachmentState, ProvisioningCheckpoint, SessionLifecycle } from "./pane-thread-lifecycle.js";
+import type { AgentState, HerdrPane } from "./runtime-observation.js";
+import type { DeliveryFailureClass, OutboundReplyKind, OutboundReplyState, OutboxLaneClass } from "./delivery.js";
+export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
+export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
+export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
 
 export type BindingState = "pending" | "active" | "archived" | "orphaned" | "failed";
-export type AgentState = "idle" | "working" | "blocked" | "done" | "unknown";
-export interface HerdrAgentSession { source: string; agent: string; kind: "id" | "path"; value: string }
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
 export type PromptDispatchKind = "turn" | "steering";
 export type TurnPriority = "normal" | "priority";
 export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
 export type SteeringOrigin = "explicit" | "automatic" | "converted";
-export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
-export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
-export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
-export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
-export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_terminalized";
-export interface OutboundFailureTransition { state: OutboundReplyState; action: OutboxQuarantineAction; laneClass: OutboxLaneClass; promptId: string | null; reply: OutboundReply }
-export interface StaleOutboxQuarantineRecovery { retriedAnswerPromptIds: string[]; rolledBackAnswerPromptIds: string[]; dismissedNotices: number; terminalizedQuarantines: number }
-export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";
-export type RequestCardRole = "task" | "answer";
-export type OutboundTargetRole = "session_status" | "operation_result";
-export type AnswerPageState = "creating" | "active" | "frozen" | "finished";
-export type AnswerPageDeliveryMode = "streaming" | "static";
-export type MainCardReservationOutcome = "reserved" | "waiting" | "current";
-export type ProjectSelectionState = "pending" | "processing" | "completed" | "failed" | "expired";
 export type PaneCloseOperationState = "executing" | "uncertain";
 export type PaneControlOperationKind = "stop" | "steer" | "model";
 export type PaneControlOperationState = "accepted" | "running" | "applied" | "confirmed" | "rejected" | "failed" | "uncertain";
@@ -142,7 +131,6 @@ export type FailureSummary =
   | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
   | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string };
 
-export type DeadLetterActionOutcome = "retried" | "dismissed" | "missing" | "unauthorized" | "stale";
 
 export interface ProjectConfig {
   id: string;
@@ -301,64 +289,6 @@ export interface RetiredPaneCleanupOperation {
   updatedAt: string;
 }
 
-export interface OutboundReply {
-  id: string;
-  idempotencyKey: string;
-  bindingId: string | null;
-  promptId: string | null;
-  workerTurnId: string | null;
-  workerId: string | null;
-  workerSessionGeneration: number | null;
-  viewVersion: number | null;
-  cardSequence: number | null;
-  selectionId: string | null;
-  cardRole: RequestCardRole | null;
-  targetRole: OutboundTargetRole | null;
-  laneKey: string;
-  rootMessageId: string;
-  kind: OutboundReplyKind;
-  payload: string;
-  intentKind: import("./delivery-intent.js").DeliveryIntentKind | null;
-  intentJson: string | null;
-  rendererRevision: number | null;
-  state: OutboundReplyState;
-  attemptCount: number;
-  error: string | null;
-  deliveredMessageId: string | null;
-  cardIdCheckpoint: string | null;
-  failureClass: DeliveryFailureClass | null;
-  httpStatus: number | null;
-  larkErrorCode: string | null;
-  autoRecoveryCount: number;
-  deadLetteredAt: string | null;
-  nextAttemptAt: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AnswerPage {
-  promptId: string;
-  pageIndex: number;
-  messageId: string | null;
-  cardId: string | null;
-  elementId: string;
-  sourceStart: number;
-  sequence: number;
-  state: AnswerPageState;
-  deliveryMode: AnswerPageDeliveryMode;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AnswerPageDeliveryFacts {
-  latestContent: { content: string; sequence: number; state: OutboundReplyState; sourceEnd?: number | null } | null;
-  finishPending: boolean;
-  continuationPending: boolean;
-  finalUpdateState: OutboundReplyState | null;
-}
-
-export type AnswerPageReservationOutcome = "reserved" | "waiting" | "stale";
-
 export interface PromptLatencyPhaseSummary {
   sampleCount: number;
   averageMs: number | null;
@@ -493,54 +423,6 @@ export interface InstanceWorkerDiagnostics {
   lastFailure: string | null;
 }
 
-export interface ProjectSelection {
-  id: string;
-  commandMessageId: string;
-  selectorMessageId: string | null;
-  chatId: string;
-  topicId: string | null;
-  rootMessageId: string;
-  actorOpenId: string;
-  requestedTitle: string | null;
-  initialPromptText: string | null;
-  selectedProjectId: string | null;
-  bindingId: string | null;
-  state: ProjectSelectionState;
-  error: string | null;
-  expiresAt: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type ProjectSelectionClaim =
-  | { outcome: "claimed" | "processing" | "completed"; selection: ProjectSelection }
-  | { outcome: "missing" | "invalid" | "unauthorized" | "expired"; selection: ProjectSelection | null };
-
-export interface HerdrPane {
-  paneId: string;
-  tabId?: string | null;
-  terminalId?: string | null;
-  agentSession?: HerdrAgentSession | null;
-  agentKind?: string | null;
-  steeringCapability?: "native" | "terminal-input" | "unsupported";
-  activeTurnId?: string | null;
-  outputRevision?: number | null;
-  stateChangeSeq?: number | null;
-  workspaceId: string;
-  cwd: string | null;
-  foregroundCwd?: string | null;
-  label: string | null;
-  agentState: AgentState;
-  foregroundExecutables: string[];
-}
-
-export interface RuntimeObservation {
-  pane: HerdrPane | null;
-  traexProcess: boolean;
-  composerReady: boolean;
-  evidenceSource: "structured" | "process" | "none";
-}
-
 export interface BindingTitleProjectionInput {
   bindingId: string;
   expectedPaneId: string;
@@ -614,21 +496,6 @@ export type RuntimeObservationApplication =
   | { outcome: "applied"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionMismatch: boolean }
   | { outcome: "terminal_identity_changed"; binding: Binding }
   | { outcome: "stale_binding" };
-
-export interface RuntimeTurnObservation {
-  state: AgentState;
-  stateSource: "structured" | "unknown";
-}
-
-export interface HerdrPaneCreationOptions {
-  bindingId: string;
-  generation: number;
-  projectId: string;
-  placement?: "split" | "dedicated-tab";
-  title?: string;
-  titlePolicy?: "lark-prefixed" | "complete";
-  environment?: Record<string, string>;
-}
 
 export interface IncomingLarkMessage {
   eventId: string;
