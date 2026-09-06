@@ -180,6 +180,40 @@ The response must contain `"status":"ready"`. If a different
 proves that the process responds; `/ready` also checks the database, project
 registry, Herdr, Lark, lease, and instance runtime.
 
+## Install from a GitHub Release
+
+Tagged releases provide a prebuilt Linux x64 archive named
+`herdr-agent-swarm-<version>-linux-x64.tar.gz`. The archive includes compiled
+JavaScript and locked production dependencies, so the target host does not need
+TypeScript or development dependencies. Node.js 24, Herdr, a supported agent
+CLI, and user systemd are still required.
+
+Download the archive and `SHA256SUMS` from the GitHub Release, place them in the
+same directory, and verify the download before extracting it:
+
+```bash
+sha256sum --check SHA256SUMS
+tar -xzf herdr-agent-swarm-0.3.0-linux-x64.tar.gz
+cd herdr-agent-swarm-0.3.0-linux-x64
+```
+
+Replace `0.3.0` with the downloaded release version. For a first installation,
+run the packaged setup entry point and review the generated private
+configuration:
+
+```bash
+npm run swarm:setup
+./install.sh
+npm run swarm:start
+npm run swarm:status
+```
+
+The packaged `install.sh` stages the prebuilt release and enables the user unit;
+it does not rebuild the source or start the service. Existing configuration and
+state directories are retained during an upgrade. Inspect status before
+restarting an active installation, because the normal restart safety gate refuses
+to interrupt queued or running work.
+
 ### Update a source installation
 
 Switch to the intended committed revision, refresh locked dependencies, rebuild,
