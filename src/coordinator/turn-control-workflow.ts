@@ -2,7 +2,7 @@ import type { ControlActor } from "../domain/commands.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
-import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
+import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
 import type { Binding, HerdrAgentSession, HerdrPane } from "../domain/types.js";

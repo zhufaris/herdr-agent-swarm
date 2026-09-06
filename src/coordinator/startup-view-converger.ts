@@ -1,7 +1,7 @@
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
-import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
+import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageWorkflowPort } from "./answer-page-workflow.js";
 import { AnswerPageWorkflow } from "./answer-page-workflow.js";

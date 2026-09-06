@@ -83,6 +83,15 @@ describe("application composition boundaries", () => {
     expect(`${mainCardTests}\n${workerCardTests}`).not.toContain("SqliteBindingStore");
   });
 
+  it("routes prompt workflows through consumer-specific port modules", () => {
+    const run = readFileSync(new URL("../src/coordinator/prompt-run-workflow.ts", import.meta.url), "utf8");
+    const safety = readFileSync(new URL("../src/coordinator/prompt-safety-scanner.ts", import.meta.url), "utf8");
+    const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    expect(`${run}\n${safety}`).toContain("ports/prompt-run.js");
+    expect(routing).toContain("ports/prompt-acceptance.js");
+    expect(`${run}\n${safety}\n${routing}`).not.toContain("ports/prompt.js");
+  });
+
   it("keeps ordered startup recovery and diagnostics outside the inbound facade", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");

@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { PromptRunStore } from "../domain/ports/prompt.js";
+import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { PromptWorkerDiagnostics } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";

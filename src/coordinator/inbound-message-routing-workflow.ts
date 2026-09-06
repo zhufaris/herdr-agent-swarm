@@ -8,7 +8,7 @@ import { formatPromptTitle } from "../domain/prompt-title.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
-import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
+import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { InboundRoutingStore } from "../domain/ports/workflow.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";

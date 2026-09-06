@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
-import type { PromptRunStore } from "../domain/ports/prompt.js";
+import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { Binding, PromptJob } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
