@@ -44,17 +44,29 @@ describe("application composition boundaries", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    const application = readFileSync(new URL("../src/composition/create-application-runtime.ts", import.meta.url), "utf8");
+    const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
     for (const component of ["InboundMessageDispatcher", "CardActionRouter", "PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger", "StartupRecoveryWorkflow"]) {
-      expect(factory).toContain(`new ${component}`);
+      expect(`${factory}\n${application}\n${primary}`).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
     expect(main).toContain("createBridgeRuntime(config, store, logger, { codex, claude, pi })");
     expect(factory).not.toContain("lease.acquire(");
     expect(factory).not.toContain("activateWriteFence(");
     expect(factory).not.toContain("startHealthServer(");
+  });
+
+  it("uses explicit sealed runtime wiring without mutable initialization cycles", () => {
+    const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    for (const builder of ["createInfrastructureRuntime", "createOutboundRuntime", "createWorkerRuntime", "createPrimaryRuntime", "createApplicationRuntime"]) {
+      expect(factory).toContain(`${builder}(`);
+    }
+    expect(factory).toContain("wakeups.seal()");
+    expect(factory).not.toMatch(/let\s+\w+!:/);
+    expect(factory).not.toMatch(/let\s+wake\w+/);
   });
 
   it("keeps ordered startup recovery and diagnostics outside the inbound facade", () => {
