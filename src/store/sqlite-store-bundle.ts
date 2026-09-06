@@ -9,12 +9,18 @@ import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStor
 import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "../domain/ports/workflow.js";
-import { SqliteBindingStore } from "./sqlite-store.js";
+import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 
 export interface SqliteStoreLifecycle {
   activateWriteFence(ownerId: string, fencingToken: number): void;
   deactivateWriteFence(): void;
   close(): void;
+}
+
+export interface SqliteRetentionStore {
+  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
+  pruneAcceptedInboundMessages(cutoff: string, limit: number): number;
+  pruneTerminalSessionOperations(cutoff: string, limit: number): number;
 }
 
 export interface SqliteStoreBundle {
@@ -51,11 +57,11 @@ export interface SqliteStoreBundle {
   readonly commandIntents: CommandIntentStore & Pick<DeliveryRecoveryStore, "audit" | "getBinding">;
   readonly inboundMessages: InboundRoutingStore & PromptAcceptanceStore & InstanceStore;
   readonly startupRecovery: InboundRoutingStore & PromptAcceptanceStore;
-  readonly retention: Pick<SqliteBindingStore, "pruneDeliveredOutboundReplies" | "pruneAcceptedInboundMessages" | "pruneTerminalSessionOperations">;
+  readonly retention: SqliteRetentionStore;
 }
 
 export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
-  const store = new SqliteBindingStore(path);
+  const store = new SqliteStoreKernel(path);
   return {
     lifecycle: store, lease: store, health: store, instance: store, turnControl: store,
     promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
