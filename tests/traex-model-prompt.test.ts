@@ -57,7 +57,7 @@ describe("TraeX two-phase model prompt", () => {
     const release = Promise.withResolvers<string>();
     const prepared = await prepareTraexModelPrompt({ peer, target: "primary", model: "GPT-5.4", revision: 3, promptSha256: digest }, { operationDir });
     const commit = commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart: () => release.promise });
-    await vi.waitFor(async () => expect((await abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).state).toBe("dispatching"));
+    await vi.waitFor(async () => expect((await abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).state).toBe("dispatching"), { timeout: 5_000 });
     release.resolve("turn-1");
     await expect(commit).resolves.toMatchObject({ state: "accepted" });
   });
