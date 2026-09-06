@@ -128,6 +128,9 @@ silently choose a different semantic.
 No new lifecycle authority is introduced. The existing boundaries remain:
 
 1. Lark reply or callback is normalized by the adapter.
+   Explicit instance and `/swarm` commands retain first priority. For ordinary
+   messages with a direct parent, Worker Task Card resolution runs before the
+   active Primary binding FIFO.
 2. For a direct reply, the normalized Lark `parent_id` is the exact replied-card
    message identity. The store resolves that identity across the Task Card's
    main page and continuation pages. Exactly one durable turn must match; zero
@@ -145,7 +148,8 @@ No new lifecycle authority is introduced. The existing boundaries remain:
 
 The direct parent message remains the routing authority. The system does not
 guess from Thread position, selected Worker, names in prose, or an older ancestor
-message. Worker completion never automatically starts a Primary turn.
+message. If that direct parent is not a Worker Task Card, normal Primary routing
+continues unchanged. Worker completion never automatically starts a Primary turn.
 
 ## Failure Handling
 

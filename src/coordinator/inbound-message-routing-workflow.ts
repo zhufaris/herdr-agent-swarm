@@ -51,16 +51,16 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   async handle(message: IncomingLarkMessage): Promise<void> {
     const instanceCommand = parseInstanceCommand(message.text);
     const command = parseCommand(message.text); const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
-    const decision = instanceCommand ? `instance-command:${instanceCommand.kind}` : command ? `command:${command.kind}` : binding?.state === "active" && binding.lifecycle === "active" ? "prompt" : this.options.store.getConversationTarget(message.chatId) ? "instance-prompt" : message.isRootMessage && message.mentionsBot ? "create_binding" : binding?.state === "archived" ? "archived_feedback" : "unbound_feedback";
-    this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: "accepted" }, "routed persisted Lark message");
+    let decision = "unresolved";
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
-      if (instanceCommand) { if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
-      else if (command) await this.options.swarmCommands.handle(message, command);
-      else if (binding?.state === "active" && binding.lifecycle === "active") disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected";
-      else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) disposition = "prompt_queued";
-      else if (message.isRootMessage && message.mentionsBot) { await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
-      else { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
+      if (instanceCommand) { decision = `instance-command:${instanceCommand.kind}`; if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
+      else if (command) { decision = `command:${command.kind}`; await this.options.swarmCommands.handle(message, command); }
+      else if (message.parentMessageId && this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "worker-card-reply"; disposition = "prompt_queued"; }
+      else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
+      else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
+      else if (message.isRootMessage && message.mentionsBot) { decision = "create_binding"; await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
+      else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
     } catch (error) {
       const rejection = this.options.instanceInteractions ? permanentInstanceCommandRejection(error) : null;
       if (rejection) {
@@ -71,6 +71,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed");
       throw error;
     }
+    this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: "accepted" }, "routed persisted Lark message");
     this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");
   }
 
