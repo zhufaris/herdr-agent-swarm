@@ -3,7 +3,7 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { Logger } from "pino";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnObserver, WorkerTurnWatch } from "../coordinator/worker-turn-observer.js";
 
@@ -15,7 +15,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry; observer?: WorkerTurnObserver; wakeOutbound?: () => void; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: InstanceStore; drivers: AgentDriverRegistry; observer?: WorkerTurnObserver; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn">; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;
@@ -83,7 +83,7 @@ export class InstanceWorkScheduler {
   }
   private transition(turnId: string, generation: number, state: Parameters<InstanceStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<InstanceStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
-      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: renderWorkerTurnCard });
+      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn });
       if (projected) this.options.wakeOutbound?.();
     } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }

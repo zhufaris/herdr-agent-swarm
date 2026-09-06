@@ -4,6 +4,7 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { workerPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -19,7 +20,7 @@ function setup(state: "dispatching" | "running") {
   const inspectPane = vi.fn(async () => ({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" }));
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
-  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake, wakeOutbound });
+  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake, wakeOutbound, presentation: workerPresentation });
   return { supervisor, inspectPane, wake, wakeOutbound };
 }
 
@@ -31,7 +32,7 @@ describe("InstanceTurnSupervisor", () => {
     store.acceptInstanceTurn({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
     store.claimNextInstanceTurn(instance.id, instance.generation);
     const wake = vi.fn();
-    const supervisor = new InstanceTurnSupervisor({ store, paneHost: {} as PaneHost, wake });
+    const supervisor = new InstanceTurnSupervisor({ store, paneHost: {} as PaneHost, wake, presentation: workerPresentation });
     supervisor.prepareRecovery();
     expect(store.getInstanceTurn("turn")).toMatchObject({ state: "queued" });
     expect(wake).not.toHaveBeenCalled();
@@ -79,7 +80,7 @@ describe("InstanceTurnSupervisor", () => {
       if (paneId === "w1:broken") throw new Error("temporary Herdr failure");
       return { paneId, workspaceId: "w1", cwd: "/repo/healthy", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" };
     });
-    const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake: vi.fn() });
+    const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake: vi.fn(), presentation: workerPresentation });
     supervisor.prepareRecovery();
     await supervisor.reconcile();
     expect(store.getInstanceTurn("turn-broken")).toMatchObject({ state: "running" });
@@ -116,7 +117,7 @@ describe("InstanceTurnSupervisor", () => {
     }
     const snapshotPanes = vi.fn(async () => panes);
     const inspectPane = vi.fn(async () => { throw new Error("individual inspection should not run"); });
-    const supervisor = new InstanceTurnSupervisor({ store, paneHost: { snapshotPanes, inspectPane } as unknown as PaneHost, wake: vi.fn() });
+    const supervisor = new InstanceTurnSupervisor({ store, paneHost: { snapshotPanes, inspectPane } as unknown as PaneHost, wake: vi.fn(), presentation: workerPresentation });
 
     await supervisor.reconcile();
 

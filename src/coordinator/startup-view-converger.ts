@@ -26,12 +26,12 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     private readonly store: PromptAcceptanceStore,
     private readonly outbound: OutboundIntentPort,
     private readonly outboundWork: OutboundWorkNotifier,
-    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">,
+    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
     answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
     private readonly logger?: Pick<Logger, "warn">
   ) {
-    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake());
+    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake(), presentation);
     this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake(), presentation);
     for (const project of config.projects) {
       this.projectsById.set(project.id, project);

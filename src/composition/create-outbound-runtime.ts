@@ -11,6 +11,7 @@ import { QueueFeedbackProjector } from "../events/queue-feedback-projector.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "../coordinator/main-card-workflow.js";
 import { cardKitPrimaryPresentation } from "../cards/cardkit-primary-presentation.js";
+import { cardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
 import { OutboxRetentionMaintainer } from "../runtime/outbox-retention-maintainer.js";
 import type { SqliteBindingStore } from "../store/sqlite-store.js";
 
@@ -18,11 +19,11 @@ export function createOutboundRuntime(config: BridgeConfig, store: SqliteBinding
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   const outbound = new OutboundIntentWriter(store, outboundWork);
   const channelPublisher = new LarkOutboxDispatcher(store, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
-  const answerPages = new AnswerPageWorkflow(store, () => outboundWork.wake(), logger);
+  const answerPages = new AnswerPageWorkflow(store, () => outboundWork.wake(), cardKitPrimaryPresentation, logger);
   const mainCards = new MainCardWorkflow(store, () => outboundWork.wake(), cardKitPrimaryPresentation, logger);
   const projector = new ConversationViewProjector(bus, store, outbound, channelPublisher, logger, cardKitPrimaryPresentation, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cardUpdateDebounceMs });
   const queueFeedbackProjector = new QueueFeedbackProjector({ store, outboundWork, logger, presentation: cardKitPrimaryPresentation });
-  const cardContextRebuilder = new CardContextRebuilder(store, () => outboundWork.wake(), logger, outboundWork);
+  const cardContextRebuilder = new CardContextRebuilder(store, () => outboundWork.wake(), logger, cardKitApplicationPresentation, outboundWork);
   const outboxRetention = new OutboxRetentionMaintainer(store, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
   return { outboundWork, outbound, channelPublisher, answerPages, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention };
 }

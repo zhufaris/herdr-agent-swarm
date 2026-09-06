@@ -13,6 +13,7 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
@@ -308,7 +309,7 @@ describe("Lark channel publisher", () => {
     store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", rootMessageId: "root-2", kind: "text", payload: "still deliver" });
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ streamCardContent: stream, replyText }), pino({ enabled: false }));
     const checkpoint = vi.fn();
-    const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+    const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
     let convergence = Promise.resolve();
     publisher.onAnswerCheckpoint((promptId, version) => { checkpoint(promptId, version); convergence = workflow.converge(promptId); });
 
@@ -407,7 +408,7 @@ describe("Lark channel publisher", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "running", answer: "partial answer", answerSegments: ["partial answer"], viewVersion: 2 });
-    const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+    const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
     await workflow.converge("p1");
 
     const streamClosed = Object.assign(new Error("Lark CardKit content update failed (code=300309, msg=streaming mode is closed)"), { larkCode: 300309 });
@@ -476,7 +477,7 @@ describe("Lark channel publisher", () => {
 
     const create = vi.fn(async () => ({ messageId: "answer-13", cardId: "cardkit-13" }));
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
-    const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+    const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
     let convergence = Promise.resolve();
     publisher.onAnswerCheckpoint((promptId) => { convergence = workflow.converge(promptId); });
 

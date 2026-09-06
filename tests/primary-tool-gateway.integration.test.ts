@@ -11,6 +11,7 @@ import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { workerPresentation } from "./helpers/presentation.js";
 
 let directory: string | undefined; let store: SqliteBindingStore | undefined; let gateway: PrimaryToolGateway | undefined;
 afterEach(async () => { await gateway?.stop(); store?.close(); if (directory) await rm(directory, { recursive: true, force: true }); gateway = undefined; store = undefined; directory = undefined; });
@@ -49,7 +50,7 @@ describe("Primary tool gateway", () => {
     store.createAgentInstance({ id: "other-worker", projectId: "p2", name: "other-worker", role: "worker", agentKind: "codex", model: null, parent: { bindingId: "other-binding", paneId: "other-primary-pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "other-worker-ws", kind: "shared-read-only", cwd: "/other", branch: null, baseCommit: "base" } });
     store.createAgentInstance({ id: "legacy-primary", projectId: "p1", name: "legacy-primary", role: "primary", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "legacy-primary-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     const driver = { kind: "codex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }) } satisfies AgentRuntimeDriver;
-    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: vi.fn(), idFactory: () => "worker-turn" });
+    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: vi.fn(), idFactory: () => "worker-turn", presentation: workerPresentation });
     const socketPath = join(directory, "tools.sock");
     gateway = new PrimaryToolGateway(socketPath, process.execPath, ["dist/cli/primary-tools-mcp.js"], store, messaging, pino({ enabled: false }));
     const launch = gateway.issueBinding("binding", 1);
@@ -75,7 +76,7 @@ describe("Primary tool gateway", () => {
     createPrimary(store);
     const capability = "a".repeat(64); const capabilityHash = createHash("sha256").update(capability).digest("hex");
     expect(store.setBindingPrimaryToolCapability({ bindingId: "binding", expectedGeneration: 1, capabilityHash })).toBe(true);
-    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused" });
+    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused", presentation: workerPresentation });
     gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false })); await gateway.start(); await gateway.stop(); await gateway.start();
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: true });
   });
@@ -85,7 +86,7 @@ describe("Primary tool gateway", () => {
     store = new SqliteBindingStore(join(directory, "bridge.db"));
     createPrimary(store, "generation-1");
     store.updateBinding("binding", { generation: 2 });
-    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused" });
+    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused", presentation: workerPresentation });
     const socketPath = join(directory, "tools.sock");
     gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
     const launch = gateway.issueBinding("binding", 2);
@@ -104,7 +105,7 @@ describe("Primary tool gateway", () => {
     store.setBindingPrimaryToolCapability({ bindingId: "binding", expectedGeneration: 1, capabilityHash: createHash("sha256").update(capability).digest("hex") });
     store.updateBinding("binding", { state: "orphaned", attachment: "orphaned" });
     store.attachBindingPane("binding", { paneId: "w:selected", terminalId: "selected-terminal", workspaceId: "w", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] }, false);
-    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused" });
+    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused", presentation: workerPresentation });
     const socketPath = join(directory, "tools.sock");
     gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
     await gateway.start();

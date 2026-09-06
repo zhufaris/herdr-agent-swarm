@@ -16,6 +16,7 @@ import { createWorkerRuntime } from "./create-worker-runtime.js";
 import { createPrimaryRuntime } from "./create-primary-runtime.js";
 import { createApplicationRuntime } from "./create-application-runtime.js";
 import type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
+import { cardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
 
 export type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
 type RuntimeWakeups = { outbound: undefined; primary: string; instance: string };
@@ -25,7 +26,7 @@ export function createBridgeRuntime(config: BridgeConfig, store: SqliteBindingSt
   const wakeups = new WorkWakeupHub<RuntimeWakeups>(["outbound", "primary", "instance"]);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => herdrEventRouterLink.get().handle(hint));
   const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, paneHost, agentDrivers, worktrees, lark, transcriptReader } = infrastructure;
-  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakeOutbound: () => wakeups.wake("outbound", undefined), wakePrimary: (bindingId) => wakeups.wake("primary", bindingId), wakeInstance: (instanceId) => wakeups.wake("instance", instanceId), maxQueueDepth: config.maxQueueDepth });
+  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, presentation: cardKitApplicationPresentation, wakeOutbound: () => wakeups.wake("outbound", undefined), wakePrimary: (bindingId) => wakeups.wake("primary", bindingId), wakeInstance: (instanceId) => wakeups.wake("instance", instanceId), maxQueueDepth: config.maxQueueDepth });
   const bus = new BridgeEventBus(logger); const scheduler = new InProcessPromptWorkScheduler(logger); const inboundWork = new InProcessInboundWorkNotifier();
   const delivery = createOutboundRuntime(config, store, lark, bus, logger);
   const { outboundWork, channelPublisher, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention } = delivery;

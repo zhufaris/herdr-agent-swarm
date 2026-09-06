@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
@@ -31,6 +32,20 @@ describe("application composition boundaries", () => {
       expect(source).not.toContain('../cards/');
       expect(source).toContain('ports/presentation.js');
     }
+  });
+
+  it("keeps every coordinator and event module independent of concrete card rendering", () => {
+    for (const directory of ["coordinator", "events"]) {
+      const directoryUrl = new URL(`../src/${directory}/`, import.meta.url);
+      for (const file of readdirSync(fileURLToPath(directoryUrl)).filter((name) => name.endsWith(".ts"))) {
+        const source = readFileSync(new URL(file, directoryUrl), "utf8");
+        expect(source, `${directory}/${file}`).not.toContain('../cards/');
+      }
+    }
+    const workerObserver = readFileSync(new URL("../src/coordinator/worker-turn-observer.ts", import.meta.url), "utf8");
+    const workerCards = readFileSync(new URL("../src/coordinator/worker-turn-card-workflow.ts", import.meta.url), "utf8");
+    expect(workerObserver).not.toContain('runtime/redact-secrets');
+    expect(workerCards).not.toContain('runtime/lark-markdown');
   });
 
   it("keeps durable prompt safety scans out of Herdr reconciliation", () => {

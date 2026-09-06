@@ -1,11 +1,11 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName } from "../config.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } from "../domain/types.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -31,6 +31,7 @@ interface HerdrRuntimeReconcilerOptions {
   isBindingBusy(bindingId: string): boolean;
   worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>;
   externalTurnObserver?: { observe(binding: Binding): Promise<void> };
+  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">;
 }
 
 const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
@@ -372,7 +373,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.orphanBindingWithProjection({
       bindingId: binding.id, expectedPaneId: binding.paneId!, expectedGeneration: binding.generation, occurredAt, reason,
-      view, rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view), renderRunCard: renderRequestAnswerCard
+      view, rootMessageId: binding.rootMessageId, mainCard: this.options.presentation.mainCard(view), renderRunCard: this.options.presentation.answerCard
     });
     if (result.outcome === "orphaned") {
       if (result.outboxReserved) this.options.wakeOutbound?.();
@@ -396,7 +397,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.recoverOrphanBindingWithProjection({
       bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, pane, view,
-      rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view)
+      rootMessageId: binding.rootMessageId, mainCard: this.options.presentation.mainCard(view)
     });
     if (result.outcome !== "recovered" || !result.binding) {
       this.options.logger.warn({
@@ -423,7 +424,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.degradeBindingWithProjection({
       bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, view,
-      rootMessageId: binding.rootMessageId, mainCard: renderProjectEntryCard(view)
+      rootMessageId: binding.rootMessageId, mainCard: this.options.presentation.mainCard(view)
     });
     if (result.outcome === "degraded") {
       if (result.outboxReserved) this.options.wakeOutbound?.();
@@ -446,7 +447,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const view = reduceTopicView(current, event);
     const result = this.options.store.reconcileBindingTitleWithProjection({
       bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, title, view,
-      rootMessageId: binding.rootMessageId, card: renderProjectEntryCard(view)
+      rootMessageId: binding.rootMessageId, card: this.options.presentation.mainCard(view)
     });
     if (result.outcome !== "projected" || !result.binding) return binding;
     if (result.outboxReserved) this.options.wakeOutbound?.();

@@ -1,10 +1,10 @@
 import type { BridgeConfig } from "../config.js";
 import { projectSpaceName } from "../config.js";
-import { renderMessageRejectedCard, renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { SessionAdministrationStore } from "../domain/ports/workflow.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
@@ -22,6 +22,7 @@ interface Options {
   outboundWork: OutboundWorkNotifier;
   scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "requestRejected">;
 }
 export interface SessionAdministrationWorkflowPort {
   emitStatus(binding: Binding): Promise<void>;
@@ -49,7 +50,7 @@ export class SessionAdministrationWorkflow implements SessionAdministrationWorkf
     if (!binding || binding.lifecycle !== "active") { await this.reject(message, "这个话题没有可归档的活动会话。"); return false; }
     const { store } = this.options; const active = this.options.isBindingBusy(binding.id); const reason = active ? "停止接收新消息；当前任务完成后归档。" : "已从飞书归档；Herdr pane 与 TraeX 保持运行。";
     const cancellationReason = "话题已归档，排队任务已取消。"; const occurredAt = new Date().toISOString();
-    const cancelled = store.cancelQueuedPromptsWithProjection({ bindingId: binding.id, reason: cancellationReason, occurredAt, rootMessageId: binding.rootMessageId, renderRunCard: renderRequestAnswerCard });
+    const cancelled = store.cancelQueuedPromptsWithProjection({ bindingId: binding.id, reason: cancellationReason, occurredAt, rootMessageId: binding.rootMessageId, renderRunCard: this.options.presentation.answerCard });
     for (const promptId of cancelled.cancelledPromptIds) await this.publishAt(binding.id, "PromptCancelled", "bridge", { promptId, reason: cancellationReason }, occurredAt);
     const type = active ? "BindingDraining" as const : "BindingArchived" as const;
     const transitioned = await this.transitionAndPublish(binding, { type: "archive_requested", hasActiveTurn: active }, type, reason);
@@ -68,9 +69,9 @@ export class SessionAdministrationWorkflow implements SessionAdministrationWorkf
   private async transitionAndPublish(binding: Binding, transition: import("../domain/pane-thread-lifecycle.js").SessionTransition, type: "BindingDraining" | "BindingArchived", reason: string): Promise<{ binding: Binding; outboxReserved: boolean }> {
     const event = createBridgeEvent(binding.id, type, "lark", { reason }); const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id); const view = reduceTopicView(current, event);
     if (!binding.statusMessageId) { const next = this.options.store.transitionBinding(binding.id, transition); await this.options.lifecycleEvents.publish(event); return { binding: next, outboxReserved: false }; }
-    const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) }); await this.options.lifecycleEvents.publish(event); return { binding: next, outboxReserved: true };
+    const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view) }); await this.options.lifecycleEvents.publish(event); return { binding: next, outboxReserved: true };
   }
-  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }
+  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
   private async publishAt(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3], occurredAt: string): Promise<void> { await this.options.lifecycleEvents.publish({ ...createBridgeEvent(bindingId, type, origin, payload), occurredAt } as ReturnType<typeof createBridgeEvent>); }
 }

@@ -4,11 +4,11 @@ import type { InstanceStore } from "../domain/ports/instance.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnObserver } from "./worker-turn-observer.js";
 
-interface Options { store: InstanceStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; logger?: Pick<Logger, "info" | "warn"> }
+interface Options { store: InstanceStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn">; logger?: Pick<Logger, "info" | "warn"> }
 
 export class InstanceTurnSupervisor {
   private timer: NodeJS.Timeout | null = null;
@@ -134,7 +134,7 @@ export class InstanceTurnSupervisor {
 
   private transition(turnId: string, generation: number, state: Parameters<InstanceStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<InstanceStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
-      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: renderWorkerTurnCard });
+      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn });
       if (projected) this.options.wakeOutbound?.();
     } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }

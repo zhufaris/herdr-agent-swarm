@@ -27,6 +27,7 @@ import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
 import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import { cardKitPanePresentation } from "../../src/cards/cardkit-pane-presentation.js";
 import { cardKitPrimaryPresentation } from "../../src/cards/cardkit-primary-presentation.js";
+import { cardKitApplicationPresentation } from "../../src/cards/cardkit-application-presentation.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
 import type { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
@@ -75,24 +76,24 @@ export function createTestRouter(
     },
     configurationForBinding: (bindingId: string, generation: number) => ({ environment: {}, command: "node", args: ["primary-tools", "--binding", bindingId, "--generation", String(generation)] })
   };
-  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
-  const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
-  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }) });
+  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
+  const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: cardKitApplicationPresentation, logger });
+  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation });
   const paneControl = new PaneControlWorkflow({ store, outbound: writer, presentation: cardKitPanePresentation, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
-  const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, logger });
-  const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
-  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
+  const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, presentation: cardKitApplicationPresentation, logger });
+  const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), presentation: cardKitApplicationPresentation });
+  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, presentation: cardKitApplicationPresentation, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, presentation: cardKitPanePresentation, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
-  const cardInteractions = new CardInteractionWorkflow({ store, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
+  const cardInteractions = new CardInteractionWorkflow({ store, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation, logger });
   const reconciler = new HerdrRuntimeReconciler({
     projects: config.projects, store, herdr, lifecycleEvents: bus, channelPublisher: writer, logger,
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
-    isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns
+    isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns, presentation: cardKitApplicationPresentation
   });
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store, inboundWork, logger });
   const commandResolver = new SwarmCommandContextResolver({ config, store, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
-  const swarmCommands = new SwarmCommandGateway({ store, resolver: commandResolver, outbound: writer, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: { createWorker: async () => { throw new Error("Worker creation is not configured in this test fixture"); }, inspect: () => { throw new Error("Worker inspection is not configured in this test fixture"); } } });
+  const swarmCommands = new SwarmCommandGateway({ store, resolver: commandResolver, outbound: writer, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: { createWorker: async () => { throw new Error("Worker creation is not configured in this test fixture"); }, inspect: () => { throw new Error("Worker inspection is not configured in this test fixture"); } }, presentation: cardKitApplicationPresentation });
   const messageRouting = new InboundMessageRoutingWorkflow({ config, store, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, presentation: cardKitPrimaryPresentation, promptRun, provisioning, swarmCommands });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
   const startupViews = new StartupViewConverger(config, store, writer, outboundWork, cardKitPrimaryPresentation, undefined, undefined, logger);

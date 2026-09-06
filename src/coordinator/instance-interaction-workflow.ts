@@ -5,20 +5,14 @@ import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { InstanceControlWorkflow } from "./instance-control-workflow.js";
 import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
-import { renderInstanceDirectoryCard } from "../cards/instance-directory-card.js";
-import { renderInstanceDetailCard } from "../cards/instance-detail-card.js";
-import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard, renderWorkerNewTaskCard, renderWorkerTaskInstructionCard } from "../cards/instance-control-card.js";
-import { renderMessageRejectedCard } from "../cards/run-card.js";
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
-import { renderWorkerMainCard } from "../cards/worker-main-card.js";
-import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
+import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../domain/worker-task-interaction.js";
 import { canSubmitWorkerMainTask } from "../domain/worker-main-view.js";
 import { randomUUID } from "node:crypto";
 
 interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: import("../domain/agent-instance.js").AgentKind; model: string | null; start: boolean }): Promise<import("../domain/agent-instance.js").CreateWorkerResult> }
-interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort; workerCreation?: WorkerCreationGateway; idFactory?: () => string }
+interface Options { projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort; presentation: Pick<ApplicationPresentation, "answerCard" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">; workerCreation?: WorkerCreationGateway; idFactory?: () => string }
 export class InstanceInteractionWorkflow {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   private readonly idFactory: () => string;
@@ -124,7 +118,7 @@ export class InstanceInteractionWorkflow {
       const projectId = typeof value.projectId === "string" ? value.projectId : "";
       if (!this.projects.has(projectId)) return warning("项目不存在或已移除。");
       if (bindingContext && bindingContext !== projectId) return warning("当前话题已固定到其他项目。");
-      return { card: renderInstanceCreateCard({ projectId, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
+      return { card: this.options.presentation.instanceCreate({ projectId, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
     }
     if (value.action === "instance_create_submit") {
       if (!sameOperator(value, action)) return forbidden();
@@ -156,7 +150,7 @@ export class InstanceInteractionWorkflow {
       const turn = this.options.store.getInstanceTurn(turnId);
       const view = this.options.store.loadWorkerTurnCard(turnId);
       if (!turn || !view || turn.instanceId !== instance.id || turn.instanceGeneration !== instance.generation || view.instanceId !== instance.id || view.instanceGeneration !== instance.generation) return warning("任务不存在或不属于当前 Worker。");
-      return { card: renderWorkerTurnCard(view) };
+      return { card: this.options.presentation.workerTurn(view) };
     }
     if (value.action === "instance_set_target") {
       this.options.store.setConversationTarget({ chatId: conversationKey, projectId: instance.projectId, target: { kind: "instance", instanceId: instance.id, expectedGeneration: instance.generation } });
@@ -174,7 +168,7 @@ export class InstanceInteractionWorkflow {
       const result = await this.options.messaging.interrupt({ idempotencyKey: `card:${action.messageId}:interrupt:${instance.generation}`, actor, targetInstanceId: instance.id });
       return { toast: { type: result.status === "interrupted" ? "success" : "warning", content: `Stop: ${result.status}` } };
     }
-    if (value.action === "instance_steer_form") return { card: renderInstanceSteerCard({ instance, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
+    if (value.action === "instance_steer_form") return { card: this.options.presentation.instanceSteer({ instance, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
     if (value.action === "instance_steer_submit") {
       if (!sameOperator(value, action)) return forbidden();
       const text = action.formValues?.steer_text?.trim() ?? "";
@@ -191,7 +185,7 @@ export class InstanceInteractionWorkflow {
         if (!current || current.generation !== plan.instanceGeneration) return warning("实例状态已变化，请重新生成删除计划。");
         const workspace = this.options.store.getWorkspaceLease(current.workspaceLeaseId);
         if (!workspace || workspace.generation !== plan.workspaceGeneration) return warning("Worktree 状态已变化，请重新生成删除计划。");
-        return { card: renderInstanceRemovalPlanCard({ instance: current, workspace, plan, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
+        return { card: this.options.presentation.instanceRemovalPlan({ instance: current, workspace, plan, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(value) }) };
       } catch (error) { return failed(error); }
     }
     if (value.action === "instance_confirm_removal") {
@@ -212,7 +206,7 @@ export class InstanceInteractionWorkflow {
     const { instance, turn, view, intent } = owned;
     if (value.action === "worker_task_instruction_form") {
       if (intent === "reject") return warning(workerTaskInteraction(view.phase).guidance);
-      return { card: renderWorkerTaskInstructionCard({ workerName: instance.name, turnId: turn.id, intent, interactionId: this.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+      return { card: this.options.presentation.workerTaskInstruction({ workerName: instance.name, turnId: turn.id, intent, interactionId: this.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
     }
     if (value.action === "worker_task_interrupt") {
       if (!workerTaskInteraction(view.phase).canInterrupt) return warning("任务已不处于可停止的运行状态。");
@@ -242,7 +236,7 @@ export class InstanceInteractionWorkflow {
     const owned = this.resolveOwnedMainAction(action, value);
     if (!owned) return warning("Worker Main 卡片已过期、状态已变化或不属于当前 Primary。");
     const { instance, view } = owned;
-    if (value.action === "worker_new_task_form") return { card: renderWorkerNewTaskCard({ workerName: instance.name, interactionId: this.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+    if (value.action === "worker_new_task_form") return { card: this.options.presentation.workerNewTask({ workerName: instance.name, interactionId: this.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
     if (value.action !== "worker_new_task_submit") return warning("未知的 Worker 新任务操作。");
     if (!sameOperator(value, action)) return forbidden();
     const interactionId = validInteractionId(value.interactionId);
@@ -290,24 +284,24 @@ export class InstanceInteractionWorkflow {
       if (!view || view.messageId !== messageId || !instance || instance.role !== "worker" || instance.workerSessionGeneration !== generation
         || instance.parent?.bindingId !== view.parentBindingId || instance.parent.paneId !== view.parentPaneId
         || !this.isOwnedCardBinding(value, chatId, view.parentBindingId, view.parentBindingGeneration, view.parentPaneId)) return warning("Worker 卡片已过期或不属于当前 Primary。");
-      return { card: renderWorkerMainCard(view) };
+      return { card: this.options.presentation.workerMain(view) };
     }
     if (kind === "worker-turn") {
       const view = this.options.store.loadWorkerTurnCard(id); const instance = view ? this.options.store.getAgentInstance(view.instanceId) : null;
       if (!view || view.instanceGeneration !== generation || view.messageId !== messageId || !instance || instance.role !== "worker"
         || instance.workerSessionGeneration !== view.workerSessionGeneration || !instance.parent
         || !this.isOwnedCardBinding(value, chatId, instance.parent.bindingId, instance.parent.bindingGeneration ?? 1, instance.parent.paneId)) return warning("Worker Task 卡片已过期或不属于当前 Primary。");
-      return { card: renderWorkerTurnCard(view) };
+      return { card: this.options.presentation.workerTurn(view) };
     }
     if (kind === "primary-session") {
       const binding = this.options.store.getBinding(id); const view = this.options.store.loadTopicView(id);
       if (!binding || binding.chatId !== chatId || binding.generation !== generation || binding.statusMessageId !== messageId || !view) return warning("Primary 卡片已过期或不属于当前会话。");
-      return { card: renderProjectEntryCard(view) };
+      return { card: this.options.presentation.mainCard(view) };
     }
     if (kind === "primary-turn") {
       const view = this.options.store.loadRunCard(id); const binding = view ? this.options.store.getBinding(view.bindingId) : null;
       if (!view || !binding || binding.chatId !== chatId || view.bindingGeneration !== generation || view.answerMessageId !== messageId) return warning("Primary Answer 卡片已过期或不属于当前会话。");
-      return { card: renderRequestAnswerCard(view, { streaming: view.workerContextFrozenAt === null }) };
+      return { card: this.options.presentation.answerCard(view, { streaming: view.workerContextFrozenAt === null }) };
     }
     return warning("未知的卡片入口。");
   }
@@ -326,13 +320,13 @@ export class InstanceInteractionWorkflow {
     const binding = conversationKey.startsWith("binding:") ? this.options.store.getBinding(conversationKey.slice("binding:".length)) : null;
     const entries = binding?.paneId ? this.options.control.listWorkersForParent({ bindingId: binding.id, paneId: binding.paneId }).map((instance) => ({ instance, workspace: this.options.control.inspect(instance.id).workspace, capabilities: this.options.drivers.describe(instance.agentKind), queueDepth: this.options.store.countPendingInstanceTurns(instance.id) })) : [];
     const primary = binding ? { bindingId: binding.id, generation: binding.generation, paneId: binding.paneId, state: binding.state } : null;
-    await this.reply(message, renderInstanceDirectoryCard({ project, entries, target, primary, conversationKey }));
+    await this.reply(message, this.options.presentation.instanceDirectory({ project, entries, target, primary, conversationKey }));
   }
   private async showDetail(message: IncomingLarkMessage, instance: AgentInstance, conversationKey: string): Promise<void> { await this.reply(message, this.detailCard(instance, conversationKey)); }
   private detailCard(instance: AgentInstance, conversationKey: string): object {
     const view = this.options.control.inspect(instance.id);
     const binding = conversationKey.startsWith("binding:") ? this.options.store.getBinding(conversationKey.slice("binding:".length)) : null;
-    return renderInstanceDetailCard({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listRecentInstanceTurnSummaries(instance.id), activeTurnId: this.options.store.getActiveInstanceTurn(instance.id, instance.generation)?.id ?? null, queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey, ...(binding ? { bindingId: binding.id, bindingGeneration: binding.generation } : {}) });
+    return this.options.presentation.instanceDetail({ ...view, capabilities: this.options.drivers.describe(instance.agentKind), turns: this.options.store.listRecentInstanceTurnSummaries(instance.id), activeTurnId: this.options.store.getActiveInstanceTurn(instance.id, instance.generation)?.id ?? null, queueDepth: this.options.store.countPendingInstanceTurns(instance.id), conversationKey, ...(binding ? { bindingId: binding.id, bindingGeneration: binding.generation } : {}) });
   }
   private resolveConversationContext(message: IncomingLarkMessage): { bindingPresent: boolean; boundProjectId: string | null; conversationKey: string } {
     const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId);
@@ -367,7 +361,7 @@ export class InstanceInteractionWorkflow {
   private findByName(conversationKey: string, name: string): AgentInstance | null { return this.listScopedWorkers(conversationKey).find((item) => item.name === name) ?? null; }
   private isOperator(openId: string): boolean { return this.options.adminOpenIds.includes(openId); }
   private reply(message: IncomingLarkMessage, card: object): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `instance:${message.messageId}:${JSON.stringify(card)}`, card); }
-  private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.reply(message, renderMessageRejectedCard(reason)); }
+  private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.reply(message, this.options.presentation.requestRejected(reason)); }
 }
 
 function projectCard(projects: readonly ProjectConfig[], selected?: string): object { return { schema: "2.0", header: { title: { tag: "plain_text", content: "Projects" }, template: "blue" }, body: { elements: projects.map((project) => ({ tag: "markdown", content: `${project.id === selected ? "▶ " : ""}**${project.displayName}** · \`${project.id}\`\n${project.description}` })) } }; }

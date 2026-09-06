@@ -16,7 +16,7 @@ import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js"
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
-import { primaryPresentation } from "./helpers/presentation.js";
+import { primaryPresentation, workerPresentation } from "./helpers/presentation.js";
 
 let directory: string | undefined; let store: SqliteBindingStore | undefined; let gateway: PrimaryToolGateway | undefined; let scheduler: InstanceWorkScheduler | undefined; let promptRun: PromptRunWorkflow | undefined;
 afterEach(async () => { await promptRun?.stop(); await scheduler?.stop(); await gateway?.stop(); store?.close(); if (directory) await rm(directory, { recursive: true, force: true }); promptRun = undefined; scheduler = undefined; gateway = undefined; store = undefined; directory = undefined; });
@@ -43,9 +43,9 @@ describe("Primary to Worker product flow", () => {
         workerTranscriptRead = true;
         return { turnId: workerRuntimeTurnId, freshTurnStart: true, answerDelta: "WORKER_OK", turnLifecycle: { turnId: workerRuntimeTurnId, state: "completed" as const, startedAt: "2026-08-30T00:00:01.000Z" } };
       }
-    } }; } }, wakeInstance: (instanceId) => scheduler?.wake(instanceId), wakeOutbound: () => {} });
-    scheduler = new InstanceWorkScheduler({ store, drivers, observer: workerTurns });
-    const messaging = new InstanceMessagingWorkflow({ store, drivers, paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: (id) => scheduler!.wake(id), idFactory: () => "worker-turn" });
+    } }; } }, wakeInstance: (instanceId) => scheduler?.wake(instanceId), wakeOutbound: () => {}, presentation: workerPresentation });
+    scheduler = new InstanceWorkScheduler({ store, drivers, observer: workerTurns, presentation: workerPresentation });
+    const messaging = new InstanceMessagingWorkflow({ store, drivers, paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: (id) => scheduler!.wake(id), idFactory: () => "worker-turn", presentation: workerPresentation });
     const socketPath = join(directory, "primary-tools.sock"); gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
     const launch = gateway.issueBinding("binding", 1); await gateway.start();
     const invoke = async (name: string, args: Record<string, unknown>) => {

@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { renderFailureCards } from "../cards/operations-card.js";
+import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { LarkPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { DeliveryRecoveryStore } from "../domain/ports/workflow.js";
@@ -13,6 +13,7 @@ interface Options {
   outbound: Pick<OutboundIntentPort, "enqueueCardUpdate">;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
+  presentation: Pick<ApplicationPresentation, "failures">;
 }
 
 export interface DeliveryRecoveryWorkflowPort {
@@ -45,6 +46,6 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     logger.info({ event: "dead-letter-action-decided", replyId, action: decision, outcome }, "processed dead-letter action");
     if (outcome === "retried") this.options.outboundWork.wake();
     const notice = outcome === "retried" ? "已重新提交该消息发送；不会重放 TraeX 任务。" : outcome === "dismissed" ? "已忽略该发送失败并保留历史记录。" : "该操作已失效或无权执行。";
-    await outbound.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${replyId}:${outcome}`, renderFailureCards(store.listFailures(action.chatId), notice)[0]!);
+    await outbound.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${replyId}:${outcome}`, this.options.presentation.failures(store.listFailures(action.chatId), notice)[0]!);
   }
 }

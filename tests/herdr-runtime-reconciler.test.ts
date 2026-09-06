@@ -7,6 +7,7 @@ import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-schedule
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 describe("HerdrRuntimeReconciler", () => {
   it("reconciles an existing binding from one authoritative Pane observation", async () => {
@@ -36,7 +37,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
       store, herdr: { observeRuntime: async () => ({ pane, traexProcess: true, composerReady: false, evidenceSource: "structured" as const }) } as unknown as HerdrPort,
       lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, externalTurnObserver
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, externalTurnObserver, presentation: applicationPresentation
     });
 
     await reconciler.requestPaneReconciliation(["w1:p1"]);
@@ -77,7 +78,7 @@ describe("HerdrRuntimeReconciler", () => {
       logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("not used"); },
       scheduler: new InProcessPromptWorkScheduler(),
-      isBindingBusy: () => false
+      isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     const first = reconciler.reconcile();
@@ -182,7 +183,7 @@ describe("HerdrRuntimeReconciler", () => {
       ],
       store, herdr: { async listPanes() { return [pane]; } } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.reconcile();
@@ -213,7 +214,7 @@ describe("HerdrRuntimeReconciler", () => {
       ],
       store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.requestReconciliation(["w2"]);
@@ -240,7 +241,7 @@ describe("HerdrRuntimeReconciler", () => {
       store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
       discoverPane: async () => { throw new Error("legacy workspaces must not discover new bindings"); },
-      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.reconcile();
@@ -271,7 +272,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w-new", cwd: "/repo" }],
       store, herdr: { async listPanes(workspaceId: string) { return workspaceId === "w-old" ? [pane] : []; } } as unknown as HerdrPort,
       lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.reconcile();
@@ -300,7 +301,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w-new", cwd: "/repo" }],
       store, herdr: { async listPanes(workspaceId: string) { return workspaceId === "w-old" ? [pane] : []; } } as unknown as HerdrPort,
       lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.reconcile();
@@ -322,7 +323,7 @@ describe("HerdrRuntimeReconciler", () => {
       ],
       store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     const first = reconciler.requestReconciliation(["w1"]);
@@ -345,7 +346,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" }],
       store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     const first = reconciler.requestReconciliation(["w1"]);
@@ -366,7 +367,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" }],
       store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
       channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.requestReconciliation(["w1"]);
@@ -433,7 +434,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }], store,
       herdr: { async listPanes() { return [pane]; } } as unknown as HerdrPort, lifecycleEvents: bus,
       channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }), discoverPane: async () => { throw new Error("not used"); },
-      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, worktreeNameFor: async (cwd) => cwd ? "feat-main-card" : null
+      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, worktreeNameFor: async (cwd) => cwd ? "feat-main-card" : null, presentation: applicationPresentation
     });
 
     await reconciler.reconcile();
@@ -763,7 +764,7 @@ describe("HerdrRuntimeReconciler", () => {
       ],
       store, herdr: { async listAllPanes() { throw new Error("snapshot unavailable"); }, listPanes } as unknown as HerdrPort,
       lifecycleEvents: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     const reconciliation = reconciler.reconcile();
@@ -791,7 +792,7 @@ describe("HerdrRuntimeReconciler", () => {
       projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
       store, herdr: { async listAllPanes() { return [unknownPane]; }, observeRuntime } as unknown as HerdrPort,
       lifecycleEvents: new BridgeEventBus(), channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
-      discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false
+      discoverPane: async () => { throw new Error("not used"); }, scheduler, isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await reconciler.reconcile();
@@ -820,6 +821,6 @@ function fixture(
     projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
     store, herdr, lifecycleEvents,
     channelPublisher: { async drain() {}, async enqueueRunCardUpdate() {} },
-    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, wakeOutbound, convergeAnswer
+    logger, discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, wakeOutbound, convergeAnswer, presentation: applicationPresentation
   });
 }

@@ -43,12 +43,12 @@ export class ConversationViewProjector {
     private readonly channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
-    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">,
+    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
     answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
     options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}
   ) {
-    this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, logger);
+    this.answerPages = answerPages ?? new AnswerPageWorkflow(store as ProjectionStore & AnswerPageStore, () => { void checkpoints.requestScan(); }, presentation, logger);
     this.mainCards = mainCards ?? new MainCardWorkflow(store as ProjectionStore & MainCardStore, () => { void checkpoints.requestScan(); }, presentation, logger);
     this.answerUpdateDelayMs = Math.min(options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, ANSWER_UPDATE_BUDGET_MS);
     this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? MAIN_CARD_UPDATE_INTERVAL_MS;

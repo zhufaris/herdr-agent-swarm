@@ -1,17 +1,16 @@
 import type { Logger } from "pino";
-import { renderModelResultCard, renderModelSelectionCard } from "../cards/model-card.js";
-import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ModelSelectionStore } from "../domain/ports/workflow.js";
+import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation, ProjectConfig } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { resolveCatalogModel } from "../domain/model-selection.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 
-interface Options { config: BridgeConfig; store: ModelSelectionStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
+interface Options { config: BridgeConfig; store: ModelSelectionStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
 const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。";
 
@@ -80,7 +79,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
 
   private async publishUnsupported(binding: Binding, messageId: string, operationId: string): Promise<void> {
     if (!binding.paneId) return;
-    await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${operationId}:unsupported`, renderModelResultCard({
+    await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${operationId}:unsupported`, this.options.presentation.modelResult({
       bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
     }));
   }
@@ -89,7 +88,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
     if (!session || session.source !== "herdr-traex-shim" || session.agent !== "traex" || session.kind !== "id" || !this.options.herdr.listModels) {
-      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:unavailable`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
+      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:unavailable`, this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
       return false;
     }
     try {
@@ -111,10 +110,10 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
         }
       }
       const preference = this.options.store.getModelPreference(binding.id);
-      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:${preference?.desiredRevision ?? "list"}`, renderModelSelectionCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, models, preference, ...(notice ? { notice } : {}) }));
+      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, models, preference, ...(notice ? { notice } : {}) }));
       return selected;
     } catch (error) {
-      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:failed`, renderModelResultCard({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
+      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:failed`, this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
       return false;
     }
   }
@@ -125,7 +124,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   }
 
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> {
-    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason));
+    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason));
   }
 
   private async convergeMainCard(bindingId: string): Promise<void> {
