@@ -23,11 +23,11 @@ export function renderWorkerMainCard(view: WorkerMainView): object {
   }
   if (!view.frozenAt && !["terminated", "failed", "stopped"].includes(view.runtimeState) && view.messageId) {
     elements.push(
-      { tag: "note", elements: [{ tag: "plain_text", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。" }] },
+      { tag: "markdown", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。" },
       callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")
     );
   }
-  if (view.frozenAt) elements.push({ tag: "note", elements: [{ tag: "plain_text", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` }] });
+  if (view.frozenAt) elements.push({ tag: "markdown", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` });
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },
     header: { title: { tag: "plain_text", content: `🤖 Worker · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: "HERDR WORKER SESSION" }, template: view.runtimeState === "failed" ? "red" : view.runtimeState === "blocked" ? "orange" : view.runtimeState === "terminated" ? "grey" : "blue" },

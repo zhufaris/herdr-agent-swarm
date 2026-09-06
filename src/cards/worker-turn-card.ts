@@ -39,7 +39,7 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
   const interaction = workerTaskInteraction(view.phase);
-  elements.push({ tag: "note", elements: [{ tag: "plain_text", content: interaction.guidance }] });
+  elements.push({ tag: "markdown", content: interaction.guidance });
   if (interaction.actionLabel && actionMessageId) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
     { tag: "column", width: "auto", elements: [callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId }, "primary")] },
     ...(interaction.canInterrupt ? [{ tag: "column", width: "auto", elements: [callbackButton("停止当前任务", { action: "worker_task_interrupt", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId }, "danger")] }] : [])

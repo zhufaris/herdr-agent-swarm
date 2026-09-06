@@ -3,6 +3,7 @@ import { renderInstanceDirectoryCard } from "../src/cards/instance-directory-car
 import { renderInstanceDetailCard } from "../src/cards/instance-detail-card.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../src/cards/instance-control-card.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { createQueuedWorkerTurnCard, reduceWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 
 const instance = { id: "i1", projectId: "p1", name: "reviewer", role: "worker" as const, agentKind: "claude-code" as const, model: "sonnet", desiredState: "running" as const, observedState: "idle" as const, workspaceLeaseId: "ws1", generation: 2, runtimeRef: { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1", generation: 2 }, pendingRuntimeRef: null, provisioningCheckpoint: "verified" as const, lastError: null };
@@ -26,6 +27,7 @@ describe("instance cards", () => {
     expect(text).not.toContain("View Worker Main");
     expect(text).not.toContain("card_target_open");
     expect(text).not.toContain("live-secret");
+    expect(text).not.toContain('\"tag\":\"note\"');
     if (phase === "running") expect(text).toContain("精确补充到当前任务");
     if (phase === "blocked") { expect(text).toContain("可补充要求"); expect(text).toContain("审批仍须在对应 Pane 完成"); }
     if (["completed", "failed", "cancelled"].includes(phase)) expect(text).toContain("FIFO 后续任务");
@@ -41,6 +43,16 @@ describe("instance cards", () => {
     const runningText = JSON.stringify(renderWorkerTurnCard(running)); const completedText = JSON.stringify(renderWorkerTurnCard(completed));
     expect(runningText).toContain("补充当前任务"); expect(runningText).toContain("停止当前任务");
     expect(completedText).toContain("继续这个任务"); expect(completedText).not.toContain("停止当前任务");
+  });
+
+  it("uses only Schema V2-supported elements in Worker Main cards", () => {
+    const view = {
+      workerId: "i1", workerName: "reviewer", workerSessionGeneration: 1, ownerName: "owner", parentPaneId: "w1:p0",
+      workspace: "/repo", branch: "main", model: "sonnet", runtimeState: "idle" as const, runtimeGeneration: 2,
+      currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [], messageId: "worker-main-message", cardId: "worker-main-card",
+      viewVersion: 1, deliveredVersion: 1, frozenAt: null, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+    expect(JSON.stringify(renderWorkerMainCard(view))).not.toContain('\"tag\":\"note\"');
   });
 
   it("never binds continuation-card actions to an earlier page message", () => {
