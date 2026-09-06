@@ -184,6 +184,28 @@ describe("SQLite store", () => {
     ]);
   });
 
+  it("rebuilds unsupported undelivered Worker Task cards without replaying the turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    const created = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: created.id, instanceGeneration: created.generation, workerSessionGeneration: 1, workerName: created.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: created.id, instanceGeneration: created.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "source", view, card: { schema: "2.0", body: { elements: [{ tag: "note" }] } } });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDeadLetter(create.id, "unsupported tag note", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "200861" });
+
+    expect(store.recoverUnsupportedWorkerCardCreates(renderWorkerTurnCard)).toEqual(["turn-1"]);
+    const recovered = store.listPendingOutboundReplies();
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ id: create.id, idempotencyKey: create.idempotencyKey, kind: "stream_card_create", attemptCount: 0 });
+    expect(recovered[0]!.payload).not.toContain('\"tag\":\"note\"');
+    expect(store.getInstanceTurn("turn-1")).toMatchObject({ state: "queued", text: "review" });
+    expect(store.recoverUnsupportedWorkerCardCreates(renderWorkerTurnCard)).toEqual([]);
+  });
+
   it("keeps the running Worker task current when newer work is queued", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });

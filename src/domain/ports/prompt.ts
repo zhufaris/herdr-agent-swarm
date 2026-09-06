@@ -6,6 +6,7 @@ import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { TranscriptTurnClaimOutcome } from "../types.js";
 import type { ModelDispatch } from "../model-selection.js";
+import type { WorkerTurnCardView } from "../worker-turn-card-view.js";
 
 export interface ClaimedPrompt {
   binding: Binding;
@@ -29,6 +30,7 @@ export interface PromptAcceptanceStore {
   listRunCards(bindingId: string): RunCardView[];
   loadTopicView(bindingId: string): TopicViewState | null;
   recoverLegacyElementIdDeadLetters(): number;
+  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[];
   recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery;
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome;
   saveRunCard(view: RunCardView): RunCardView;

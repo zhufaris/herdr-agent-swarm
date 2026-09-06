@@ -3401,6 +3401,39 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
+  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[] {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.database.prepare(`
+        SELECT o.id, o.worker_turn_id, o.lane_key
+        FROM outbound_replies o
+        JOIN worker_turn_cards card ON card.turn_id = o.worker_turn_id
+        WHERE o.state = 'dead_letter' AND o.kind = 'stream_card_create'
+          AND o.idempotency_key = 'worker-turn:create:' || o.worker_turn_id || ':0'
+          AND card.message_id IS NULL AND card.card_id IS NULL
+          AND o.lark_error_code IN ('200861', '230099')
+          AND instr(o.payload, '"tag":"note"') > 0
+        ORDER BY o.delivery_order
+      `).all() as Array<{ id: string; worker_turn_id: string; lane_key: string }>;
+      const timestamp = now();
+      const recovered: string[] = [];
+      for (const row of rows) {
+        const view = this.loadWorkerTurnCard(row.worker_turn_id);
+        if (!view) continue;
+        const payload = JSON.stringify({ card: render(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } });
+        const updated = this.database.prepare(`UPDATE outbound_replies SET state = 'pending', payload = ?, view_version = ?, attempt_count = 0, error = NULL, delivered_message_id = NULL, card_id_checkpoint = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, auto_recovery_count = 0, dead_lettered_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'`)
+          .run(payload, view.viewVersion, timestamp, timestamp, row.id);
+        if (updated.changes !== 1) continue;
+        this.database.prepare(`UPDATE outbox_lane_quarantines SET state = 'released', action = 'startup_rebuild', released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`)
+          .run(timestamp, timestamp, row.lane_key, row.id);
+        this.refreshOutboxLaneHead(row.lane_key);
+        recovered.push(row.worker_turn_id);
+      }
+      this.database.exec("COMMIT");
+      return recovered;
+    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+  }
+
   recoverStaleOutboxQuarantines(): import("../domain/types.js").StaleOutboxQuarantineRecovery {
     this.database.exec("BEGIN IMMEDIATE");
     try {
