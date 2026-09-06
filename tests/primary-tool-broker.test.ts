@@ -31,6 +31,14 @@ describe("PrimaryToolBroker", () => {
     await expect(broker(actor).promptInstance({ instanceId: worker.id, task: "review", idempotencyKey: "k1" })).resolves.toMatchObject({ accepted: true });
   });
 
+  it("creates a card-backed follow-up for an explicit settled Worker turn", async () => {
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    store!.acceptInstanceTurn({ id: "parent-turn", idempotencyKey: "parent-key", actor: { kind: "human", userId: "u" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
+    store!.completeInstanceTurn({ turnId: "parent-turn", expectedGeneration: worker.generation, result: "done" });
+    await expect(broker(actor).followUpInstance({ instanceId: worker.id, parentTurnId: "parent-turn", text: "continue", idempotencyKey: "follow-key" })).resolves.toMatchObject({ accepted: true, card: { parentTurnId: "parent-turn", rootMessageId: "root" } });
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ kind: "followup", parentTurnId: "parent-turn" });
+  });
+
   it.each(["cross-project", "stale-primary"])("denies %s authority", async (kind) => {
     const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1"); const other = create("other", "p2");
     const identity = kind === "stale-primary" ? { ...actor, bindingGeneration: 2 } : actor;

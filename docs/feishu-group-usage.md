@@ -97,7 +97,8 @@ Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation
 逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
 触发 Primary turn。Primary 通过内置 Worker 工具发起的新任务和 follow-up 也会在当前飞书
 话题创建独立的 Worker Task Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
-不能由工具调用参数伪造。
+不能由工具调用参数伪造。调用 `follow_up_instance` 时必须显式传入 `inspect_instance` 返回的
+已终结 `parentTurnId`；服务端拒绝跨 Worker、跨 generation 或尚未结束的父任务。
 
 实例停止不删除 worktree。删除前系统会重新检查 dirty、conflict、ahead、generation 和
 fingerprint；任何不安全或不确定状态都会保留实例/worktree，不提供危险确认按钮。
