@@ -43,6 +43,8 @@ import { SqliteInstanceStore } from "./sqlite/instance-store.js";
 import { SqliteCardContextStore } from "./sqlite/card-context-store.js";
 import { SqliteInboundProjectStore } from "./sqlite/inbound-project-store.js";
 import { SqlitePaneOperationStore } from "./sqlite/pane-operation-store.js";
+import { SqliteBindingLifecycleStore } from "./sqlite/binding-store.js";
+import { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -74,12 +76,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private readonly cardContexts: SqliteCardContextStore;
   private readonly inboundProjects: SqliteInboundProjectStore;
   private readonly paneOperations: SqlitePaneOperationStore;
+  private readonly bindings: SqliteBindingLifecycleStore;
+  private readonly bindingProjections: SqliteBindingProjectionStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
     this.database = this.context.database;
     this.migrations = new SqliteMigrations(this.context);
     this.migrations.run();
+    this.bindings = new SqliteBindingLifecycleStore(this.context);
     this.operations = new SqliteOperationsStore(this.context);
     this.commandIntents = new SqliteCommandIntentStore(this.context);
     this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.getBinding(id));
@@ -99,6 +104,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       saveRunCard: (view) => this.projections.saveRunCard(view),
       persistBindingPatch: (id, patch) => this.persistBindingPatch(id, patch),
       invalidateCardContexts: (targets) => this.invalidateCardContexts(targets)
+    });
+    this.bindingProjections = new SqliteBindingProjectionStore(this.context, this.bindings, this.projections, {
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
+      listRunCardsByPhases: (bindingId, phases) => this.listRunCardsByPhases(bindingId, phases)
     });
     this.prompts = new SqlitePromptStore(this.context, this.projections, {
       getBinding: (id) => this.getBinding(id),
@@ -583,13 +592,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding {
-    const timestamp = now();
-    this.database.prepare(`
-      INSERT INTO bindings(
-        id, creator_open_id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, state, last_agent_state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', ?, ?)
-    `).run(input.id, input.creatorOpenId ?? null, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, timestamp, timestamp);
-    return this.requireBinding(input.id);
+    return this.bindings.createPendingBinding(input);
   }
 
   createCardInteraction(input: { id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind; parentPromptId: string | null; targetPromptId: string | null; expiresAt: string }): CardInteraction {
@@ -669,77 +672,27 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
-    return this.context.transaction(() => {
-      const previous = this.requireBinding(input.oldBindingId);
-      const existing = this.database.prepare("SELECT * FROM bindings WHERE reset_message_id = ?").get(input.resetMessageId) as BindingRow | undefined;
-      if (existing) {return { previous, replacement: mapBinding(existing), created: false }; }
-      if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId) throw new Error("Binding is not eligible for in-topic reset");
-      const timestamp = now();
-      this.database.prepare(`INSERT INTO bindings(id, project_id, workspace_id, chat_id, topic_id, root_message_id, replaces_binding_id, reserved_topic_id, reserved_root_message_id, reset_message_id, title, runtime, state, last_agent_state, lifecycle, attachment, generation, provisioning_checkpoint, degradation_count, has_completed_turn, last_activity_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 'traex', 'pending', 'unknown', 'provisioning', 'unattached', 1, 'selected', 0, 0, ?, ?, ?)` )
-        .run(input.newBindingId, previous.projectId, previous.workspaceId, previous.chatId, previous.id, previous.topicId, previous.rootMessageId, input.resetMessageId, input.title, timestamp, timestamp, timestamp);
-      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset.candidate', ?, 'created', ?)")
-        .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
-
-      return { previous, replacement: this.requireBinding(input.newBindingId), created: true };
-    });
+    return this.bindings.createResetCandidate(input);
   }
 
   cutoverResetCandidate(input: { oldBindingId: string; newBindingId: string; cleanupOperationId: string; actorOpenId: string; expectedCwd: string }): { previous: Binding; replacement: Binding; cleanup: RetiredPaneCleanupOperation; cancelledPromptIds: string[] } {
-    return this.context.transaction(() => {
-      const previous = this.requireBinding(input.oldBindingId);
-      const candidate = this.requireBinding(input.newBindingId);
-      if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId || !previous.paneId || !previous.traexSessionId) throw new Error("Binding is not eligible for reset cutover");
-      if (candidate.replacesBindingId !== previous.id || candidate.reservedTopicId !== previous.topicId || candidate.reservedRootMessageId !== previous.rootMessageId || candidate.lifecycle !== "provisioning" || candidate.provisioningCheckpoint !== "runtime_started" || !candidate.paneId || !candidate.traexSessionId) throw new Error("Reset candidate is not ready for cutover");
-      const timestamp = now();
-      const cancelledPromptIds = (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' ORDER BY created_at, id").all(previous.id) as Array<{ id: string }>).map((row) => row.id);
-      this.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'queued'")
-        .run("话题已开启新会话，排队请求未提交给 TraeX。", timestamp, previous.id);
-      this.database.prepare("UPDATE prompt_jobs SET observation_state = 'detached', was_detached = 1, error = ?, updated_at = ? WHERE binding_id = ? AND state = 'running'")
-        .run("话题已开启新会话；Bridge 不再观察该 TraeX 请求，也不会重放。", timestamp, previous.id);
-      this.database.prepare("UPDATE outbound_replies SET state = 'dismissed', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'pending'")
-        .run("话题已开启新会话；不再投递旧会话更新。", timestamp, previous.id);
-      this.database.prepare(`UPDATE bindings SET topic_id = NULL, root_message_id = NULL, retired_topic_id = ?, retired_root_message_id = ?, lifecycle = 'archived', state = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`)
-        .run(previous.topicId, previous.rootMessageId, timestamp, timestamp, previous.id);
-      this.database.prepare(`UPDATE bindings SET topic_id = ?, root_message_id = ?, status_message_id = ?, lifecycle = 'active', attachment = 'attached', state = 'active', provisioning_checkpoint = 'activated', updated_at = ? WHERE id = ?`)
-        .run(previous.topicId, previous.rootMessageId, previous.rootMessageId, timestamp, candidate.id);
-      this.database.prepare(`INSERT INTO retired_pane_cleanup_operations(id, old_binding_id, replacement_binding_id, pane_id, expected_workspace_id, expected_project_id, expected_cwd, expected_terminal_id, actor_open_id, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)` )
-        .run(input.cleanupOperationId, previous.id, candidate.id, previous.paneId, previous.workspaceId, previous.projectId, input.expectedCwd, previous.traexSessionId, input.actorOpenId, timestamp, timestamp);
-      this.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, 'binding.reset', ?, 'cutover', ?)")
-        .run(input.actorOpenId, `${previous.id}:${input.newBindingId}`, timestamp);
-
-      return { previous: this.requireBinding(previous.id), replacement: this.requireBinding(input.newBindingId), cleanup: this.requireRetiredPaneCleanup(input.cleanupOperationId), cancelledPromptIds };
-    });
+    return this.bindings.cutoverResetCandidate(input);
   }
 
   listRetiredPaneCleanupOperations(states: readonly RetiredPaneCleanupState[] = ["pending", "waiting_busy", "executing"]): RetiredPaneCleanupOperation[] {
-    if (states.length === 0) return [];
-    const placeholders = states.map(() => "?").join(",");
-    return (this.database.prepare(`SELECT * FROM retired_pane_cleanup_operations WHERE state IN (${placeholders}) ORDER BY created_at, id`).all(...states) as RetiredPaneCleanupRow[]).map(mapRetiredPaneCleanup);
+    return this.bindings.listRetiredPaneCleanupOperations(states);
   }
 
   claimRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null {
-    const result = this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'executing', attempt_count = attempt_count + 1, detail = NULL, updated_at = ? WHERE id = ? AND state IN ('pending','waiting_busy')").run(now(), id);
-    return result.changes === 1 ? this.requireRetiredPaneCleanup(id) : null;
+    return this.bindings.claimRetiredPaneCleanup(id);
   }
 
   updateRetiredPaneCleanup(id: string, state: RetiredPaneCleanupState, detail: string | null = null): RetiredPaneCleanupOperation | null {
-    const result = this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('pending','waiting_busy','executing')").run(state, detail, now(), id);
-    return result.changes === 1 ? this.requireRetiredPaneCleanup(id) : null;
+    return this.bindings.updateRetiredPaneCleanup(id, state, detail);
   }
 
   completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null {
-    return this.context.transaction(() => {
-      const operation = this.requireRetiredPaneCleanup(id);
-      if (operation.state !== "executing") {return null; }
-      const binding = this.requireBinding(operation.oldBindingId);
-      if (binding.lifecycle !== "archived" || binding.paneId !== operation.paneId) throw new Error("Retired pane cleanup binding identity changed");
-      const timestamp = now();
-      this.database.prepare("UPDATE bindings SET lifecycle = 'closed', attachment = 'unattached', state = 'archived', last_agent_state = 'unknown', updated_at = ? WHERE id = ?").run(timestamp, binding.id);
-      this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'succeeded', detail = NULL, updated_at = ? WHERE id = ? AND state = 'executing'").run(timestamp, id);
-
-      return this.requireRetiredPaneCleanup(id);
-    });
+    return this.bindings.completeRetiredPaneCleanup(id);
   }
 
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection {
@@ -817,291 +770,80 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   /** Legacy test/setup escape hatch; workflows must use explicit ports below. */
-  updateBinding(id: string, patch: Partial<Binding>): Binding { return this.persistBindingPatch(id, patch); }
+  updateBinding(id: string, patch: Partial<Binding>): Binding { return this.bindings.updateBinding(id, patch); }
 
   private persistBindingPatch(id: string, patch: Partial<Binding>): Binding {
-    const normalized = { ...patch };
-    if (patch.state && patch.lifecycle === undefined) {
-      if (patch.state === "active") { normalized.lifecycle = "active"; normalized.provisioningCheckpoint = "activated"; if (patch.paneId) normalized.attachment = "attached"; }
-      else if (patch.state === "archived") { normalized.lifecycle = "archived"; normalized.archivedAt = patch.archivedAt ?? now(); }
-      else if (patch.state === "orphaned") { normalized.lifecycle = "active"; normalized.attachment = "orphaned"; }
-      else if (patch.state === "failed") normalized.lifecycle = "failed";
-    }
-    const entries = Object.entries(normalized).filter(([key]) => key !== "id" && key !== "createdAt");
-    entries.push(["updatedAt", now()]);
-    if (entries.length === 0) return this.requireBinding(id);
-    const assignments = entries.map(([key]) => `${BINDING_COLUMNS[key as keyof Binding]} = ?`).join(", ");
-    const values = entries.map(([, value]) => typeof value === "boolean" ? Number(value) : value as SqlValue);
-    const result = this.database.prepare(`UPDATE bindings SET ${assignments} WHERE id = ?`).run(...values, id);
-    if (result.changes === 0) throw new Error(`Binding not found: ${id}`);
-    return this.requireBinding(id);
+    return this.bindings.persistBindingPatch(id, patch);
   }
 
-  updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.persistBindingPatch(id, patch); }
+  updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.bindings.updateBindingMetadata(id, patch); }
 
   replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding {
-    const timestamp = now();
-    const result = this.database.prepare(`UPDATE bindings SET
-      pane_id = ?, traex_session_id = ?,
-      agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?,
-      workspace_id = ?, generation = generation + 1, last_agent_state = ?, last_observed_at = NULL, updated_at = ?
-      WHERE id = ? AND pane_id = ? AND generation = ? AND lifecycle = 'provisioning' AND provisioning_checkpoint = 'pane_created'`)
-      .run(
-        input.pane.paneId, input.pane.terminalId ?? null, input.pane.agentSession?.source ?? null, input.pane.agentSession?.agent ?? null,
-        input.pane.agentSession?.kind ?? null, input.pane.agentSession?.value ?? null, input.pane.workspaceId, input.pane.agentState, timestamp,
-        input.bindingId, input.expectedPaneId, input.expectedGeneration
-      );
-    if (result.changes !== 1) throw new Error(`Provisioning pane replacement lost ownership for binding ${input.bindingId}`);
-    return this.requireBinding(input.bindingId);
+    return this.bindings.replaceProvisioningPane(input);
   }
 
   transitionBinding(id: string, transition: SessionTransition): Binding {
-    const binding = this.requireBinding(id);
-    const next = transitionSession({
-      lifecycle: binding.lifecycle, attachment: binding.attachment, runtime: binding.lastAgentState, generation: binding.generation,
-      provisioningCheckpoint: binding.provisioningCheckpoint, degradationCount: binding.degradationCount, hasCompletedTurn: binding.hasCompletedTurn
-    }, transition);
-    const legacyState: BindingState = next.attachment === "orphaned" && next.lifecycle !== "archived" && next.lifecycle !== "closed"
-      ? "orphaned"
-      : next.lifecycle === "provisioning" ? "pending"
-        : next.lifecycle === "active" || next.lifecycle === "draining" ? "active"
-          : next.lifecycle === "archived" || next.lifecycle === "closed" ? "archived" : "failed";
-    return this.persistBindingPatch(id, {
-      lifecycle: next.lifecycle, attachment: next.attachment, lastAgentState: next.runtime, generation: next.generation,
-      provisioningCheckpoint: next.provisioningCheckpoint, degradationCount: next.degradationCount, hasCompletedTurn: next.hasCompletedTurn,
-      state: legacyState, lastObservedAt: transition.type === "pane_observed" ? now() : binding.lastObservedAt,
-      archivedAt: next.lifecycle === "archived" ? binding.archivedAt ?? now() : binding.archivedAt
-    });
+    return this.bindings.transitionBinding(id, transition);
   }
 
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication {
-    return this.context.transaction(() => {
-      let binding = this.requireBinding(input.bindingId);
-      if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || (binding.lifecycle !== "active" && binding.lifecycle !== "draining") || binding.attachment === "orphaned") {
-
-        return { outcome: "stale_binding" };
-      }
-      const persistedSession = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
-        ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
-        : null;
-      const observedSession = input.pane.agentSession ?? null;
-      const sameSession = Boolean(persistedSession && observedSession
-        && persistedSession.source === observedSession.source && persistedSession.agent === observedSession.agent
-        && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
-      const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
-      if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) {
-
-        return { outcome: "terminal_identity_changed", binding };
-      }
-      const nativeSessionMismatch = Boolean(persistedSession && observedSession && !sameSession);
-      if (terminalIdentityRefreshed || (!persistedSession && observedSession)) binding = this.persistBindingPatch(binding.id, {
-        ...(terminalIdentityRefreshed ? { traexSessionId: input.pane.terminalId ?? null } : {}),
-        ...(!persistedSession && observedSession ? { agentSessionSource: observedSession.source, agentSessionAgent: observedSession.agent, agentSessionKind: observedSession.kind, agentSessionValue: observedSession.value } : {})
-      });
-      binding = this.transitionBinding(binding.id, { type: "pane_observed", runtime: input.pane.agentState });
-
-      return { outcome: "applied", binding, terminalIdentityRefreshed, nativeSessionMismatch };
-    });
+    return this.bindings.applyRuntimeObservation(input);
   }
 
   reconcileBindingTitleWithProjection(input: BindingTitleProjectionInput): BindingTitleProjectionResult {
-    return this.context.transaction(() => {
-      let binding = this.requireBinding(input.bindingId);
-      if (!this.matchesRuntimeFence(binding, input.expectedPaneId, input.expectedGeneration)) {
-
-        return { outcome: "stale_binding", binding, outboxReserved: false };
-      }
-      if (binding.title === input.title) {
-
-        return { outcome: "unchanged", binding, outboxReserved: false };
-      }
-      this.database.prepare("UPDATE bindings SET title = ?, updated_at = ? WHERE id = ?").run(input.title, now(), input.bindingId);
-      binding = this.requireBinding(input.bindingId);
-      this.saveTopicView(input.view);
-      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.card);
-
-      return { outcome: "projected", binding, outboxReserved: reservation === "reserved" };
-    });
+    return this.bindingProjections.reconcileBindingTitleWithProjection(input);
   }
 
   degradeBindingWithProjection(input: RuntimeDegradationInput): RuntimeDegradationResult {
-    return this.context.transaction(() => {
-      let binding = this.requireBinding(input.bindingId);
-      if (!this.matchesRuntimeFence(binding, input.expectedPaneId, input.expectedGeneration)) {
-
-        return { outcome: "stale", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
-      }
-      const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
-      if (binding.attachment === "degraded" && current.phase === input.view.phase && current.notice === input.view.notice) {
-
-        return { outcome: "unchanged", binding, view: current, outboxReserved: false };
-      }
-      if (current.viewVersion > input.view.viewVersion) {
-
-        return { outcome: "stale", binding, view: current, outboxReserved: false };
-      }
-      binding = this.transitionBinding(input.bindingId, { type: "agent_unregistered" });
-      this.saveTopicView(input.view);
-      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
-
-      return { outcome: "degraded", binding, view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
-    });
+    return this.bindingProjections.degradeBindingWithProjection(input);
   }
 
   orphanBindingWithProjection(input: OrphanBindingProjectionInput): OrphanBindingProjectionResult {
-    return this.context.transaction(() => {
-      let binding = this.requireBinding(input.bindingId);
-      if (binding.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration) {return { outcome: "stale", binding: null, view: null, updatedPromptIds: [], outboxReserved: false }; }
-      if (binding.attachment === "orphaned") {return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
-      const current = this.loadTopicView(input.bindingId) ?? initialTopicView(input.bindingId);
-      if (current.viewVersion > input.view.viewVersion) {return { outcome: "stale", binding, view: current, updatedPromptIds: [], outboxReserved: false }; }
-      binding = this.transitionBinding(input.bindingId, { type: "pane_probe_failed", confirmedMissing: true, orphanThreshold: 2 });
-      if (binding.attachment !== "orphaned") {return { outcome: "unchanged", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds: [], outboxReserved: false }; }
-      this.database.prepare(`
-        UPDATE prompt_jobs SET
-          state = CASE state WHEN 'queued' THEN 'cancelled' ELSE 'failed' END,
-          observation_state = 'completed', error = ?, updated_at = ?
-        WHERE binding_id = ? AND state IN ('running', 'queued')
-      `).run(input.reason, input.occurredAt, input.bindingId);
-      const updatedPromptIds: string[] = [];
-      let answerOutboxReserved = false;
-      for (const view of this.listRunCardsByPhases(input.bindingId, ["running", "blocked", "queued"])) {
-        const next = { ...view, phase: "failed" as const, notice: input.reason, finishedAt: input.occurredAt, queuePosition: 0, activityAt: input.occurredAt, viewVersion: view.viewVersion + 1, updatedAt: input.occurredAt };
-        this.saveRunCard(next);
-        updatedPromptIds.push(next.promptId);
-        if (!next.answerCardId && next.answerMessageId) {
-          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(input.renderRunCard(next)) });
-          answerOutboxReserved = true;
-        } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
-          this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${next.promptId}:answer`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
-          answerOutboxReserved = true;
-        }
-      }
-      this.saveTopicView(input.view);
-      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
-
-      return { outcome: "orphaned", binding, view: this.loadTopicView(input.bindingId), updatedPromptIds, outboxReserved: answerOutboxReserved || reservation === "reserved" };
-    });
+    return this.bindingProjections.orphanBindingWithProjection(input);
   }
 
   recoverOrphanBindingWithProjection(input: RecoverOrphanBindingProjectionInput): RecoverOrphanBindingProjectionResult {
-    return this.context.transaction(() => {
-      let binding = this.requireBinding(input.bindingId);
-      if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration
-        || binding.lifecycle !== "active" || binding.attachment !== "orphaned" || binding.workspaceId !== input.pane.workspaceId) {
-
-        return { outcome: "stale", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
-      }
-      const persistedSession = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
-        ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
-        : null;
-      const observedSession = input.pane.agentSession ?? null;
-      const nativeSessionMatches = !persistedSession || Boolean(observedSession
-        && persistedSession.source === observedSession.source && persistedSession.agent === observedSession.agent
-        && persistedSession.kind === observedSession.kind && persistedSession.value === observedSession.value);
-      if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId
-        || !nativeSessionMatches || !isTraexCompatibleNativeAgent(input.pane)) {
-
-        return { outcome: "identity_mismatch", binding, view: this.loadTopicView(input.bindingId), outboxReserved: false };
-      }
-      binding = this.transitionBinding(input.bindingId, { type: "pane_reattached", replacement: false });
-      binding = this.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.pane.agentState });
-      this.saveTopicView(input.view);
-      const reservation = this.reserveMainCardInTransaction(input.view, input.rootMessageId, input.mainCard);
-
-      return { outcome: "recovered", binding, view: this.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
-    });
+    return this.bindingProjections.recoverOrphanBindingWithProjection(input);
   }
 
   transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding {
-    return this.context.transaction(() => {
-      const binding = this.transitionBinding(input.id, input.transition);
-      this.database.prepare("INSERT OR IGNORE INTO lifecycle_events(event_id, binding_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)")
-        .run(input.event.eventId, input.id, input.event.type, JSON.stringify(input.event.payload), input.event.occurredAt);
-      this.saveTopicView(input.view);
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${input.id}:${input.view.viewVersion}`, bindingId: input.id, viewVersion: input.view.viewVersion, targetRole: "session_status", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
-
-      return binding;
-    });
+    return this.bindingProjections.transitionBindingWithOutbox(input);
   }
 
   attachBindingPane(id: string, pane: import("../domain/types.js").HerdrPane, replacement: boolean): Binding {
-    const binding = this.requireBinding(id);
-    const next = transitionSession({
-      lifecycle: binding.lifecycle, attachment: binding.attachment, runtime: binding.lastAgentState, generation: binding.generation,
-      provisioningCheckpoint: binding.provisioningCheckpoint, degradationCount: binding.degradationCount, hasCompletedTurn: binding.hasCompletedTurn
-    }, { type: "pane_reattached", replacement });
-    const suspended = transitionSession(next, { type: "archive_requested", hasActiveTurn: false });
-    return this.context.transaction(() => {
-      this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`)
-        .run(pane.paneId, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, now(), now(), now(), id);
-      if (!replacement) this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(id, suspended.generation);
-
-      return this.requireBinding(id);
-    });
+    return this.bindings.attachBindingPane(id, pane, replacement);
   }
 
   findBindingByTopic(topicId: string): Binding | null {
-    const row = this.database.prepare("SELECT * FROM bindings WHERE topic_id = ? ORDER BY created_at DESC LIMIT 1").get(topicId) as BindingRow | undefined;
-    return row ? mapBinding(row) : null;
+    return this.bindings.findBindingByTopic(topicId);
   }
 
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null {
-    if (!topicId && !rootMessageId) return null;
-    const row = this.database.prepare(`
-      SELECT * FROM bindings
-      WHERE (? IS NOT NULL AND topic_id = ?) OR (? IS NOT NULL AND root_message_id = ?)
-      ORDER BY created_at DESC LIMIT 1
-    `).get(topicId, topicId, rootMessageId, rootMessageId) as BindingRow | undefined;
-    return row ? mapBinding(row) : null;
+    return this.bindings.findBindingByLarkScope(topicId, rootMessageId);
   }
 
   findBindingByPane(paneId: string): Binding | null {
-    const row = this.database.prepare("SELECT * FROM bindings WHERE pane_id = ? ORDER BY created_at DESC LIMIT 1").get(paneId) as BindingRow | undefined;
-    return row ? mapBinding(row) : null;
+    return this.bindings.findBindingByPane(paneId);
   }
 
   getBinding(id: string): Binding | null {
-    const row = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(id) as BindingRow | undefined;
-    return row ? mapBinding(row) : null;
+    return this.bindings.getBinding(id);
   }
 
   listBindings(): Binding[] {
-    return (this.database.prepare("SELECT * FROM bindings ORDER BY created_at").all() as BindingRow[]).map(mapBinding);
+    return this.bindings.listBindings();
   }
 
   listBindingsByState(state: Binding["state"]): Binding[] {
-    return (this.database.prepare("SELECT * FROM bindings WHERE state = ? ORDER BY created_at, id").all(state) as BindingRow[]).map(mapBinding);
+    return this.bindings.listBindingsByState(state);
   }
 
   listSessions(chatId: string): SessionSummary[] {
-    const rows = this.database.prepare(`
-      SELECT b.*, (SELECT COUNT(*) FROM prompt_jobs p WHERE p.binding_id = b.id AND p.state IN ('queued','running')) AS queue_depth,
-        COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name
-      FROM bindings b WHERE b.chat_id = ?
-      ORDER BY CASE b.attachment WHEN 'degraded' THEN 0 WHEN 'orphaned' THEN 2 ELSE 1 END,
-        CASE b.lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END,
-        b.last_activity_at DESC, b.id
-    `).all(chatId) as Array<BindingRow & { queue_depth: number; space_name: string }>;
-    return rows.map((row) => ({ binding: mapBinding(row), queueDepth: Number(row.queue_depth), spaceName: row.space_name }));
+    return this.bindings.listSessions(chatId);
   }
 
   listFailures(chatId: string): FailureSummary[] {
-    const outbound = this.database.prepare(`
-      SELECT o.id, o.binding_id, o.attempt_count, o.updated_at, o.error, b.pane_id, b.title,
-        COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM outbound_replies o
-      LEFT JOIN bindings b ON b.id = o.binding_id
-      LEFT JOIN project_selections s ON s.id = o.selection_id
-      WHERE o.state = 'dead_letter' AND (b.chat_id = ? OR s.chat_id = ?)
-      ORDER BY o.updated_at DESC
-    `).all(chatId, chatId) as Array<{ id: string; binding_id: string | null; attempt_count: number; updated_at: string; error: string | null; pane_id: string | null; title: string | null; space_name: string | null }>;
-    const prompts = this.database.prepare(`SELECT p.id, p.binding_id, p.updated_at, p.error, b.pane_id, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id WHERE b.chat_id = ? AND p.state IN ('failed','cancelled') ORDER BY p.updated_at DESC`).all(chatId) as Array<{ id: string; binding_id: string; updated_at: string; error: string | null; pane_id: string | null; title: string; space_name: string }>;
-    const sessions = this.database.prepare(`SELECT b.id, b.updated_at, b.lifecycle, b.attachment, b.pane_id, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM bindings b WHERE b.chat_id = ? AND (b.lifecycle IN ('failed','provisioning') OR b.attachment IN ('degraded','orphaned')) ORDER BY b.updated_at DESC`).all(chatId) as Array<{ id: string; updated_at: string; lifecycle: string; attachment: string; pane_id: string | null; title: string; space_name: string }>;
-    return [
-      ...outbound.map((row): FailureSummary => ({ kind: "outbound", id: row.id, bindingId: row.binding_id, attemptCount: Number(row.attempt_count), updatedAt: row.updated_at, error: boundedError(row.error), ...(row.space_name ? { spaceName: row.space_name } : {}), ...(row.pane_id !== undefined ? { paneId: row.pane_id } : {}), ...(row.title ? { title: row.title } : {}) })),
-      ...prompts.map((row): FailureSummary => ({ kind: "prompt", id: row.id, bindingId: row.binding_id, updatedAt: row.updated_at, error: boundedError(row.error), spaceName: row.space_name, paneId: row.pane_id, title: row.title })),
-      ...sessions.map((row): FailureSummary => ({ kind: "session", id: `session:${row.id}`, bindingId: row.id, updatedAt: row.updated_at, error: `Session is ${row.lifecycle}/${row.attachment}`, spaceName: row.space_name, paneId: row.pane_id, title: row.title }))
-    ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return this.bindings.listFailures(chatId);
   }
 
   countPendingPrompts(bindingId: string): number {
@@ -1505,9 +1247,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   private requireBinding(id: string): Binding {
-    const row = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(id) as BindingRow | undefined;
-    if (!row) throw new Error(`Binding not found: ${id}`);
-    return mapBinding(row);
+    const binding = this.bindings.getBinding(id);
+    if (!binding) throw new Error(`Binding not found: ${id}`);
+    return binding;
   }
 
   getPrompt(id: string): PromptJob | null {
@@ -1552,12 +1294,6 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private getOutboundReply(id: string): OutboundReply | null {
     const row = this.database.prepare("SELECT * FROM outbound_replies WHERE id = ?").get(id) as OutboundReplyRow | undefined;
     return row ? mapOutboundReply(row) : null;
-  }
-
-  private requireRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation {
-    const row = this.database.prepare("SELECT * FROM retired_pane_cleanup_operations WHERE id = ?").get(id) as RetiredPaneCleanupRow | undefined;
-    if (!row) throw new Error(`Retired pane cleanup ${id} not found`);
-    return mapRetiredPaneCleanup(row);
   }
 
 }
