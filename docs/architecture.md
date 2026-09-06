@@ -74,7 +74,7 @@ the source of workflow policy.
                v                      v                           v
 ┌──────────────────────── Infrastructure and adapters ─────────────────────┐
 │ Lark adapter · Herdr adapter · command runner · Socket RPC/event client   │
-│ SQLite store · health server · lease runtime · shutdown                    │
+│ SQLite capability bundle · health server · lease runtime · shutdown        │
 └───────────────────────┬──────────────────────────────────────────────────┘
                         │ implements ports
                         v
@@ -117,7 +117,11 @@ The production implementation uses the following modules and seams.
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
 | `LarkOutboxDispatcher` | Durable Lark delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore`; no direct aggregate mutation |
-| `SqliteBindingStore` | Atomic aggregate, projection, page, outbox, and lease persistence | Capability-focused ports over one transaction owner |
+| `createSqliteStoreBundle` | Constructs all SQLite capabilities once and exposes consumer-specific port views | One shared `SqliteContext`; production workflows do not receive the broad compatibility facade |
+| `SqliteBindingStore` | Compatibility facade and remaining binding/instance orchestration persistence | Delegates extracted Prompt, Worker-turn, projection, outbox, lease, approval, command, and operations capabilities |
+| `SqlitePromptStore` / `SqliteWorkerTurnStore` | Prompt and Worker-turn aggregates | Deep aggregate operations preserve cross-table state, projection, event, invalidation, and outbox transactions |
+| `SqliteProjectionStore` / `SqliteOutboxStore` | Card projections/pages and durable delivery lifecycle | Internal transaction-participating seams over the shared context |
+| `SqliteMigrations` | Latest-schema creation and ordered compatibility migration | Runs once during bundle construction before capability use |
 
 ### Ubiquitous language and target module names
 
@@ -163,6 +167,21 @@ checkpoints, detached observation, card projections, outbox intent, audit data,
 and the fenced instance lease. Atomic acceptance and claim transitions must remain atomic
 when ports are narrowed; splitting a large store interface must not split a
 workflow transaction.
+
+The production composition root creates one `SqliteStoreBundle`. The bundle
+constructs one compatibility facade, which in turn creates exactly one
+`SqliteContext` and one `DatabaseSync` connection. Each workflow receives only
+the domain port it consumes, such as `PromptRunStore`, `InstanceStore`,
+`OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
+facade type. Tests that inspect migration fixtures may still construct
+`SqliteBindingStore` directly as an intentional compatibility seam.
+
+All extracted SQLite capability modules share that context. Only the outermost
+`SqliteContext.transaction()` issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`;
+nested Prompt, Worker-turn, projection, and outbox calls participate in the
+existing transaction. Capability modules never instantiate their own database
+connection. This is what keeps prompt/card/outbox and Worker turn/card/page/event
+changes atomic even though their implementations live in separate files.
 
 ### Swarm command bounded context
 

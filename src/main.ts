@@ -8,7 +8,7 @@ import { InstanceLeaseController } from "./runtime/instance-lease.js";
 import { loadBuildIdentity } from "./runtime/build-identity.js";
 import { detectAgentRuntimeAvailability } from "./runtime/agents/agent-availability.js";
 import { safeLogError } from "./runtime/safe-error.js";
-import { SqliteBindingStore } from "./store/sqlite-store.js";
+import { createSqliteStoreBundle } from "./store/sqlite-store-bundle.js";
 import { createBridgeRuntime } from "./composition/create-bridge-runtime.js";
 
 const buildIdentity = loadBuildIdentity(fileURLToPath(new URL("./build-info.json", import.meta.url)), process.env.BRIDGE_EXPECTED_BUILD_ID);
@@ -19,21 +19,21 @@ const logger = pino({ level: config.logLevel, serializers: { err: safeLogError }
   "cookie", "*.cookie", "password", "*.password", "privateKey", "*.privateKey"
 ] });
 const startupStartedAt = Date.now();
-const store = new SqliteBindingStore(config.databasePath);
-const lease = new InstanceLeaseController(store, config.instanceLease, logger);
+const stores = createSqliteStoreBundle(config.databasePath);
+const lease = new InstanceLeaseController(stores.lease, config.instanceLease, logger);
 const availabilityRunner = new ExecFileCommandRunner(config.commandTimeoutMs);
 const [codex, claude, pi] = await Promise.all([
   detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
   detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
   detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
 ]);
-const runtime = createBridgeRuntime(config, store, logger, { codex, claude, pi });
+const runtime = createBridgeRuntime(config, stores, logger, { codex, claude, pi });
 const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, lark, bus, sessionOperations, reconciler, promptRun } = runtime;
 let runtimeShutdown: BridgeRuntimeShutdown | null = null;
 try {
   lease.acquire();
   const writeFence = lease.writeFence();
-  store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
+  stores.lifecycle.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
   lease.start(() => {
     if (runtimeShutdown) return runtimeShutdown.shutdown("lease-lost").then(() => undefined).finally(() => { process.exitCode = 1; });
     process.kill(process.pid, "SIGTERM");
@@ -44,8 +44,8 @@ try {
   await sqliteIntegrity.run();
   await instanceRuntime.reconcile();
   await instanceTurns.reconcile();
-  const healthServer = await startHealthServer({ ...config.http, store, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() }, sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
-  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, publisher: channelPublisher, healthServer, lease, store, logger });
+  const healthServer = await startHealthServer({ ...config.http, store: stores.health, herdr, lark, projects: config.projects, lease, workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator, inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() }, sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime, instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector, outboxDispatcher: channelPublisher, promptWorker: promptRun, ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity });
+  runtimeShutdown = new BridgeRuntimeShutdown({ ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, instanceRuntime, instanceWorker: { async stop(context) { await Promise.all([instanceTurns.stop(), instanceWork.stop(context)]); } }, integrityAuditor: sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, publisher: channelPublisher, healthServer, lease, store: stores.lifecycle, logger });
   const shutdown = runtimeShutdown;
   const stopRuntime = async (signal: string) => {
     await paneRetention.stop();
@@ -76,7 +76,7 @@ try {
   outboxRetention.stop();
   if (runtimeShutdown) await runtimeShutdown.shutdown("startup-failure");
   else {
-    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, lease, store, logger });
+    await cleanupStartupFailure({ integrityAuditor: sqliteIntegrity, ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}), primaryToolGateway, lease, store: stores.lifecycle, logger });
   }
   process.exitCode = 1;
 }

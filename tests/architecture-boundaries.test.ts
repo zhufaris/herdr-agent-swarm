@@ -20,7 +20,13 @@ describe("application composition boundaries", () => {
       expect(factory).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
-    expect(main).toContain("createBridgeRuntime(config, store, logger, { codex, claude, pi })");
+    expect(main).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
+    expect(main).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
+    expect(main).not.toContain("new SqliteBindingStore");
+    expect(factory).toContain("stores.promptRun");
+    expect(factory).toContain("stores.outbox");
+    expect(factory).toContain("stores.instance");
+    expect(factory).not.toContain("SqliteBindingStore");
     expect(factory).not.toContain("lease.acquire(");
     expect(factory).not.toContain("activateWriteFence(");
     expect(factory).not.toContain("startHealthServer(");
