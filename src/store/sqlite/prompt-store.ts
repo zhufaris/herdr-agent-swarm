@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { estimateQueueWait } from "../../domain/queue-wait-estimate.js";
 import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../../domain/ports.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, PromptJob, PromptObservationState, PromptState, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { Binding, PromptJob, PromptObservationState, PromptState, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import { mapBinding, mapModelPreference, mapPrompt, type BindingRow, type ModelPreferenceRow, type PromptRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
@@ -264,6 +264,48 @@ export class SqlitePromptStore {
       if (!row) throw new Error(`Prompt disappeared while claiming transcript turn: ${input.promptId}`);
       return { state: result.changes > 0 ? "claimed" : row.transcript_turn_id === input.turnId ? "matched" : row.transcript_turn_id === null ? "ineligible" : "conflict", prompt: mapPrompt(row) };
     });
+  }
+
+  listStaleUndispatchedPromptClaims(updatedBefore: string, limit: number): StalePromptClaim[] {
+    if (!Number.isFinite(Date.parse(updatedBefore))) throw new Error("Invalid stale prompt cutoff");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new Error("Invalid stale prompt claim limit");
+    const rows = this.context.database.prepare(`
+      SELECT p.id, p.binding_id, p.updated_at
+      FROM prompt_jobs p
+      LEFT JOIN binding_model_preferences preference ON preference.dispatch_prompt_id = p.id
+      WHERE p.state = 'running' AND p.dispatch_kind = 'turn' AND p.observation_state = 'not_started'
+        AND p.dispatched_at IS NULL AND p.transcript_turn_id IS NULL
+        AND preference.prepared_operation_id IS NULL AND p.updated_at < ?
+      ORDER BY p.updated_at, p.rowid LIMIT ?
+    `).all(updatedBefore, limit) as Array<{ id: string; binding_id: string; updated_at: string }>;
+    return rows.map((row) => ({ promptId: row.id, bindingId: row.binding_id, updatedAt: row.updated_at }));
+  }
+
+  requeueStaleUndispatchedPromptClaim(candidate: StalePromptClaim): boolean {
+    return this.context.transaction(() => {
+      const row = this.context.database.prepare(`
+        SELECT p.model_name, p.model_revision, preference.state AS preference_state, preference.prepared_operation_id
+        FROM prompt_jobs p
+        LEFT JOIN bindings b ON b.id = p.binding_id
+        LEFT JOIN binding_model_preferences preference ON preference.dispatch_prompt_id = p.id AND preference.binding_id = p.binding_id AND preference.binding_generation = b.generation AND preference.desired_model = p.model_name AND preference.desired_revision = p.model_revision
+        WHERE p.id = ? AND p.binding_id = ? AND p.updated_at = ?
+          AND p.state = 'running' AND p.dispatch_kind = 'turn' AND p.observation_state = 'not_started'
+          AND p.dispatched_at IS NULL AND p.transcript_turn_id IS NULL AND preference.prepared_operation_id IS NULL
+      `).get(candidate.promptId, candidate.bindingId, candidate.updatedAt) as { model_name: string | null; model_revision: number | null; preference_state: string | null; prepared_operation_id: string | null } | undefined;
+      if (!row) return false;
+      const hasModel = row.model_name !== null || row.model_revision !== null;
+      if (hasModel && row.preference_state !== "applying") return false;
+      const timestamp = now();
+      if (hasModel) this.context.database.prepare(`UPDATE binding_model_preferences SET state = 'pending', dispatch_prompt_id = NULL, prepared_operation_id = NULL, updated_at = ? WHERE dispatch_prompt_id = ? AND state = 'applying' AND prepared_operation_id IS NULL`).run(timestamp, candidate.promptId);
+      const result = this.context.database.prepare(`UPDATE prompt_jobs SET state = 'queued', observation_state = 'not_started', model_name = NULL, model_revision = NULL, error = NULL, updated_at = ? WHERE id = ? AND binding_id = ? AND updated_at = ? AND state = 'running' AND dispatch_kind = 'turn' AND observation_state = 'not_started' AND dispatched_at IS NULL AND transcript_turn_id IS NULL`).run(timestamp, candidate.promptId, candidate.bindingId, candidate.updatedAt);
+      if (Number(result.changes) !== 1) throw new Error("Stale prompt claim changed during recovery");
+      this.context.database.prepare(`UPDATE run_cards SET phase = 'queued', started_at = NULL, finished_at = NULL, notice = NULL, queue_position = 1, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?`).run(timestamp, candidate.promptId);
+      return true;
+    });
+  }
+
+  listDetachedPrompts(): PromptJob[] {
+    return (this.context.database.prepare("SELECT * FROM prompt_jobs WHERE state = 'running' AND observation_state = 'detached' ORDER BY created_at, id").all() as PromptRow[]).map(mapPrompt);
   }
 
   getPrompt(id: string): PromptJob | null {
