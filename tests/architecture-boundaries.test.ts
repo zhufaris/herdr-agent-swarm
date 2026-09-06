@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
@@ -69,6 +69,26 @@ describe("application composition boundaries", () => {
     ].map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
     expect(productionFiles).not.toContain("SqliteBindingStore");
     expect(productionFiles).not.toContain('from "../store/sqlite-store.js"');
+    expect(existsSync(new URL("../src/store/sqlite-store.ts", import.meta.url))).toBe(false);
+    const compatibility = readFileSync(new URL("./helpers/sqlite-binding-store.ts", import.meta.url), "utf8");
+    expect(compatibility).toContain("extends SqliteStoreKernel");
+  });
+
+  it("bounds renderer-bearing store ports to documented atomic transition seams", () => {
+    const ports = new URL("../src/domain/ports/", import.meta.url);
+    const rendererBearing = readdirSync(ports)
+      .filter((file) => file.endsWith(".ts"))
+      .filter((file) => /\brender[A-Z]\w*|\brender\??s*[:(]/.test(readFileSync(new URL(file, ports), "utf8")))
+      .sort();
+    expect(rendererBearing).toEqual([
+      "instance.ts",
+      "pane-operations.ts",
+      "prompt-acceptance.ts",
+      "prompt-run.ts",
+      "turn-control.ts",
+      "worker-card-display.ts",
+      "workflow.ts"
+    ]);
   });
 
   it("provides capability-oriented test construction without the compatibility facade", () => {
@@ -90,6 +110,48 @@ describe("application composition boundaries", () => {
     expect(`${run}\n${safety}`).toContain("ports/prompt-run.js");
     expect(routing).toContain("ports/prompt-acceptance.js");
     expect(`${run}\n${safety}\n${routing}`).not.toContain("ports/prompt.js");
+  });
+
+  it("keeps ordinary card replies on the Primary prompt path", () => {
+    const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const interactions = readFileSync(new URL("../src/coordinator/instance-interaction-workflow.ts", import.meta.url), "utf8");
+    expect(routing).not.toContain("worker-card-reply");
+    expect(interactions).not.toContain("handleWorkerCardReply");
+    expect(interactions).toContain("if (message.parentMessageId) return false");
+  });
+
+  it("keeps instance interaction as a router over focused use cases", () => {
+    const facade = readFileSync(new URL("../src/coordinator/instance-interaction-workflow.ts", import.meta.url), "utf8");
+    expect(facade).toContain("InstanceCommandActions");
+    expect(facade).toContain("WorkerCardActions");
+    expect(facade).toContain("WorkerLifecycleActions");
+    expect(facade).not.toContain("instance_plan_removal");
+    expect(facade).not.toContain("instance_create_submit");
+    expect(facade).not.toContain("decideWorkerCardBindingOwnership");
+  });
+
+  it("routes every binding runtime transition through one converger", () => {
+    const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
+    const converger = readFileSync(new URL("../src/coordinator/binding-runtime-converger.ts", import.meta.url), "utf8");
+    expect(reconciler).toContain("BindingRuntimeConverger");
+    expect(reconciler).toContain("this.converger.converge");
+    expect(reconciler).toContain("this.converger.orphan");
+    expect(reconciler).not.toContain("applyRuntimeObservation");
+    expect(reconciler).not.toContain("orphanBindingWithProjection");
+    expect(converger).toContain("applyRuntimeObservation");
+    expect(converger).toContain("orphanBindingWithProjection");
+  });
+
+  it("keeps attachment and startup recovery behind provisioning use cases", () => {
+    const facade = readFileSync(new URL("../src/coordinator/binding-provisioning-workflow.ts", import.meta.url), "utf8");
+    expect(facade).toContain("BindingAttachmentUseCase");
+    expect(facade).toContain("BindingStartupRecovery");
+    expect(facade).toContain("this.attachment.attach");
+    expect(facade).toContain("this.startupRecovery.recover");
+    expect(facade).not.toContain("ambiguous_pane_label");
+    expect(facade).not.toContain("discovered-binding-recovery-failed");
+    expect(facade).toContain("decideSelectedCheckpoint");
+    expect(facade).toContain("decidePaneCreatedCheckpoint");
   });
 
   it("keeps ordered startup recovery and diagnostics outside the inbound facade", () => {

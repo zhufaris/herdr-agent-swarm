@@ -178,20 +178,35 @@ constructs one internal `SqliteStoreKernel`, which creates exactly one
 Each workflow receives only
 the domain port it consumes, such as `PromptRunStore`, `InstanceStore`,
 `OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
-facade type. Tests that inspect migration fixtures may still construct
-`SqliteBindingStore` directly as an intentional compatibility seam.
+facade type. Legacy tests that inspect migration fixtures may still construct the
+test-only `SqliteBindingStore` from `tests/helpers/sqlite-binding-store.ts`. The
+compatibility name does not exist under `src/`, and new workflow tests use
+`createTestStoreBundle()` with named capabilities.
 
 All extracted SQLite capability modules share that context. Their transactional
 entry points use `SqliteContext.transaction()`, where only the outermost call
 issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`; nested Prompt, Worker-turn,
 projection, and outbox calls participate in the existing transaction. Capability
 modules never instantiate their own database connection. The compatibility
-facade is an implementation-free alias and is not part of production
-composition. The kernel only wires capability calls and exposes their existing
+facade is an implementation-free test alias and is not part of production
+source or composition. The kernel only wires capability calls and exposes their existing
 domain-port operations; business SQL lives in the capability modules. This
 keeps prompt/card/outbox and Worker
 turn/card/page/event changes atomic even though their implementations live in
 separate files.
+
+Some atomic store operations still accept a renderer callback or an already
+materialized card. These are bounded transition seams for prompt and Worker-turn
+acceptance, detached-prompt skip, queued-prompt cancellation, Worker card
+projection, card-context convergence, turn-control recovery, and startup renderer
+convergence. In each case the
+canonical state transition, projection version, and durable outbox row must be
+computed and committed in the same outer SQLite transaction. Moving rendering
+outside those calls would require rendering a speculative view or introduce a
+delivery gap. New delivery rows are nevertheless persisted with schema-versioned
+typed intent plus a pinned materialized payload, so retry does not rerender
+against mutable state. New renderer-bearing store APIs require an explicit atomic
+transition justification and an architecture-test allowlist update.
 
 ### Swarm command bounded context
 
