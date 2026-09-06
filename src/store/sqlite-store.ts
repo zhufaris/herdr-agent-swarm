@@ -45,6 +45,7 @@ import { SqliteInboundProjectStore } from "./sqlite/inbound-project-store.js";
 import { SqlitePaneOperationStore } from "./sqlite/pane-operation-store.js";
 import { SqliteBindingLifecycleStore } from "./sqlite/binding-store.js";
 import { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.js";
+import { SqliteInstanceOperationStore } from "./sqlite/instance-operation-store.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -78,6 +79,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   private readonly paneOperations: SqlitePaneOperationStore;
   private readonly bindings: SqliteBindingLifecycleStore;
   private readonly bindingProjections: SqliteBindingProjectionStore;
+  private readonly instanceOperations: SqliteInstanceOperationStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
@@ -125,6 +127,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.instances = new SqliteInstanceStore(this.context, {
       invalidateWorkerInstanceContexts: (instance, reason) => this.cardContexts.invalidateWorkerInstanceContexts(instance, reason)
     });
+    this.instanceOperations = new SqliteInstanceOperationStore(this.context, (id) => this.instances.getAgentInstance(id));
     this.cardContexts = new SqliteCardContextStore(this.context, {
       getAgentInstance: (id) => this.instances.getAgentInstance(id),
       getWorkspaceLease: (id) => this.instances.getWorkspaceLease(id),
@@ -366,27 +369,13 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] { return this.workerTurns.listInstanceEvents(instanceId, afterId); }
   countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number { return this.workerTurns.countPendingInstanceTurns(instanceId, expectedGeneration); }
   acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean } {
-    const timestamp = now();
-    const instance = this.getAgentInstance(input.instanceId);
-    if (!instance || instance.projectId !== input.projectId || instance.generation !== input.instanceGeneration) throw new Error("Instance generation changed before operation acceptance");
-    const inserted = this.database.prepare(`INSERT INTO instance_operations(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, payload, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-      .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, input.payload, timestamp, timestamp).changes === 1;
-    const row = this.database.prepare("SELECT * FROM instance_operations WHERE idempotency_key = ?").get(input.idempotencyKey) as Record<string, unknown> | undefined;
-    if (!row) throw new Error("Accepted instance operation could not be loaded");
-    const operation = this.mapInstanceOperation(row);
-    if (operation.instanceId !== input.instanceId || operation.kind !== input.kind || operation.payload !== input.payload) throw new Error("Idempotency key belongs to a different instance operation");
-    return { operation, inserted };
+    return this.instanceOperations.acceptInstanceOperation(input);
   }
   claimInstanceOperation(id: string, expectedGeneration: number): InstanceOperation | null {
-    const changed = this.database.prepare(`UPDATE instance_operations SET state = 'running', result = 'running', updated_at = ? WHERE id = ? AND instance_generation = ? AND state = 'accepted' AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_operations.instance_id AND i.generation = ?)`)
-      .run(now(), id, expectedGeneration, expectedGeneration);
-    if (changed.changes !== 1) return null;
-    return this.mapInstanceOperation(this.database.prepare("SELECT * FROM instance_operations WHERE id = ?").get(id) as Record<string, unknown>);
+    return this.instanceOperations.claimInstanceOperation(id, expectedGeneration);
   }
   updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null {
-    const changed = this.database.prepare("UPDATE instance_operations SET state = ?, result = ?, updated_at = ? WHERE id = ? AND instance_generation = ?").run(input.state, input.result, now(), input.id, input.expectedGeneration);
-    if (changed.changes !== 1) return null;
-    return this.mapInstanceOperation(this.database.prepare("SELECT * FROM instance_operations WHERE id = ?").get(input.id) as Record<string, unknown>);
+    return this.instanceOperations.updateInstanceOperation(input);
   }
   acceptTurnControlOperation(input: AcceptTurnControlOperationInput): { operation: TurnControlOperation; inserted: boolean } {
     if ((input.kind === "steer") !== (input.payload !== null)) throw new Error("Steer requires a payload and interrupt forbids one");
@@ -536,15 +525,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       target.logicalTurnId, target.owner.id, target.projectId, target.paneId, target.generation, target.agentSession.value, target.runtimeTurnId
     ));
   }
-  private mapInstanceOperation(row: Record<string, unknown>): InstanceOperation { return { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceOperation["kind"], payload: row.payload === null ? null : String(row.payload), state: String(row.state) as InstanceOperation["state"], result: row.result === null ? null : String(row.result), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
   getConversationTarget(chatId: string): { projectId: string; target: import("../domain/agent-instance.js").InstanceTarget } | null {
-    const row = this.database.prepare("SELECT project_id, target_kind, instance_id, instance_generation FROM conversation_targets WHERE chat_id = ?").get(chatId) as { project_id: string; target_kind: string; instance_id: string | null; instance_generation: number | null } | undefined;
-    if (!row) return null;
-    return { projectId: row.project_id, target: row.target_kind === "primary" ? { kind: "primary" } : { kind: "instance", instanceId: row.instance_id!, ...(row.instance_generation === null ? {} : { expectedGeneration: Number(row.instance_generation) }) } };
+    return this.instanceOperations.getConversationTarget(chatId);
   }
   setConversationTarget(input: { chatId: string; projectId: string; target: import("../domain/agent-instance.js").InstanceTarget }): void {
-    this.database.prepare(`INSERT INTO conversation_targets(chat_id, project_id, target_kind, instance_id, instance_generation, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET project_id = excluded.project_id, target_kind = excluded.target_kind, instance_id = excluded.instance_id, instance_generation = excluded.instance_generation, updated_at = excluded.updated_at`)
-      .run(input.chatId, input.projectId, input.target.kind, input.target.kind === "instance" ? input.target.instanceId : null, input.target.kind === "instance" ? input.target.expectedGeneration ?? null : null, now());
+    this.instanceOperations.setConversationTarget(input);
   }
   private insertInstanceEvent(projectId: string, instanceId: string, turnId: string | null, kind: InstanceEventKind, payload: Record<string, unknown>): void { this.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(projectId, instanceId, turnId, kind, JSON.stringify(payload), now()); }
   private mapInstanceTurn(row: Record<string, unknown> | undefined): InstanceTurn | null { return row ? { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceTurn["kind"], priority: String(row.priority ?? "normal") as InstanceTurn["priority"], text: String(row.text), state: String(row.state) as InstanceTurnState, result: row.result === null ? null : String(row.result), error: row.error === null ? null : String(row.error), parentTurnId: row.parent_turn_id === null || row.parent_turn_id === undefined ? null : String(row.parent_turn_id), sourceMessageId: row.source_message_id === null || row.source_message_id === undefined ? null : String(row.source_message_id), runtimeTurnId: row.runtime_turn_id === null || row.runtime_turn_id === undefined ? null : String(row.runtime_turn_id), runtimeTurnStartedAt: row.runtime_turn_started_at === null || row.runtime_turn_started_at === undefined ? null : String(row.runtime_turn_started_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : null; }
