@@ -125,7 +125,7 @@ The production implementation uses the following modules and seams.
 | `SqliteProjectionStore` / `SqliteCardContextStore` / `SqliteOutboxStore` | Card projections/pages, invalidation state, and durable delivery lifecycle | Internal transaction-participating seams over the shared context |
 | `SqliteInboundProjectStore` / `SqlitePaneOperationStore` | Durable inbound/project selection and pane operation capabilities | Workflow-specific atomic transitions, not table repositories |
 | `SqliteLeaseStore` / `SqliteApprovalStore` / `SqliteCommandIntentStore` / `SqliteSessionOperationStore` / `SqliteOperationsStore` | Lease/fencing, approvals, commands, session operations, diagnostics, audit, and recovery | Low-coupling capabilities over the same context and write fence |
-| `SqliteMigrations` | Latest-schema creation and ordered compatibility migration | Runs once during bundle construction before capability use |
+| `createLatestSchema` / `SqliteMigrations` | Latest-schema bootstrap and ordered compatibility migration | Separate modules run in order during kernel construction before capability use |
 
 ### Ubiquitous language and target module names
 

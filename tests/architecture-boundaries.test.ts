@@ -9,6 +9,15 @@ describe("application composition boundaries", () => {
     expect(reconciler).not.toContain('scheduler.wake({ kind: "prompt-ready", bindingId: binding.id })');
   });
 
+  it("keeps latest SQLite schema bootstrap separate from compatibility migrations", () => {
+    const schema = readFileSync(new URL("../src/store/sqlite/schema.ts", import.meta.url), "utf8");
+    const migrations = readFileSync(new URL("../src/store/sqlite/migrations.ts", import.meta.url), "utf8");
+    expect(schema).toContain("export function createLatestSchema");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS schema_migrations");
+    expect(migrations).toContain("createLatestSchema(this.context)");
+    expect(migrations).not.toContain("CREATE TABLE IF NOT EXISTS schema_migrations");
+  });
+
   it("keeps concrete workflow and adapter construction in the composition factory", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
