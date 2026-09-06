@@ -180,6 +180,34 @@ The response must contain `"status":"ready"`. If a different
 proves that the process responds; `/ready` also checks the database, project
 registry, Herdr, Lark, lease, and instance runtime.
 
+### Update a source installation
+
+Switch to the intended committed revision, refresh locked dependencies, rebuild,
+and install a new immutable release:
+
+```bash
+git pull --ff-only
+npm ci
+npm run build
+./install.sh
+npm run swarm:status
+npm run swarm:restart
+```
+
+Inspect status before restarting. An ordinary restart refuses to interrupt
+running or queued prompts, active instance work, or pending delivery work. Wait
+for that work to drain whenever possible. For an intentional observer handoff,
+use the explicit forced form:
+
+```bash
+npm run swarm:restart -- --force
+```
+
+The forced restart detaches observers and recovers the existing durable work
+without replay; it is not a general-purpose way to bypass workload safety. The
+restart succeeds only after the replacement process reports the expected build
+identity and readiness.
+
 ## Install from a GitHub Release
 
 Tagged releases provide a prebuilt Linux x64 archive named
@@ -213,34 +241,6 @@ it does not rebuild the source or start the service. Existing configuration and
 state directories are retained during an upgrade. Inspect status before
 restarting an active installation, because the normal restart safety gate refuses
 to interrupt queued or running work.
-
-### Update a source installation
-
-Switch to the intended committed revision, refresh locked dependencies, rebuild,
-and install a new immutable release:
-
-```bash
-git pull --ff-only
-npm ci
-npm run build
-./install.sh
-npm run swarm:status
-npm run swarm:restart
-```
-
-Inspect status before restarting. An ordinary restart refuses to interrupt
-running or queued prompts, active instance work, or pending delivery work. Wait
-for that work to drain whenever possible. For an intentional observer handoff,
-use the explicit forced form:
-
-```bash
-npm run swarm:restart -- --force
-```
-
-The forced restart detaches observers and recovers the existing durable work
-without replay; it is not a general-purpose way to bypass workload safety. The
-restart succeeds only after the replacement process reports the expected build
-identity and readiness.
 
 ## Install as a standalone service
 
