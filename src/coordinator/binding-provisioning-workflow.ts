@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderAttachStatusCard, renderMessageRejectedCard, renderProjectEntryCard, renderProjectSelectionStatusCard, renderProjectSelectorCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort, LarkPort } from "../domain/ports/external.js";
 import type { ImmediateOutboundDispatcher, OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { BindingProvisioningStore } from "../domain/ports/binding.js";
+import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { createPrimaryPaneToken } from "../domain/pane-title.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
@@ -44,6 +44,7 @@ interface Options {
   };
   wakeRetiredPaneCleanup?: () => void;
   logger: Logger;
+  presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus" | "attachStatus" | "mainCard" | "requestRejected">;
 }
 
 interface PrimaryToolConfiguration { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] }
@@ -83,7 +84,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     this.options.store.createProjectSelection({
       id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId,
       rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText,
-      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: renderProjectSelectorCard({ selectionId, projects: this.options.config.projects })
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: this.options.presentation.projectSelector({ selectionId, projects: this.options.config.projects })
     });
     this.options.outboundWork.wake();
     try { await this.options.immediateOutbound.requestScan(); }
@@ -102,7 +103,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     store.audit({ actorOpenId: action.operatorOpenId, action: "project.select", target: `${selectionId}:${projectId}`, outcome: claim.outcome });
     if (!claim.selection || claim.outcome === "missing" || claim.outcome === "invalid" || claim.outcome === "unauthorized" || claim.outcome === "processing") return null;
     if (claim.outcome === "expired") {
-      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:expired`, renderProjectSelectionStatusCard({ status: "expired", message: "请重新发送 /swarm new。" }));
+      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:expired`, this.options.presentation.projectSelectionStatus({ status: "expired", message: "请重新发送 /swarm new。" }));
       return null;
     }
     const selection = claim.selection;
@@ -117,7 +118,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     }
     const project = this.projectsById.get(projectId);
     if (!project) return null;
-    await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:processing`, renderProjectSelectionStatusCard({ status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) }));
+    await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:processing`, this.options.presentation.projectSelectionStatus({ status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) }));
     try {
       const binding = await this.createSelectedProject(selection, project, true);
       const completedSelection = store.completeProjectSelection(selection.id, binding.id);
@@ -126,7 +127,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       return { binding, selection: completedSelection };
     } catch (error) {
       store.pauseProjectSelection(selection.id, errorMessage(error));
-      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:recoverable`, renderProjectSelectionStatusCard({
+      await outbound.enqueueCardUpdate(null, action.messageId, `selection:${selectionId}:recoverable`, this.options.presentation.projectSelectionStatus({
         status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: provisioningRecoveryMessage(error)
       }));
       logger.error({ event: "project-selection-paused", err: safeLogError(error), selectionId, projectId, outcome: "retry_on_restart" }, "project selection paused at a recoverable checkpoint");
@@ -162,7 +163,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const availabilityEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
     const initialView = reduceTopicView(reduceTopicView(initialTopicView(binding.id), createdEvent), availabilityEvent);
     store.saveTopicView(initialView);
-    const topic = await lark.createTopic(renderProjectEntryCard(initialView), binding.id);
+    const topic = await lark.createTopic(this.options.presentation.mainCard(initialView), binding.id);
     store.recordBridgeMessage(topic.rootMessageId);
     store.saveTopicView({ ...initialView, deliveredVersion: initialView.viewVersion });
     binding = store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId });
@@ -215,7 +216,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       await this.publish(replacement.id, "BindingCreated", "lark", { title, workspaceId: replacement.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId });
       await this.publish(replacement.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: replacement.topicId! });
       await this.publish(replacement.id, "PrimaryToolAvailabilityChanged", "bridge", { available: true, reason: null });
-      await this.reply(replacement.rootMessageId!, renderMessageRejectedCard(`已开启新会话：${pane.paneId}。旧 Herdr pane ${handoff.previous.paneId ?? "(unknown)"} 将在确认空闲后安全关闭。`));
+      await this.reply(replacement.rootMessageId!, this.options.presentation.requestRejected(`已开启新会话：${pane.paneId}。旧 Herdr pane ${handoff.previous.paneId ?? "(unknown)"} 将在确认空闲后安全关闭。`));
       logger.info({ event: "binding-reset-completed", previousBindingId: handoff.previous.id, bindingId: replacement.id, paneId: pane.paneId, outcome: "active" }, "reset Lark topic to a new Herdr session");
       return true;
     } catch (error) {
@@ -357,7 +358,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       }
       const activatedEvent = createBridgeEvent(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: "pending" });
       const activeView = reduceTopicView(store.loadTopicView(current.id) ?? initialTopicView(current.id), activatedEvent);
-      if (current.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(renderProjectEntryCard(activeView), current.id); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); current = store.updateBindingMetadata(current.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); current = store.transitionBinding(current.id, { type: "thread_created" }); }
+      if (current.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(this.options.presentation.mainCard(activeView), current.id); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); current = store.updateBindingMetadata(current.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); current = store.transitionBinding(current.id, { type: "thread_created" }); }
       if (current.provisioningCheckpoint === "thread_created") current = store.transitionBinding(current.id, { type: "activate" });
       await this.publish(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: current.topicId! });
       await this.publish(current.id, "PrimaryToolAvailabilityChanged", "bridge", { available: true, reason: null }); return current;
@@ -374,12 +375,12 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
         const binding = store.getBinding(selection.bindingId);
         if (binding?.lifecycle === "provisioning") store.transitionBinding(binding.id, { type: "provisioning_failed" });
         store.failProjectSelection(selection.id, error.message);
-        if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:failed`, renderProjectSelectionStatusCard({ status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: error.message }));
+        if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:failed`, this.options.presentation.projectSelectionStatus({ status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: error.message }));
         logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "failed_missing_pane" }, "project provisioning cannot resume because its pane no longer exists");
         return;
       }
       store.pauseProjectSelection(selection.id, errorMessage(error));
-      if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:recoverable`, renderProjectSelectionStatusCard({ status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) }));
+      if (selection.selectorMessageId) await outbound.enqueueCardUpdate(null, selection.selectorMessageId, `selection:${selection.id}:recoverable`, this.options.presentation.projectSelectionStatus({ status: "recoverable", projectName: project.displayName, spaceName: projectSpaceName(project), message: errorMessage(error) }));
       logger.error({ event: "project-selection-recovery-failed", err: safeLogError(error), selectionId: selection.id, bindingId: selection.bindingId, outcome: "retry_on_restart" }, "project provisioning remains recoverable");
     }
   }
@@ -387,7 +388,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async recoverDiscoveredBinding(binding: Binding): Promise<void> {
     if (!binding.paneId || !binding.projectId) return;
     const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; if (!project) return;
-    try { this.options.store.revokeBindingPrimaryToolCapability(binding.id, binding.generation); const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, binding.paneId); const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId }); const unavailableEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE }); const view = reduceTopicView(reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent), unavailableEvent); const topic = await this.options.lark.createTopic(renderProjectEntryCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); this.options.store.saveTopicView({ ...view, deliveredVersion: view.viewVersion }); let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" }); await this.options.lifecycleEvents.publish(createdEvent); await this.options.lifecycleEvents.publish(unavailableEvent); await this.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning"); }
+    try { this.options.store.revokeBindingPrimaryToolCapability(binding.id, binding.generation); const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, binding.paneId); const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId }); const unavailableEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE }); const view = reduceTopicView(reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent), unavailableEvent); const topic = await this.options.lark.createTopic(this.options.presentation.mainCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); this.options.store.saveTopicView({ ...view, deliveredVersion: view.viewVersion }); let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" }); await this.options.lifecycleEvents.publish(createdEvent); await this.options.lifecycleEvents.publish(unavailableEvent); await this.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning"); }
     catch (error) { this.options.logger.error({ event: "discovered-binding-recovery-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "retry_on_restart" }, "discovered-pane provisioning remains recoverable"); }
   }
 
@@ -427,13 +428,13 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     await this.publish(handoff.replacement.id, "BindingActivated", "lark", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: handoff.replacement.topicId! });
     return handoff.replacement;
   }
-  private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> { await this.options.outbound.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, renderProjectSelectionStatusCard({ status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId } : {}) })); }
+  private async publishSelectionSuccess(selectionId: string, selectorMessageId: string, project: ProjectConfig, binding: Binding): Promise<void> { await this.options.outbound.enqueueCardUpdate(null, selectorMessageId, `selection:${selectionId}:completed`, this.options.presentation.projectSelectionStatus({ status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId } : {}) })); }
   private async publishAttachSuccess(message: IncomingLarkMessage, binding: Binding, spaceName: string, alreadyAttached: boolean, resumeRequired = false, toolsUnavailable = !this.options.store.hasBindingPrimaryToolCapability(binding.id, binding.generation)): Promise<void> {
     if (!binding.paneId) return;
     if (toolsUnavailable) await this.publish(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
-    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`, renderAttachStatusCard({ spaceName, paneId: binding.paneId, ...(binding.rootMessageId ? { bindingId: binding.id } : {}), alreadyAttached, resumeRequired }));
+    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`, this.options.presentation.attachStatus({ spaceName, paneId: binding.paneId, ...(binding.rootMessageId ? { bindingId: binding.id } : {}), alreadyAttached, resumeRequired }));
   }
-  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }
+  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
   private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
 }

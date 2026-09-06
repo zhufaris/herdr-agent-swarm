@@ -4,6 +4,7 @@ import { join } from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { LarkPort } from "../src/domain/ports.js";
 import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
@@ -45,7 +46,7 @@ describe("Answer page crash recovery", () => {
     for (let step = 0; step < 20; step += 1) {
       store = new SqliteBindingStore(databasePath);
       const dispatcher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
-      const workflow = new AnswerPageWorkflow(store, () => {}, pino({ enabled: false }));
+      const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
       await workflow.converge("p1");
       await dispatcher.requestScan(true);
       const pages = store.listAnswerPages("p1");

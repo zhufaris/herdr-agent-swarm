@@ -1,4 +1,4 @@
-import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, FailureSummary, HerdrAgentSession, IncomingLarkMessage, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary } from "../types.js";
+import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, IncomingLarkMessage, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
@@ -54,8 +54,14 @@ export interface CardInteractionStore {
   loadTopicView(bindingId: string): TopicViewState | null;
 }
 
+export interface AdoptExternalTurnInput {
+  bindingId: string; expectedGeneration: number; expectedPaneId: string; expectedSession: HerdrAgentSession;
+  turnId: string; startedAt: string; requestText: string; externalPromptId: string; externalMessageId: string;
+  supersede?: ExternalTurnSupersessionFence; externalView: RunCardView; answerCardFor(view: RunCardView): object;
+}
+
 export interface ExternalTurnObservationStore {
-  adoptExternalTurn(input: { bindingId: string; expectedGeneration: number; expectedPaneId: string; expectedSession: HerdrAgentSession; turnId: string; startedAt: string; requestText: string; externalPromptId: string; externalMessageId: string; supersede?: import("../types.js").ExternalTurnSupersessionFence; externalView: RunCardView; answerCardFor(view: RunCardView): object }): ExternalTurnAdoption;
+  adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption;
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding;
   countPendingPrompts(bindingId: string): number;
   failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void;

@@ -1,7 +1,5 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
-import { renderWorkerMainCard } from "../cards/worker-main-card.js";
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { CardContextInvalidation } from "../domain/card-context-invalidation.js";
 import type { CardContextProjectionStore } from "../domain/ports/card-context.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -13,7 +11,7 @@ export class CardContextRebuilder {
   private stopping = false;
   private unsubscribe: (() => void) | null = null;
 
-  constructor(private readonly store: CardContextProjectionStore, private readonly wakeOutbound: () => void, private readonly logger: Pick<Logger, "debug" | "error">, private readonly work?: OutboundWorkNotifier) {}
+  constructor(private readonly store: CardContextProjectionStore, private readonly wakeOutbound: () => void, private readonly logger: Pick<Logger, "debug" | "error">, private readonly presentation: Pick<ApplicationPresentation, "workerMain" | "workerTurn" | "mainCard" | "answerCard">, private readonly work?: OutboundWorkNotifier) {}
 
   start(intervalMs: number): void {
     if (this.timer) return;
@@ -52,7 +50,7 @@ export class CardContextRebuilder {
   }
 
   private project(invalidation: CardContextInvalidation): boolean {
-    const renderers = { workerMain: renderWorkerMainCard, workerTask: renderWorkerTurnCard, primaryMain: renderProjectEntryCard, primaryAnswer: renderRequestAnswerCard };
+    const renderers = { workerMain: this.presentation.workerMain, workerTask: this.presentation.workerTurn, primaryMain: this.presentation.mainCard, primaryAnswer: this.presentation.answerCard };
     const outcome = this.store.projectCardContext(invalidation, renderers);
     this.logger.debug({ event: "card-context-rebuilt", targetKind: invalidation.targetKind, targetId: invalidation.targetId, targetGeneration: invalidation.targetGeneration, dependencyRevision: invalidation.requestedDependencyRevision, outcome }, "rebuilt card context projection");
     return outcome === "reserved";

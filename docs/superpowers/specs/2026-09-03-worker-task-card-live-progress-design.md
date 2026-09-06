@@ -80,4 +80,3 @@ Focused tests prove that:
 5. The rendered Worker card includes visible status/progress and preserves
    redaction, output pagination, and existing View Worker navigation.
 6. Existing lifecycle, completion, recovery, and full-suite tests remain green.
-

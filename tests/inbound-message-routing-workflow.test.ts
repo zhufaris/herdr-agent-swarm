@@ -2,6 +2,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { InboundMessageRoutingWorkflow } from "../src/coordinator/inbound-message-routing-workflow.js";
 import { PermanentInboundMessageRejection } from "../src/domain/permanent-inbound-message-rejection.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("routes an active-topic reply to an exact Worker Task Card before the Primary FIFO", async () => {
@@ -17,7 +18,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, logger: pino({ enabled: false })
+      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-worker-reply", messageId: "message-worker-reply", parentMessageId: "worker-task-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
 
@@ -36,7 +37,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, logger: pino({ enabled: false })
+      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-primary-reply", messageId: "message-primary-reply", parentMessageId: "primary-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue primary", mentionsBot: true, isRootMessage: false };
 
@@ -55,7 +56,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, logger: pino({ enabled: false })
+      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = {
       eventId: "event-flattened-card-reply", messageId: "text-created-from-task-card-reply",
@@ -75,7 +76,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
       store: { findBindingByLarkScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null) },
-      outbound, instanceInteractions, logger: pino({ enabled: false })
+      outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "/to test continue", mentionsBot: false, isRootMessage: true };
 

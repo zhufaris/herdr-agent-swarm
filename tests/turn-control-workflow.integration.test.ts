@@ -3,6 +3,7 @@ import { TurnControlWorkflow } from "../src/coordinator/turn-control-workflow.js
 import type { HerdrPane } from "../src/domain/types.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -22,7 +23,7 @@ function setupWorker(
   store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
   const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1", ...overrides };
   const getPane = vi.fn(async () => pane);
-  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent: steer, interruptAgent: interrupt }, idFactory: () => "control-1", maxQueueDepth });
+  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent: steer, interruptAgent: interrupt }, idFactory: () => "control-1", maxQueueDepth, presentation: applicationPresentation });
   return { workflow, getPane, steer, interrupt, worker, pane };
 }
 
@@ -38,7 +39,7 @@ describe("TurnControlWorkflow", () => {
     store.claimPromptTranscriptTurn({ promptId: "prompt-1", bindingId: "b1", turnId: "runtime-1", startedAt: "2026-09-03T00:00:00.100Z" });
     const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1" };
     const steerAgent = vi.fn(async () => ({ status: "delivered" as const, operationId: "native-1", turnId: "runtime-1" }));
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane, steerAgent }, idFactory: () => "control-primary" });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane, steerAgent }, idFactory: () => "control-primary", presentation: applicationPresentation });
 
     await expect(workflow.steer({ owner: { kind: "binding", id: "b1" }, actor: { kind: "human", userId: "u1" }, text: "focus", idempotencyKey: "primary-steer-1" })).resolves.toMatchObject({ operation: { state: "delivered", target: { owner: { kind: "binding", id: "b1" }, logicalTurnId: "prompt-1", runtimeTurnId: "runtime-1" } } });
     expect(steerAgent).toHaveBeenCalledOnce();
@@ -54,7 +55,7 @@ describe("TurnControlWorkflow", () => {
     }
     const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
     const wakePrimary = vi.fn();
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-1", wakePrimary });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-1", wakePrimary, presentation: applicationPresentation });
     const command = { owner: { kind: "binding" as const, id: "b1" }, actor: { kind: "human" as const, userId: "u1" }, text: "urgent", idempotencyKey: "steer-idle-1" };
 
     await expect(workflow.steer(command)).resolves.toEqual({ mode: "priority", logicalTurnId: "priority-1", duplicate: false });
@@ -69,7 +70,7 @@ describe("TurnControlWorkflow", () => {
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, lastAgentState: "idle", agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
     let id = 0;
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => `priority-${++id}`, maxQueueDepth: 2 });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => `priority-${++id}`, maxQueueDepth: 2, presentation: applicationPresentation });
     const command = (key: string) => ({ owner: { kind: "binding" as const, id: "b1" }, actor: { kind: "human" as const, userId: "u1" }, text: key, idempotencyKey: key });
 
     await workflow.steer(command("first"));
@@ -101,7 +102,7 @@ describe("TurnControlWorkflow", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
     const wakeInstance = vi.fn();
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-worker", wakeInstance });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-worker", wakeInstance, presentation: applicationPresentation });
 
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "urgent", idempotencyKey: "worker-steer-idle" }))
       .resolves.toEqual({ mode: "priority", logicalTurnId: "priority-worker", duplicate: false });
@@ -115,7 +116,7 @@ describe("TurnControlWorkflow", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     store.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "queued" });
     const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: null };
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-worker", maxQueueDepth: 1 });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "priority-worker", maxQueueDepth: 1, presentation: applicationPresentation });
 
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "urgent", idempotencyKey: "priority" })).rejects.toThrow(/queue is full/);
   });
@@ -241,7 +242,7 @@ describe("TurnControlWorkflow", () => {
     const getPane = vi.fn().mockResolvedValueOnce(working).mockResolvedValueOnce(working).mockResolvedValueOnce({ ...working, agentState: "idle", activeTurnId: null });
     const steerAgent = vi.fn(async () => ({ status: "not-active" as const, reason: "turn completed" }));
     let id = 0;
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent }, idFactory: () => `generated-${++id}`, maxQueueDepth: 20 });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane, steerAgent }, idFactory: () => `generated-${++id}`, maxQueueDepth: 20, presentation: applicationPresentation });
 
     const outcome = await workflow.steer({ owner: { kind: "binding", id: "b1" }, actor: { kind: "human", userId: "u1" }, text: "continue safely", idempotencyKey: "primary-fallback" });
     expect(outcome).toMatchObject({ mode: "priority" });

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createQueuedRunCard, type RunCardView } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { QueueFeedbackProjector } from "../src/events/queue-feedback-projector.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 function event(type: "PromptQueued" | "TurnStarted" | "TurnCompleted" | "TurnFailed" | "PromptCancelled" | "RunQueuePositionChanged", bindingId = "b1") {
   const payload = type === "PromptQueued" ? { promptId: "p1", queueDepth: 1, actorOpenId: "u1" }
@@ -22,7 +23,7 @@ describe("QueueFeedbackProjector", () => {
       projectQueuedRunCards: vi.fn()
     };
     const bus = new BridgeEventBus();
-    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: pino({ enabled: false }) });
+    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: pino({ enabled: false }), presentation: primaryPresentation });
     projector.start(bus);
 
     await bus.publish(event(type));
@@ -55,7 +56,7 @@ describe("QueueFeedbackProjector", () => {
     const setIntervalFn = vi.fn((callback: () => void) => { timers.push(callback); return interval; });
     const clearIntervalFn = vi.fn();
     const bus = new BridgeEventBus();
-    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: outboundWork as never, logger: pino({ enabled: false }), now: () => clock, intervalMs: 30_000, setIntervalFn: setIntervalFn as never, clearIntervalFn: clearIntervalFn as never });
+    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: outboundWork as never, logger: pino({ enabled: false }), presentation: primaryPresentation, now: () => clock, intervalMs: 30_000, setIntervalFn: setIntervalFn as never, clearIntervalFn: clearIntervalFn as never });
     projector.start(bus);
 
     for (const type of ["PromptQueued", "TurnStarted", "TurnCompleted", "TurnFailed", "RunQueuePositionChanged"] as const) await bus.publish(event(type));
@@ -91,7 +92,7 @@ describe("QueueFeedbackProjector", () => {
     const promptWake = vi.fn();
     const interval = { unref: vi.fn() };
     const clearIntervalFn = vi.fn();
-    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: outboundWork as never, logger: pino({ enabled: false }), now: () => "2026-08-29T12:00:00.000Z", intervalMs: 30_000, setIntervalFn: (() => interval) as never, clearIntervalFn: clearIntervalFn as never });
+    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: outboundWork as never, logger: pino({ enabled: false }), presentation: primaryPresentation, now: () => "2026-08-29T12:00:00.000Z", intervalMs: 30_000, setIntervalFn: (() => interval) as never, clearIntervalFn: clearIntervalFn as never });
 
     await projector.converge();
     expect(store.projectQueuedRunCards).toHaveBeenCalledOnce();

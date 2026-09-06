@@ -1,7 +1,6 @@
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
+import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
-import { redactSecrets } from "../runtime/redact-secrets.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 
 interface Options {
@@ -9,6 +8,7 @@ interface Options {
   transcriptReader: TraexTranscriptReaderPort;
   wakeInstance(instanceId: string): void;
   wakeOutbound(): void;
+  presentation: Pick<WorkerPresentation, "workerTurn" | "safeWorkerOutput">;
 }
 export interface WorkerTurnWatch { stop(): Promise<void> }
 const POLL_INTERVAL_MS = 250;
@@ -31,15 +31,15 @@ export class WorkerTurnObserver {
     if (lifecycle && (lifecycle.turnId !== turn.runtimeTurnId || lifecycle.startedAt !== turn.runtimeTurnStartedAt)) return;
     let view = this.options.store.loadWorkerTurnCard(turnId);
     const expected = { expectedRuntimeTurnId: turn.runtimeTurnId, expectedRuntimeTurnStartedAt: turn.runtimeTurnStartedAt! };
-    const delta = safeOutput(observation.answerDelta);
+    const delta = this.safeOutput(observation.answerDelta);
     const chunks = view ? null : this.headlessChunks.get(turnId) ?? [];
     if (delta && chunks) { chunks.push(delta); this.headlessChunks.set(turnId, chunks); }
-    const accumulated = safeOutput(view ? (delta ? [view.answer, delta].filter(Boolean).join("\n\n") : view.answer) : chunks!.join("\n\n"));
+    const accumulated = this.safeOutput(view ? (delta ? [view.answer, delta].filter(Boolean).join("\n\n") : view.answer) : chunks!.join("\n\n"));
     const occurredAt = new Date().toISOString();
-    const progressEvents = observedProgress(observation, occurredAt);
-    const statusTitle = observation.mainStatus?.statusTitle === undefined ? undefined : safeOutput(observation.mainStatus.statusTitle);
+    const progressEvents = observedProgress(observation, occurredAt, (value) => this.safeOutput(value));
+    const statusTitle = observation.mainStatus?.statusTitle === undefined ? undefined : this.safeOutput(observation.mainStatus.statusTitle);
     if (view && lifecycle?.state === "active" && ["queued", "preparing", "dispatch-uncertain"].includes(view.phase)) {
-      view = this.options.store.applyInstanceTurnProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "running", occurredAt }, render: renderWorkerTurnCard });
+      view = this.options.store.applyInstanceTurnProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "running", occurredAt }, render: this.options.presentation.workerTurn });
       if (view) this.options.wakeOutbound();
     }
     if (lifecycle?.state === "aborted") {
@@ -47,16 +47,16 @@ export class WorkerTurnObserver {
         ? "TraeX turn was interrupted by a human operator"
         : `TraeX turn was aborted${lifecycle.reason ? `: ${lifecycle.reason}` : ""}`;
       const projected = view
-        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled", change: { type: "cancelled", occurredAt, notice }, render: renderWorkerTurnCard })
+        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled", change: { type: "cancelled", occurredAt, notice }, render: this.options.presentation.workerTurn })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled" });
       this.headlessChunks.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }
       return;
     }
     if (lifecycle?.state === "completed") {
-      const answer = safeOutput(lifecycle.finalAnswer ?? accumulated);
+      const answer = this.safeOutput(lifecycle.finalAnswer ?? accumulated);
       const projected = view
-        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: renderWorkerTurnCard })
+        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: this.options.presentation.workerTurn })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed" });
       this.headlessChunks.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }
@@ -64,7 +64,7 @@ export class WorkerTurnObserver {
     }
     if ((delta || progressEvents.length > 0 || statusTitle !== undefined) && view) {
       const projected = this.options.store.applyInstanceTurnProjection({
-        turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "output", occurredAt, answer: accumulated, ...(statusTitle === undefined ? {} : { statusTitle }), progressEvents }, render: renderWorkerTurnCard
+        turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "output", occurredAt, answer: accumulated, ...(statusTitle === undefined ? {} : { statusTitle }), progressEvents }, render: this.options.presentation.workerTurn
       });
       if (projected) this.options.wakeOutbound();
     }
@@ -131,23 +131,20 @@ export class WorkerTurnObserver {
     const view = this.options.store.loadWorkerTurnCard(turnId);
     if (current && view && !["completed", "failed", "cancelled"].includes(current.state)) {
       const occurredAt = new Date().toISOString();
-      const answer = safeOutput(view.answer);
+      const answer = this.safeOutput(view.answer);
       const projected = this.options.store.transitionInstanceTurnWithProjection({
         turnId, expectedGeneration: current.instanceGeneration, expectedRuntimeTurnId: current.runtimeTurnId!, expectedRuntimeTurnStartedAt: current.runtimeTurnStartedAt!,
-        state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: renderWorkerTurnCard
+        state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: this.options.presentation.workerTurn
       });
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(current.instanceId); }
     }
   }
-}
-
-function safeOutput(value: string): string {
-  return redactSecrets(value).slice(0, 64 * 1024);
+  private safeOutput(value: string): string { return this.options.presentation.safeWorkerOutput(value); }
 }
 function hasObservation(observation: TraexTranscriptObservation): boolean {
   return Boolean(observation.turnId || observation.freshTurnStart || observation.answerDelta || observation.toolActivities?.length || observation.mainStatus || observation.turnLifecycle);
 }
-function observedProgress(observation: TraexTranscriptObservation, occurredAt: string): RunProgressEvent[] {
+function observedProgress(observation: TraexTranscriptObservation, occurredAt: string, safeOutput: (value: string) => string): RunProgressEvent[] {
   const tools = (observation.toolActivities ?? []).map((event) => ({ ...event, label: safeOutput(event.label), occurredAt }));
   const plans = (observation.mainStatus?.planSteps ?? []).map((step) => ({ key: `plan:${step.key}`, kind: "step" as const, label: safeOutput(step.label), state: step.state, occurredAt }));
   return [...tools, ...plans];

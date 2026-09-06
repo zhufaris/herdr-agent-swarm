@@ -1,9 +1,7 @@
 import type { Logger } from "pino";
-import { renderWorkerTurnCard, workerTurnProgressContent } from "../cards/worker-turn-card.js";
-import { workerTurnElementId, workerTurnProgressElementId, workerTurnStreamContent } from "../domain/worker-turn-card-view.js";
+import type { WorkerPresentation } from "../domain/ports/presentation.js";
+import { workerTurnElementId, workerTurnProgressElementId } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnCardStore } from "../domain/ports/projection.js";
-import { renderLarkMarkdownPage } from "../runtime/lark-markdown.js";
-import { redactSecrets } from "../runtime/redact-secrets.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 
 const PAGE_LIMIT = 9_000;
@@ -13,7 +11,7 @@ export interface WorkerTurnCardWorkflowPort { converge(turnId: string): Promise<
 export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
   private readonly tails = new Map<string, Promise<void>>();
 
-  constructor(private readonly store: WorkerTurnCardStore, private readonly wakeOutbound: () => void, private readonly logger?: Logger) {}
+  constructor(private readonly store: WorkerTurnCardStore, private readonly wakeOutbound: () => void, private readonly presentation: Pick<WorkerPresentation, "workerTurn" | "workerTurnProgress" | "workerTurnPage">, private readonly logger?: Logger) {}
 
   converge(turnId: string): Promise<void> {
     const previous = this.tails.get(turnId) ?? Promise.resolve();
@@ -37,14 +35,14 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
       || (["active", "finished"].includes(currentPage.state) && view.phase === "completed")
     );
     if (shouldHydrate && currentPage.cardId && currentPage.messageId) {
-      const hydration = this.store.reserveWorkerTurnCardHydration({ turnId, pageIndex: currentPage.pageIndex, cardId: currentPage.cardId, messageId: currentPage.messageId, card: renderWorkerTurnCard(view, currentPage) });
+      const hydration = this.store.reserveWorkerTurnCardHydration({ turnId, pageIndex: currentPage.pageIndex, cardId: currentPage.cardId, messageId: currentPage.messageId, card: this.presentation.workerTurn(view, currentPage) });
       if (hydration === "reserved") this.wakeOutbound();
       if (hydration === "stale") return;
     }
     const page = currentPage?.state === "active" ? currentPage : null;
     if (!page?.cardId) return;
     if (view.statusTitle || view.progressEvents.length > 0) {
-      const progress = workerTurnProgressContent(view);
+      const progress = this.presentation.workerTurnProgress(view);
       const progressOutcome = this.store.reserveWorkerTurnProgress({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: workerTurnProgressElementId(turnId, page.pageIndex), content: progress });
       if (progressOutcome === "reserved") {
         this.wakeOutbound();
@@ -53,18 +51,17 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
       if (progressOutcome === "stale") return;
     }
     if (!["completed", "failed", "cancelled"].includes(view.phase)) return;
-    const content = redactSecrets(workerTurnStreamContent(view));
-    const rendered = renderLarkMarkdownPage(content, page.pageStart, PAGE_LIMIT);
+    const rendered = this.presentation.workerTurnPage(view, page.pageStart, PAGE_LIMIT);
     const facts = this.store.getWorkerTurnCardDeliveryFacts(turnId, page.pageIndex);
     if (facts.continuationPending || facts.latestContent?.state === "pending" || facts.latestContent?.state === "dead_letter") return;
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
     if (view.phase === "completed" && facts.latestContent?.content !== rendered.page && rendered.page) {
-      outcome = this.store.reserveWorkerTurnContent({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: rendered.page, sourceEnd: rendered.nextPageStart ?? content.length });
+      outcome = this.store.reserveWorkerTurnContent({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: rendered.page, sourceEnd: rendered.nextPageStart ?? rendered.sourceLength });
     } else if (view.phase === "completed" && rendered.nextPageStart !== null) {
       const nextPageIndex = page.pageIndex + 1;
       const nextElementId = workerTurnElementId(turnId, nextPageIndex);
       const nextPage = { id: `${turnId}:${nextPageIndex}`, turnId, pageIndex: nextPageIndex, pageStart: rendered.nextPageStart, elementId: nextElementId, messageId: null, cardId: null, state: "creating" as const, sequence: 0, createdAt: view.updatedAt, updatedAt: view.updatedAt };
-      outcome = this.store.reserveWorkerTurnContinuation({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, summary: `结果将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex, nextPageStart: rendered.nextPageStart, nextElementId, rootMessageId: view.rootMessageId, viewVersion: view.viewVersion, card: renderWorkerTurnCard({ ...view, pageIndex: nextPageIndex, pageStart: rendered.nextPageStart, elementId: nextElementId }, nextPage) });
+      outcome = this.store.reserveWorkerTurnContinuation({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, summary: `结果将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex, nextPageStart: rendered.nextPageStart, nextElementId, rootMessageId: view.rootMessageId, viewVersion: view.viewVersion, card: this.presentation.workerTurn({ ...view, pageIndex: nextPageIndex, pageStart: rendered.nextPageStart, elementId: nextElementId }, nextPage) });
     } else if (["completed", "failed", "cancelled"].includes(view.phase) && !facts.finishPending) {
       outcome = this.store.reserveWorkerTurnFinish({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, summary: view.phase === "completed" ? "Completed" : "Finished" });
     }

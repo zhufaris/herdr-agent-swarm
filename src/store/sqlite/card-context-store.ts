@@ -101,6 +101,11 @@ export class SqliteCardContextStore {
     ]);
   }
 
+  invalidateBindingWorkerContexts(bindingId: string, reason: string): void {
+    const workers = this.database.prepare("SELECT id, worker_session_generation FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? ORDER BY created_at, id").all(bindingId) as Array<{ id: string; worker_session_generation: number }>;
+    this.invalidateCardContexts(workers.map((worker) => ({ targetKind: "worker-session" as const, targetId: worker.id, targetGeneration: Number(worker.worker_session_generation), reason })));
+  }
+
   listPendingCardContextInvalidations(limit = 100): CardContextInvalidation[] {
     const bounded = Math.max(1, Math.min(limit, 500));
     return (this.database.prepare(`SELECT * FROM card_context_invalidations WHERE projected_dependency_revision < requested_dependency_revision ORDER BY updated_at, target_kind, target_id, target_generation LIMIT ?`).all(bounded) as Array<Record<string, unknown>>).map(mapCardContextInvalidation);
@@ -179,6 +184,7 @@ export class SqliteCardContextStore {
     const summary = (row: WorkerTaskSummaryRow) => ({ turnId: row.turn_id, title: summarizeTaskTitle(row.request_text), phase: row.phase as WorkerTurnCardView["phase"], durationSeconds: durationSeconds(row.started_at, row.finished_at), taskCard: { aggregateKind: "worker-turn" as const, aggregateId: row.turn_id, generation: Number(row.instance_generation), messageId: row.message_id }, updatedAt: row.updated_at });
     return {
       workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
+      runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: (() => { const parent = this.dependencies.getBinding(instance.parent.bindingId); return parent?.generation === instance.parent!.bindingGeneration && parent.paneId === instance.parent!.paneId && parent.state === "active" && parent.lifecycle === "active" && parent.attachment === "attached"; })(),
       lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, ownerName: this.dependencies.getBinding(instance.parent.bindingId)?.title ?? "Primary",
       workspace: lease.cwd, branch: lease.branch, currentTask: active ? summary(active) : null, queueCount: Number(queue.count), nextTaskTitle: nextQueued ? summarizeTaskTitle(nextQueued.request_text) : null,
       recentTasks: recent.map(summary), createdAt: first.created_at ?? now()

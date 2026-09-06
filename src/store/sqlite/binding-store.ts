@@ -9,7 +9,7 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
 };
 
 export class SqliteBindingLifecycleStore {
-  constructor(private readonly context: SqliteContext) {}
+  constructor(private readonly context: SqliteContext, private readonly invalidateWorkerContexts?: (bindingId: string, reason: string) => void) {}
   private get database() { return this.context.database; }
 
   createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding {
@@ -30,20 +30,23 @@ export class SqliteBindingLifecycleStore {
   hasPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean { return Boolean(this.database.prepare("SELECT 1 FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").get(bindingId, expectedGeneration)); }
   revokePrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean { return Number(this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(bindingId, expectedGeneration).changes) > 0; }
   persistBindingPatch(id: string, patch: Partial<Binding>): Binding {
-    const normalized = { ...patch };
-    if (patch.state && patch.lifecycle === undefined) {
-      if (patch.state === "active") { normalized.lifecycle = "active"; normalized.provisioningCheckpoint = "activated"; if (patch.paneId) normalized.attachment = "attached"; }
-      else if (patch.state === "archived") { normalized.lifecycle = "archived"; normalized.archivedAt = patch.archivedAt ?? now(); }
-      else if (patch.state === "orphaned") { normalized.lifecycle = "active"; normalized.attachment = "orphaned"; }
-      else if (patch.state === "failed") normalized.lifecycle = "failed";
-    }
-    const entries = Object.entries(normalized).filter(([key]) => key !== "id" && key !== "createdAt");
-    entries.push(["updatedAt", now()]);
-    const assignments = entries.map(([key]) => `${BINDING_COLUMNS[key as keyof Binding]} = ?`).join(", ");
-    const values = entries.map(([, value]) => typeof value === "boolean" ? Number(value) : value as SqlValue);
-    const result = this.database.prepare(`UPDATE bindings SET ${assignments} WHERE id = ?`).run(...values, id);
-    if (result.changes === 0) throw new Error(`Binding not found: ${id}`);
-    return this.requireBinding(id);
+    return this.context.transaction(() => {
+      const normalized = { ...patch };
+      if (patch.state && patch.lifecycle === undefined) {
+        if (patch.state === "active") { normalized.lifecycle = "active"; normalized.provisioningCheckpoint = "activated"; if (patch.paneId) normalized.attachment = "attached"; }
+        else if (patch.state === "archived") { normalized.lifecycle = "archived"; normalized.archivedAt = patch.archivedAt ?? now(); }
+        else if (patch.state === "orphaned") { normalized.lifecycle = "active"; normalized.attachment = "orphaned"; }
+        else if (patch.state === "failed") normalized.lifecycle = "failed";
+      }
+      const entries = Object.entries(normalized).filter(([key]) => key !== "id" && key !== "createdAt");
+      entries.push(["updatedAt", now()]);
+      const assignments = entries.map(([key]) => `${BINDING_COLUMNS[key as keyof Binding]} = ?`).join(", ");
+      const values = entries.map(([, value]) => typeof value === "boolean" ? Number(value) : value as SqlValue);
+      const result = this.database.prepare(`UPDATE bindings SET ${assignments} WHERE id = ?`).run(...values, id);
+      if (result.changes === 0) throw new Error(`Binding not found: ${id}`);
+      if (entries.some(([key]) => ["title", "lifecycle", "state", "attachment", "paneId", "generation"].includes(key))) this.invalidateWorkerContexts?.(id, "parent-binding.changed");
+      return this.requireBinding(id);
+    });
   }
 
   replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding {

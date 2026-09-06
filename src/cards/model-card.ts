@@ -1,5 +1,5 @@
 import type { ModelPreference } from "../domain/model-selection.js";
-import type { TraexModelSummary } from "../runtime/traex-model-protocol.js";
+import type { TraexModelSummary } from "../domain/model-selection.js";
 
 export function renderModelSelectionCard(input: { bindingId: string; spaceName: string; paneId: string; models: readonly TraexModelSummary[]; preference: ModelPreference | null; notice?: string }): object {
   const preference = input.preference;

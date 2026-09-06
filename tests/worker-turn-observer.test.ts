@@ -4,6 +4,7 @@ import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { workerPresentation } from "./helpers/presentation.js";
 
 const sessionId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
 const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
@@ -21,7 +22,7 @@ function setup() {
   store.claimNextInstanceTurn(worker.id, worker.generation);
   store.updateInstanceTurn({ turnId: "turn-1", expectedGeneration: worker.generation, state: "running", eventKind: "turn.running" });
   const transcriptReader: TraexTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" as const })) };
-  const observer = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: vi.fn(), wakeOutbound: vi.fn() });
+  const observer = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: vi.fn(), wakeOutbound: vi.fn(), presentation: workerPresentation });
   return { worker, observer, transcriptReader };
 }
 

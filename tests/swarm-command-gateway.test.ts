@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SwarmCommandContextResolver } from "../src/coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../src/coordinator/swarm-command-gateway.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 const project = { id: "project", displayName: "Project", spaceName: "space", description: "project", workspaceId: "w1", cwd: "/repo", maxInstances: 4 };
 const config = { projects: [project], defaultProjectId: "project", lark: { adminOpenIds: ["admin"] } } as never;
@@ -22,7 +23,7 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
   };
   const worker = { id: "worker", name: "reviewer" }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
-  const gateway = new SwarmCommandGateway({ store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl } as never);
+  const gateway = new SwarmCommandGateway({ store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, presentation: applicationPresentation } as never);
   return { store, gateway, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound };
 }
 
@@ -186,7 +187,7 @@ describe("SwarmCommandGateway", () => {
     const action = { messageId: "card", chatId: "chat", operatorOpenId: "admin", value: {} };
     const command = { kind: "worker_create" as const, name: "reviewer", agentKind: "traex" as const, model: null, start: true };
     await expect(fixture.gateway.createWorkerFromCard(action, "binding", command)).resolves.toMatchObject({ status: "created-start-failed", error: "runtime unavailable" });
-    const restarted = new SwarmCommandGateway({ store: fixture.store, resolver: new SwarmCommandContextResolver({ config, store: fixture.store, activeTurn: () => null }), outbound: fixture.outbound, logger: pino({ enabled: false }), provisioning: fixture.provisioning, operationsQuery: fixture.operationsQuery, sessionAdministration: fixture.sessionAdministration, modelSelection: fixture.modelSelection, paneControl: fixture.paneControl, paneClosure: fixture.paneClosure, promptRun: fixture.promptRun, instanceControl: fixture.instanceControl } as never);
+    const restarted = new SwarmCommandGateway({ store: fixture.store, resolver: new SwarmCommandContextResolver({ config, store: fixture.store, activeTurn: () => null }), outbound: fixture.outbound, logger: pino({ enabled: false }), provisioning: fixture.provisioning, operationsQuery: fixture.operationsQuery, sessionAdministration: fixture.sessionAdministration, modelSelection: fixture.modelSelection, paneControl: fixture.paneControl, paneClosure: fixture.paneClosure, promptRun: fixture.promptRun, instanceControl: fixture.instanceControl, presentation: applicationPresentation } as never);
     await expect(restarted.createWorkerFromCard(action, "binding", command)).resolves.toMatchObject({ status: "created-start-failed", error: "runtime unavailable" });
     expect(fixture.instanceControl.createWorker).toHaveBeenCalledOnce();
     fixture.store.close();

@@ -8,6 +8,7 @@ import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("Lark pane close", () => {
   it("requires confirmation before closing the bound idle pane", async () => {
@@ -64,6 +65,29 @@ describe("Lark pane close", () => {
     expect(fixture.store.getInstanceTurn("child-queued")).toMatchObject({ state: "cancelled" });
     expect(fixture.store.getAgentInstance(sibling.id)).toMatchObject({ workerSessionLifecycle: "active", desiredState: "running" });
     expect(JSON.stringify(fixture.cards.at(-1))).toContain("1 个 Worker Pane");
+    await fixture.close();
+  });
+
+  it("reports a partial result when a Worker pane close is uncertain", async () => {
+    const fixture = await setup("idle");
+    const child = fixture.store.createWorkerAgentInstance({
+      id: "child-uncertain", projectId: "default", name: "child-uncertain", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: fixture.bindingId, paneId: "w1:p1", nativeSessionId: "term-1" }, workspace: { id: "ws-child-uncertain", kind: "shared-read-only", cwd: "/repo/child-uncertain", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    fixture.store.attachAgentInstanceRuntime({ instanceId: child.id, expectedGeneration: child.generation, herdrWorkspaceId: "w1", paneId: "w1:child-uncertain", nativeSessionId: "term-child" });
+    fixture.closePane.mockRejectedValueOnce(new Error("child close result unknown"));
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
+
+    expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child-uncertain", "w1:p1"]);
+    expect(fixture.store.database.prepare("SELECT state FROM worker_pane_close_steps WHERE worker_id = 'child-uncertain'").get()).toEqual({ state: "uncertain" });
+    const result = JSON.stringify(fixture.cards.at(-1));
+    expect(result).toContain("共 1 个");
+    expect(result).toContain("0 个已关闭");
+    expect(result).toContain("1 个关闭结果不确定");
+    expect(result).not.toContain("已级联关闭 1 个 Worker Pane");
     await fixture.close();
   });
 
@@ -207,7 +231,7 @@ async function setup(initialAgentState: AgentState, failClose = false) {
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;

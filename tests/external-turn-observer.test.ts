@@ -5,6 +5,7 @@ import type { TraexTranscriptObservation } from "../src/domain/ports.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("ExternalTurnObserver", () => {
   it("opens only the active binding attached to a targeted Pane", async () => {
@@ -14,7 +15,7 @@ describe("ExternalTurnObserver", () => {
       store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId, agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: `session-${id}` });
     }
     const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }));
-    const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt() {} });
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
 
     await observer.observeByPane(["w1:p2"]);
 
@@ -41,7 +42,7 @@ describe("ExternalTurnObserver", () => {
     const events: string[] = [];
     bus.onBridgeEvent("capture", (event) => { events.push(event.type); });
     const wake = vi.fn();
-    const observer = new ExternalTurnObserver({ store, transcriptReader, bus, outboundWork: { wake }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external-1" });
+    const observer = new ExternalTurnObserver({ store, transcriptReader, bus, outboundWork: { wake }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external-1" });
 
     await observer.observe(store.getBinding("b1")!);
     expect(store.getPrompt("external-1")).toBeNull();
@@ -76,7 +77,7 @@ describe("ExternalTurnObserver", () => {
     const observer = new ExternalTurnObserver({
       store,
       transcriptReader: { open, openAtTurn },
-      bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => true, wakePrompt
+      bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => true, wakePrompt
     });
 
     await observer.observe(store.getBinding("b1")!);
@@ -108,7 +109,7 @@ describe("ExternalTurnObserver", () => {
     const observer = new ExternalTurnObserver({
       store,
       transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }) },
-      bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt, idFactory: () => "external-aborted"
+      bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt, idFactory: () => "external-aborted"
     });
 
     const binding = store.getBinding("b1")!;
@@ -128,7 +129,7 @@ describe("ExternalTurnObserver", () => {
     const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: async () => "", readObservation } }));
     let active = false;
     const store = { getBinding: () => binding, getActiveExternalPrompt: () => null } as never;
-    const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => active, wakePrompt() {} });
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => active, wakePrompt() {} });
     const binding = { id: "b1", generation: 1, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" } as never;
     await observer.observe(binding);
     active = true;
@@ -149,7 +150,7 @@ describe("ExternalTurnObserver", () => {
     ];
     const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
     const wakePrompt = vi.fn();
-    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor }) }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt, idFactory: () => "external-1" });
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor }) }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt, idFactory: () => "external-1" });
 
     await observer.scanActiveBindings();
     await observer.scanActiveBindings();
@@ -171,7 +172,7 @@ describe("ExternalTurnObserver", () => {
       { turnId: "new-turn", freshTurnStart: true, requestText: "new", answerDelta: "answer", turnLifecycle: { turnId: "new-turn", state: "completed", startedAt: "2026-08-31T10:00:02.000Z", finalAnswer: "answer" } }, { answerDelta: "" }
     ];
     const bus = new BridgeEventBus(); const events: string[] = []; bus.onBridgeEvent("capture", (event) => events.push(event.type));
-    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return replay.shift() ?? { answerDelta: "" }; } } }) }, bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external" });
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return replay.shift() ?? { answerDelta: "" }; } } }) }, bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external" });
     const binding = store.getBinding("b1")!; const old = store.getPrompt("old")!;
     const completed = await observer.observeSupersedingTurn(binding, old, { turnId: "new-turn", freshTurnStart: true, requestText: "new", answerDelta: "answer", turnLifecycle: { turnId: "new-turn", state: "completed", startedAt: "2026-08-31T10:00:02.000Z", finalAnswer: "answer" } });
     expect(completed).toBe("completed"); const eventCount = events.length;

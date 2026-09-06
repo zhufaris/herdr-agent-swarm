@@ -24,6 +24,9 @@ export interface WorkerMainView {
   ownerName: string;
   runtimeGeneration: number;
   runtimeState: WorkerMainRuntimeState;
+  runtimeAttached: boolean;
+  desiredState: "running" | "stopped";
+  parentActive: boolean;
   paneId: string | null;
   workspace: string;
   branch: string | null;
@@ -42,14 +45,19 @@ export interface WorkerMainView {
   updatedAt: string;
 }
 
+export function canSubmitWorkerMainTask(view: Pick<WorkerMainView, "frozenAt" | "runtimeState" | "runtimeAttached" | "desiredState" | "parentActive" | "messageId">): boolean {
+  return view.frozenAt === null && view.messageId !== null && view.runtimeAttached && view.desiredState === "running" && view.parentActive
+    && ["idle", "working", "blocked"].includes(view.runtimeState);
+}
+
 export type WorkerMainChange =
-  | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; paneId: string | null; occurredAt: string }
+  | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId: string | null; occurredAt: string }
   | { type: "tasks"; currentTask: WorkerMainTaskSummary | null; queueCount: number; nextTaskTitle: string | null; recentTasks: readonly WorkerMainTaskSummary[]; occurredAt: string; dependencyRevision?: number }
   | { type: "terminated"; occurredAt: string };
 
 export function createWorkerMainView(input: {
   workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string;
-  workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; paneId?: string | null;
+    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null;
   workspace: string; branch: string | null; model: string | null; occurredAt: string;
 }): WorkerMainView {
   return {
@@ -62,8 +70,9 @@ export function reduceWorkerMainView(state: WorkerMainView, change: WorkerMainCh
   if (state.frozenAt !== null) return state;
   let patch: Partial<WorkerMainView>;
   if (change.type === "runtime") {
-    if (state.runtimeGeneration === change.runtimeGeneration && state.runtimeState === change.runtimeState && state.paneId === change.paneId) return state;
-    patch = { runtimeGeneration: change.runtimeGeneration, runtimeState: change.runtimeState, paneId: change.paneId };
+    if (state.runtimeGeneration === change.runtimeGeneration && state.runtimeState === change.runtimeState && state.runtimeAttached === change.runtimeAttached
+      && state.desiredState === change.desiredState && state.parentActive === change.parentActive && state.paneId === change.paneId) return state;
+    patch = { runtimeGeneration: change.runtimeGeneration, runtimeState: change.runtimeState, runtimeAttached: change.runtimeAttached, desiredState: change.desiredState, parentActive: change.parentActive, paneId: change.paneId };
   } else if (change.type === "terminated") {
     patch = { runtimeState: "terminated", paneId: null, frozenAt: change.occurredAt };
   } else {

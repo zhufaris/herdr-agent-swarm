@@ -2,11 +2,11 @@ import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PaneControlStore } from "../domain/ports/pane-operations.js";
 import type { Binding, IncomingLarkMessage } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import { renderMessageRejectedCard } from "../cards/run-card.js";
+import type { PanePresentation } from "../domain/ports/presentation.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 
-interface Options { store: PaneControlStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
+interface Options { store: PaneControlStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "requestRejected">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
 export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean>; }
 
 export class PaneControlWorkflow implements PaneControlWorkflowPort {
@@ -61,7 +61,7 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
     }
   }
 
-  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, "rejected:" + message.messageId, renderMessageRejectedCard(reason)); }
+  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, "rejected:" + message.messageId, this.options.presentation.requestRejected(reason)); }
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

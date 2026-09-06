@@ -1,8 +1,8 @@
-import { renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageWorkflowPort } from "./answer-page-workflow.js";
 import { AnswerPageWorkflow } from "./answer-page-workflow.js";
 import { initialTopicView, mirrorRunCardToTopic, updateTopicView } from "../domain/topic-view.js";
@@ -29,12 +29,13 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     private readonly store: PromptAcceptanceStore,
     private readonly outbound: OutboundIntentPort,
     private readonly outboundWork: OutboundWorkNotifier,
+    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
     answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
     private readonly logger?: Pick<Logger, "warn">
   ) {
-    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake());
-    this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake());
+    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake(), presentation);
+    this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake(), presentation);
     for (const project of config.projects) {
       this.projectsById.set(project.id, project);
       const existing = this.uniqueProjectsByWorkspace.get(project.workspaceId);
@@ -75,8 +76,8 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       for (const view of runCards) {
         const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title;
         const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
-        if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, renderRequestAnswerCard(current)); this.outboundWork.wake(); }
-        if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", renderRequestAnswerCard(current));
+        if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current)); this.outboundWork.wake(); }
+        if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current));
         else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId);
       }
       const activeRun = runCards.find((view) => view.phase === "running" || view.phase === "blocked")

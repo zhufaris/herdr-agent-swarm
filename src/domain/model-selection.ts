@@ -18,6 +18,12 @@ export interface ModelDispatch {
   revision: number;
 }
 
+export interface TraexModelSummary {
+  id: string;
+  name: string;
+  displayName: string;
+}
+
 export type ModelSelectionAcceptance =
   | { outcome: "accepted"; preference: ModelPreference }
   | { outcome: "busy" | "stale"; preference: ModelPreference | null };

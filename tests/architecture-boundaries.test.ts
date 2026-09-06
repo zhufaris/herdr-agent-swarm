@@ -22,12 +22,14 @@ describe("application composition boundaries", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    const application = readFileSync(new URL("../src/composition/create-application-runtime.ts", import.meta.url), "utf8");
+    const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
     for (const component of ["InboundMessageDispatcher", "CardActionRouter", "PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger", "StartupRecoveryWorkflow"]) {
-      expect(factory).toContain(`new ${component}`);
+      expect(`${factory}\n${application}\n${primary}`).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
     expect(main).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
@@ -35,9 +37,9 @@ describe("application composition boundaries", () => {
     expect(main).not.toContain("new SqliteBindingStore");
     expect(storeBundle).toContain("new SqliteStoreKernel");
     expect(storeBundle).not.toContain("SqliteBindingStore");
-    expect(factory).toContain("stores.promptRun");
-    expect(factory).toContain("stores.outbox");
-    expect(factory).toContain("stores.instance");
+    expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
+    expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");
+    expect(readFileSync(new URL("../src/composition/create-outbound-runtime.ts", import.meta.url), "utf8")).toContain("stores.outbox");
     expect(factory).not.toContain("SqliteBindingStore");
     expect(factory).not.toContain("lease.acquire(");
     expect(factory).not.toContain("activateWriteFence(");

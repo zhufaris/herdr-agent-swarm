@@ -1,8 +1,11 @@
 import { isAbsolute } from "node:path";
+import { z } from "zod";
 import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult, TraexTranscriptObservation } from "../domain/ports/external.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROMPT_START_SETTLEMENT_MS = 5_000;
+const agentSessionSchema = z.object({ source: z.string(), agent: z.string(), kind: z.enum(["id", "path"]), value: z.string().min(1) }).strict();
+const managedTraexSessionSchema = agentSessionSchema.extend({ source: z.literal("herdr-traex-shim"), agent: z.literal("traex"), kind: z.literal("id"), value: z.string().regex(SESSION_ID) });
 
 export type HerdrShimInvocation =
   | { kind: "delegate"; argv: string[] }
@@ -346,12 +349,7 @@ function parseTraexSteer(args: readonly string[]): Extract<HerdrShimInvocation, 
     else if (option === "--idempotency-key") { if (idempotencyKey) throw new Error("Duplicate --idempotency-key option"); idempotencyKey = value; }
     else if (option === "--agent-session") {
       if (agentSession) throw new Error("Duplicate --agent-session option");
-      let decoded: unknown;
-      try { decoded = JSON.parse(value); } catch { throw new Error("TraeX steer --agent-session must be valid JSON"); }
-      if (!decoded || typeof decoded !== "object") throw new Error("TraeX steer --agent-session is invalid");
-      const record = decoded as Record<string, unknown>;
-      if (typeof record.source !== "string" || typeof record.agent !== "string" || !["id", "path"].includes(String(record.kind)) || typeof record.value !== "string" || !record.value) throw new Error("TraeX steer --agent-session is invalid");
-      agentSession = { source: record.source, agent: record.agent, kind: record.kind as "id" | "path", value: record.value };
+      agentSession = parseAgentSession(value, "steer");
     }
     else {
       if (!/^[0-9]+$/.test(value)) throw new Error("TraeX steer timeout must be an integer");
@@ -378,12 +376,7 @@ function parseTraexModelList(args: readonly string[]): Extract<HerdrShimInvocati
     index += 1;
     if (option === "--agent-session") {
       if (agentSession) throw new Error("Duplicate --agent-session option");
-      let decoded: unknown;
-      try { decoded = JSON.parse(value); } catch { throw new Error("TraeX model list --agent-session must be valid JSON"); }
-      if (!decoded || typeof decoded !== "object") throw new Error("TraeX model list Agent session is invalid");
-      const record = decoded as Record<string, unknown>;
-      if (record.source !== "herdr-traex-shim" || record.agent !== "traex" || record.kind !== "id" || typeof record.value !== "string" || !SESSION_ID.test(record.value)) throw new Error("TraeX model list Agent session is invalid");
-      agentSession = { source: record.source, agent: record.agent, kind: "id", value: record.value };
+      agentSession = parseManagedSession(value, "model list");
     } else {
       if (!/^[0-9]+$/.test(value)) throw new Error("TraeX model list timeout must be an integer");
       timeoutMs = Number(value);
@@ -426,7 +419,14 @@ function parseUniqueOptions(args: readonly string[], allowed: readonly string[])
   return values;
 }
 function parseTimeout(value: string | undefined, label: string): number { if (value === undefined) return 10_000; if (!/^[0-9]+$/.test(value) || Number(value) < 1 || Number(value) > 300_000) throw new Error(`Invalid ${label} timeout`); return Number(value); }
-function parseManagedSession(value: string, label: string): { source: string; agent: string; kind: "id"; value: string } { let decoded: unknown; try { decoded = JSON.parse(value); } catch { throw new Error(`TraeX ${label} Agent session is invalid`); } const record = decoded && typeof decoded === "object" ? decoded as Record<string, unknown> : {}; if (record.source !== "herdr-traex-shim" || record.agent !== "traex" || record.kind !== "id" || typeof record.value !== "string" || !SESSION_ID.test(record.value)) throw new Error(`TraeX ${label} Agent session is invalid`); return { source: record.source, agent: record.agent, kind: "id", value: record.value }; }
+function parseAgentSession(value: string, label: string): z.infer<typeof agentSessionSchema> {
+  try { return agentSessionSchema.parse(JSON.parse(value)); }
+  catch { throw new Error(`TraeX ${label} Agent session is invalid`); }
+}
+function parseManagedSession(value: string, label: string): z.infer<typeof managedTraexSessionSchema> {
+  try { return managedTraexSessionSchema.parse(JSON.parse(value)); }
+  catch { throw new Error(`TraeX ${label} Agent session is invalid`); }
+}
 
 function projectsAgentJson(argv: readonly string[]): boolean {
   if (argv[0] === "api" && argv[1] === "snapshot") return true;

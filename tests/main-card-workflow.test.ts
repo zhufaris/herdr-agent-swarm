@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MainCardWorkflow } from "../src/coordinator/main-card-workflow.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("MainCardWorkflow", () => {
   it("persists projection state before a root delivery target exists", async () => {
@@ -10,7 +11,7 @@ describe("MainCardWorkflow", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: null, rootMessageId: null, title: "Task" });
     const wake = vi.fn();
 
-    await new MainCardWorkflow(store, wake).project({ ...initialTopicView("b1"), title: "Before root", viewVersion: 1 });
+    await new MainCardWorkflow(store, wake, primaryPresentation).project({ ...initialTopicView("b1"), title: "Before root", viewVersion: 1 });
 
     expect(store.loadTopicView("b1")).toMatchObject({ title: "Before root", viewVersion: 1, deliveredVersion: 0 });
     expect(store.listPendingOutboundReplies()).toEqual([]);
@@ -23,7 +24,7 @@ describe("MainCardWorkflow", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.saveTopicView({ ...initialTopicView("b1"), title: "Visible", viewVersion: 1 });
     const wake = vi.fn();
-    const workflow = new MainCardWorkflow(store, wake, pino({ enabled: false }));
+    const workflow = new MainCardWorkflow(store, wake, primaryPresentation, pino({ enabled: false }));
 
     await Promise.all([workflow.converge("b1"), workflow.converge("b1"), workflow.converge("b1")]);
 
@@ -37,7 +38,7 @@ describe("MainCardWorkflow", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { statusMessageId: "main-1" });
     const wake = vi.fn();
-    const workflow = new MainCardWorkflow(store, wake);
+    const workflow = new MainCardWorkflow(store, wake, primaryPresentation);
 
     await workflow.project({ ...initialTopicView("b1"), title: "Newest", viewVersion: 2, deliveredVersion: 1 });
 
@@ -56,7 +57,7 @@ describe("MainCardWorkflow", () => {
     store.saveTopicView({ ...initialTopicView("b1"), model: "GPT-5.4", viewVersion: 1 });
     store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.6-Sol" });
 
-    await new MainCardWorkflow(store, vi.fn()).converge("b1");
+    await new MainCardWorkflow(store, vi.fn(), primaryPresentation).converge("b1");
 
     expect(store.loadTopicView("b1")).toMatchObject({
       model: "GPT-5.4", modelPreference: { model: "GPT-5.6-Sol", revision: 1, state: "pending" }, viewVersion: 2
@@ -69,7 +70,7 @@ describe("MainCardWorkflow", () => {
   it("delivers the newest version after initial card creation checkpoints", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const workflow = new MainCardWorkflow(store, vi.fn());
+    const workflow = new MainCardWorkflow(store, vi.fn(), primaryPresentation);
     await workflow.project({ ...initialTopicView("b1"), title: "First", viewVersion: 1 });
     await workflow.project({ ...initialTopicView("b1"), title: "Newest", viewVersion: 2 });
     const [create] = store.listPendingOutboundReplies();

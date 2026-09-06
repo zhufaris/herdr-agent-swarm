@@ -1,6 +1,5 @@
 import type { Logger } from "pino";
-import { renderFailureCards, renderSessionCards } from "../cards/operations-card.js";
-import { renderSpaceDirectoryCards, type SpaceDirectoryGroup } from "../cards/space-directory-card.js";
+import type { ApplicationPresentation, SpaceDirectoryGroup } from "../domain/ports/presentation.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
@@ -8,7 +7,7 @@ import type { OperationsQueryStore } from "../domain/ports/workflow.js";
 import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQueryStore; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger; }
+interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQueryStore; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<ApplicationPresentation, "spaces" | "sessions" | "failures">; logger: Logger; }
 
 export interface OperationsQueryWorkflowPort {
   listSpaces(message: IncomingLarkMessage): Promise<void>;
@@ -37,11 +36,11 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
         if (projects.length === 1) pane.claimProjectId = projects[0]!.id;
       }
     }
-    await this.publishCards(message, "spaces", renderSpaceDirectoryCards(groups));
+    await this.publishCards(message, "spaces", this.options.presentation.spaces(groups));
   }
 
-  async listSessions(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "sessions", renderSessionCards(this.options.store.listSessions(message.chatId))); }
-  async listFailures(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "failures", renderFailureCards(this.options.store.listFailures(message.chatId))); }
+  async listSessions(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "sessions", this.options.presentation.sessions(this.options.store.listSessions(message.chatId))); }
+  async listFailures(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "failures", this.options.presentation.failures(this.options.store.listFailures(message.chatId))); }
 
   private async publishCards(message: IncomingLarkMessage, kind: string, cards: object[]): Promise<void> {
     for (const [index, card] of cards.entries()) await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `${kind}:${message.messageId}:${index}`, card);

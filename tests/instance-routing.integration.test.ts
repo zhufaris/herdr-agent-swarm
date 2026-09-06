@@ -7,6 +7,7 @@ import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createWorkerMainView } from "../src/domain/worker-main-view.js";
 import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -46,7 +47,7 @@ function setup(adminOpenIds: readonly string[] = ["u1"]) {
     confirmRemoval: vi.fn(async () => true)
   };
   let interaction = 0;
-  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, idFactory: () => `interaction-${++interaction}` });
+  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, presentation: applicationPresentation, idFactory: () => `interaction-${++interaction}` });
   return { create, workflow, outbound, messaging, control };
 }
 
@@ -190,7 +191,7 @@ describe("instance routing", () => {
     const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
-    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-action", cardId: "card-main" });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 2 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
@@ -222,7 +223,7 @@ describe("instance routing", () => {
     const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "session" })!;
-    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-01T00:00:00.000Z" });
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-repeat", cardId: "card-main-repeat" });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");

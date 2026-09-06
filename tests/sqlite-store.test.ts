@@ -284,6 +284,25 @@ describe("SQLite store", () => {
     expect(plan.some(({ detail }) => detail.includes("worker_turn_cards_session_phase"))).toBe(true);
   });
 
+  it("invalidates Worker Main when its parent binding stops being active", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    store.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" });
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ runtimeAttached: true, desiredState: "running", parentActive: true });
+    store.database.exec("DELETE FROM card_context_invalidations");
+
+    store.updateBinding("binding-1", { lifecycle: "archived", state: "archived", attachment: "unattached" });
+
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ parentActive: false });
+    expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ targetKind: "worker-session", targetId: worker.id, targetGeneration: 1, reason: "parent-binding.changed" })]);
+  });
+
   it("projects an idle Worker with queued work as queued instead of idle", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });

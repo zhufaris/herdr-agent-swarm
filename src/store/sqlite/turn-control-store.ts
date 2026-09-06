@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AcceptInstanceTurnWithCardInput, BindingStorePort } from "../../domain/ports.js";
+import type { AcceptInstanceTurnWithCardInput } from "../../domain/ports.js";
+import type { AcceptPromptInput } from "../../domain/ports/prompt.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../../domain/turn-control.js";
 import type { AgentInstance } from "../../domain/agent-instance.js";
@@ -52,7 +53,7 @@ export class SqliteTurnControlStore {
   rejectAccepted(input: { id: string; result: Record<string, unknown>; card?: object }): TurnControlOperation | null { return this.finishTransition(input.id, "accepted", "rejected", input.result, input.card); }
   finish(input: { id: string; state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">; result: Record<string, unknown>; card?: object }): TurnControlOperation | null { return this.finishTransition(input.id, "dispatching", input.state, input.result, input.card); }
 
-  convertToPrimaryPriority(input: { operationId: string; prompt: Parameters<BindingStorePort["acceptPrompt"]>[0]["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
+  convertToPrimaryPriority(input: { operationId: string; prompt: AcceptPromptInput["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
     return this.context.transaction(() => {
       const operation = this.get(input.operationId);
       if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "binding" || operation.target.owner.id !== input.prompt.bindingId) return null;

@@ -1,9 +1,9 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { HerdrPort, TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { DetachedPromptSkipResult, PromptRunStore } from "../domain/ports/prompt.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
@@ -43,6 +43,7 @@ interface PromptRunWorkflowOptions {
   scheduler: PromptWorkScheduler;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">;
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
@@ -230,7 +231,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const result = this.options.store.skipOldestDetachedPrompt({
       bindingId, expectedBindingGeneration, actorOpenId, sourceMessageId, rootMessageId,
       reason: "人工跳过；此前执行结果不确定，任务不会自动重放。",
-      occurredAt: new Date().toISOString(), renderRunCard: renderRequestAnswerCard
+      occurredAt: new Date().toISOString(), renderRunCard: this.options.presentation.answerCard
     });
     this.options.logger.info({ event: "detached-prompt-skip", bindingId, promptId: result.outcome === "skipped" ? result.promptId : null, actorOpenId, sourceMessageId, outcome: result.outcome }, "processed explicit detached prompt skip");
     if (result.outcome === "skipped") {
@@ -746,7 +747,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       await this.options.bus.publish(event);
       return;
     }
-    this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: renderProjectEntryCard(view) });
+    this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view) });
     this.options.outboundWork.wake();
     await this.options.bus.publish(event);
   }

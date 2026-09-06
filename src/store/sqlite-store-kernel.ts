@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
-import type { AcceptInstanceTurnWithCardInput, BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
+import type { AcceptInstanceTurnWithCardInput, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
+import type { AcceptPromptInput } from "../domain/ports/prompt.js";
+import type { AdoptExternalTurnInput } from "../domain/ports/workflow.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
 import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
@@ -63,7 +65,7 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
   createdAt: "created_at", updatedAt: "updated_at"
 };
 
-export class SqliteStoreKernel implements BindingStorePort, TurnControlStore, WorkerCardDisplayStore {
+export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplayStore {
   readonly database: DatabaseSync;
   private readonly context: SqliteContext;
   private readonly approvals: SqliteApprovalStore;
@@ -91,7 +93,7 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore, Wo
     this.database = this.context.database;
     this.migrations = new SqliteMigrations(this.context);
     this.migrations.run();
-    this.bindings = new SqliteBindingLifecycleStore(this.context);
+    this.bindings = new SqliteBindingLifecycleStore(this.context, (bindingId, reason) => this.cardContexts.invalidateBindingWorkerContexts(bindingId, reason));
     this.operations = new SqliteOperationsStore(this.context);
     this.commandIntents = new SqliteCommandIntentStore(this.context);
     this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.getBinding(id));
@@ -420,7 +422,7 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore, Wo
   finishTurnControlOperation(input: { id: string; state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">; result: Record<string, unknown>; card?: object }): TurnControlOperation | null {
     return this.turnControls.finish(input);
   }
-  convertTurnControlToPrimaryPriority(input: { operationId: string; prompt: Parameters<BindingStorePort["acceptPrompt"]>[0]["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
+  convertTurnControlToPrimaryPriority(input: { operationId: string; prompt: AcceptPromptInput["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
     return this.turnControls.convertToPrimaryPriority(input);
   }
   convertTurnControlToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "render"> & { view?: AcceptInstanceTurnWithCardInput["view"]; render?: AcceptInstanceTurnWithCardInput["render"] }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
@@ -825,7 +827,7 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore, Wo
     return this.prompts.claimPromptTranscriptTurn(input);
   }
 
-  adoptExternalTurn(input: Parameters<BindingStorePort["adoptExternalTurn"]>[0]): ExternalTurnAdoption {
+  adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption {
     return this.prompts.adoptExternalTurn(input);
   }
 
@@ -837,7 +839,7 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore, Wo
     return this.prompts.enqueuePrompt(input);
   }
 
-  acceptPrompt(input: Parameters<BindingStorePort["acceptPrompt"]>[0]): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
+  acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
     return this.prompts.acceptPrompt(input);
   }
 

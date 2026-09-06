@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderDisconnectedTopicCard, renderMessageRejectedCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { classifyContinuation } from "../domain/continuation-classifier.js";
@@ -10,6 +9,7 @@ import type { BridgeEvent } from "../domain/events.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { InboundRoutingStore } from "../domain/ports/workflow.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, IncomingLarkMessage, ProjectSelection } from "../domain/types.js";
@@ -30,7 +30,7 @@ export interface InboundMessageRoutingWorkflowPort {
 
 type Store = InboundRoutingStore & PromptAcceptanceStore & InstanceStore;
 interface Options {
-  config: BridgeConfig; store: Store; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler;
+  config: BridgeConfig; store: Store; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
 }
 
@@ -60,7 +60,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
       else if (message.isRootMessage && message.mentionsBot) { decision = "create_binding"; await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
-      else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, renderDisconnectedTopicCard(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
+      else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, this.options.presentation.disconnectedTopic(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
     } catch (error) {
       const rejection = this.options.instanceInteractions ? permanentInstanceCommandRejection(error) : null;
       if (rejection) {
@@ -81,7 +81,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     if (!classification.eligible && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
     const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
     const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
-    const result = this.options.store.acceptClassifiedPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }), steeringView: createQueuedRunCard({ ...common, conversionParentPromptId: null, queuePosition: 0 }), rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: null, activeAfter: new Date(Date.parse(acceptedAt) - 5 * 60_000).toISOString(), acceptedAt, answerCardFor: renderRequestAnswerCard });
+    const result = this.options.store.acceptClassifiedPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }), steeringView: createQueuedRunCard({ ...common, conversionParentPromptId: null, queuePosition: 0 }), rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: null, activeAfter: new Date(Date.parse(acceptedAt) - 5 * 60_000).toISOString(), acceptedAt, answerCardFor: this.options.presentation.answerCard });
     this.options.logger.info({ event: "auto-steering-classified", bindingId: binding.id, messageId: message.messageId, outcome: result.decision, reason: classification.eligible ? result.fallbackReason : classification.reason }, "classified continuation message");
     if (result.decision === "queue_full") { await this.reject(message, "This topic's prompt queue is full"); return false; }
     if (!result.inserted) return true;
@@ -92,7 +92,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   }
 
   private spaceNameFor(binding: Binding): string { const project = binding.projectId ? this.projectsById.get(binding.projectId) : this.uniqueProjectByWorkspace.get(binding.workspaceId); return project ? projectSpaceName(project) : "legacy/unresolved"; }
-  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, renderMessageRejectedCard(reason)); }
+  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
 }
 
 function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> { const result = new Map<string, BridgeConfig["projects"][number] | null>(); for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project); return result; }

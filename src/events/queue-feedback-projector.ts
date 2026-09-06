@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { renderRequestAnswerCard } from "../cards/run-card.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { QueueFeedbackStore } from "../domain/ports/projection.js";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
@@ -25,7 +25,7 @@ export class QueueFeedbackProjector {
   private stopping = false;
 
   constructor(private readonly options: {
-    store: QueueFeedbackStore; outboundWork: Pick<OutboundWorkNotifier, "wake">; logger: Logger;
+    store: QueueFeedbackStore; outboundWork: Pick<OutboundWorkNotifier, "wake">; logger: Logger; presentation: Pick<PrimaryPresentation, "answerCard">;
     now?: () => string; intervalMs?: number; setIntervalFn?: SetIntervalFn; clearIntervalFn?: ClearIntervalFn;
   }) {}
 
@@ -77,7 +77,7 @@ export class QueueFeedbackProjector {
       const reduced = feedbackChanged ? reduceRunCard(positioned, { type: "queue-feedback", occurredAt, feedback }) : positioned;
       const next = reduced === view ? view : { ...reduced, viewVersion: view.viewVersion + 1 };
       if (next === view) continue;
-      projections.push({ expectedViewVersion: view.viewVersion, view: next, card: next.answerMessageId ? renderRequestAnswerCard(next) : null });
+      projections.push({ expectedViewVersion: view.viewVersion, view: next, card: next.answerMessageId ? this.options.presentation.answerCard(next) : null });
     }
     if (projections.length === 0) return;
     const result = this.options.store.projectQueuedRunCards({ bindingId, projections });

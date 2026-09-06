@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { estimateQueueWait } from "../../domain/queue-wait-estimate.js";
-import type { BindingStorePort, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../../domain/ports.js";
-import type { DetachedPromptSkipResult } from "../../domain/ports/prompt.js";
+import type { ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../../domain/ports.js";
+import type { AcceptPromptInput, DetachedPromptSkipResult } from "../../domain/ports/prompt.js";
+import type { AdoptExternalTurnInput } from "../../domain/ports/workflow.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { Binding, CardInteraction, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
@@ -178,7 +179,7 @@ export class SqlitePromptStore {
     return { prompt: mapPrompt(row), inserted };
   }
 
-  acceptPrompt(input: Parameters<BindingStorePort["acceptPrompt"]>[0]): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
+  acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
     return this.context.transaction(() => {
       const existing = this.context.database.prepare("SELECT * FROM prompt_jobs WHERE lark_message_id = ?").get(input.prompt.larkMessageId) as PromptRow | undefined;
       if (existing) {
@@ -440,7 +441,7 @@ export class SqlitePromptStore {
     });
   }
 
-  adoptExternalTurn(input: Parameters<BindingStorePort["adoptExternalTurn"]>[0]): ExternalTurnAdoption {
+  adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption {
     return this.context.transaction(() => {
       const binding = this.context.database.prepare("SELECT * FROM bindings WHERE id = ?").get(input.bindingId) as BindingRow | undefined;
       if (!binding || !binding.root_message_id || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || Number(binding.generation) !== input.expectedGeneration || binding.pane_id !== input.expectedPaneId

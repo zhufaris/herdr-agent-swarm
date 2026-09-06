@@ -3,12 +3,12 @@ import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { PaneRetentionStore } from "../domain/ports/workflow.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
-import { renderPaneRetentionWarningCard } from "../cards/pane-close-card.js";
+import type { PanePresentation } from "../domain/ports/presentation.js";
 import { evaluatePaneClosureSafety, evaluatePaneRetention } from "../domain/pane-retention-policy.js";
 import type { Binding, ProjectConfig } from "../domain/types.js";
 import { PeriodicWorkflowRunner } from "../runtime/periodic-workflow-runner.js";
 
-interface Options { projects: readonly ProjectConfig[]; store: PaneRetentionStore; herdr: Pick<HerdrPort, "getPane" | "closePane">; outbound: Pick<OutboundIntentPort, "enqueueCard">; isBindingBusy(bindingId: string): boolean; logger: Pick<Logger, "info" | "warn">; }
+interface Options { projects: readonly ProjectConfig[]; store: PaneRetentionStore; herdr: Pick<HerdrPort, "getPane" | "closePane">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "paneRetentionWarning">; isBindingBusy(bindingId: string): boolean; logger: Pick<Logger, "info" | "warn">; }
 export interface PaneRetentionWorkflowPort { start(intervalMs: number): void; stop(): Promise<void>; scan(): Promise<void>; }
 
 export class PaneRetentionWorkflow implements PaneRetentionWorkflowPort {
@@ -37,7 +37,7 @@ export class PaneRetentionWorkflow implements PaneRetentionWorkflowPort {
       const pane = await this.options.herdr.getPane(binding.paneId);
       const decision = evaluatePaneRetention({ binding, now, enabled: true, pendingWork: this.options.store.countPendingPrompts(binding.id) > 0, unresolvedTurn: this.options.isBindingBusy(binding.id), runtimeState: pane?.agentState ?? null, ...(policy.idleAfterMs !== undefined ? { idleAfterMs: policy.idleAfterMs } : {}), ...(policy.graceMs !== undefined ? { graceMs: policy.graceMs } : {}) });
       if (decision.status === "warning" && binding.rootMessageId) {
-        await this.options.outbound.enqueueCard(binding.rootMessageId, `pane-retention-warning:${binding.id}:${decision.warningAt}`, renderPaneRetentionWarningCard({ paneId: pane?.paneId ?? binding.paneId, warningAt: decision.warningAt, closeAt: decision.closeAt }), binding.id, "operation_result");
+        await this.options.outbound.enqueueCard(binding.rootMessageId, `pane-retention-warning:${binding.id}:${decision.warningAt}`, this.options.presentation.paneRetentionWarning({ paneId: pane?.paneId ?? binding.paneId, warningAt: decision.warningAt, closeAt: decision.closeAt }), binding.id, "operation_result");
         continue;
       }
       if (decision.status !== "eligible" || !pane) continue;

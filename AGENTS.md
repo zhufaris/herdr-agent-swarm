@@ -40,8 +40,9 @@ Herdr snapshot is the convergence path.
   a TraeX prompt.
 - CardKit stream sequence is ordered within a card element. Frozen answer pages
   are not patched; large answers continue in a new card.
-- Keep high-risk TraeX approval local to Herdr. The bridge intentionally has no
-  remote stop or approval action.
+- Keep high-risk TraeX approval local to Herdr. The bridge permits only
+  identity-fenced exact-turn stop; it has no remote approval, denial, arbitrary
+  terminal-input, process-kill, or pane-kill action.
 
 ### Code boundaries
 

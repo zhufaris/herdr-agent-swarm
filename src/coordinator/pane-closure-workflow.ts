@@ -1,16 +1,15 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { renderPaneCloseConfirmationCard, renderPaneCloseResultCard } from "../cards/pane-close-card.js";
-import { renderMessageRejectedCard } from "../cards/run-card.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PaneCloseStore } from "../domain/ports/pane-operations.js";
+import type { PanePresentation } from "../domain/ports/presentation.js";
 import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import { evaluatePaneClosureSafety } from "../domain/pane-retention-policy.js";
 
-interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; isBindingBusy(bindingId: string): boolean; }
+interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: PanePresentation; isBindingBusy(bindingId: string): boolean; }
 export interface PaneClosureWorkflowPort { recover(): Promise<void>; requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>; }
 
 export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
@@ -41,7 +40,7 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
   async requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     const checked = await this.checkSafety(message, binding); if (!checked) return false; const code = randomBytes(3).toString("hex").toUpperCase(); const expiresAt = new Date(Date.now() + 60_000).toISOString();
     this.options.store.createPaneCloseRequest({ id: randomUUID(), bindingId: checked.binding.id, paneId: checked.pane.paneId, actorOpenId: message.actorOpenId, codeHash: hashCode(code), expiresAt });
-    await this.reply(message, renderPaneCloseConfirmationCard({ spaceName: this.spaceNameFor(checked.binding), paneId: checked.pane.paneId, agentState: checked.pane.agentState, code, expiresAt })); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.requested", target: checked.binding.id, outcome: "confirmation_issued" }); return true;
+    await this.reply(message, this.options.presentation.paneCloseConfirmation({ spaceName: this.spaceNameFor(checked.binding), paneId: checked.pane.paneId, agentState: checked.pane.agentState, code, expiresAt })); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.requested", target: checked.binding.id, outcome: "confirmation_issued" }); return true;
   }
 
   async confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean> {
@@ -51,11 +50,13 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
     const checked = await this.checkSafety(message, store.getBinding(binding.id), outcome.paneId); if (!checked) { store.finishPaneCloseRequest(outcome.operationId, "rejected", "safety_recheck_failed"); return false; }
     try {
       const children = store.beginWorkerPaneCloseCascade({ operationId: outcome.operationId, bindingId: checked.binding.id, paneId: checked.pane.paneId, reason: `Parent pane ${checked.pane.paneId} closed` });
+      let workerPaneSucceededCount = 0;
+      let workerPaneUncertainCount = 0;
       for (const child of children) {
-        try { await herdr.closePane(child.paneId); store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "succeeded", detail: "closed by parent pane cascade" }); }
-        catch (error) { store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "uncertain", detail: errorMessage(error) }); }
+        try { await herdr.closePane(child.paneId); store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "succeeded", detail: "closed by parent pane cascade" }); workerPaneSucceededCount += 1; }
+        catch (error) { store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "uncertain", detail: errorMessage(error) }); workerPaneUncertainCount += 1; }
       }
-      await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: "Herdr pane " + checked.pane.paneId + " 已由飞书确认关闭。" }); await this.reply(message, renderPaneCloseResultCard({ paneId: checked.pane.paneId, workerPaneCount: children.length })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" }); return true;
+      await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: "Herdr pane " + checked.pane.paneId + " 已由飞书确认关闭。" }); await this.reply(message, this.options.presentation.paneCloseResult({ paneId: checked.pane.paneId, workerPaneCount: children.length, workerPaneSucceededCount, workerPaneUncertainCount })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: workerPaneUncertainCount > 0 ? "closed_with_uncertain_workers" : "closed" }); return true;
     }
     catch (error) { store.finishPaneCloseRequest(outcome.operationId, "uncertain", errorMessage(error)); await this.reject(message, "Pane 关闭失败或无法验证：" + errorMessage(error)); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" }); return false; }
   }
@@ -70,7 +71,7 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
   }
   private spaceNameFor(binding: Binding): string { const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; return project ? projectSpaceName(project) : "legacy/unresolved"; }
   private async reply(message: IncomingLarkMessage, card: object): Promise<void> { const root = message.rootMessageId ?? message.messageId; await this.options.outbound.enqueueCard(root, "standalone:" + root + ":" + JSON.stringify(card), card); }
-  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, "rejected:" + message.messageId, renderMessageRejectedCard(reason)); }
+  private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, "rejected:" + message.messageId, this.options.presentation.requestRejected(reason)); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
 }
 

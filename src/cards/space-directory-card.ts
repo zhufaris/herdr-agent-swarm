@@ -1,28 +1,10 @@
-import type { AgentState } from "../domain/types.js";
+import type { SpaceDirectoryGroup, SpaceDirectoryPane } from "../domain/ports/presentation.js";
 import { callbackButton } from "./cardkit-button.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 
 const MAX_PANE_ROWS_PER_PAGE = 16;
 const MAX_FIELD_LENGTH = 160;
 const MAX_VISIBLE_DIRECTORIES = 8;
-
-interface SpaceDirectoryPane {
-  paneId: string;
-  name: string;
-  agentState: AgentState;
-  foregroundExecutables: string[];
-  bindingId?: string;
-  claimProjectId?: string;
-}
-
-export interface SpaceDirectoryGroup {
-  spaceName: string;
-  workspaceId: string;
-  directories: string[];
-  panes: SpaceDirectoryPane[];
-  error?: string;
-  unregistered?: boolean;
-}
 
 interface SpaceSection {
   elements: object[];

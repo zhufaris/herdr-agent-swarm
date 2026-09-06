@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 function harness() {
   const store = new SqliteBindingStore(":memory:");
@@ -12,7 +13,7 @@ function harness() {
   const wakePrompt = vi.fn();
   const logger = { info: vi.fn(), warn: vi.fn() };
   const sessionOperations = { accept: vi.fn(() => "accepted" as const) };
-  const workflow = new CardInteractionWorkflow({ store, adminOpenIds: ["creator"], sessionAdministration: { emitStatus: vi.fn(async () => {}) }, sessionOperations, wakePrompt, logger });
+  const workflow = new CardInteractionWorkflow({ store, adminOpenIds: ["creator"], sessionAdministration: { emitStatus: vi.fn(async () => {}) }, sessionOperations, wakePrompt, presentation: applicationPresentation, logger });
   return { store, binding: store.getBinding("b1")!, workflow, wakePrompt, logger, sessionOperations };
 }
 

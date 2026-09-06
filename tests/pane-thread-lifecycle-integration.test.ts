@@ -15,6 +15,7 @@ import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { SessionAdministrationWorkflow } from "../src/coordinator/session-administration-workflow.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
+import { applicationPresentation, primaryPresentation } from "./helpers/presentation.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -38,7 +39,7 @@ describe("pane/thread lifecycle integration", () => {
       expect(store.getBinding("b1")).toMatchObject({ lifecycle: "archived", state: "archived" });
       expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" }));
     }); const workflow = new SessionAdministrationWorkflow({
-      config: config(), store, herdr: {} as never, lifecycleEvents: bus, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false
+      config: config(), store, herdr: {} as never, lifecycleEvents: bus, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await workflow.archive(message(1, "/swarm close"), store.getBinding("b1"));
@@ -57,7 +58,7 @@ describe("pane/thread lifecycle integration", () => {
     vi.spyOn(store, "cancelQueuedPromptsWithProjection").mockImplementation(() => { throw new Error("cancel failed"); });
     const transition = vi.spyOn(store, "transitionBinding"); const audit = vi.spyOn(store, "audit");
     const publish = vi.fn(); const wake = vi.fn(); const workflow = new SessionAdministrationWorkflow({
-      config: config(), store, herdr: {} as never, lifecycleEvents: { publish }, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false
+      config: config(), store, herdr: {} as never, lifecycleEvents: { publish }, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await expect(workflow.archive(message(1, "/swarm close"), store.getBinding("b1"))).rejects.toThrow("cancel failed");
@@ -301,7 +302,7 @@ describe("pane/thread lifecycle integration", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -342,7 +343,7 @@ describe("pane/thread lifecycle integration", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active" });
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const logger = { info: vi.fn(), warn: (value: object) => warnings.push(value), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(), trace: vi.fn(), silent: vi.fn(), level: "silent", child: () => logger } as unknown as ReturnType<typeof pino>;
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 10);
     await coordinator.start();
@@ -632,7 +633,7 @@ describe("pane/thread lifecycle integration", () => {
     store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "old-message", actorOpenId: "user", body: "do not replay" });
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -675,7 +676,7 @@ function message(index: number, text: string) {
 function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort, logger = pino({ enabled: false }), observeExternalTurns = false) {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false })); projector.start();
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, shutdownGraceMs, undefined, undefined, transcriptReader, observeExternalTurns);
   return { coordinator, projector, publisher };
 }

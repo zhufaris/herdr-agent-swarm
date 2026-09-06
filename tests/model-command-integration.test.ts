@@ -7,6 +7,7 @@ import { ConversationViewProjector } from "../src/events/conversation-view-proje
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 const UNSUPPORTED = "运行中的 Agent 不支持远程切换模型";
 
@@ -99,7 +100,7 @@ async function setup() {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
   publisher.start();
-  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }));
+  const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
   projector.start();
   const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
   await coordinator.start();

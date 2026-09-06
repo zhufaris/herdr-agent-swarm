@@ -14,13 +14,13 @@ function task(index: number, phase: WorkerMainTaskSummary["phase"] = "completed"
 function initial() {
   return createWorkerMainView({
     workerId: "worker-1", workerSessionGeneration: 3, parentBindingId: "binding-1", parentBindingGeneration: 7, parentPaneId: "pane-primary",
-    workerName: "reviewer", ownerName: "Primary", runtimeGeneration: 4, runtimeState: "idle", workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: "GPT-5", occurredAt: createdAt
+    workerName: "reviewer", ownerName: "Primary", runtimeGeneration: 4, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: "GPT-5", occurredAt: createdAt
   });
 }
 
 describe("WorkerMainView", () => {
   it("keeps session identity across runtime replacement and freezes the exact session generation", () => {
-    const restarted = reduceWorkerMainView(initial(), { type: "runtime", runtimeGeneration: 5, runtimeState: "working", paneId: "pane-replacement", occurredAt: "2026-09-05T00:01:00.000Z" });
+    const restarted = reduceWorkerMainView(initial(), { type: "runtime", runtimeGeneration: 5, runtimeState: "working", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "pane-replacement", occurredAt: "2026-09-05T00:01:00.000Z" });
     const frozen = reduceWorkerMainView(restarted, { type: "terminated", occurredAt: "2026-09-05T00:02:00.000Z" });
     const late = reduceWorkerMainView(frozen, { type: "runtime", runtimeGeneration: 6, runtimeState: "idle", paneId: "late-pane", occurredAt: "2026-09-05T00:03:00.000Z" });
 
@@ -49,7 +49,7 @@ describe("WorkerMainView", () => {
 
   it("does not advance the view version for an unchanged projection", () => {
     const current = initial();
-    expect(reduceWorkerMainView(current, { type: "runtime", runtimeGeneration: 4, runtimeState: "idle", paneId: null, occurredAt: "later" })).toBe(current);
+    expect(reduceWorkerMainView(current, { type: "runtime", runtimeGeneration: 4, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: null, occurredAt: "later" })).toBe(current);
     expect(reduceWorkerMainView(current, { type: "tasks", currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [], dependencyRevision: 2, occurredAt: "later" })).toMatchObject({ viewVersion: 1, dependencyRevision: 2 });
   });
 });

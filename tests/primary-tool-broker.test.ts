@@ -5,6 +5,7 @@ import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { workerPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -21,7 +22,7 @@ function setup() {
     return { projectId, bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent", sourceMessageId: "message", rootMessageId: "root" };
   };
   const driver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }), steer: async () => ({ status: "delivered" as const }), interrupt: async () => ({ status: "interrupted" as const }) } satisfies AgentRuntimeDriver;
-  const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "turn-1" });
+  const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "turn-1", presentation: workerPresentation });
   const workerCards = { show: vi.fn((input) => ({ accepted: true as const, delivery: "queued" as const, worker: { id: "worker", name: input.workerName, workerSessionGeneration: 1 }, cards: ["worker-main", "worker-task"] as ["worker-main", "worker-task"], taskTurnId: null })) };
   return { create, primary, workerCards, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }) => new PrimaryToolBroker(identity, messaging, workerCards) };
 }

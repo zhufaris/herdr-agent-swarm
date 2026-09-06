@@ -1,6 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { answerStreamContent } from "../src/runtime/answer-stream.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
@@ -19,11 +20,11 @@ describe("AnswerPageWorkflow", () => {
     const store = readyStore();
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "hello", answerSegments: ["hello"], viewVersion: 2 });
     const wake = vi.fn();
-    await new AnswerPageWorkflow(store, wake, pino({ enabled: false })).converge("p1");
+    await new AnswerPageWorkflow(store, wake, primaryPresentation, pino({ enabled: false })).converge("p1");
     expect(wake).toHaveBeenCalledOnce();
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
     expect(store.getActiveAnswerPage("p1")?.sequence).toBe(1);
-    await new AnswerPageWorkflow(store, wake).converge("p1");
+    await new AnswerPageWorkflow(store, wake, primaryPresentation).converge("p1");
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
     store.close();
   });
@@ -34,7 +35,7 @@ describe("AnswerPageWorkflow", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const wake = vi.fn();
-    await new AnswerPageWorkflow(store, wake).converge("p1");
+    await new AnswerPageWorkflow(store, wake, primaryPresentation).converge("p1");
     expect(wake).not.toHaveBeenCalled();
     expect(store.listPendingOutboundReplies()).toHaveLength(1);
     store.close();
@@ -48,7 +49,7 @@ describe("AnswerPageWorkflow", () => {
     const [contentReply] = store.listPendingOutboundReplies();
     store.markOutboundReplyDelivered(contentReply!.id, "card-1");
     const wake = vi.fn();
-    const workflow = new AnswerPageWorkflow(store, wake);
+    const workflow = new AnswerPageWorkflow(store, wake, primaryPresentation);
 
     await Promise.all([workflow.converge("p1"), workflow.converge("p1"), workflow.converge("p1")]);
 
@@ -71,7 +72,7 @@ describe("AnswerPageWorkflow", () => {
     });
     store.markOutboundReplyDelivered("recovery-content", "card-1");
 
-    await new AnswerPageWorkflow(store, vi.fn()).converge("p1");
+    await new AnswerPageWorkflow(store, vi.fn(), primaryPresentation).converge("p1");
 
     expect(store.listPendingOutboundReplies()).toEqual([
       expect.objectContaining({ kind: "stream_finish", viewVersion: 2 }),
@@ -93,7 +94,7 @@ describe("AnswerPageWorkflow", () => {
     });
     store.markOutboundReplyDelivered("recovery-content", "card-1");
 
-    await new AnswerPageWorkflow(store, vi.fn()).converge("p1");
+    await new AnswerPageWorkflow(store, vi.fn(), primaryPresentation).converge("p1");
 
     expect(store.listPendingOutboundReplies()).toEqual([
       expect.objectContaining({ kind: "stream_finish" }),
@@ -114,7 +115,7 @@ describe("AnswerPageWorkflow", () => {
     const page = store.getActiveAnswerPage("p1")!;
     expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content })).toBe("reserved");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
-    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
 
     await workflow.converge("p1");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
@@ -132,7 +133,7 @@ describe("AnswerPageWorkflow", () => {
     const store = readyStore();
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "final answer", answerSegments: ["final answer"], viewVersion: 2 });
     store.database.prepare("UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
-    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
 
     await workflow.converge("p1");
 
@@ -161,7 +162,7 @@ describe("AnswerPageWorkflow", () => {
     const page = store.getActiveAnswerPage("p1")!;
     expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content })).toBe("reserved");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
-    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
 
     await workflow.converge("p1");
     const [finish] = store.listPendingOutboundReplies();
@@ -193,7 +194,7 @@ describe("AnswerPageWorkflow", () => {
     });
     store.markOutboundReplyDelivered("visible-continuation", "card-2");
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "short final answer", answerSegments: ["short final answer"], viewVersion: 3 });
-    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
 
     await workflow.converge("p1");
 
@@ -213,7 +214,7 @@ describe("AnswerPageWorkflow", () => {
     const page = store.getActiveAnswerPage("p1")!;
     expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content })).toBe("reserved");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
-    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
     await workflow.converge("p1");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
     await workflow.converge("p1");
@@ -241,7 +242,7 @@ describe("AnswerPageWorkflow", () => {
     const page = store.getActiveAnswerPage("p1")!;
     expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: page.elementId, content: `⏳ 已接收请求\n\n${answer}` })).toBe("reserved");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
-    const workflow = new AnswerPageWorkflow(store, vi.fn());
+    const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
     await workflow.converge("p1");
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
     await workflow.converge("p1");

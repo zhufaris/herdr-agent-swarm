@@ -1,13 +1,10 @@
-import type { AgentInstance, InstanceTarget, WorkspaceLease } from "../domain/agent-instance.js";
-import type { AgentCapabilities } from "../domain/agent-runtime.js";
-import type { Binding, ProjectConfig } from "../domain/types.js";
+import type { InstanceDirectoryEntry, ThreadPrimaryView } from "../domain/ports/presentation.js";
+import type { InstanceTarget } from "../domain/agent-instance.js";
+import type { ProjectConfig } from "../domain/types.js";
 import { callbackButton } from "./cardkit-button.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 
 const MAX_VISIBLE_INSTANCES = 16;
-
-export interface InstanceDirectoryEntry { instance: AgentInstance; workspace: WorkspaceLease; capabilities: AgentCapabilities; queueDepth: number; approvalCount?: number }
-export interface ThreadPrimaryView { bindingId: string; generation: number; paneId: string | null; state: Binding["state"] }
 
 export function renderInstanceDirectoryCard(input: { project: ProjectConfig; entries: InstanceDirectoryEntry[]; target: InstanceTarget; primary: ThreadPrimaryView | null; conversationKey?: string }): object {
   const bindingContext = input.primary ? { bindingId: input.primary.bindingId, bindingGeneration: input.primary.generation } : {};

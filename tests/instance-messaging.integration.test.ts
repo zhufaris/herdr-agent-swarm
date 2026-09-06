@@ -6,6 +6,7 @@ import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import { workerPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -29,10 +30,10 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
     steer: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "delivered" } }, duplicate: false })),
     interrupt: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "interrupted" } }, duplicate: false }))
   };
-  const workflow = new InstanceMessagingWorkflow({ store, turnControl: turnControl as never, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })() });
+  const workflow = new InstanceMessagingWorkflow({ store, turnControl: turnControl as never, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })(), presentation: workerPresentation });
   let scheduler!: InstanceWorkScheduler;
-  const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound }) : undefined;
-  scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound });
+  const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound, presentation: workerPresentation }) : undefined;
+  scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound, presentation: workerPresentation });
   return { create, workflow, scheduler, wake, wakeOutbound, submit, driver, turnControl };
 }
 

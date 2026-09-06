@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
-import { renderProjectEntryCard } from "../cards/run-card.js";
 import type { MainCardStore } from "../domain/ports/projection.js";
+import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { updateTopicModelPreference, type TopicViewState } from "../domain/topic-view.js";
 
 export interface MainCardWorkflowPort {
@@ -11,7 +11,7 @@ export interface MainCardWorkflowPort {
 export class MainCardWorkflow implements MainCardWorkflowPort {
   private readonly tails = new Map<string, Promise<void>>();
 
-  constructor(private readonly store: MainCardStore, private readonly wake: () => void, private readonly logger?: Logger) {}
+  constructor(private readonly store: MainCardStore, private readonly wake: () => void, private readonly presentation: Pick<PrimaryPresentation, "mainCard">, private readonly logger?: Logger) {}
 
   converge(bindingId: string): Promise<void> { return this.enqueue(bindingId); }
   project(view: TopicViewState): Promise<void> { return this.enqueue(view.bindingId, view); }
@@ -34,7 +34,7 @@ export class MainCardWorkflow implements MainCardWorkflowPort {
       if (desired) this.store.saveTopicView(view);
       return;
     }
-    const outcome = this.store.reserveMainCard(view, binding.rootMessageId, renderProjectEntryCard(view));
+    const outcome = this.store.reserveMainCard(view, binding.rootMessageId, this.presentation.mainCard(view));
     this.logger?.debug({ event: "main-card-converged", bindingId, viewVersion: view.viewVersion, outcome }, "converged Main Card delivery");
     if (outcome === "reserved") this.wake();
   }

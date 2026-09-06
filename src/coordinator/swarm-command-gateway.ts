@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { renderAwakeStatusCard, renderHelpCard, renderMessageRejectedCard, renderSkipStatusCard } from "../cards/run-card.js";
 import type { CreateWorkerResult } from "../domain/agent-instance.js";
 import type { CommandIntent, CommandIntentOutcome } from "../domain/command-intent.js";
 import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
+import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { swarmCommandPolicy } from "../domain/swarm-command.js";
 import type { BridgeCommand, Binding, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -24,6 +24,7 @@ interface Options {
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
   promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlWorkflow, "createWorker" | "inspect">;
+  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected">;
 }
 
 export interface SwarmCommandGatewayPort {
@@ -140,7 +141,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
           const detail = result.outcome === "skipped"
             ? `已跳过 detached prompt \`${result.promptId.slice(0, 12)}\`；此前执行结果仍不确定，任务不会自动重放。`
             : result.outcome === "none" ? "当前没有 detached prompt，无需跳过。" : "Primary 上下文已变化，未跳过任何 prompt。";
-          await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `skip:${message.messageId}`, renderSkipStatusCard(detail, result.outcome));
+          await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `skip:${message.messageId}`, this.options.presentation.skipStatus(detail, result.outcome));
         }
       }
       else if (command.kind === "stop") ok = await this.options.paneControl.stop(message, binding);
@@ -163,7 +164,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
 
   private finish(intent: CommandIntent, state: "rejected", code: string, detail: string): void { this.options.store.finishCommandIntent(intent.id, state, { code, detail, operationKind: null, operationId: null }); }
   private async executeQuery(message: IncomingLarkMessage, command: BridgeCommand, binding: Binding | null): Promise<void> {
-    if (command.kind === "help") return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-query:${message.messageId}:help`, renderHelpCard());
+    if (command.kind === "help") return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-query:${message.messageId}:help`, this.options.presentation.help());
     if (command.kind === "projects") return this.options.provisioning.selectProject(message, null);
     if (command.kind === "spaces") return this.options.operationsQuery.listSpaces(message);
     if (command.kind === "sessions") return this.options.operationsQuery.listSessions(message);
@@ -175,9 +176,9 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   private async awake(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding) return false; const result = await this.options.promptRun.awake(binding.id); const recovered = result.outcome === "recovered";
     const detail = recovered ? `已从 Herdr transcript 恢复 ${result.recoveredTurns} 个遗漏 turn；每个 turn 使用新的 Answer Card，未向 TraeX 重发任务。` : result.outcome === "busy" ? "当前绑定仍在切换观察器，请稍后重试 `/swarm awake`。" : result.reason === "no_detached_prompt" ? "当前没有 detached prompt，无需唤醒。" : result.reason === "no_complete_later_turn" ? "没有找到可安全恢复的完整后续 Herdr turn；原任务保持 detached，不会重发。" : `无法安全恢复（${result.reason}）；原任务保持 detached，不会重发。`;
-    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `awake:${message.messageId}`, renderAwakeStatusCard(detail, recovered)); return recovered || result.outcome === "none";
+    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `awake:${message.messageId}`, this.options.presentation.awakeStatus(detail, recovered)); return recovered || result.outcome === "none";
   }
-  private async reject(message: IncomingLarkMessage, reason: string, kind: string, outcome: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-rejected:${message.messageId}:${kind}`, renderMessageRejectedCard(reason)); this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${kind}`, target: message.messageId, outcome }); }
+  private async reject(message: IncomingLarkMessage, reason: string, kind: string, outcome: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-rejected:${message.messageId}:${kind}`, this.options.presentation.requestRejected(reason)); this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${kind}`, target: message.messageId, outcome }); }
   private async reply(message: IncomingLarkMessage, text: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-result:${message.messageId}`, { schema: "2.0", header: { title: { tag: "plain_text", content: "Swarm command" }, template: "blue" }, body: { elements: [{ tag: "markdown", content: text }] } }); }
 }
 

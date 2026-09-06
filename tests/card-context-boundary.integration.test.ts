@@ -7,6 +7,7 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -37,7 +38,7 @@ describe("card context boundaries", () => {
     store.markOutboundReplyDelivered(taskCreate.id, "task-message", "task-card");
 
     const wakeOutbound: string[] = [];
-    const rebuilder = new CardContextRebuilder(store, () => wakeOutbound.push("wake"), { debug() {}, error() {} } as never);
+    const rebuilder = new CardContextRebuilder(store, () => wakeOutbound.push("wake"), { debug() {}, error() {} } as never, applicationPresentation);
     await rebuilder.requestScan();
 
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ currentTask: { turnId: task.turnId, title: "Review durable boundary", taskCard: { messageId: "task-message" } }, queueCount: 1, frozenAt: null });

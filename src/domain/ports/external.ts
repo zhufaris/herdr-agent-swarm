@@ -1,8 +1,7 @@
 import type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, RuntimeObservation, RuntimeTurnObservation } from "../types.js";
 import type { SteerReceipt } from "../agent-runtime.js";
 import type { RunProgressEvent } from "../run-card-view.js";
-import type { TraexModelSummary } from "../../runtime/traex-model-protocol.js";
-import type { ModelDispatch } from "../model-selection.js";
+import type { ModelDispatch, TraexModelSummary } from "../model-selection.js";
 
 export interface ModelPromptDispatchOptions {
   modelDispatch: ModelDispatch;

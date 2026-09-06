@@ -87,6 +87,14 @@ describe("Herdr TraeX shim invocation", () => {
     expect(() => parseHerdrShimInvocation(argv)).toThrow(error);
   });
 
+  it.each([
+    '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"session-1","extra":true}',
+    '{"source":1,"agent":"traex","kind":"id","value":"session-1"}',
+    "not-json"
+  ])("rejects malformed steering Agent session %s", (session) => {
+    expect(() => parseHerdrShimInvocation(["agent", "steer", "reviewer", "text", "--turn-id", "turn-1", "--idempotency-key", "key", "--agent-session", session])).toThrow(/Agent session is invalid/);
+  });
+
   it("projects only explicitly marked managed TraeX agents", () => {
     expect(projectTraexAgentJson({ result: { agents: [
       { agent: "codex", display_agent: "traex", name: "managed" },
