@@ -9,9 +9,9 @@ interface Options {
   wakeInstance(instanceId: string): void;
   wakeOutbound(): void;
   presentation: Pick<WorkerPresentation, "workerTurn" | "safeWorkerOutput">;
+  pollIntervalMs?: number;
 }
 export interface WorkerTurnWatch { stop(): Promise<void> }
-const POLL_INTERVAL_MS = 250;
 const FINAL_DRAIN_LIMIT = 8;
 
 export class WorkerTurnObserver {
@@ -88,7 +88,7 @@ export class WorkerTurnObserver {
         if (hasObservation(observation)) await this.observe(turnId, observation);
       }).catch(() => undefined);
     };
-    timer = setInterval(poll, POLL_INTERVAL_MS);
+    timer = setInterval(poll, this.options.pollIntervalMs ?? 250);
     timer.unref?.();
     return {
       stop: async () => {

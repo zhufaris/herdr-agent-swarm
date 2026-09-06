@@ -16,20 +16,25 @@ interface TranscriptObserverOptions {
   isBindingActive(bindingId: string): boolean;
   isStopping(): boolean;
   publishObservation(bindingId: string, promptId: string, observation: NonNullable<ReturnType<typeof projectOwnedTranscriptOutput>["observation"]>): Promise<void>;
+  identityPollMs?: number;
+  attachedPollMs?: number;
 }
 
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
-const TRANSCRIPT_IDENTITY_POLL_MS = 50;
 const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
-const ATTACHED_TRANSCRIPT_POLL_MS = 250;
 const FINAL_TRANSCRIPT_DRAIN_LIMIT = 8;
 const MAX_TRANSCRIPT_CONFLICT_PROMPTS = 256;
 const MAX_TRANSCRIPT_CONFLICT_TURNS_PER_PROMPT = 16;
 
 export class TranscriptObserver {
   private readonly conflictTurns = new Map<string, Set<string>>();
+  private readonly identityPollMs: number;
+  private readonly attachedPollMs: number;
 
-  constructor(private readonly options: TranscriptObserverOptions) {}
+  constructor(private readonly options: TranscriptObserverOptions) {
+    this.identityPollMs = options.identityPollMs ?? 50;
+    this.attachedPollMs = options.attachedPollMs ?? 250;
+  }
 
   clear(): void { this.conflictTurns.clear(); }
 
@@ -66,7 +71,7 @@ export class TranscriptObserver {
     );
     if (!canRetry() || current.hasCompletedTurn) return source;
     const deadline = Date.now() + FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS;
-    let pollMs = TRANSCRIPT_IDENTITY_POLL_MS;
+    let pollMs = this.identityPollMs;
     while (Date.now() < deadline) {
       current = this.options.store.getBinding(binding.id) ?? current;
       if (current.agentSessionValue) {
@@ -97,14 +102,14 @@ export class TranscriptObserver {
 
   async observeAttached(input: { source: TurnOutputSource; binding: Binding; prompt: PromptJob; startedAt: number; signal: AbortSignal; confirmDispatched(): void; updateSource(source: TurnOutputSource): void }): Promise<void> {
     let source = input.source;
-    await abortableWait(ATTACHED_TRANSCRIPT_POLL_MS, input.signal).catch(() => undefined);
+    await abortableWait(this.attachedPollMs, input.signal).catch(() => undefined);
     while (!this.options.isStopping() && !input.signal.aborted && this.options.isBindingActive(input.binding.id)) {
       const typed = await this.read(source, input.binding, input.prompt.id);
       source = typed.source;
       input.updateSource(source);
       const signature = JSON.stringify(typed.observation);
       if (source.mode === "typed" && signature === source.lastObservationSignature) {
-        await abortableWait(ATTACHED_TRANSCRIPT_POLL_MS, input.signal).catch(() => undefined);
+        await abortableWait(this.attachedPollMs, input.signal).catch(() => undefined);
         continue;
       }
       if (source.mode === "typed") source.lastObservationSignature = signature;
@@ -114,7 +119,7 @@ export class TranscriptObserver {
         this.retain(source, owned.observation);
         await this.publish(input.binding.id, input.prompt.id, owned.observation, input.startedAt);
       }
-      await abortableWait(ATTACHED_TRANSCRIPT_POLL_MS, input.signal).catch(() => undefined);
+      await abortableWait(this.attachedPollMs, input.signal).catch(() => undefined);
     }
   }
 

@@ -25,6 +25,7 @@ interface ExternalTurnObserverOptions {
   wakePrompt(bindingId: string): void;
   idFactory?: () => string;
   presentation: Pick<PrimaryPresentation, "answerCard">;
+  pollIntervalMs?: number;
 }
 
 interface TurnProjectionState {
@@ -39,7 +40,6 @@ interface ObservedBinding extends TurnProjectionState {
 
 const MAX_DRAIN_OBSERVATIONS = 8;
 const MAX_AWAKE_OBSERVATIONS = 256;
-const DEFAULT_POLL_INTERVAL_MS = 2_000;
 
 export class ExternalTurnObserver {
   private readonly bindings = new Map<string, ObservedBinding>();
@@ -54,7 +54,7 @@ export class ExternalTurnObserver {
     this.idFactory = options.idFactory ?? randomUUID;
   }
 
-  start(intervalMs = DEFAULT_POLL_INTERVAL_MS): void {
+  start(intervalMs = this.options.pollIntervalMs ?? 2_000): void {
     if (this.stopping || this.timer) return;
     this.timer = setInterval(() => { void this.scanActiveBindings(); }, intervalMs);
     this.timer.unref();

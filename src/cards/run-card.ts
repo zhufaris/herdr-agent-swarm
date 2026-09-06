@@ -37,7 +37,7 @@ const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 12;
 const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 6_000;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 
-export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }): object {
+export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }, payloadLimit = 12_000): object {
   const elements: object[] = [];
   let visible = 0;
   for (const project of input.projects) {
@@ -45,7 +45,7 @@ export function renderProjectSelectorCard(input: { selectionId: string; projects
       { tag: "markdown", content: `**${escapeMarkdown(project.displayName)}**\n${escapeMarkdown(project.description)}` },
       callbackButton(`打开 ${project.displayName}`, { action: "select_project", selectionId: input.selectionId, projectId: project.id }, "primary")
     ];
-    if (!appendWithinCardLimit(elements, entry)) break;
+    if (!appendWithinCardLimit(elements, entry, 800, payloadLimit)) break;
     elements.push(...entry);
     visible += 1;
   }
@@ -233,8 +233,8 @@ function effectiveProgressSummary(summary: RunProgressSummary, events: readonly 
   return summary.total === 0 && events.length > 0 ? summarizeProgress(events) : summary;
 }
 
-export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string }): object | null {
-  const elements = foldFinalAnswerContent(options.initialContent);
+export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string }, payloadLimit = 12_000): object | null {
+  const elements = foldFinalAnswerContent(options.initialContent, payloadLimit);
   if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const pageNumber = options.pageNumber ?? 1;
   const workerElements = workerActivityElements(input);

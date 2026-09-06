@@ -6,7 +6,7 @@ import { appendWithinCardLimit } from "./card-payload.js";
 
 const MAX_VISIBLE_INSTANCES = 16;
 
-export function renderInstanceDirectoryCard(input: { project: ProjectConfig; entries: InstanceDirectoryEntry[]; target: InstanceTarget; primary: ThreadPrimaryView | null; conversationKey?: string }): object {
+export function renderInstanceDirectoryCard(input: { project: ProjectConfig; entries: InstanceDirectoryEntry[]; target: InstanceTarget; primary: ThreadPrimaryView | null; conversationKey?: string }, payloadLimit = 12_000): object {
   const bindingContext = input.primary ? { bindingId: input.primary.bindingId, bindingGeneration: input.primary.generation } : {};
   const targetInstanceId = input.target.kind === "instance" ? input.target.instanceId : null;
   const target = targetInstanceId === null ? (input.primary ? "Primary (当前 Thread)" : "未绑定 Thread") : input.entries.find(({ instance }) => instance.id === targetInstanceId)?.instance.name ?? "未知 Worker";
@@ -22,7 +22,7 @@ export function renderInstanceDirectoryCard(input: { project: ProjectConfig; ent
   const summary = { tag: "markdown", content: `**PRIMARY**  ${primary}   **TARGET**  ${targetInstanceId === null ? target : escape(target)}   **WORKERS**  ${input.entries.length}` };
   const rows: object[] = [];
   for (const row of allRows.slice(0, MAX_VISIBLE_INSTANCES)) {
-    if (!appendWithinCardLimit([summary, ...rows], [row])) break;
+    if (!appendWithinCardLimit([summary, ...rows], [row], 800, payloadLimit)) break;
     rows.push(row);
   }
   const omitted = allRows.length - rows.length;

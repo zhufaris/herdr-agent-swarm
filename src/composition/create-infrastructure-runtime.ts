@@ -37,7 +37,7 @@ export function createInfrastructureRuntime(
     : null;
   const rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
   const herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
-  const herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, config.runtimeTuning.herdrSnapshotCacheTtlMs, logger);
+  const herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, config.runtimeTuning.cache.herdrSnapshotTtlMs, logger);
   herdrLink.connect(herdr);
   const paneHost = new HerdrPaneHost(herdr);
   const agentDrivers = new AgentDriverRegistry([

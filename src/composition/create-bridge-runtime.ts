@@ -16,19 +16,22 @@ import { createWorkerRuntime } from "./create-worker-runtime.js";
 import { createPrimaryRuntime } from "./create-primary-runtime.js";
 import { createApplicationRuntime } from "./create-application-runtime.js";
 import type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
-import { cardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
+import { createCardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
+import { cardKitPanePresentation } from "../cards/cardkit-pane-presentation.js";
 
 export type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
 type RuntimeWakeups = { outbound: undefined; primary: string; instance: string };
 
 export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBundle, logger: Logger, availability: AgentRuntimeAvailability) {
+  const applicationPresentation = createCardKitApplicationPresentation(config.runtimeTuning.cards);
+  const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: cardKitPanePresentation };
   const herdrEventRouterLink = new RuntimeLink<{ handle(hint: import("../runtime/herdr-event-hint.js").HerdrRuntimeHint): Promise<void> }>("Herdr event router");
   const wakeups = new WorkWakeupHub<RuntimeWakeups>(["outbound", "primary", "instance"]);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => herdrEventRouterLink.get().handle(hint));
   const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, paneHost, agentDrivers, worktrees, lark, transcriptReader } = infrastructure;
-  const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: cardKitApplicationPresentation, wakeOutbound: () => wakeups.wake("outbound", undefined), wakePrimary: (bindingId) => wakeups.wake("primary", bindingId), wakeInstance: (instanceId) => wakeups.wake("instance", instanceId), maxQueueDepth: config.maxQueueDepth });
+  const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => wakeups.wake("outbound", undefined), wakePrimary: (bindingId) => wakeups.wake("primary", bindingId), wakeInstance: (instanceId) => wakeups.wake("instance", instanceId), maxQueueDepth: config.maxQueueDepth });
   const bus = new BridgeEventBus(logger); const scheduler = new InProcessPromptWorkScheduler(logger); const inboundWork = new InProcessInboundWorkNotifier();
-  const delivery = createOutboundRuntime(config, stores, lark, bus, logger);
+  const delivery = createOutboundRuntime(config, stores, lark, bus, logger, presentation);
   const { outboundWork, channelPublisher, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention } = delivery;
   wakeups.register("outbound", () => outboundWork.wake()); wakeups.register("primary", (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), (bindingId) => bindingId);
   const worker = createWorkerRuntime({ config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork });
@@ -36,9 +39,9 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   wakeups.register("instance", (instanceId) => instanceWork.wake(instanceId), (instanceId) => instanceId);
   const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
   channelPublisher.connectPromptScheduler(scheduler);
-  const primary = createPrimaryRuntime({ config, stores, logger, herdr, bus, scheduler, outboundWork, transcriptReader, mainCards });
+  const primary = createPrimaryRuntime({ config, stores, logger, herdr, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
   const { externalTurns, promptRun } = primary;
-  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker });
+  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation });
   herdrEventRouterLink.connect(herdrEventRouter);
   wakeups.seal();
   const instanceWorker = { snapshot() { const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot(); return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure }; } };

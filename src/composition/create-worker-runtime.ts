@@ -28,7 +28,7 @@ export function createWorkerRuntime(options: {
 }) {
   const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork } = options;
   const instanceWorkLink = new RuntimeLink<InstanceWorkScheduler>("instance work scheduler");
-  const workerTurns = new WorkerTurnObserver({ store: stores.instance, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation });
+  const workerTurns = new WorkerTurnObserver({ store: stores.instance, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
   const instanceWork = new InstanceWorkScheduler({ store: stores.instance, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
   instanceWorkLink.connect(instanceWork);
   const instanceTurns = new InstanceTurnSupervisor({ store: stores.instance, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });

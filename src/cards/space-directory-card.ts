@@ -11,7 +11,7 @@ interface SpaceSection {
   paneRows: number;
 }
 
-export function renderSpaceDirectoryCards(groups: SpaceDirectoryGroup[]): object[] {
+export function renderSpaceDirectoryCards(groups: SpaceDirectoryGroup[], payloadLimit = 12_000): object[] {
   const sections = groups.flatMap(groupSections);
   const pages: object[][] = [];
   let page: object[] = [];
@@ -20,7 +20,7 @@ export function renderSpaceDirectoryCards(groups: SpaceDirectoryGroup[]): object
   for (const section of sections) {
     const separator = page.length ? [{ tag: "hr" }] : [];
     const candidate = [...page, ...separator, ...section.elements];
-    if (page.length && (paneRows + section.paneRows > MAX_PANE_ROWS_PER_PAGE || !appendWithinCardLimit([], candidate))) {
+    if (page.length && (paneRows + section.paneRows > MAX_PANE_ROWS_PER_PAGE || !appendWithinCardLimit([], candidate, 800, payloadLimit))) {
       pages.push(page);
       page = [...section.elements];
       paneRows = section.paneRows;

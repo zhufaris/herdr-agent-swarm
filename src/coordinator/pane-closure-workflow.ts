@@ -9,7 +9,7 @@ import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/type
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import { evaluatePaneClosureSafety } from "../domain/pane-retention-policy.js";
 
-interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: PanePresentation; isBindingBusy(bindingId: string): boolean; }
+interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: PanePresentation; isBindingBusy(bindingId: string): boolean; confirmationTtlMs?: number; }
 export interface PaneClosureWorkflowPort { recover(): Promise<void>; requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>; }
 
 export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
@@ -38,7 +38,7 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
   }
 
   async requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
-    const checked = await this.checkSafety(message, binding); if (!checked) return false; const code = randomBytes(3).toString("hex").toUpperCase(); const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const checked = await this.checkSafety(message, binding); if (!checked) return false; const code = randomBytes(3).toString("hex").toUpperCase(); const expiresAt = new Date(Date.now() + (this.options.confirmationTtlMs ?? 60_000)).toISOString();
     this.options.store.createPaneCloseRequest({ id: randomUUID(), bindingId: checked.binding.id, paneId: checked.pane.paneId, actorOpenId: message.actorOpenId, codeHash: hashCode(code), expiresAt });
     await this.reply(message, this.options.presentation.paneCloseConfirmation({ spaceName: this.spaceNameFor(checked.binding), paneId: checked.pane.paneId, agentState: checked.pane.agentState, code, expiresAt })); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.requested", target: checked.binding.id, outcome: "confirmation_issued" }); return true;
   }

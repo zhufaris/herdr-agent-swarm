@@ -10,7 +10,7 @@ const ATTACHMENT_LABEL: Record<Binding["attachment"], string> = {
 };
 const AGENT_LABEL: Record<AgentState, string> = { idle: "空闲", working: "执行中", blocked: "等待处理", done: "已完成", unknown: "未知" };
 
-export function renderSessionCards(sessions: SessionSummary[]): object[] {
+export function renderSessionCards(sessions: SessionSummary[], payloadLimit = 12_000): object[] {
   const rows = sessions.map(({ binding, queueDepth, spaceName }) => {
     const scope = spaceName ?? binding.projectId ?? binding.workspaceId;
     const content = [
@@ -20,10 +20,10 @@ export function renderSessionCards(sessions: SessionSummary[]): object[] {
     ].join("\n");
     return [{ tag: "markdown", content }, ...(binding.rootMessageId ? [button("发送话题入口", { action: "open_project_thread", bindingId: binding.id })] : [])];
   });
-  return paginate("Herdr Sessions", "当前群没有会话。", rows, "blue");
+  return paginate("Herdr Sessions", "当前群没有会话。", rows, "blue", payloadLimit);
 }
 
-export function renderFailureCards(failures: FailureSummary[], notice?: string): object[] {
+export function renderFailureCards(failures: FailureSummary[], notice?: string, payloadLimit = 12_000): object[] {
   const rows = failures.map((failure) => {
     const heading = failure.kind === "outbound" ? "消息发送失败" : failure.kind === "prompt" ? "任务未完成（不可自动重试）" : "会话需要处理";
     const stage = failure.kind === "outbound" ? "发送阶段" : failure.kind === "prompt" ? "任务阶段" : "会话阶段";
@@ -42,16 +42,16 @@ export function renderFailureCards(failures: FailureSummary[], notice?: string):
     ] }];
   });
   if (notice) rows.unshift([{ tag: "markdown", content: escape(notice) }]);
-  return paginate("Herdr Failures", "当前群没有需要处理的失败。", rows, failures.length ? "orange" : "green");
+  return paginate("Herdr Failures", "当前群没有需要处理的失败。", rows, failures.length ? "orange" : "green", payloadLimit);
 }
 
-function paginate(title: string, empty: string, rows: object[][], template: string): object[] {
+function paginate(title: string, empty: string, rows: object[][], template: string, payloadLimit: number): object[] {
   const pages: object[][] = [];
   let page: object[] = [];
   let rowCount = 0;
   for (const row of rows) {
     const additions = page.length > 0 ? [{ tag: "hr" }, ...row] : row;
-    if (rowCount > 0 && (rowCount >= 20 || !appendWithinCardLimit(page, additions))) {
+    if (rowCount > 0 && (rowCount >= 20 || !appendWithinCardLimit(page, additions, 800, payloadLimit))) {
       pages.push(page);
       page = [...row];
       rowCount = 1;

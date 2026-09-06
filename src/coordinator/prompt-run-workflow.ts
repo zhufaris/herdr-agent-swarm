@@ -51,6 +51,7 @@ interface PromptRunWorkflowOptions {
   safetyScanIntervalMs?: number;
   staleClaimGraceMs?: number;
   transcriptReader?: TraexTranscriptReaderPort;
+  transcriptPolling?: { identityMs: number; attachedMs: number };
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
   observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
   recoverExternalTurns?: (binding: Binding, prompt: PromptJob) => Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }>;
@@ -81,6 +82,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     });
     this.transcriptObserver = new TranscriptObserver({
       store: options.store, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
+      ...(options.transcriptPolling ? { identityPollMs: options.transcriptPolling.identityMs, attachedPollMs: options.transcriptPolling.attachedMs } : {}),
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       publishObservation: async (bindingId, promptId, observation) => {
         await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId, observation });

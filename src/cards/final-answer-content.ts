@@ -37,11 +37,11 @@ export function compactAnswerToolActivity(content: string): string {
 }
 
 /** Turns final answer text into CardKit content without adding card metadata or delivery state. */
-export function foldFinalAnswerContent(content: string): FinalAnswerElement[] {
+export function foldFinalAnswerContent(content: string, payloadLimit = 12_000): FinalAnswerElement[] {
   const elements: FinalAnswerElement[] = [];
   for (const block of splitFinalAnswerBlocks(content)) {
     const additions = renderBlock(block);
-    if (block.kind === "command" && !appendWithinCardLimit(elements, additions)) elements.push({ tag: "markdown", content: block.compact });
+    if (block.kind === "command" && !appendWithinCardLimit(elements, additions, 800, payloadLimit)) elements.push({ tag: "markdown", content: block.compact });
     else elements.push(...additions);
   }
   return elements;
