@@ -28,4 +28,3 @@ function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
     startupRecovery: store, retention: store, workerCardDisplay: store
   };
 }
-
