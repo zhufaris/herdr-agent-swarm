@@ -77,7 +77,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     this.operations = new SqliteOperationsStore(this.context);
     this.commandIntents = new SqliteCommandIntentStore(this.context);
     this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.getBinding(id));
-    this.projections = new SqliteProjectionStore(this.context);
+    this.projections = new SqliteProjectionStore(this.context, {
+      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
+      hasPendingAnswerContinuation: (promptId, pageIndex) => this.hasPendingAnswerContinuation(promptId, pageIndex)
+    });
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.getAgentInstance(id),
       enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
@@ -3239,92 +3242,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   getAnswerPageDeliveryFacts(promptId: string, pageIndex: number): AnswerPageDeliveryFacts {
-    const page = this.database.prepare("SELECT card_id, element_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(promptId, pageIndex) as { card_id: string | null; element_id: string } | undefined;
-    if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
-    const rows = this.database.prepare("SELECT idempotency_key, kind, payload, state, view_version FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','delivered','dead_letter','dismissed') ORDER BY delivery_order DESC").all(promptId) as Array<{ idempotency_key: string; kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
-    let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
-    let finishPending = false;
-    let continuationPending = false;
-    let finalUpdateState: AnswerPageDeliveryFacts["finalUpdateState"] = null;
-    for (const row of rows) {
-      const payload = parseJsonRecord(row.payload);
-      if (row.kind === "stream_card_create" && row.state === "pending" && Number((payload.stream as Record<string, unknown> | undefined)?.pageIndex) === pageIndex + 1) continuationPending = true;
-      if (row.kind === "card_update" && row.idempotency_key === `answer-final-fold:${promptId}:${pageIndex}:${page.card_id}` && finalUpdateState === null && row.state !== "delivered") finalUpdateState = row.state;
-      if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
-      if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
-      if (row.kind === "stream_content" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) {
-        latestContent = {
-          content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state,
-          sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null
-        };
-      }
-    }
-    return { latestContent, finishPending, continuationPending, finalUpdateState };
+    return this.projections.getAnswerPageDeliveryFacts(promptId, pageIndex);
   }
 
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
-    return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
-      const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
-      if (facts.latestContent?.state === "pending" || facts.latestContent?.content === input.content) return "waiting";
-      const sequence = page.sequence + 1;
-      this.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND sequence = ?")
-        .run(sequence, now(), input.promptId, input.pageIndex, page.sequence);
-      this.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
-        .run(sequence, now(), input.promptId, input.pageIndex);
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sequence }) });
-      return "reserved";
-    });
+    return this.projections.reserveAnswerContent(input);
   }
 
   reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object }): AnswerPageReservationOutcome {
-    return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.messageId !== input.messageId) return "stale";
-      const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
-      if (facts.finishPending || page.state === "finished") return "waiting";
-      const sequence = page.sequence + 1;
-      this.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND sequence = ?")
-        .run(sequence, now(), input.promptId, input.pageIndex, page.sequence);
-      this.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
-        .run(sequence, now(), input.promptId, input.pageIndex);
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.finalizedCard), laneKeyOverride: `answer:${input.promptId}` });
-      return "reserved";
-    });
+    return this.projections.reserveAnswerFinish(input);
   }
 
   reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
-    return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.messageId !== input.messageId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
-      const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
-      if ((facts.latestContent && facts.latestContent.state !== "delivered") || facts.finishPending || facts.continuationPending) return "waiting";
-      const sequence = page.sequence + 1;
-      this.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND sequence = ?")
-        .run(sequence, now(), input.promptId, input.pageIndex, page.sequence);
-      this.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
-        .run(sequence, now(), input.promptId, input.pageIndex);
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.finalizedCard), laneKeyOverride: `answer:${input.promptId}` });
-      this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) });
-      return "reserved";
-    });
+    return this.projections.reserveAnswerContinuation(input);
   }
 
   reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
-    return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
-      if (page.deliveryMode !== "streaming" || input.nextPageIndex !== input.pageIndex + 1 || input.sourceStart !== page.sourceStart) return "stale";
-      const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
-      if (facts.latestContent && facts.latestContent.state !== "delivered") return "waiting";
-      if (this.hasPendingAnswerContinuation(input.promptId, input.nextPageIndex)) return "waiting";
-      const timestamp = now();
-      this.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active'")
-        .run(timestamp, input.promptId, input.pageIndex);
-      this.enqueueOutboundReply({
-        id: randomUUID(), idempotencyKey: `stream-rebuild:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer",
-        rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.sourceStart, elementId: input.nextElementId } })
-      });
-      return "reserved";
-    });
+    return this.projections.reserveAnswerRebuild(input);
   }
 
   reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome {
@@ -3431,17 +3365,6 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         .run(now(), input.promptId, input.nextPageIndex);
       this.refreshOutboxLaneHead(replacement.laneKey);
       this.database.exec("COMMIT"); return "reserved";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
-  }
-
-  private reserveAnswerPageIntent(promptId: string, pageIndex: number, reserve: (page: AnswerPage, view: RunCardView) => AnswerPageReservationOutcome): AnswerPageReservationOutcome {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const pageRow = this.database.prepare("SELECT * FROM answer_pages WHERE prompt_id = ? AND page_index = ? AND state = 'active'").get(promptId, pageIndex) as AnswerPageRow | undefined;
-      const view = this.loadRunCard(promptId);
-      const outcome = pageRow && view ? reserve(mapAnswerPage(pageRow), view) : "stale";
-      this.database.exec("COMMIT");
-      return outcome;
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
 
