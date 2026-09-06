@@ -1,27 +1,18 @@
-import type { AttachmentState, ProvisioningCheckpoint, SessionLifecycle } from "./pane-thread-lifecycle.js";
 import type { AgentState, HerdrPane } from "./runtime-observation.js";
 import type { DeliveryFailureClass, OutboundReplyKind, OutboundReplyState, OutboxLaneClass } from "./delivery.js";
+import type { Binding, BindingState } from "./binding.js";
+import type { PromptDispatchKind, PromptJob, PromptState } from "./prompt.js";
+export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
+export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, SteeringOrigin, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
 export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
 
-export type BindingState = "pending" | "active" | "archived" | "orphaned" | "failed";
 export type EventOrigin = "lark" | "herdr" | "bridge";
-export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
-export type PromptDispatchKind = "turn" | "steering";
-export type TurnPriority = "normal" | "priority";
-export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
-export type SteeringOrigin = "explicit" | "automatic" | "converted";
 export type PaneCloseOperationState = "executing" | "uncertain";
 export type PaneControlOperationKind = "stop" | "steer" | "model";
 export type PaneControlOperationState = "accepted" | "running" | "applied" | "confirmed" | "rejected" | "failed" | "uncertain";
 export type RetiredPaneCleanupState = "pending" | "waiting_busy" | "executing" | "succeeded" | "retained";
-export type PromptWorkHint =
-  | { kind: "prompt-ready"; bindingId: string }
-  | { kind: "control-ready"; bindingId: string }
-  | { kind: "steering-ready"; bindingId: string; parentPromptId: string }
-  | { kind: "detached-observer-ready"; bindingId: string; promptId: string }
-  | { kind: "binding-runtime-changed"; bindingId: string };
 
 export interface PaneControlOperation {
   id: string;
@@ -42,17 +33,6 @@ export interface PaneControlOperation {
   updatedAt: string;
 }
 
-export interface DurablePromptWorkScan {
-  cancelled: number;
-  failedDetached: number;
-  hints: PromptWorkHint[];
-}
-
-export interface StalePromptClaim {
-  promptId: string;
-  bindingId: string;
-  updatedAt: string;
-}
 
 export interface InstanceLease {
   ownerId: string;
@@ -157,46 +137,6 @@ export interface LarkCardActionResult {
   card?: object;
 }
 
-export interface Binding {
-  id: string;
-  creatorOpenId: string | null;
-  projectId: string | null;
-  workspaceId: string;
-  chatId: string;
-  topicId: string | null;
-  rootMessageId: string | null;
-  retiredTopicId: string | null;
-  retiredRootMessageId: string | null;
-  replacesBindingId: string | null;
-  reservedTopicId: string | null;
-  reservedRootMessageId: string | null;
-  resetMessageId: string | null;
-  paneId: string | null;
-  traexSessionId: string | null;
-  agentSessionSource?: string | null;
-  agentSessionAgent?: string | null;
-  agentSessionKind?: "id" | "path" | null;
-  agentSessionValue?: string | null;
-  title: string;
-  runtime: "traex";
-  state: BindingState;
-  statusMessageId: string | null;
-  statusCardSequence: number;
-  lastAgentState: AgentState;
-  lastOutputFingerprint: string | null;
-  lifecycle: SessionLifecycle;
-  attachment: AttachmentState;
-  generation: number;
-  provisioningCheckpoint: ProvisioningCheckpoint;
-  degradationCount: number;
-  hasCompletedTurn: boolean;
-  lastObservedAt: string | null;
-  archivedAt: string | null;
-  lastActivityAt: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export type CardInteractionActionKind = "supplement" | "convert_queued_prompt" | "enqueue_failed_steering" | "more_actions" | "session_control";
 export type CardInteractionState = "active" | "claimed" | "consumed" | "expired";
 export interface CardInteraction {
@@ -212,58 +152,6 @@ export interface SessionOperation {
   expectedPaneId: string | null; expectedTerminalId: string | null; actorOpenId: string; kind: SessionOperationKind;
   argument: string | null; state: SessionOperationState; attemptCount: number; detail: string | null; createdAt: string; updatedAt: string;
 }
-
-export type BindingMetadataPatch = Partial<Pick<Binding,
-  | "projectId" | "topicId" | "rootMessageId" | "retiredTopicId" | "retiredRootMessageId"
-  | "reservedTopicId" | "reservedRootMessageId" | "resetMessageId" | "paneId" | "traexSessionId"
-  | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"
-  | "title" | "statusMessageId" | "lastOutputFingerprint" | "lastActivityAt"
->>;
-
-export interface PromptJob {
-  id: string;
-  bindingId: string;
-  larkMessageId: string;
-  actorOpenId: string;
-  body: string;
-  executionOrigin: "bridge" | "herdr";
-  dispatchKind: PromptDispatchKind;
-  priority: TurnPriority;
-  parentPromptId: string | null;
-  steeringOrigin: SteeringOrigin | null;
-  sourcePromptId: string | null;
-  wasDetached: boolean;
-  dispatchedAt: string | null;
-  transcriptTurnId: string | null;
-  transcriptTurnStartedAt: string | null;
-  modelName?: string | null;
-  modelRevision?: number | null;
-  observationState: PromptObservationState;
-  state: PromptState;
-  attemptCount: number;
-  error: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ExternalTurnAdoption {
-  outcome: "adopted_queued" | "created_external" | "already_owned" | "stale_binding" | "conflict";
-  prompt: PromptJob | null;
-  supersededPromptIds: string[];
-  outboxReserved: boolean;
-}
-
-export interface ExternalTurnSupersessionFence {
-  promptId: string;
-  turnId: string;
-  startedAt: string;
-}
-
-export type TranscriptTurnClaimOutcome =
-  | { state: "claimed"; prompt: PromptJob }
-  | { state: "matched"; prompt: PromptJob }
-  | { state: "conflict"; prompt: PromptJob }
-  | { state: "ineligible"; prompt: PromptJob | null };
 
 export interface PaneCloseOperation {
   id: string;
