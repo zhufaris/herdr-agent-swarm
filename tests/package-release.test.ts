@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { RELEASE_FILES, parseArguments, releaseName, sha256, validateReleaseTag } from "../scripts/package-release.mjs";
+import { RELEASE_FILES, parseArguments, releaseName, sha256, validateBuildIdentity, validateReleaseTag } from "../scripts/package-release.mjs";
 
 describe("release packaging contract", () => {
   it("accepts only the exact package version tag", () => {
@@ -22,6 +22,13 @@ describe("release packaging contract", () => {
     expect(RELEASE_FILES).not.toContain(".env");
     expect(RELEASE_FILES).not.toContain("var");
     expect(releaseName("0.3.0")).toBe("herdr-agent-swarm-0.3.0-linux-x64");
+  });
+
+  it("rejects stale or version-mismatched compiled output", () => {
+    const commit = "a".repeat(40);
+    expect(() => validateBuildIdentity({ version: "0.3.0", gitCommit: commit }, "0.3.0", commit)).not.toThrow();
+    expect(() => validateBuildIdentity({ version: "0.2.0", gitCommit: commit }, "0.3.0", commit)).toThrow(/build version/);
+    expect(() => validateBuildIdentity({ version: "0.3.0", gitCommit: "b".repeat(40) }, "0.3.0", commit)).toThrow(/build commit/);
   });
 
   it("computes a standard SHA-256 digest", () => {

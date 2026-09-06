@@ -20,6 +20,11 @@ export function validateReleaseTag(tag, version) {
 
 export function releaseName(version) { return `herdr-agent-swarm-${version}-linux-x64`; }
 
+export function validateBuildIdentity(buildInfo, version, gitCommit) {
+  if (buildInfo.version !== version) throw new Error(`compiled build version ${JSON.stringify(buildInfo.version)} does not match package version ${JSON.stringify(version)}`);
+  if (!/^[a-f0-9]{40}$/.test(gitCommit) || buildInfo.gitCommit !== gitCommit) throw new Error(`compiled build commit ${JSON.stringify(buildInfo.gitCommit)} does not match current commit ${JSON.stringify(gitCommit)}`);
+}
+
 export function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
@@ -45,7 +50,9 @@ export function packageRelease({ root, output, tag }) {
   const buildInfoPath = join(projectRoot, "dist/build-info.json");
   if (!existsSync(buildInfoPath)) throw new Error("dist/build-info.json is missing; run npm run build first");
   const buildInfo = JSON.parse(readFileSync(buildInfoPath, "utf8"));
-  if (buildInfo.version !== version) throw new Error(`compiled build version ${JSON.stringify(buildInfo.version)} does not match package version ${JSON.stringify(version)}`);
+  const git = spawnSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" });
+  if (git.status !== 0) throw new Error(`cannot resolve current Git commit: ${(git.stderr || git.stdout).trim()}`);
+  validateBuildIdentity(buildInfo, version, git.stdout.trim());
   for (const relativePath of RELEASE_FILES) {
     if (!existsSync(join(projectRoot, relativePath))) throw new Error(`required release input is missing: ${relativePath}`);
   }
