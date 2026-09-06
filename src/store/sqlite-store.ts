@@ -85,6 +85,10 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     });
     this.prompts = new SqlitePromptStore(this.context, this.projections, {
       getBinding: (id) => this.getBinding(id),
+      persistBindingPatch: (id, patch) => this.persistBindingPatch(id, patch),
+      transitionBinding: (id, transition) => this.transitionBinding(id, transition),
+      loadCardContextInvalidation: (target) => this.loadCardContextInvalidation(target),
+      loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.loadPrimaryWorkerActivity(promptId, bindingGeneration),
       enqueueOutboundReply: (input) => this.enqueueOutboundReply(input)
     });
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
@@ -1751,26 +1755,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   settleDetachedPrompt(input: { promptId: string; bindingId: string; runtime: Binding["lastAgentState"]; occurredAt: string; terminal: { kind: "completed"; answer: string; outputFingerprint: string } | { kind: "failed"; error: string } }): boolean {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const nextState = input.terminal.kind === "completed" ? "delivered" : "failed";
-      const error = input.terminal.kind === "failed" ? input.terminal.error : null;
-      const changed = this.database.prepare(`
-        UPDATE prompt_jobs SET state = ?, observation_state = 'completed', error = ?, updated_at = ?
-        WHERE id = ? AND binding_id = ? AND state = 'running' AND observation_state = 'detached'
-      `).run(nextState, error, input.occurredAt, input.promptId, input.bindingId);
-      if (Number(changed.changes) !== 1) { this.database.exec("COMMIT"); return false; }
-      this.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.runtime });
-      if (input.terminal.kind === "completed") {
-        this.persistBindingPatch(input.bindingId, { lastOutputFingerprint: input.terminal.outputFingerprint });
-        this.transitionBinding(input.bindingId, { type: "turn_completed" });
-        this.persistTerminalRunCard(input.promptId, { type: "completed", occurredAt: input.occurredAt, answer: input.terminal.answer, replaceAnswer: true });
-      } else {
-        this.persistTerminalRunCard(input.promptId, { type: "failed", occurredAt: input.occurredAt, notice: input.terminal.error });
-      }
-      this.database.exec("COMMIT");
-      return true;
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.prompts.settleDetachedPrompt(input);
   }
 
   markPromptObservationDetached(id: string, notice: string): void {
@@ -1924,19 +1909,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[] {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const rows = this.database.prepare("SELECT id, steering_origin FROM prompt_jobs WHERE binding_id = ? AND parent_prompt_id = ? AND dispatch_kind = 'steering' AND state = 'queued'")
-        .all(bindingId, parentPromptId) as Array<{ id: string; steering_origin: string | null }>;
-      const timestamp = now();
-      for (const row of rows) {
-        const failureNotice = row.steering_origin === "automatic" ? "当前任务已结束，未自动注入" : notice;
-        this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run(failureNotice, timestamp, row.id);
-        this.persistTerminalRunCard(row.id, { type: "steering-failed", occurredAt: timestamp, notice: failureNotice, failureKind: "rejected" });
-      }
-      this.database.exec("COMMIT");
-      return rows.map((row) => row.id);
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    return this.prompts.failQueuedSteering(bindingId, parentPromptId, notice);
   }
 
   updatePrompt(id: string, state: PromptState, error: string | null = null): void {
@@ -1944,68 +1917,15 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', error = NULL, updated_at = ? WHERE id = ? AND binding_id = ?")
-        .run(input.occurredAt, input.promptId, input.bindingId);
-      this.persistBindingPatch(input.bindingId, { lastOutputFingerprint: input.outputFingerprint });
-      const binding = this.transitionBinding(input.bindingId, { type: "turn_completed" });
-      this.persistTerminalRunCard(input.promptId, { type: "completed", occurredAt: input.occurredAt, answer: input.answer, ...(input.replaceAnswer === undefined ? {} : { replaceAnswer: input.replaceAnswer }) });
-      this.database.exec("COMMIT");
-      return binding;
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    return this.prompts.completeTurn(input);
   }
 
   failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.prepare(`
-        UPDATE binding_model_preferences
-        SET state = CASE WHEN prepared_operation_id IS NULL THEN 'pending' ELSE 'uncertain' END,
-          dispatch_prompt_id = CASE WHEN prepared_operation_id IS NULL THEN NULL ELSE dispatch_prompt_id END,
-          updated_at = ?
-        WHERE state = 'applying' AND dispatch_prompt_id = ?
-          AND EXISTS (
-            SELECT 1 FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id
-            WHERE p.id = ? AND p.binding_id = binding_model_preferences.binding_id
-              AND b.generation = binding_model_preferences.binding_generation
-              AND p.model_name = binding_model_preferences.desired_model
-              AND p.model_revision = binding_model_preferences.desired_revision
-          )
-      `).run(input.occurredAt, input.promptId, input.promptId);
-      this.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?")
-        .run(input.error, input.occurredAt, input.promptId);
-      this.persistTerminalRunCard(input.promptId, input.steeringFailureKind
-        ? { type: "steering-failed", occurredAt: input.occurredAt, notice: input.error, failureKind: input.steeringFailureKind }
-        : { type: "failed", occurredAt: input.occurredAt, notice: input.error });
-      this.database.exec("COMMIT");
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    this.prompts.failPrompt(input);
   }
 
   completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', error = NULL, updated_at = ? WHERE id = ?")
-        .run(input.occurredAt, input.promptId);
-      this.persistTerminalRunCard(input.promptId, { type: "steering-delivered", occurredAt: input.occurredAt, notice: input.notice });
-      this.database.exec("COMMIT");
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
-  }
-
-  private persistTerminalRunCard(promptId: string, change: Parameters<typeof reduceRunCard>[1]): void {
-    const current = this.loadRunCard(promptId);
-    if (!current) throw new Error(`Run card missing for prompt: ` + promptId);
-    let next = reduceRunCard(current, change);
-    if (next.phase === "completed" || next.phase === "failed") {
-      const invalidation = this.loadCardContextInvalidation({ targetKind: "primary-turn", targetId: next.promptId, targetGeneration: next.bindingGeneration });
-      const revision = Math.max(next.workerDependencyRevision, invalidation?.requestedDependencyRevision ?? 0);
-      next = freezeRunCardWorkerContext(updateRunCardWorkerContext(next, selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(next.promptId, next.bindingGeneration)), revision, change.occurredAt), change.occurredAt);
-    }
-    if (next !== current) this.saveRunCard(next);
-    const prompt = this.getPrompt(promptId);
-    if (prompt?.dispatchKind === "steering") return;
-    const topic = this.loadTopicView(current.bindingId);
-    if (topic) this.saveTopicView(mirrorRunCardToTopic(topic, next));
+    this.prompts.completeSteering(input);
   }
 
   cancelQueuedPromptsWithProjection(input: { bindingId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): { cancelledPromptIds: string[]; outboxReserved: boolean } {
