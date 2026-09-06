@@ -11,9 +11,9 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
-import { FailureLogGate } from "../runtime/failure-log-gate.js";
-import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
-import { mergeReconciliationScope, reconciliationCooldownCovers, reconciliationScopeCovers, type ReconciliationScope } from "./reconciliation-scope-policy.js";
+import { applyMonotonicAgentState, isConfirmedUnregisteredTraexAgent, isTraexCompatiblePane, type ObservedAgentState } from "../domain/binding-runtime-convergence-policy.js";
+import { HerdrSnapshotCollector } from "./herdr-snapshot-collector.js";
+import { ReconciliationScheduler } from "./reconciliation-scheduler.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -34,8 +34,6 @@ interface HerdrRuntimeReconcilerOptions {
   presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">;
 }
 
-const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
-
 export interface HerdrRuntimeReconcilerPort {
   captureBaselines(): Promise<void>;
   reconcile(workspaceIds?: readonly string[]): Promise<void>;
@@ -47,24 +45,20 @@ export interface HerdrRuntimeReconcilerPort {
 }
 
 export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
-  private reconciliation: Promise<void> | null = null;
-  private pendingReconciliation: ReconciliationScope | undefined;
-  private activeReconciliation: ReconciliationScope | undefined;
-  private stopping = false;
-  private timer: NodeJS.Timeout | null = null;
-  private readonly observedAgentStates = new Map<string, { terminalId: string | null; sequence: number; state: HerdrPane["agentState"] }>();
+  private readonly observedAgentStates = new Map<string, ObservedAgentState>();
   private readonly observedTabIds = new Map<string, string | null>();
   private readonly observedWorktreeNames = new Map<string, string | null>();
-  private readonly lastReconciledAt = new Map<string, number>();
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
   private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
-  private readonly metrics = new ReconciliationRunMetrics();
-  private readonly workspaceFailureLogs = new FailureLogGate();
+  private readonly snapshots: HerdrSnapshotCollector;
+  private readonly reconciliationScheduler: ReconciliationScheduler;
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
+    this.snapshots = new HerdrSnapshotCollector(options.herdr, options.logger);
+    this.reconciliationScheduler = new ReconciliationScheduler({ configuredWorkspaceIds: this.configuredWorkspaceIds, execute: (scope) => this.reconcileOnce(scope), logger: options.logger });
     this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
     const projectsByWorkspaceAndCwd = new Map<string, ProjectConfig[]>();
     for (const project of options.projects) {
@@ -77,9 +71,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   async captureBaselines(): Promise<void> {
-    const panes = this.options.herdr.listAllPanes
-      ? await this.options.herdr.listAllPanes()
-      : (await Promise.all([...this.configuredWorkspaceIds].map((workspaceId) => this.options.herdr.listPanes(workspaceId)))).flat();
+    const panes = await this.snapshots.allOrConfigured([...this.configuredWorkspaceIds]);
     for (const pane of panes) {
       if (pane.stateChangeSeq !== null && pane.stateChangeSeq !== undefined) {
         this.observedAgentStates.set(pane.paneId, { terminalId: pane.terminalId ?? null, sequence: pane.stateChangeSeq, state: pane.agentState });
@@ -89,36 +81,16 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
-    if (this.stopping) return;
-    if (this.reconciliation) { this.metrics.markCoalesced(); return this.reconciliation; }
-    this.enqueueReconciliation(workspaceIds);
-    const work = this.drainReconciliations();
-    this.reconciliation = work;
-    try { await work; }
-    finally { if (this.reconciliation === work) this.reconciliation = null; }
+    return this.reconciliationScheduler.reconcile(workspaceIds);
   }
 
   async requestReconciliation(workspaceIds?: readonly string[]): Promise<void> {
-    if (this.stopping) return;
-    if (this.reconciliation && this.activeReconciliationCovers(workspaceIds)) {
-      this.metrics.markCoalesced();
-      return this.reconciliation;
-    }
-    if (!this.reconciliation && this.recentReconciliationCovers(workspaceIds)) {
-      this.metrics.markCoalesced();
-      return;
-    }
-    this.enqueueReconciliation(workspaceIds);
-    if (this.reconciliation) { this.metrics.markCoalesced(); return this.reconciliation; }
-    const work = this.drainReconciliations();
-    this.reconciliation = work;
-    try { await work; }
-    finally { if (this.reconciliation === work) this.reconciliation = null; }
+    return this.reconciliationScheduler.request(workspaceIds);
   }
 
   async requestPaneReconciliation(paneIds: readonly string[]): Promise<void> {
-    if (this.stopping) return;
-    if (this.reconciliation) await this.reconciliation;
+    if (this.reconciliationScheduler.isStopping()) return;
+    await this.reconciliationScheduler.waitForIdle();
     for (const paneId of [...new Set(paneIds)]) {
       const existing = this.options.store.findBindingByPane(paneId);
       if (!existing || (existing.state !== "active" && existing.state !== "orphaned")) continue;
@@ -132,78 +104,27 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     }
   }
 
-  private enqueueReconciliation(workspaceIds?: readonly string[]): void {
-    this.pendingReconciliation = mergeReconciliationScope(this.pendingReconciliation, workspaceIds);
-  }
-
-  private activeReconciliationCovers(workspaceIds?: readonly string[]): boolean {
-    return reconciliationScopeCovers(this.activeReconciliation, workspaceIds);
-  }
-
-  private recentReconciliationCovers(workspaceIds?: readonly string[]): boolean {
-    return reconciliationCooldownCovers({
-      ...(workspaceIds ? { requestedWorkspaceIds: workspaceIds } : {}), configuredWorkspaceIds: this.configuredWorkspaceIds,
-      lastReconciledAt: this.lastReconciledAt, now: performance.now(), cooldownMs: EVENT_RECONCILIATION_COOLDOWN_MS
-    });
-  }
-
-  private async drainReconciliations(): Promise<void> {
-    while (this.pendingReconciliation !== undefined && !this.stopping) {
-      const requested = this.pendingReconciliation;
-      this.pendingReconciliation = undefined;
-      this.activeReconciliation = requested;
-      try { await this.runMeasured(requested === null ? undefined : requested); }
-      finally { this.activeReconciliation = undefined; }
-    }
-  }
-
   snapshot(): ReconciliationDiagnostics {
-    return this.metrics.snapshot(this.stopping ? "stopping" : this.reconciliation ? "running" : "idle");
-  }
-
-  private async runMeasured(requestedWorkspaceIds?: ReadonlySet<string>): Promise<void> {
-    await this.metrics.measure(async () => {
-      const reconciledWorkspaceIds = await this.reconcileOnce(requestedWorkspaceIds);
-      const completedAt = performance.now();
-      for (const workspaceId of reconciledWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
-    });
+    return this.reconciliationScheduler.snapshot();
   }
 
   start(intervalMs: number): void {
-    if (this.stopping || this.timer) return;
-    this.timer = setInterval(() => {
-      void this.reconcile().catch((error) => this.options.logger.error({ event: "reconciliation-failed", err: safeLogError(error), outcome: "failed" }, "reconciliation failed"));
-    }, intervalMs);
-    this.timer.unref();
+    this.reconciliationScheduler.start(intervalMs);
   }
 
   async stop(): Promise<void> {
-    this.stopping = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    if (this.reconciliation) await this.reconciliation;
+    await this.reconciliationScheduler.stop();
   }
 
   private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<ReadonlySet<string>> {
     const allActiveBindings = this.options.store.listBindingsByState("active");
     const orphanedBindings = this.options.store.listBindingsByState("orphaned");
-    const panesByWorkspace = new Map<string, HerdrPane[]>();
     const reconciliationWorkspaceIds = new Set(this.configuredWorkspaceIds);
     for (const binding of [...allActiveBindings, ...orphanedBindings]) reconciliationWorkspaceIds.add(binding.workspaceId);
     const workspaceIds = requestedWorkspaceIds
       ? [...requestedWorkspaceIds].filter((workspaceId) => reconciliationWorkspaceIds.has(workspaceId))
       : [...reconciliationWorkspaceIds];
-    if (this.options.herdr.listAllPanes) {
-      try {
-        const requested = new Set(workspaceIds);
-        const snapshot = await this.options.herdr.listAllPanes();
-        for (const workspaceId of workspaceIds) panesByWorkspace.set(workspaceId, []);
-        for (const pane of snapshot) if (requested.has(pane.workspaceId)) panesByWorkspace.get(pane.workspaceId)!.push(pane);
-      } catch (error) {
-        this.options.logger.warn({ event: "herdr-snapshot-fallback", err: safeLogError(error), workspaceIds, outcome: "fallback" }, "Herdr snapshot unavailable; falling back to workspace pane discovery");
-        await this.loadWorkspacePanes(workspaceIds, panesByWorkspace);
-      }
-    } else await this.loadWorkspacePanes(workspaceIds, panesByWorkspace);
+    const panesByWorkspace = await this.snapshots.collect(workspaceIds);
 
     const paneIdsByWorkspace = new Map<string, Set<string>>();
     for (const [workspaceId, workspacePanes] of panesByWorkspace) paneIdsByWorkspace.set(workspaceId, new Set(workspacePanes.map((pane) => pane.paneId)));
@@ -340,30 +261,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private withMonotonicAgentState(pane: HerdrPane): HerdrPane {
-    const sequence = pane.stateChangeSeq;
-    if (sequence === null || sequence === undefined) return pane;
-    const terminalId = pane.terminalId ?? null;
-    const previous = this.observedAgentStates.get(pane.paneId);
-    if (previous && previous.terminalId === terminalId && sequence <= previous.sequence) {
-      return { ...pane, agentState: previous.state };
-    }
-    this.observedAgentStates.set(pane.paneId, { terminalId, sequence, state: pane.agentState });
-    return pane;
-  }
-
-  private async loadWorkspacePanes(workspaceIds: readonly string[], panesByWorkspace: Map<string, HerdrPane[]>): Promise<void> {
-    await Promise.all(workspaceIds.map(async (workspaceId) => {
-      try {
-        panesByWorkspace.set(workspaceId, await this.options.herdr.listPanes(workspaceId));
-        const recovery = this.workspaceFailureLogs.recover(workspaceId);
-        if (recovery) this.options.logger.info({ event: "workspace-reconciliation-recovered", workspaceId, ...recovery, outcome: "recovered" }, "workspace reconciliation recovered");
-      }
-      catch (error) {
-        const safe = safeLogError(error);
-        const decision = this.workspaceFailureLogs.fail(workspaceId, safe.message);
-        if (decision.kind !== "suppressed") this.options.logger.warn({ event: decision.kind === "summary" ? "workspace-reconciliation-failure-summary" : "workspace-reconciliation-failed", err: safe, workspaceId, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "failed" }, "workspace reconciliation failed");
-      }
-    }));
+    const result = applyMonotonicAgentState(pane, this.observedAgentStates.get(pane.paneId));
+    if (result.observation) this.observedAgentStates.set(pane.paneId, result.observation);
+    return result.pane;
   }
 
   private async orphanMissingPane(binding: Binding, reason = `Herdr pane ${binding.paneId} no longer exists`): Promise<Binding> {
@@ -466,13 +366,4 @@ function workspaceCwdKey(workspaceId: string, cwd: string | null): string {
 
 function pruneMissingPaneObservations<Value>(observations: Map<string, Value>, livePaneIds: ReadonlySet<string>): void {
   for (const paneId of observations.keys()) if (!livePaneIds.has(paneId)) observations.delete(paneId);
-}
-
-function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean {
-  return pane.agentKind === null && pane.foregroundExecutables.includes("traex");
-}
-
-function isTraexCompatiblePane(pane: HerdrPane): boolean {
-  return pane.foregroundExecutables.includes("traex")
-    || pane.agentKind === "traex" || pane.agentKind === "codex" || pane.agentKind === "claude" || pane.agentKind === "pi";
 }
