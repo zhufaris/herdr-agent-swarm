@@ -167,18 +167,43 @@ describe("project registry configuration", () => {
 
   it("configures bounded runtime cache, safety scan, and debounce intervals", () => {
     expect(loadConfig(requiredEnvironment).runtimeTuning).toEqual({
-      herdrSnapshotCacheTtlMs: 2_000, outboxSafetyScanIntervalMs: 30_000, cardUpdateDebounceMs: 500
+      polling: { transcriptIdentityMs: 50, attachedTranscriptMs: 250, workerTurnMs: 250, externalTurnMs: 2_000 },
+      cache: { herdrSnapshotTtlMs: 2_000 },
+      cards: { updateDebounceMs: 500, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 9_000 },
+      paneClosure: { confirmationTtlMs: 60_000 },
+      outboxSafetyScanIntervalMs: 30_000
     });
-    expect(loadConfig({
-      ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "0", OUTBOX_SAFETY_SCAN_INTERVAL_MS: "1000",
-      CARD_UPDATE_DEBOUNCE_MS: "10000"
-    }).runtimeTuning).toEqual({
-      herdrSnapshotCacheTtlMs: 0, outboxSafetyScanIntervalMs: 1_000, cardUpdateDebounceMs: 10_000
-    });
-    expect(() => loadConfig({ ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "60001" })).toThrow();
+    expect(loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "1000" }).runtimeTuning.outboxSafetyScanIntervalMs).toBe(1_000);
     expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "999" })).toThrow();
     expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "300001" })).toThrow();
-    expect(() => loadConfig({ ...requiredEnvironment, CARD_UPDATE_DEBOUNCE_MS: "10001" })).toThrow();
+  });
+
+  it("loads partial runtime tuning from strict YAML", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "herdr-runtime-")), "runtime.yaml");
+    writeFileSync(path, "runtime:\n  polling:\n    workerTurnMs: 40\n  cards:\n    updateDebounceMs: 0\n    answerPageLimitChars: 8000\n");
+    expect(loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path }).runtimeTuning).toEqual({
+      polling: { transcriptIdentityMs: 50, attachedTranscriptMs: 250, workerTurnMs: 40, externalTurnMs: 2_000 },
+      cache: { herdrSnapshotTtlMs: 2_000 },
+      cards: { updateDebounceMs: 0, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 8_000 },
+      paneClosure: { confirmationTtlMs: 60_000 },
+      outboxSafetyScanIntervalMs: 30_000
+    });
+  });
+
+  it("rejects malformed, unknown, and inconsistent runtime YAML", () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-runtime-invalid-"));
+    const path = join(directory, "runtime.yaml");
+    writeFileSync(path, "runtime: [");
+    expect(() => loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path })).toThrow(/runtime configuration/i);
+    writeFileSync(path, "runtime:\n  polling:\n    typoMs: 25\n");
+    expect(() => loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path })).toThrow(/typoMs/);
+    writeFileSync(path, "runtime:\n  cards:\n    answerStreamLimitChars: 8000\n    answerPageLimitChars: 9000\n");
+    expect(() => loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path })).toThrow(/answerPageLimitChars/);
+  });
+
+  it("rejects retired runtime environment overrides with migration guidance", () => {
+    expect(() => loadConfig({ ...requiredEnvironment, HERDR_SNAPSHOT_CACHE_TTL_MS: "1000" })).toThrow(/runtime.yaml.*runtime.cache.herdrSnapshotTtlMs/);
+    expect(() => loadConfig({ ...requiredEnvironment, CARD_UPDATE_DEBOUNCE_MS: "1000" })).toThrow(/runtime.yaml.*runtime.cards.updateDebounceMs/);
   });
 
   it("rejects project paths that are missing or not directories", () => {

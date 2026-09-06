@@ -3,6 +3,7 @@ import { basename, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 import type { ProjectConfig } from "./domain/types.js";
+import { loadRuntimeTuning } from "./runtime-config.js";
 
 const projectSchema = z.object({
   id: z.string().regex(/^[a-z0-9_-]+$/),
@@ -38,6 +39,7 @@ const environmentSchema = z.object({
   LARK_ALLOWED_OPEN_IDS: z.string().min(1),
   LARK_ADMIN_OPEN_IDS: z.string().min(1),
   PROJECTS_CONFIG_PATH: z.string().min(1).default("./config/projects.json"),
+  RUNTIME_CONFIG_PATH: z.string().min(1).default("./config/runtime.yaml"),
   BRIDGE_DATABASE_PATH: z.string().min(1).default("./var/bridge.db"),
   BRIDGE_HTTP_HOST: z.enum(["127.0.0.1", "localhost", "::1"]).default("127.0.0.1"),
   BRIDGE_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
@@ -53,9 +55,7 @@ const environmentSchema = z.object({
   LARK_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
-  HERDR_SNAPSHOT_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60_000).default(2_000),
   OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
-  CARD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).max(10_000).default(500),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
   HERDR_CIRCUIT_OPEN_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),
   INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
@@ -71,14 +71,16 @@ const environmentSchema = z.object({
 export type BridgeConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
+  rejectRetiredRuntimeEnvironment(environment);
   const value = environmentSchema.parse(environment);
   const registry = loadProjectRegistry(value.PROJECTS_CONFIG_PATH);
-  return buildConfig(value, registry);
+  return buildConfig(value, registry, loadRuntimeTuning(value.RUNTIME_CONFIG_PATH));
 }
 
 function buildConfig(
   value: z.infer<typeof environmentSchema>,
-  registry: { defaultProjectId: string; projects: ProjectConfig[] }
+  registry: { defaultProjectId: string; projects: ProjectConfig[] },
+  runtime = loadRuntimeTuning(value.RUNTIME_CONFIG_PATH)
 ) {
   if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
     throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
@@ -95,6 +97,7 @@ function buildConfig(
     projects: registry.projects,
     defaultProjectId: registry.defaultProjectId,
     projectsConfigPath: value.PROJECTS_CONFIG_PATH,
+    runtimeConfigPath: value.RUNTIME_CONFIG_PATH,
     traex: { executable: value.TRAEX_BIN, permissionMode: value.TRAEX_PERMISSION_MODE, sessionsRoot: value.TRAEX_SESSIONS_ROOT },
     agents: { codex: value.CODEX_BIN, claudeCode: value.CLAUDE_CODE_BIN, pi: value.PI_BIN },
     databasePath: value.BRIDGE_DATABASE_PATH,
@@ -104,9 +107,7 @@ function buildConfig(
     turnTimeoutMs: value.TURN_TIMEOUT_MS,
     reconcileIntervalMs: value.RECONCILE_INTERVAL_MS,
     runtimeTuning: {
-      herdrSnapshotCacheTtlMs: value.HERDR_SNAPSHOT_CACHE_TTL_MS,
-      outboxSafetyScanIntervalMs: value.OUTBOX_SAFETY_SCAN_INTERVAL_MS,
-      cardUpdateDebounceMs: value.CARD_UPDATE_DEBOUNCE_MS
+      ...runtime, outboxSafetyScanIntervalMs: value.OUTBOX_SAFETY_SCAN_INTERVAL_MS
     },
     herdrCircuitBreaker: { failureThreshold: value.HERDR_CIRCUIT_FAILURE_THRESHOLD, openMs: value.HERDR_CIRCUIT_OPEN_MS },
     instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
@@ -137,7 +138,14 @@ export function validateEnvironmentAndRegistry(
   environment: NodeJS.ProcessEnv,
   registry: { defaultProjectId: string; projects: ProjectConfig[] }
 ) {
-  return buildConfig(environmentSchema.parse(environment), registry);
+  rejectRetiredRuntimeEnvironment(environment);
+  const value = environmentSchema.parse(environment);
+  return buildConfig(value, registry, loadRuntimeTuning(value.RUNTIME_CONFIG_PATH));
+}
+
+function rejectRetiredRuntimeEnvironment(environment: NodeJS.ProcessEnv): void {
+  if (environment.HERDR_SNAPSHOT_CACHE_TTL_MS !== undefined) throw new Error("HERDR_SNAPSHOT_CACHE_TTL_MS was replaced by runtime.yaml field runtime.cache.herdrSnapshotTtlMs");
+  if (environment.CARD_UPDATE_DEBOUNCE_MS !== undefined) throw new Error("CARD_UPDATE_DEBOUNCE_MS was replaced by runtime.yaml field runtime.cards.updateDebounceMs");
 }
 
 export function validateProjectRegistryFile(path: string): void {

@@ -1,0 +1,18 @@
+runtime:
+  polling:
+    transcriptIdentityMs: 50
+    attachedTranscriptMs: 250
+    workerTurnMs: 250
+    externalTurnMs: 2000
+
+  cache:
+    herdrSnapshotTtlMs: 2000
+
+  cards:
+    updateDebounceMs: 500
+    payloadLimitChars: 12000
+    answerStreamLimitChars: 28000
+    answerPageLimitChars: 9000
+
+  paneClosure:
+    confirmationTtlMs: 60000

@@ -35,6 +35,7 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.56.0",
     "pino": "^9.7.0",
+    "yaml": "^2.9.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
