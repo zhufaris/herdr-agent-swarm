@@ -65,6 +65,12 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE TABLE IF NOT EXISTS primary_tool_capabilities(
     binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(binding_id, binding_generation)
   );
+  CREATE TABLE IF NOT EXISTS worker_card_display_requests(
+    id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL,
+    parent_prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL,
+    worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER NOT NULL, worker_name TEXT NOT NULL,
+    receipt_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(binding_id, binding_generation, idempotency_key)
+  );
   CREATE TABLE IF NOT EXISTS approval_requests(
     id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, project_id TEXT NOT NULL, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL,
     action_fingerprint TEXT NOT NULL, resource_scope TEXT NOT NULL, policy_version TEXT NOT NULL, tier TEXT NOT NULL CHECK(tier = 'remote-confirmation'),

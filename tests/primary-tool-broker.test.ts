@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 import { PrimaryToolBroker } from "../src/runtime/primary-tool-broker.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
@@ -22,7 +22,8 @@ function setup() {
   };
   const driver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }), steer: async () => ({ status: "delivered" as const }), interrupt: async () => ({ status: "interrupted" as const }) } satisfies AgentRuntimeDriver;
   const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "turn-1" });
-  return { create, primary, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }) => new PrimaryToolBroker(identity, messaging) };
+  const workerCards = { show: vi.fn((input) => ({ accepted: true as const, delivery: "queued" as const, worker: { id: "worker", name: input.workerName, workerSessionGeneration: 1 }, cards: ["worker-main", "worker-task"] as ["worker-main", "worker-task"], taskTurnId: null })) };
+  return { create, primary, workerCards, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }) => new PrimaryToolBroker(identity, messaging, workerCards) };
 }
 
 describe("PrimaryToolBroker", () => {
@@ -47,6 +48,13 @@ describe("PrimaryToolBroker", () => {
 
   it("exposes only the fixed non-topology tool surface", () => {
     const { primary, broker } = setup();
-    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(broker(primary()))).filter((name) => name !== "constructor").sort()).toEqual(["followUpInstance", "inspectInstance", "interruptInstance", "listInstances", "promptInstance", "steerInstance", "waitInstance"].sort());
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(broker(primary()))).filter((name) => name !== "constructor").sort()).toEqual(["followUpInstance", "inspectInstance", "interruptInstance", "listInstances", "promptInstance", "showWorkerCards", "steerInstance", "waitInstance"].sort());
+  });
+
+  it("passes only server-owned Primary scope to Worker card display", () => {
+    const { primary, broker, workerCards } = setup(); const identity = primary();
+    expect(broker(identity).showWorkerCards({ workerName: "reviewer", idempotencyKey: "display-1" })).toMatchObject({ accepted: true, delivery: "queued" });
+    expect(workerCards.show).toHaveBeenCalledWith({ ...identity, workerName: "reviewer", idempotencyKey: "display-1" });
+    expect(() => broker(identity).showWorkerCards({ workerName: 1 as never, idempotencyKey: "display-2" })).toThrow(/requires workerName/);
   });
 });

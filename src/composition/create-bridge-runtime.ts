@@ -31,6 +31,7 @@ import { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
 import { InstanceControlWorkflow } from "../coordinator/instance-control-workflow.js";
 import { InstanceMessagingWorkflow } from "../coordinator/instance-messaging-workflow.js";
 import { InstanceInteractionWorkflow } from "../coordinator/instance-interaction-workflow.js";
+import { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
 import { SwarmCommandContextResolver } from "../coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../coordinator/swarm-command-gateway.js";
 import { InstanceRuntimeReconciler } from "../coordinator/instance-runtime-reconciler.js";
@@ -91,7 +92,8 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const instanceTurns = new InstanceTurnSupervisor({ store: stores.instance, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), logger });
   instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store: stores.instance, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeCardContext: () => outboundWork.wake(), logger });
   const instanceMessaging = new InstanceMessagingWorkflow({ store: stores.instance, turnControl, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, maxQueueDepth: config.maxQueueDepth });
-  const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("../cli/primary-tools-mcp.js", import.meta.url))], stores.instance, instanceMessaging, logger);
+  const workerCardDisplay = new WorkerCardDisplayWorkflow(stores.workerCardDisplay, () => outboundWork.wake());
+  const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("../cli/primary-tools-mcp.js", import.meta.url))], stores.instance, instanceMessaging, logger, [], {}, workerCardDisplay);
   const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store: stores.instance, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
   const channelPublisher = new LarkOutboxDispatcher(stores.outbox, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs); const answerPages = new AnswerPageWorkflow(stores.answerPages, () => outboundWork.wake(), logger); const mainCards = new MainCardWorkflow(stores.mainCards, () => outboundWork.wake(), logger);
   const outboxRetention = new OutboxRetentionMaintainer(stores.retention, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger); const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);

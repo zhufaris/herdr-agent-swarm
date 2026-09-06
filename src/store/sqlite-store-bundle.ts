@@ -8,6 +8,7 @@ import type { PromptAcceptanceStore, PromptRunStore } from "../domain/ports/prom
 import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "../domain/ports/projection.js";
 import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
+import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "../domain/ports/workflow.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 
@@ -58,6 +59,7 @@ export interface SqliteStoreBundle {
   readonly inboundMessages: InboundRoutingStore & PromptAcceptanceStore & InstanceStore;
   readonly startupRecovery: InboundRoutingStore & PromptAcceptanceStore;
   readonly retention: SqliteRetentionStore;
+  readonly workerCardDisplay: WorkerCardDisplayStore;
 }
 
 export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
@@ -72,6 +74,6 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
     sessionOperations: store, modelSelection: store, sessionAdministration: store,
     paneRetention: store, commandIntents: store, inboundMessages: store,
-    startupRecovery: store, retention: store
+    startupRecovery: store, retention: store, workerCardDisplay: store
   };
 }

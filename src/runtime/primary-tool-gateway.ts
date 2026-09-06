@@ -7,13 +7,14 @@ import type { InstanceStore } from "../domain/ports/instance.js";
 import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
 import { PrimaryToolBroker } from "./primary-tool-broker.js";
 import { safeLogError } from "./safe-error.js";
+import type { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CONNECTIONS = 64;
 const requestSchema = z.object({
   bindingId: z.string().min(1).max(128), generation: z.number().int().positive(), capability: z.string().regex(/^[a-f0-9]{64}$/),
-  tool: z.enum(["listInstances", "promptInstance", "followUpInstance", "steerInstance", "inspectInstance", "waitInstance", "interruptInstance"]),
+  tool: z.enum(["listInstances", "promptInstance", "followUpInstance", "steerInstance", "inspectInstance", "waitInstance", "interruptInstance", "showWorkerCards"]),
   arguments: z.record(z.unknown()).default({})
 }).strict();
 
@@ -24,7 +25,7 @@ export class PrimaryToolGateway {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
 
-  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}) {}
+  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}, private readonly workerCards?: Pick<WorkerCardDisplayWorkflow, "show">) {}
 
   issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolLaunch {
     const capability = randomBytes(32).toString("hex");
@@ -90,7 +91,7 @@ export class PrimaryToolGateway {
     const prompt = this.store.getActiveOrdinaryPrompt(request.bindingId, request.generation);
     if (!binding?.projectId || !prompt) throw new Error("Primary tool calls require a current active ordinary binding prompt");
     if (!binding.rootMessageId) throw new Error("Primary tool calls require a Lark topic root message");
-    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id, sourceMessageId: prompt.larkMessageId, rootMessageId: binding.rootMessageId }, this.messaging);
+    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id, sourceMessageId: prompt.larkMessageId, rootMessageId: binding.rootMessageId }, this.messaging, this.workerCards);
     return await (broker[request.tool] as (input: Record<string, unknown>) => unknown)(request.arguments);
   }
 }

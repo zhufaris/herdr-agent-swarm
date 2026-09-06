@@ -11,8 +11,14 @@ afterEach(async () => { await Promise.all(temporaryDirectories.splice(0).map((pa
 describe("Primary tools MCP surface", () => {
   it("advertises only the fixed non-topology tools with model-facing guidance", async () => {
     const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string; description: string }> } };
-    expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "steer_instance", "wait_instance"].sort());
+    expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "show_worker_cards", "steer_instance", "wait_instance"].sort());
     expect(response.result.tools.every(({ description }) => description.length > 40)).toBe(true);
+  });
+
+  it("maps an exact-name Worker card display request", async () => {
+    const invoke = vi.fn(async () => ({ accepted: true, delivery: "queued" }));
+    await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: "show", method: "tools/call", params: { name: "show_worker_cards", arguments: { workerName: "reviewer", idempotencyKey: "show-reviewer" } } }, invoke);
+    expect(invoke).toHaveBeenCalledWith("showWorkerCards", { workerName: "reviewer", idempotencyKey: "show-reviewer" });
   });
 
   it("maps a tool call to the gateway without accepting identity fields outside arguments", async () => {

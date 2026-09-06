@@ -78,6 +78,7 @@ export class SqliteMigrations {
     this.ensurePaneControlOperationState();
     this.ensureTurnControlOperations();
     this.ensureSwarmCommandIntents();
+    this.ensureWorkerCardDisplayRequests();
     if (runCardViewNeedsRebuild) this.recreateRunCardsView();
     this.ensureQueryIndexes();
     const answerTargetMigration = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
@@ -107,6 +108,17 @@ export class SqliteMigrations {
         this.context.database.exec("COMMIT");
       } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
     }
+  }
+
+  private ensureWorkerCardDisplayRequests(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS worker_card_display_requests(
+        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL,
+        parent_prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL,
+        worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER NOT NULL, worker_name TEXT NOT NULL,
+        receipt_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(binding_id, binding_generation, idempotency_key)
+      );
+    `);
   }
 
   private ensureAgentInstanceLifecycleColumns(): void {

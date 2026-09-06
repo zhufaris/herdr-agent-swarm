@@ -18,7 +18,7 @@ const STATE = {
 
 const REQUEST_PREVIEW_LIMIT = 2_000;
 
-export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage): object {
+export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean } = {}): object {
   const state = STATE[view.phase];
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
@@ -44,8 +44,8 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   if (showOutput) elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
   const interaction = workerTaskInteraction(view.phase);
-  elements.push({ tag: "markdown", content: interaction.guidance });
-  if (interaction.actionLabel && actionMessageId) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
+  elements.push({ tag: "markdown", content: options.snapshot ? "📸 这是只读状态快照；如需继续或补充任务，请使用原 Worker Task Card。" : interaction.guidance });
+  if (!options.snapshot && interaction.actionLabel && actionMessageId) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
     { tag: "column", width: "auto", elements: [callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId }, "primary")] },
     ...(interaction.canInterrupt ? [{ tag: "column", width: "auto", elements: [callbackButton("停止当前任务", { action: "worker_task_interrupt", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId }, "danger")] }] : [])
   ] });
@@ -56,13 +56,23 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   if (targets.length > 0) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: targets.map((button) => ({ tag: "column", width: "auto", elements: [button] })) });
   return {
     schema: "2.0",
-    config: { update_multi: true, streaming_mode: ["preparing", "running", "blocked"].includes(view.phase), summary: { content: `${view.workerName} · ${state.label}` } },
+    config: { update_multi: true, streaming_mode: !options.snapshot && ["preparing", "running", "blocked"].includes(view.phase), summary: { content: `${view.workerName} · ${state.label}` } },
     header: {
       title: { tag: "plain_text", content: `🎯 ${view.workerName} · Task ${view.turnId.slice(0, 8)}` },
       subtitle: { tag: "plain_text", content: "HERDR WORKER TASK" },
       template: state.color
     },
     body: { elements }
+  };
+}
+
+export function renderWorkerNoTaskCard(workerName: string): object {
+  const name = truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(workerName)), 300);
+  return {
+    schema: "2.0",
+    config: { update_multi: false, summary: { content: `${name} · 暂无 Task` } },
+    header: { title: { tag: "plain_text", content: `🎯 ${name} · 暂无 Task` }, subtitle: { tag: "plain_text", content: "HERDR WORKER TASK" }, template: "grey" },
+    body: { elements: [{ tag: "markdown", content: "该 Worker 当前还没有任务记录。" }] }
   };
 }
 

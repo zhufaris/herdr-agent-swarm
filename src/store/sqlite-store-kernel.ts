@@ -47,6 +47,8 @@ import { SqliteBindingLifecycleStore } from "./sqlite/binding-store.js";
 import { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.js";
 import { SqliteInstanceOperationStore } from "./sqlite/instance-operation-store.js";
 import { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
+import { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
+import type { WorkerCardDisplayReceipt, WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -61,7 +63,7 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
   createdAt: "created_at", updatedAt: "updated_at"
 };
 
-export class SqliteStoreKernel implements BindingStorePort, TurnControlStore {
+export class SqliteStoreKernel implements BindingStorePort, TurnControlStore, WorkerCardDisplayStore {
   readonly database: DatabaseSync;
   private readonly context: SqliteContext;
   private readonly approvals: SqliteApprovalStore;
@@ -82,6 +84,7 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore {
   private readonly bindingProjections: SqliteBindingProjectionStore;
   private readonly instanceOperations: SqliteInstanceOperationStore;
   private readonly turnControls: SqliteTurnControlStore;
+  private readonly workerCardDisplays: SqliteWorkerCardDisplayStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
@@ -143,6 +146,11 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore {
       loadRunCard: (id) => this.projections.loadRunCard(id),
       saveRunCard: (view) => this.projections.saveRunCard(view),
       reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
+    });
+    this.workerCardDisplays = new SqliteWorkerCardDisplayStore(this.context, {
+      loadWorkerMainProjectionSource: (workerId, generation) => this.cardContexts.loadWorkerMainProjectionSource(workerId, generation),
+      loadWorkerMainView: (workerId, generation) => this.cardContexts.loadWorkerMainView(workerId, generation),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
     });
     this.turnControls = new SqliteTurnControlStore(this.context, {
@@ -220,6 +228,10 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore {
 
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
     return this.cardContexts.reserveWorkerMainCard(view, rootMessageId, card);
+  }
+
+  reserveWorkerCardDisplay(input: Parameters<WorkerCardDisplayStore["reserveWorkerCardDisplay"]>[0]): WorkerCardDisplayReceipt {
+    return this.workerCardDisplays.reserveWorkerCardDisplay(input);
   }
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
