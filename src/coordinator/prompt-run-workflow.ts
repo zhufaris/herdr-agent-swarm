@@ -14,7 +14,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { TurnSupervisor } from "./turn-supervisor.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, decidePromptExecutionFailure, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
-import { decidePromptSafetyScan, decidePromptSafetyScanFailure } from "./prompt-safety-scan-policy.js";
+import { PromptSafetyScanner } from "./prompt-safety-scanner.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 
@@ -73,27 +73,22 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly steeringWorkers = new Map<string, Promise<void>>();
   private readonly turns = new TurnSupervisor();
   private readonly shutdownGraceMs: number;
-  private readonly safetyScanIntervalMs: number;
-  private readonly staleClaimGraceMs: number;
+  private readonly safetyScanner: PromptSafetyScanner;
   private unsubscribe: (() => void) | null = null;
-  private safetyTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private stopping = false;
-  private consecutiveIdleScans = 0;
-  private currentSafetyScanDelayMs: number | null = null;
-  private nextSafetyScanDelayMs: number | null = null;
-  private nextSafetyScanAt: string | null = null;
-  private lastScanAt: string | null = null;
-  private lastScanOutcome: PromptWorkerDiagnostics["lastScanOutcome"] = null;
-  private lastDiscovered: PromptWorkerDiagnostics["lastDiscovered"] = { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 };
-  private lastScanFailureAt: string | null = null;
   private readonly legacyDetachedWithoutIdentity = new Set<string>();
   private readonly transcriptConflictTurns = new Map<string, Set<string>>();
 
   constructor(private readonly options: PromptRunWorkflowOptions) {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
-    this.safetyScanIntervalMs = options.safetyScanIntervalMs ?? 5_000;
-    this.staleClaimGraceMs = options.staleClaimGraceMs ?? Math.max(10_000, this.safetyScanIntervalMs * 2);
+    const intervalMs = options.safetyScanIntervalMs ?? 5_000;
+    this.safetyScanner = new PromptSafetyScanner({
+      store: options.store, scheduler: options.scheduler, logger: options.logger, intervalMs,
+      staleClaimGraceMs: options.staleClaimGraceMs ?? Math.max(10_000, intervalMs * 2),
+      isBindingOwned: (bindingId) => this.workers.has(bindingId) || this.turns.has(bindingId),
+      pruneDetachedTracking: () => this.pruneDetachedTracking()
+    });
   }
 
   prepareRecovery(): void {
@@ -106,72 +101,20 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.stopping = false;
     this.started = true;
     this.unsubscribe = this.options.scheduler.subscribe((event) => this.wake(event));
-    this.requestSafetyScan();
+    this.safetyScanner.start();
   }
 
   requestSafetyScan(): void {
     if (this.stopping) return;
-    if (this.safetyTimer) clearTimeout(this.safetyTimer);
-    this.safetyTimer = null;
-    this.currentSafetyScanDelayMs = null;
-    this.nextSafetyScanAt = null;
-    try {
-      const staleCutoff = new Date(Date.now() - this.staleClaimGraceMs).toISOString();
-      let recoveredClaims = 0;
-      const recoveredBindings = new Set<string>();
-      const staleClaims = this.options.store.listStaleUndispatchedPromptClaims?.(staleCutoff, 100) ?? [];
-      for (const candidate of staleClaims) {
-        if (this.workers.has(candidate.bindingId) || this.turns.has(candidate.bindingId)) continue;
-        if (!this.options.store.requeueStaleUndispatchedPromptClaim?.(candidate)) continue;
-        recoveredClaims += 1;
-        recoveredBindings.add(candidate.bindingId);
-        this.options.logger.warn({
-          event: "orphaned-prompt-claim-requeued", bindingId: candidate.bindingId, promptId: candidate.promptId,
-          ageMs: Math.max(0, Date.now() - Date.parse(candidate.updatedAt)), outcome: "requeued_before_dispatch"
-        }, "requeued an unowned prompt claim with no durable dispatch evidence");
-      }
-      const result = this.options.store.scanDurablePromptWork();
-      for (const promptId of this.legacyDetachedWithoutIdentity) {
-        const prompt = this.options.store.getPrompt(promptId);
-        if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.legacyDetachedWithoutIdentity.delete(promptId);
-      }
-      for (const promptId of this.transcriptConflictTurns.keys()) {
-        const prompt = this.options.store.getPrompt(promptId);
-        if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.transcriptConflictTurns.delete(promptId);
-      }
-      const decision = decidePromptSafetyScan(result, this.consecutiveIdleScans, this.safetyScanIntervalMs, recoveredClaims);
-      for (const hint of result.hints) this.options.scheduler.wake(hint);
-      for (const bindingId of recoveredBindings) this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
-      this.lastDiscovered = decision.discovered;
-      this.lastScanOutcome = decision.outcome;
-      this.consecutiveIdleScans = decision.consecutiveIdleScans;
-      this.nextSafetyScanDelayMs = decision.nextDelayMs;
-      if (result.cancelled > 0 || result.failedDetached > 0) this.options.logger.info({
-        event: "prompt-backlog-converged", cancelled: result.cancelled, failedDetached: result.failedDetached, outcome: "terminalized"
-      }, "converged prompt work whose bindings can no longer dispatch or observe");
-    } catch (error) {
-      this.lastDiscovered = { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 };
-      this.lastScanOutcome = "failed";
-      const decision = decidePromptSafetyScanFailure(this.safetyScanIntervalMs);
-      this.consecutiveIdleScans = decision.consecutiveIdleScans;
-      this.nextSafetyScanDelayMs = decision.nextDelayMs;
-      this.lastScanFailureAt = new Date().toISOString();
-      this.options.logger.error({ event: "prompt-safety-scan-failed", err: safeLogError(error), outcome: "deferred_to_next_scan" }, "durable prompt safety scan failed");
-    } finally {
-      this.lastScanAt = new Date().toISOString();
-      if (this.started && !this.stopping) {
-        this.armSafetyScan(this.nextSafetyScanDelayMs ?? this.safetyScanIntervalMs);
-      }
-    }
+    this.safetyScanner.request();
   }
 
   snapshot(): PromptWorkerDiagnostics {
+    const safety = this.safetyScanner.snapshot();
     return {
       state: this.stopping ? "stopping" : this.started ? "running" : "idle",
       activeTurnWorkers: this.workers.size, activeSteeringWorkers: this.steeringWorkers.size,
-      currentSafetyScanDelayMs: this.currentSafetyScanDelayMs, nextSafetyScanAt: this.nextSafetyScanAt,
-      lastScanAt: this.lastScanAt, lastScanOutcome: this.lastScanOutcome,
-      lastDiscovered: { ...this.lastDiscovered }, lastScanFailureAt: this.lastScanFailureAt
+      ...safety
     };
   }
 
@@ -190,8 +133,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       if (event.kind === "binding-runtime-changed" && !this.isBindingActive(event.bindingId)) this.turns.abort(event.bindingId);
       this.scheduleWorker(event.bindingId);
     } finally {
-      this.consecutiveIdleScans = 0;
-      this.armSafetyScan(this.safetyScanIntervalMs);
+      this.safetyScanner.resetCadence();
     }
   }
 
@@ -245,10 +187,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.stopping = true;
     this.legacyDetachedWithoutIdentity.clear();
     this.transcriptConflictTurns.clear();
-    if (this.safetyTimer) clearTimeout(this.safetyTimer);
-    this.safetyTimer = null;
-    this.currentSafetyScanDelayMs = null;
-    this.nextSafetyScanAt = null;
+    this.safetyScanner.stop();
     this.unsubscribe?.();
     this.unsubscribe = null;
     const pending = [...this.workers.values(), ...this.steeringWorkers.values()];
@@ -273,26 +212,23 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     }
   }
 
-  private armSafetyScan(delayMs: number): void {
-    if (this.stopping || !this.started) return;
-    if (this.safetyTimer) clearTimeout(this.safetyTimer);
-    this.currentSafetyScanDelayMs = delayMs;
-    this.nextSafetyScanAt = new Date(Date.now() + delayMs).toISOString();
-    this.safetyTimer = setTimeout(() => {
-      this.safetyTimer = null;
-      this.currentSafetyScanDelayMs = null;
-      this.nextSafetyScanAt = null;
-      this.requestSafetyScan();
-    }, delayMs);
-    this.safetyTimer.unref?.();
-  }
-
   private scheduleSteering(bindingId: string, parentPromptId: string): void {
     const previous = this.steeringWorkers.get(bindingId) ?? Promise.resolve();
     const worker = previous.catch(() => undefined).then(() => this.drainSteering(bindingId, parentPromptId)).finally(() => {
       if (this.steeringWorkers.get(bindingId) === worker) this.steeringWorkers.delete(bindingId);
     });
     this.steeringWorkers.set(bindingId, worker);
+  }
+
+  private pruneDetachedTracking(): void {
+    for (const promptId of this.legacyDetachedWithoutIdentity) {
+      const prompt = this.options.store.getPrompt(promptId);
+      if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.legacyDetachedWithoutIdentity.delete(promptId);
+    }
+    for (const promptId of this.transcriptConflictTurns.keys()) {
+      const prompt = this.options.store.getPrompt(promptId);
+      if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.transcriptConflictTurns.delete(promptId);
+    }
   }
 
   private async drainSteering(bindingId: string, parentPromptId: string): Promise<void> {
