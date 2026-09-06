@@ -17,7 +17,7 @@ import { normalizeLarkCardElementIds } from "../runtime/lark-card-id.js";
 import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
-import { mapAnswerPage, mapBinding, mapCardInteraction, mapCommandIntent, mapInstanceLease, mapModelPreference, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, mapSessionOperation, mapTurnControlOperation, type AnswerPageRow, type BindingRow, type CardInteractionRow, type CommandIntentRow, type ModelPreferenceRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SessionOperationRow, type SqlValue, type TurnControlOperationRow } from "./sqlite-records.js";
+import { mapAnswerPage, mapBinding, mapCardInteraction, mapCommandIntent, mapModelPreference, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, mapSessionOperation, mapTurnControlOperation, type AnswerPageRow, type BindingRow, type CardInteractionRow, type CommandIntentRow, type ModelPreferenceRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SessionOperationRow, type SqlValue, type TurnControlOperationRow } from "./sqlite-records.js";
 import type { ModelPreference } from "../domain/model-selection.js";
 import { acceptModelSelection } from "../domain/model-selection.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
@@ -36,12 +36,8 @@ import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
 import type { AcceptCommandIntentInput, AcceptCommandIntentResult, CommandIntent, CommandIntentTerminalState } from "../domain/command-intent.js";
+import { SqliteInstanceLease } from "./sqlite-instance-lease.js";
 
-const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "outbox_lane_heads", "outbox_lane_quarantines",
-  "project_selections", "card_interactions", "session_operations", "swarm_command_intents", "pane_close_requests", "worker_pane_close_steps", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "binding_model_preferences", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
-] as const;
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 const normalizeExternalRequest = (value: string): string => value.replace(/\r\n?/g, "\n");
 
@@ -59,12 +55,14 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
 
 export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   readonly database: DatabaseSync;
+  private readonly instanceLease: SqliteInstanceLease;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.database = new DatabaseSync(path);
     this.database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     this.migrate();
+    this.instanceLease = new SqliteInstanceLease(this.database);
   }
 
   close(): void { this.database.close(); }
@@ -128,74 +126,23 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   }
 
   activateWriteFence(ownerId: string, fencingToken: number): void {
-    this.deactivateWriteFence();
-    this.database.exec("CREATE TEMP TABLE bridge_write_fence(owner_id TEXT NOT NULL, fencing_token INTEGER NOT NULL)");
-    this.database.prepare("INSERT INTO temp.bridge_write_fence(owner_id, fencing_token) VALUES (?, ?)").run(ownerId, fencingToken);
-    for (const table of FENCED_TABLES) for (const operation of ["INSERT", "UPDATE", "DELETE"] as const) {
-      const trigger = `bridge_fence_${table}_${operation.toLowerCase()}`;
-      this.database.exec(`
-        CREATE TEMP TRIGGER ${trigger} BEFORE ${operation} ON main.${table}
-        BEGIN
-          SELECT CASE WHEN NOT EXISTS (
-            SELECT 1 FROM main.instance_lease AS lease, temp.bridge_write_fence AS fence
-            WHERE lease.singleton_id = 1 AND lease.owner_id = fence.owner_id
-              AND lease.fencing_token = fence.fencing_token
-              AND julianday(lease.expires_at) > julianday('now')
-          ) THEN RAISE(ABORT, 'stale_instance_lease') END;
-        END;
-      `);
-    }
-    try { this.assertWriteFence(); }
-    catch (error) { this.deactivateWriteFence(); throw error; }
+    this.instanceLease.activateWriteFence(ownerId, fencingToken);
   }
 
   deactivateWriteFence(): void {
-    for (const table of FENCED_TABLES) for (const operation of ["insert", "update", "delete"] as const) {
-      this.database.exec(`DROP TRIGGER IF EXISTS temp.bridge_fence_${table}_${operation}`);
-    }
-    this.database.exec("DROP TABLE IF EXISTS temp.bridge_write_fence");
-  }
-
-  private assertWriteFence(): void {
-    const valid = this.database.prepare(`
-      SELECT 1 FROM main.instance_lease AS lease, temp.bridge_write_fence AS fence
-      WHERE lease.singleton_id = 1 AND lease.owner_id = fence.owner_id
-        AND lease.fencing_token = fence.fencing_token
-        AND julianday(lease.expires_at) > julianday('now')
-    `).get();
-    if (!valid) throw new Error("stale_instance_lease");
+    this.instanceLease.deactivateWriteFence();
   }
 
   acquireInstanceLease(ownerId: string, currentTime: string, expiresAt: string): InstanceLease | null {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.database.prepare("SELECT owner_id, fencing_token, expires_at, updated_at FROM instance_lease WHERE singleton_id = 1").get() as { owner_id: string; fencing_token: number; expires_at: string; updated_at: string } | undefined;
-      if (!row) {
-        this.database.prepare("INSERT INTO instance_lease(singleton_id, owner_id, fencing_token, expires_at, updated_at) VALUES (1, ?, 1, ?, ?)").run(ownerId, expiresAt, currentTime);
-      } else if (row.owner_id === ownerId) {
-        this.database.prepare("UPDATE instance_lease SET expires_at = ?, updated_at = ? WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ?").run(expiresAt, currentTime, ownerId, row.fencing_token);
-      } else if (row.expires_at <= currentTime) {
-        this.database.prepare("UPDATE instance_lease SET owner_id = ?, fencing_token = fencing_token + 1, expires_at = ?, updated_at = ? WHERE singleton_id = 1 AND fencing_token = ? AND expires_at <= ?").run(ownerId, expiresAt, currentTime, row.fencing_token, currentTime);
-      } else {
-        this.database.exec("COMMIT");
-        return null;
-      }
-      const acquired = this.database.prepare("SELECT owner_id, fencing_token, expires_at, updated_at FROM instance_lease WHERE singleton_id = 1 AND owner_id = ?").get(ownerId) as { owner_id: string; fencing_token: number; expires_at: string; updated_at: string } | undefined;
-      this.database.exec("COMMIT");
-      return acquired ? mapInstanceLease(acquired) : null;
-    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    return this.instanceLease.acquire(ownerId, currentTime, expiresAt);
   }
 
   renewInstanceLease(ownerId: string, fencingToken: number, currentTime: string, expiresAt: string): InstanceLease | null {
-    const result = this.database.prepare("UPDATE instance_lease SET expires_at = ?, updated_at = ? WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ? AND expires_at > ?")
-      .run(expiresAt, currentTime, ownerId, fencingToken, currentTime);
-    if (result.changes !== 1) return null;
-    const row = this.database.prepare("SELECT owner_id, fencing_token, expires_at, updated_at FROM instance_lease WHERE singleton_id = 1").get() as { owner_id: string; fencing_token: number; expires_at: string; updated_at: string };
-    return mapInstanceLease(row);
+    return this.instanceLease.renew(ownerId, fencingToken, currentTime, expiresAt);
   }
 
   releaseInstanceLease(ownerId: string, fencingToken: number): boolean {
-    return this.database.prepare("DELETE FROM instance_lease WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ?").run(ownerId, fencingToken).changes === 1;
+    return this.instanceLease.release(ownerId, fencingToken);
   }
 
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
