@@ -42,7 +42,8 @@ runtime:
   cards:
     updateDebounceMs: 500
     payloadLimitChars: 12000
-    answerPageLimitChars: 28000
+    answerStreamLimitChars: 28000
+    answerPageLimitChars: 9000
 
   paneClosure:
     confirmationTtlMs: 60000
@@ -68,12 +69,15 @@ malformed, non-object, or schema-invalid file is a startup error.
 | `runtime.cache.herdrSnapshotTtlMs` | 2000 | 0–60000 | Herdr workspace snapshot cache |
 | `runtime.cards.updateDebounceMs` | 500 | 0–10000 | Answer and Main Card projection scheduling |
 | `runtime.cards.payloadLimitChars` | 12000 | 1000–50000 | bounded non-streaming CardKit payloads |
-| `runtime.cards.answerPageLimitChars` | 28000 | 4000–50000 | Answer stream page splitting |
+| `runtime.cards.answerStreamLimitChars` | 28000 | 4000–50000 | render-safe Answer stream upper bound |
+| `runtime.cards.answerPageLimitChars` | 9000 | 1000–28000 | durable Answer page splitting |
 | `runtime.paneClosure.confirmationTtlMs` | 60000 | 5000–600000 | pane-close confirmation code |
 
-Cross-field validation requires `payloadLimitChars` to be less than
-`answerPageLimitChars`. This preserves a larger envelope for streamed answers
-than for compact directory and detail cards.
+Cross-field validation requires `answerPageLimitChars` not to exceed
+`answerStreamLimitChars`. The separate values preserve the current 9000-character
+durable page policy while moving the existing 28000-character rendering safety
+bound into configuration. `payloadLimitChars` remains independent because it
+bounds serialized CardKit JSON rather than Markdown source text.
 
 The existing environment variables `HERDR_SNAPSHOT_CACHE_TTL_MS` and
 `CARD_UPDATE_DEBOUNCE_MS` are retired from the runtime configuration surface. To
