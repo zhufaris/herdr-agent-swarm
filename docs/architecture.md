@@ -176,12 +176,15 @@ the domain port it consumes, such as `PromptRunStore`, `InstanceStore`,
 facade type. Tests that inspect migration fixtures may still construct
 `SqliteBindingStore` directly as an intentional compatibility seam.
 
-All extracted SQLite capability modules share that context. Only the outermost
-`SqliteContext.transaction()` issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`;
-nested Prompt, Worker-turn, projection, and outbox calls participate in the
-existing transaction. Capability modules never instantiate their own database
-connection. This is what keeps prompt/card/outbox and Worker turn/card/page/event
-changes atomic even though their implementations live in separate files.
+All extracted SQLite capability modules share that context. Their transactional
+entry points use `SqliteContext.transaction()`, where only the outermost call
+issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`; nested Prompt, Worker-turn,
+projection, and outbox calls participate in the existing transaction. Capability
+modules never instantiate their own database connection. The compatibility
+facade still coordinates its not-yet-extracted binding and instance aggregates
+on that same connection. This keeps prompt/card/outbox and Worker
+turn/card/page/event changes atomic even though their implementations live in
+separate files.
 
 ### Swarm command bounded context
 
