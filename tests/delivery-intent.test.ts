@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { materializedDeliveryIntent } from "../src/domain/delivery-intent.js";
+import { deliveryIntentKind, materializedDeliveryIntent } from "../src/domain/delivery-intent.js";
 import { materializeOutboundReply } from "../src/events/outbound-intent-materializer.js";
 import type { OutboundReply } from "../src/domain/types.js";
 
@@ -9,6 +9,16 @@ function reply(patch: Partial<OutboundReply> = {}): OutboundReply {
 
 describe("durable delivery intent", () => {
   it("keeps legacy payload rows deliverable", () => expect(materializeOutboundReply(reply())).toBe('{"legacy":true}'));
+  it.each([
+    ["text", "text"],
+    ["card_reply", "card"],
+    ["card_update", "card"],
+    ["stream_card_create", "stream-card"],
+    ["stream_content", "stream-content"],
+    ["stream_finish", "stream-finish"]
+  ] as const)("maps %s to the versioned %s intent kind", (replyKind, intentKind) => {
+    expect(deliveryIntentKind(replyKind)).toBe(intentKind);
+  });
   it("uses the immutable payload pinned in a typed intent", () => {
     const intent = materializedDeliveryIntent("card_update", '{"typed":true}');
     expect(materializeOutboundReply(reply({ intentKind: intent.kind, intentJson: JSON.stringify(intent), rendererRevision: 1 }))).toBe('{"typed":true}');
@@ -16,5 +26,12 @@ describe("durable delivery intent", () => {
   it("rejects unsupported renderer revisions", () => {
     const intent = materializedDeliveryIntent("card_update", "{}");
     expect(() => materializeOutboundReply(reply({ intentKind: intent.kind, intentJson: JSON.stringify(intent), rendererRevision: 2 }))).toThrow(/Unsupported durable delivery intent/);
+  });
+  it.each([
+    ["malformed JSON", "{", "card"],
+    ["unknown intent kind", JSON.stringify({ schemaVersion: 1, kind: "unknown", materializedPayload: "{}" }), "unknown"],
+    ["mismatched intent kind", JSON.stringify({ schemaVersion: 1, kind: "text", materializedPayload: "{}" }), "card"]
+  ])("rejects %s instead of silently delivering the legacy payload", (_label, intentJson, intentKind) => {
+    expect(() => materializeOutboundReply(reply({ intentJson, intentKind: intentKind as never, rendererRevision: 1 }))).toThrow(/Unsupported durable delivery intent/);
   });
 });

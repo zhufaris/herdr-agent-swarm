@@ -19,6 +19,10 @@ export function encodeDeliveryIntent(kind: OutboundReplyKind, payload: string): 
 }
 export function decodeDeliveryIntent(value: string | null): MaterializedDeliveryIntent | null {
   if (!value) return null;
-  try { const parsed = JSON.parse(value) as Partial<MaterializedDeliveryIntent>; return parsed.schemaVersion === 1 && typeof parsed.kind === "string" && typeof parsed.materializedPayload === "string" ? parsed as MaterializedDeliveryIntent : null; }
+  try { const parsed = JSON.parse(value) as Partial<MaterializedDeliveryIntent>; return parsed.schemaVersion === 1 && isDeliveryIntentKind(parsed.kind) && typeof parsed.materializedPayload === "string" ? parsed as MaterializedDeliveryIntent : null; }
   catch { return null; }
+}
+
+function isDeliveryIntentKind(value: unknown): value is DeliveryIntentKind {
+  return value === "text" || value === "card" || value === "stream-card" || value === "stream-content" || value === "stream-finish";
 }
