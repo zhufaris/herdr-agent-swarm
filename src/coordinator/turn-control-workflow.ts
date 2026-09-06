@@ -134,7 +134,7 @@ export class TurnControlWorkflow {
     const instance = target.instance;
     if (input.resultTargetMessageId) {
       const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: instance.id, instanceGeneration: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name, parentTurnId: null, rootMessageId: input.resultTargetMessageId, requestText: input.text, queuePosition: 0, occurredAt });
-      const accepted = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", priority: "priority", text: input.text, parentTurnId: null, sourceMessageId: input.sourceMessageId ?? input.idempotencyKey, view, card: renderWorkerTurnCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20 });
+      const accepted = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", priority: "priority", text: input.text, parentTurnId: null, sourceMessageId: input.sourceMessageId ?? input.idempotencyKey, view, render: renderWorkerTurnCard, maxQueueDepth: this.options.maxQueueDepth ?? 20 });
       if (accepted.inserted) this.options.wakeOutbound?.();
       this.options.wakeInstance?.(instance.id);
       return { mode: "priority", logicalTurnId: accepted.turn.id, duplicate: !accepted.inserted };
@@ -197,7 +197,7 @@ export class TurnControlWorkflow {
     if (!instance?.runtimeRef || instance.generation !== operation.target.generation || instance.runtimeRef.paneId !== operation.target.paneId || instance.runtimeRef.nativeSessionId !== operation.target.agentSession.value) return null;
     const common = { id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: instance.projectId, instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn" as const, priority: "priority" as const, text: input.text, parentTurnId: null, sourceMessageId: input.sourceMessageId ?? input.idempotencyKey };
     const turn = input.resultTargetMessageId
-      ? (() => { const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: instance.id, instanceGeneration: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name, parentTurnId: null, rootMessageId: input.resultTargetMessageId!, requestText: input.text, queuePosition: 0, occurredAt }); return { ...common, view, card: renderWorkerTurnCard(view) }; })()
+      ? (() => { const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: instance.id, instanceGeneration: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name, parentTurnId: null, rootMessageId: input.resultTargetMessageId!, requestText: input.text, queuePosition: 0, occurredAt }); return { ...common, view, render: renderWorkerTurnCard }; })()
       : common;
     const converted = this.options.store.convertTurnControlToWorkerPriority({ operationId: operation.id, turn, maxQueueDepth: this.options.maxQueueDepth ?? 20, result, card: renderTurnControlResultCard({ ...operation, state: "delivered", result }) });
     if (!converted) return null;

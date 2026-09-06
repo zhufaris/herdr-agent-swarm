@@ -13,7 +13,7 @@ function setup(state: "dispatching" | "running") {
   store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
   const instance = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
   const view = createQueuedWorkerTurnCard({ turnId: "turn", instanceId: instance.id, instanceGeneration: instance.generation, workerName: instance.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-  store.acceptInstanceTurnWithCard({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: "m1", view, card: renderWorkerTurnCard(view) });
+  store.acceptInstanceTurnWithCard({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
   store.claimNextInstanceTurn(instance.id, instance.generation);
   store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state, eventKind: `turn.${state}` });
   const inspectPane = vi.fn(async () => ({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" }));

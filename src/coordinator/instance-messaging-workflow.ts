@@ -16,12 +16,11 @@ export class InstanceMessagingWorkflow {
   async submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string }; source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null } }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView | null; inserted: boolean }> {
     const target = this.authorize(input.actor, input.projectId, input.targetInstanceId);
     if (!target.runtimeRef || target.desiredState !== "running") throw new Error("Target instance is not running");
-    const queueDepth = this.options.store.countPendingInstanceTurns(target.id);
     const id = this.options.idFactory();
     if (input.source) {
       const primaryAnswer = input.actor.kind === "thread-primary" ? { aggregateKind: "primary-turn" as const, aggregateId: input.actor.parentPromptId, generation: input.actor.bindingGeneration, messageId: null } : null;
-      const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: target.id, instanceGeneration: target.generation, workerSessionGeneration: target.workerSessionGeneration, workerName: target.name, parentTurnId: input.source.parentTurnId ?? null, rootMessageId: input.source.rootMessageId, requestText: input.content.text, queuePosition: queueDepth + 1, primaryAnswer, occurredAt: new Date().toISOString() });
-      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, card: renderWorkerTurnCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20 });
+      const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: target.id, instanceGeneration: target.generation, workerSessionGeneration: target.workerSessionGeneration, workerName: target.name, parentTurnId: input.source.parentTurnId ?? null, rootMessageId: input.source.rootMessageId, requestText: input.content.text, queuePosition: 0, primaryAnswer, occurredAt: new Date().toISOString() });
+      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, render: renderWorkerTurnCard, maxQueueDepth: this.options.maxQueueDepth ?? 20 });
       if (result.inserted) { this.options.wakeOutbound?.(); this.options.wake(target.id); }
       return { accepted: true, ...result, card: result.view };
     }

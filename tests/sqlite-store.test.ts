@@ -193,7 +193,7 @@ describe("SQLite store", () => {
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: created.id, instanceGeneration: created.generation, workerSessionGeneration: 1, workerName: created.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
-    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: created.id, instanceGeneration: created.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "source", view, card: { schema: "2.0", body: { elements: [{ tag: "note" }] } } });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: created.id, instanceGeneration: created.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "source", view, render: () => ({ schema: "2.0", body: { elements: [{ tag: "note" }] } }) });
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDeadLetter(create.id, "unsupported tag note", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "200861" });
 
@@ -215,7 +215,7 @@ describe("SQLite store", () => {
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
     const queued = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
-    store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: "source", view: queued, card: renderWorkerTurnCard(queued) });
+    store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: "source", view: queued, render: renderWorkerTurnCard });
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "task-message", "task-card");
     store.transitionInstanceTurnWithProjection({ turnId: queued.turnId, expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-05T00:01:00.000Z", answer: "done" }, render: renderWorkerTurnCard });
@@ -243,7 +243,7 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     const running = createQueuedWorkerTurnCard({ turnId: "running", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Running task", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 2, occurredAt: "2026-09-05T00:00:01.000Z" });
-    for (const view of [running, queued]) store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, card: {} });
+    for (const view of [running, queued]) store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, render: renderWorkerTurnCard });
     store.transitionInstanceTurnWithProjection({ turnId: running.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-05T00:00:02.000Z" }, render: renderWorkerTurnCard });
 
     expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running" }, queueCount: 1, nextTaskTitle: "Queued task" });
@@ -261,7 +261,7 @@ describe("SQLite store", () => {
     }, 4).instance;
     const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 1, occurredAt: "2026-09-05T00:00:01.000Z" });
-    store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: queued.turnId, view: queued, card: {} });
+    store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: queued.turnId, view: queued, render: renderWorkerTurnCard });
 
     expect(store.loadPrimaryWorkerSummaries("binding-1", 1)).toEqual([expect.objectContaining({ workerId: worker.id, state: "queued", currentTaskTitle: "Queued task", queueCount: 1 })]);
   });
@@ -283,7 +283,7 @@ describe("SQLite store", () => {
       }, 4).instance;
       const worker = store!.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: `worker-${workerId}`, nativeSessionId: `session-${workerId}` })!;
       const view = createQueuedWorkerTurnCard({ turnId: `turn-${workerId}`, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root-binding-1", requestText: `Task ${workerId}`, queuePosition: 1, occurredAt: "2026-09-05T00:00:01.000Z" });
-      store!.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "thread-primary", projectId: "p1", bindingId: actorBindingId, bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, card: {} });
+      store!.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "thread-primary", projectId: "p1", bindingId: actorBindingId, bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, render: renderWorkerTurnCard });
       return worker.id;
     };
 
@@ -325,12 +325,49 @@ describe("SQLite store", () => {
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-    const input = { id: "turn-1", idempotencyKey: "lark:m1", actor: { kind: "human" as const, userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn" as const, text: "review", parentTurnId: null, sourceMessageId: "m1", view, card: { schema: "2.0" } };
+    const input = { id: "turn-1", idempotencyKey: "lark:m1", actor: { kind: "human" as const, userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn" as const, text: "review", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard };
 
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: true, turn: { id: "turn-1", sourceMessageId: "m1", parentTurnId: null }, view: { turnId: "turn-1", phase: "queued" } });
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: false, turn: { id: "turn-1" } });
     expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ requestText: "review", queuePosition: 1 });
     expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === "turn-1")).toHaveLength(1);
+  });
+
+  it("assigns the Worker card queue position inside the acceptance transaction", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const accept = (id: string, proposedPosition: number) => {
+      const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: id, queuePosition: proposedPosition, occurredAt: "2026-09-06T00:00:00.000Z" });
+      return store!.acceptInstanceTurnWithCard({ id, idempotencyKey: id, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: id, parentTurnId: null, sourceMessageId: id, view, render: renderWorkerTurnCard });
+    };
+
+    expect(accept("first", 99).view.queuePosition).toBe(1);
+    expect(accept("second", 99).view.queuePosition).toBe(2);
+    expect(accept("second", 7)).toMatchObject({ inserted: false, view: { queuePosition: 2 } });
+    store.updateInstanceTurn({ turnId: "first", expectedGeneration: worker.generation, state: "running", eventKind: "turn.started" });
+    expect(accept("third", 99).view.queuePosition).toBe(2);
+
+    const payload = JSON.parse(String((store.database.prepare("SELECT payload FROM outbound_replies WHERE worker_turn_id = ?").get("first") as { payload: string }).payload)) as { card: unknown };
+    expect(JSON.stringify(payload.card)).toContain("队列第 1 位");
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM instance_turns INDEXED BY instance_turns_priority_queue WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").all(worker.id, worker.generation) as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("instance_turns_priority_queue"))).toBe(true);
+  });
+
+  it("rolls back the Worker card and outbox when transactional capacity is exhausted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const accept = (id: string) => {
+      const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: id, queuePosition: 0, occurredAt: "2026-09-06T00:00:00.000Z" });
+      return store!.acceptInstanceTurnWithCard({ id, idempotencyKey: id, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: id, parentTurnId: null, sourceMessageId: id, view, render: renderWorkerTurnCard, maxQueueDepth: 1 });
+    };
+
+    expect(accept("first").inserted).toBe(true);
+    expect(() => accept("rejected")).toThrow(/queue is full/);
+    expect(store.getInstanceTurn("rejected")).toBeNull();
+    expect(store.loadWorkerTurnCard("rejected")).toBeNull();
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(1);
   });
 
   it("validates Worker follow-up parents transactionally", () => {
@@ -339,7 +376,7 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     store.acceptInstanceTurn({ id: "parent", idempotencyKey: "parent", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "first" });
     const view = createQueuedWorkerTurnCard({ turnId: "child", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: "parent", rootMessageId: "root-1", requestText: "continue", queuePosition: 2, occurredAt: "2026-09-01T00:00:00.000Z" });
-    const followup = { id: "child", idempotencyKey: "child", actor: { kind: "human" as const, userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "followup" as const, text: "continue", parentTurnId: "parent", sourceMessageId: "m2", view, card: {} };
+    const followup = { id: "child", idempotencyKey: "child", actor: { kind: "human" as const, userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "followup" as const, text: "continue", parentTurnId: "parent", sourceMessageId: "m2", view, render: renderWorkerTurnCard };
 
     expect(() => store!.acceptInstanceTurnWithCard(followup)).toThrow(/settled/);
     store.updateInstanceTurn({ turnId: "parent", expectedGeneration: worker.generation, state: "completed", result: "done", eventKind: "turn.completed" });
@@ -355,7 +392,7 @@ describe("SQLite store", () => {
       const turnId = `turn-${index}`;
       const occurredAt = `2026-09-01T00:0${index}:00.000Z`;
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: `work ${index}`, queuePosition: index + 1, occurredAt });
-      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: `work ${index}`, parentTurnId: null, sourceMessageId: `message-${index}`, view, card: {} });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: `work ${index}`, parentTurnId: null, sourceMessageId: `message-${index}`, view, render: renderWorkerTurnCard });
       store.database.prepare("UPDATE instance_turns SET created_at = ?, updated_at = ? WHERE id = ?").run(occurredAt, occurredAt, turnId);
     }
     store.transitionInstanceTurnWithProjection({ turnId: "turn-6", expectedGeneration: worker.generation, state: "completed", result: "finding", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-01T00:07:00.000Z", answer: "finding" }, render: renderWorkerTurnCard });
@@ -374,7 +411,7 @@ describe("SQLite store", () => {
       const worker = store.attachAgentInstanceRuntime({ instanceId: workerId, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: `w1:${workerId}`, nativeSessionId: `session-${workerId}` })!;
       const turnId = `turn-${workerId}`;
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-06T00:00:00.000Z" });
-      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, card: {} });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, render: renderWorkerTurnCard });
     }
     const reviewerReply = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-reviewer")!;
     store.markOutboundReplyDelivered(reviewerReply.id, "task-card-reviewer", "cardkit-reviewer");
@@ -418,7 +455,7 @@ describe("SQLite store", () => {
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-    store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, card: {} });
+    store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "worker-message-1", "worker-card-1");
     store.reserveWorkerTurnContent({ turnId: "turn-1", pageIndex: 0, cardId: "worker-card-1", elementId: view.elementId, content: "finding", sourceEnd: 7 });
@@ -441,7 +478,7 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     for (const turnId of ["turn-a", "turn-b"]) {
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, card: {} });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, render: renderWorkerTurnCard });
     }
     const failed = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-a")!;
 
@@ -458,7 +495,7 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     for (const [index, turnId] of ["turn-a", "turn-b", "turn-c"].entries()) {
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: index + 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, card: renderWorkerTurnCard(view) });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, render: renderWorkerTurnCard });
     }
     store.claimNextInstanceTurn(worker.id, worker.generation);
 

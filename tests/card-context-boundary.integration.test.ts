@@ -32,7 +32,7 @@ describe("card context boundaries", () => {
       turnId: "worker-turn", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Review durable boundary\nsecret body", queuePosition: 1,
       primaryAnswer: { aggregateKind: "primary-turn", aggregateId: answer.promptId, generation: 1, messageId: null }, occurredAt: "2026-09-05T00:00:01.000Z"
     });
-    store.acceptInstanceTurnWithCard({ id: task.turnId, idempotencyKey: "delegate-1", actor: { kind: "thread-primary", projectId: "project", bindingId: "binding", bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "project", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: task.requestText, parentTurnId: null, sourceMessageId: "source", view: task, card: renderWorkerTurnCard(task) });
+    store.acceptInstanceTurnWithCard({ id: task.turnId, idempotencyKey: "delegate-1", actor: { kind: "thread-primary", projectId: "project", bindingId: "binding", bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "project", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: task.requestText, parentTurnId: null, sourceMessageId: "source", view: task, render: renderWorkerTurnCard });
     const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === task.turnId)!;
     store.markOutboundReplyDelivered(taskCreate.id, "task-message", "task-card");
 

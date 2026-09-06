@@ -53,7 +53,7 @@ function setup(adminOpenIds: readonly string[] = ["u1"]) {
 function taskCard(instanceId: string, state: "queued" | "running" | "completed" | "failed" | "cancelled" | "dispatch-uncertain", turnId = `turn-${state}`) {
   const worker = store!.getAgentInstance(instanceId)!;
   const view = createQueuedWorkerTurnCard({ turnId, instanceId, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-  store!.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: worker.projectId, instanceId, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, card: renderWorkerTurnCard(view) });
+  store!.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: worker.projectId, instanceId, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, render: renderWorkerTurnCard });
   store!.markOutboundReplyDelivered(store!.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === turnId)!.id, `card-message-${turnId}`, `card-${turnId}`);
   if (state !== "queued") {
     const occurredAt = "2026-09-01T00:01:00.000Z";

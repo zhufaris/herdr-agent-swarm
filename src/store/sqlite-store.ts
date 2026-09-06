@@ -694,16 +694,19 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
         if (!parent || parent.projectId !== input.projectId || parent.instanceId !== input.instanceId || !["completed", "failed", "cancelled"].includes(parent.state)) throw new Error("Worker follow-up parent must be a settled turn on the same instance");
       }
       if (input.view.turnId !== input.id || input.view.instanceId !== input.instanceId || input.view.instanceGeneration !== input.instanceGeneration || input.view.parentTurnId !== input.parentTurnId || input.view.rootMessageId.length === 0) throw new Error("Worker turn card identity does not match the accepted turn");
+      const queuePosition = priority === "priority" ? 0 : Number((this.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").get(input.instanceId, input.instanceGeneration) as { count: number }).count) + 1;
+      const acceptedView = { ...input.view, queuePosition };
+      const card = input.render(acceptedView);
       const inserted = this.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
         .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
       if (!turn) throw new Error("Accepted instance turn could not be loaded");
       if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority || turn.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
       if (inserted) {
-        this.saveWorkerTurnCard(input.view);
+        this.saveWorkerTurnCard(acceptedView);
         this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id, viewVersion: input.view.viewVersion, rootMessageId: input.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: 0, pageStart: 0, elementId: input.view.elementId } }) });
-        this.invalidateWorkerCardContexts(input.view, "turn.accepted");
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id, viewVersion: acceptedView.viewVersion, rootMessageId: acceptedView.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card, stream: { pageIndex: 0, pageStart: 0, elementId: acceptedView.elementId } }) });
+        this.invalidateWorkerCardContexts(acceptedView, "turn.accepted");
       }
       const view = this.loadWorkerTurnCard(turn.id);
       if (!view) throw new Error("Accepted Worker turn card could not be loaded");
@@ -1121,7 +1124,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       return { operation: converted, prompt: this.requirePrompt(input.prompt.id) };
     } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
   }
-  convertTurnControlToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "card"> & { view?: AcceptInstanceTurnWithCardInput["view"]; card?: object }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
+  convertTurnControlToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "render"> & { view?: AcceptInstanceTurnWithCardInput["view"]; render?: AcceptInstanceTurnWithCardInput["render"] }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const operation = this.getTurnControlOperation(input.operationId);
@@ -1134,10 +1137,11 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       this.database.prepare("INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'priority', ?, 'queued', ?, ?, ?, ?)")
         .run(input.turn.id, input.turn.idempotencyKey, input.turn.projectId, input.turn.instanceId, input.turn.instanceGeneration, JSON.stringify(input.turn.actor), input.turn.kind, input.turn.text, input.turn.parentTurnId, input.turn.sourceMessageId, timestamp, timestamp);
       this.insertInstanceEvent(input.turn.projectId, input.turn.instanceId, input.turn.id, "turn.accepted", { kind: input.turn.kind });
-      if ((input.turn.view === undefined) !== (input.turn.card === undefined)) throw new Error("Worker priority card view and payload must be provided together");
-      if (input.turn.view && input.turn.card) {
+      if ((input.turn.view === undefined) !== (input.turn.render === undefined)) throw new Error("Worker priority card view and renderer must be provided together");
+      if (input.turn.view && input.turn.render) {
+        const renderedCard = input.turn.render(input.turn.view);
         this.saveWorkerTurnCard(input.turn.view);
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turn.id}:0`, bindingId: null, workerTurnId: input.turn.id, viewVersion: input.turn.view.viewVersion, rootMessageId: input.turn.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.turn.card, stream: { pageIndex: 0, pageStart: 0, elementId: input.turn.view.elementId } }) });
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turn.id}:0`, bindingId: null, workerTurnId: input.turn.id, viewVersion: input.turn.view.viewVersion, rootMessageId: input.turn.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: renderedCard, stream: { pageIndex: 0, pageStart: 0, elementId: input.turn.view.elementId } }) });
         this.invalidateWorkerCardContexts(input.turn.view, "turn.accepted");
       }
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
