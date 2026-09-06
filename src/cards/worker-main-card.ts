@@ -1,5 +1,5 @@
 import type { CardTargetRef } from "../domain/card-target-ref.js";
-import type { WorkerMainTaskSummary, WorkerMainView } from "../domain/worker-main-view.js";
+import { canSubmitWorkerMainTask, type WorkerMainTaskSummary, type WorkerMainView } from "../domain/worker-main-view.js";
 import { normalizeLarkPreview, truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
@@ -21,7 +21,7 @@ export function renderWorkerMainCard(view: WorkerMainView): object {
     elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🕘", "Recent Tasks")}\n${view.recentTasks.map(taskLine).join("\n")}` });
     for (const task of view.recentTasks) pushTaskLink(elements, task.taskCard, `打开 ${safe(task.title)}`);
   }
-  if (!view.frozenAt && !["terminated", "failed", "stopped"].includes(view.runtimeState) && view.messageId) {
+  if (canSubmitWorkerMainTask(view) && view.messageId) {
     elements.push(
       { tag: "note", elements: [{ tag: "plain_text", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。" }] },
       callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")

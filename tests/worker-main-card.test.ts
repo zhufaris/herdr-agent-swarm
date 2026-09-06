@@ -48,4 +48,9 @@ describe("Worker Main card", () => {
     expect(text).toContain("立即执行");
     expect(text).toContain("发起新任务");
   });
+
+  it.each(["unprovisioned", "starting", "detached", "stopped", "failed", "terminated"] as const)("hides new-task controls while runtime is %s", (runtimeState) => {
+    const text = JSON.stringify(renderWorkerMainCard({ ...view(), messageId: "om_worker_main", runtimeState }));
+    expect(text).not.toContain("worker_new_task_form");
+  });
 });

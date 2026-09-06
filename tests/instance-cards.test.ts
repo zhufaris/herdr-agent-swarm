@@ -27,7 +27,7 @@ describe("instance cards", () => {
     expect(text).not.toContain("card_target_open");
     expect(text).not.toContain("live-secret");
     if (phase === "running") expect(text).toContain("精确补充到当前任务");
-    if (phase === "blocked") { expect(text).toContain("可补充要求"); expect(text).toContain("审批仍须在对应 Pane 完成"); }
+    if (phase === "blocked") { expect(text).toContain("对应 Pane"); expect(text).not.toContain("worker_task_instruction_form"); }
     if (["completed", "failed", "cancelled"].includes(phase)) expect(text).toContain("FIFO 后续任务");
     if (["queued", "preparing", "dispatch-uncertain"].includes(phase)) expect(text).not.toContain("worker_task_instruction_form");
     expect(text.length).toBeLessThan(12_000);

@@ -69,7 +69,7 @@ Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Wo
 
 Worker prompt 分为三种明确语义，推荐直接围绕卡片操作：
 
-- `补充当前任务`：回复正在运行或 blocked 的 Task Card，或点击卡片上的同名按钮；
+- `补充当前任务`：回复正在运行的 Task Card，或点击卡片上的同名按钮；blocked 状态必须回到 Herdr Pane 处理；
   内容只会 steer 这一个精确 active turn。
 - `继续这个任务`：回复 completed、failed 或 cancelled 的 Task Card，或点击卡片上的
   同名按钮；系统创建一条带父任务关系的新 follow-up，并按 FIFO 排队。
@@ -78,7 +78,7 @@ Worker prompt 分为三种明确语义，推荐直接围绕卡片操作：
 
 要持续给同一个任务补充要求，请直接回复它的 Task Card 并 `@Bot`：
 
-- 回复正在运行或 blocked 的卡片会精确 steer 该 turn。
+- 回复正在运行的卡片会精确 steer 该 turn；blocked 卡片仅指引用户回到 Herdr 处理。
 - 回复 completed、failed 或 cancelled 的卡片会创建一条带父任务关系的新 follow-up，并进入 FIFO。
 - 回复仍 queued 的卡片会被拒绝，因为任务尚未开始。
 - 回复 `dispatch-uncertain` 的卡片会被拒绝，因为请求可能已到达 Agent；自动重试可能造成重复执行。请先在对应 Herdr Pane 核对。

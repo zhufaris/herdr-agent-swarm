@@ -27,7 +27,7 @@ the durable model even when the card makes choosing one feel automatic.
 
 | User intent | Primary entry | Durable meaning | Scheduling |
 | --- | --- | --- | --- |
-| Modify the active task | Reply to its running or blocked Task Card | Exact-turn steer | Delivered only to the fenced active turn |
+| Modify the active task | Reply to its running Task Card | Exact-turn steer | Delivered only to the fenced active turn |
 | Continue a finished task | Reply to its completed, failed, or cancelled Task Card | Follow-up with `parentTurnId` | New FIFO task |
 | Start unrelated work | Worker Main Card or `/to <worker> <text>` | Independent turn | New FIFO task |
 
@@ -63,8 +63,8 @@ generation, Worker session generation, and task identity.
 ### Blocked
 
 - Explain that approval or local input must be handled in the Herdr pane.
-- A reply may still steer the exact blocked turn when the driver supports it,
-  but it cannot remotely approve or answer a protected local prompt.
+- Do not offer steering while blocked because the current exact-turn transport
+  rejects protected local approval and question states.
 - Keep the pane identity visible so the operator knows where to act.
 
 ### Completed, failed, or cancelled
@@ -118,7 +118,7 @@ No new lifecycle authority is introduced. The existing boundaries remain:
 1. Lark reply or callback is normalized by the adapter.
 2. `InstanceInteractionWorkflow` resolves the direct parent Task Card and reloads
    its durable turn plus Worker and Primary ownership.
-3. Active/blocked replies call exact-turn steering; terminal replies call
+3. Running replies call exact-turn steering; terminal replies call
    `InstanceMessagingWorkflow.submit` with `kind: followup` and `parentTurnId`.
 4. Independent Main Card submissions call the same messaging workflow with
    `kind: turn` and no parent.
@@ -161,7 +161,7 @@ wake-up. Those require separate workflow and authorization designs.
 
 ### Deterministic interaction tests
 
-- A direct reply to a running or blocked Task Card steers only the exact active
+- A direct reply to a running Task Card steers only the exact active
   turn and never enqueues fallback work.
 - A direct reply to completed, failed, or cancelled creates one idempotent
   follow-up with the correct `parentTurnId` and FIFO position.

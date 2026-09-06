@@ -42,6 +42,10 @@ export interface WorkerMainView {
   updatedAt: string;
 }
 
+export function canSubmitWorkerMainTask(view: Pick<WorkerMainView, "frozenAt" | "runtimeState">): boolean {
+  return view.frozenAt === null && ["idle", "working", "blocked"].includes(view.runtimeState);
+}
+
 export type WorkerMainChange =
   | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; paneId: string | null; occurredAt: string }
   | { type: "tasks"; currentTask: WorkerMainTaskSummary | null; queueCount: number; nextTaskTitle: string | null; recentTasks: readonly WorkerMainTaskSummary[]; occurredAt: string; dependencyRevision?: number }

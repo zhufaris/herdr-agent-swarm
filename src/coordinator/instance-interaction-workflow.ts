@@ -14,6 +14,7 @@ import { renderWorkerMainCard } from "../cards/worker-main-card.js";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../cards/run-card.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../domain/worker-task-interaction.js";
+import { canSubmitWorkerMainTask } from "../domain/worker-main-view.js";
 import { randomUUID } from "node:crypto";
 
 interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: import("../domain/agent-instance.js").AgentKind; model: string | null; start: boolean }): Promise<import("../domain/agent-instance.js").CreateWorkerResult> }
@@ -273,7 +274,7 @@ export class InstanceInteractionWorkflow {
     const sourceCardMessageId = typeof value.sourceCardMessageId === "string" ? value.sourceCardMessageId : "";
     const instance = this.options.store.getAgentInstance(instanceId); const view = this.options.store.loadWorkerMainView(instanceId, sessionGeneration);
     if (!instance || !view || instance.role !== "worker" || instance.generation !== generation || instance.workerSessionGeneration !== sessionGeneration || view.runtimeGeneration !== generation
-      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || view.frozenAt || ["terminated", "failed", "stopped"].includes(view.runtimeState) || !instance.runtimeRef || instance.desiredState !== "running" || !instance.parent) return null;
+      || view.messageId !== sourceCardMessageId || action.messageId !== sourceCardMessageId || !canSubmitWorkerMainTask(view) || !instance.runtimeRef || instance.desiredState !== "running" || !instance.parent) return null;
     const binding = this.options.store.getBinding(instance.parent.bindingId);
     if (!binding || binding.chatId !== action.chatId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== instance.parent.paneId || binding.generation !== view.parentBindingGeneration) return null;
     return { instance, view };

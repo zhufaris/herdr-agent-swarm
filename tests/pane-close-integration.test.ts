@@ -67,6 +67,27 @@ describe("Lark pane close", () => {
     await fixture.close();
   });
 
+  it("reports a partial result when a Worker pane close is uncertain", async () => {
+    const fixture = await setup("idle");
+    const child = fixture.store.createWorkerAgentInstance({
+      id: "child-uncertain", projectId: "default", name: "child-uncertain", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: fixture.bindingId, paneId: "w1:p1", nativeSessionId: "term-1" }, workspace: { id: "ws-child-uncertain", kind: "shared-read-only", cwd: "/repo/child-uncertain", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    fixture.store.attachAgentInstanceRuntime({ instanceId: child.id, expectedGeneration: child.generation, herdrWorkspaceId: "w1", paneId: "w1:child-uncertain", nativeSessionId: "term-child" });
+    fixture.closePane.mockRejectedValueOnce(new Error("child close result unknown"));
+    await fixture.coordinator.handleMessage(message(1, "/swarm pane close"));
+    const code = /\/swarm pane close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
+
+    await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
+
+    expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child-uncertain", "w1:p1"]);
+    expect(fixture.store.database.prepare("SELECT state FROM worker_pane_close_steps WHERE worker_id = 'child-uncertain'").get()).toEqual({ state: "uncertain" });
+    const result = JSON.stringify(fixture.cards.at(-1));
+    expect(result).toContain("1 个关闭结果不确定");
+    expect(result).not.toContain("已级联关闭 1 个 Worker Pane");
+    await fixture.close();
+  });
+
   it("observes unresolved child close steps after restart without reissuing closePane", async () => {
     const fixture = await setup("idle");
     const child = fixture.store.createWorkerAgentInstance({

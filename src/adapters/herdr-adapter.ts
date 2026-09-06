@@ -5,7 +5,7 @@ import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js"
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
-import type { TraexModelSummary } from "../runtime/traex-model-protocol.js";
+import type { TraexModelSummary } from "../domain/model-selection.js";
 import { createHash } from "node:crypto";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });

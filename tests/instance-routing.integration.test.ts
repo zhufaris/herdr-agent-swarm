@@ -78,15 +78,14 @@ describe("instance routing", () => {
     expect(messaging.submit).not.toHaveBeenCalled();
   });
 
-  it("uses the shared task policy for blocked and preparing direct replies", async () => {
+  it("uses the shared task policy to reject blocked and preparing direct replies", async () => {
     const { create, workflow, messaging, outbound } = setup();
     const worker = create("reviewer", "worker");
     const blocked = taskCard(worker.id, "running", "turn-blocked");
     store!.transitionInstanceTurnWithProjection({ turnId: blocked.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-01T00:02:00.000Z", notice: "local approval" }, render: renderWorkerTurnCard });
-    vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
-
     await workflow.handleOrdinaryMessage({ ...message("more context", "reply-blocked"), parentMessageId: blocked.cardMessageId });
-    expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetTurnId: blocked.turnId, text: "more context" }));
+    expect(messaging.steer).not.toHaveBeenCalled();
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain("对应 Pane");
 
     const preparing = taskCard(worker.id, "queued", "turn-preparing");
     store!.transitionInstanceTurnWithProjection({ turnId: preparing.turnId, expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching", change: { type: "preparing", occurredAt: "2026-09-01T00:03:00.000Z" }, render: renderWorkerTurnCard });

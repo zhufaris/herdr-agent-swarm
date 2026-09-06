@@ -51,11 +51,13 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
     const checked = await this.checkSafety(message, store.getBinding(binding.id), outcome.paneId); if (!checked) { store.finishPaneCloseRequest(outcome.operationId, "rejected", "safety_recheck_failed"); return false; }
     try {
       const children = store.beginWorkerPaneCloseCascade({ operationId: outcome.operationId, bindingId: checked.binding.id, paneId: checked.pane.paneId, reason: `Parent pane ${checked.pane.paneId} closed` });
+      let workerPaneSucceededCount = 0;
+      let workerPaneUncertainCount = 0;
       for (const child of children) {
-        try { await herdr.closePane(child.paneId); store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "succeeded", detail: "closed by parent pane cascade" }); }
-        catch (error) { store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "uncertain", detail: errorMessage(error) }); }
+        try { await herdr.closePane(child.paneId); store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "succeeded", detail: "closed by parent pane cascade" }); workerPaneSucceededCount += 1; }
+        catch (error) { store.finishWorkerPaneCloseStep({ operationId: outcome.operationId, ...child, state: "uncertain", detail: errorMessage(error) }); workerPaneUncertainCount += 1; }
       }
-      await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: "Herdr pane " + checked.pane.paneId + " 已由飞书确认关闭。" }); await this.reply(message, renderPaneCloseResultCard({ paneId: checked.pane.paneId, workerPaneCount: children.length })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: "closed" }); return true;
+      await herdr.closePane(checked.pane.paneId); let next = store.transitionBinding(checked.binding.id, { type: "archive_requested", hasActiveTurn: false }); next = store.transitionBinding(next.id, { type: "closed" }); store.finishPaneCloseRequest(outcome.operationId, "succeeded"); await this.publish(next.id, "BindingArchived", "lark", { reason: "Herdr pane " + checked.pane.paneId + " 已由飞书确认关闭。" }); await this.reply(message, renderPaneCloseResultCard({ paneId: checked.pane.paneId, workerPaneCount: children.length, workerPaneSucceededCount, workerPaneUncertainCount })); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.completed", target: checked.binding.id, outcome: workerPaneUncertainCount > 0 ? "closed_with_uncertain_workers" : "closed" }); return true;
     }
     catch (error) { store.finishPaneCloseRequest(outcome.operationId, "uncertain", errorMessage(error)); await this.reject(message, "Pane 关闭失败或无法验证：" + errorMessage(error)); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.failed", target: checked.binding.id, outcome: "unverified" }); return false; }
   }

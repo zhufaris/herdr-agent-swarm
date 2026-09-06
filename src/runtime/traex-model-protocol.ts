@@ -1,15 +1,10 @@
 import type { TraexSessionPeer } from "./traex-session-peer.js";
+import type { TraexModelSummary } from "../domain/model-selection.js";
 import { stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { randomUUID } from "node:crypto";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
-
-export interface TraexModelSummary {
-  id: string;
-  name: string;
-  displayName: string;
-}
 
 interface ModelListParams { cursor: string | null; limit: number; includeHidden: false }
 interface ModelListResponse { data: unknown[]; nextCursor: string | null }
