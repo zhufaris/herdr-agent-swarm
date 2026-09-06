@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Scan tracked content for credential material
+        run: |
+          ! git grep -nEI '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+      - name: Package release
+        run: npm run release:package -- --output release --tag "$GITHUB_REF_NAME"
+      - name: Verify checksum
+        working-directory: release
+        run: sha256sum --check SHA256SUMS
+      - name: Read release metadata
+        id: metadata
+        run: node -e 'const p=require("./package.json"); const fs=require("node:fs"); fs.appendFileSync(process.env.GITHUB_OUTPUT, `prerelease=${p.version.includes("-")}\n`)'
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ steps.metadata.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: |
+            release/herdr-agent-swarm-*-linux-x64.tar.gz
+            release/SHA256SUMS
