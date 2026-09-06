@@ -107,7 +107,7 @@ The production implementation uses the following modules and seams.
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
-| `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, and no-replay recovery | Generation-fenced `InstanceStore` transitions and Agent driver hooks |
+| `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced `InstanceStore` transitions and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
@@ -346,7 +346,13 @@ boundary for observation and never calls the submission boundary again.
 
 Each task uses a separate `worker-turn:<turnId>` outbox lane. A permanent CardKit
 failure quarantines only that lane, so another task card or unrelated reply can
-still advance. Output pages are ordered within the task. Once a continuation page
+still advance. While a task is queued, preparing, running, or blocked, the task
+card publishes only lifecycle and structured progress; transcript output remains
+durable but is not sent as visible draft content. Completion first updates the
+card structure, then publishes the final sanitized output through the ordered task
+lane. Failed, cancelled, and dispatch-uncertain tasks expose only their reason and
+never publish partial output. Final output pages are ordered within the task and
+split at the 9,000-character render boundary. Once a continuation page
 is created, earlier pages are frozen and are not patched. SQLite retains the full
 sanitized canonical result; recent Worker history and card previews are bounded
 render-only summaries.

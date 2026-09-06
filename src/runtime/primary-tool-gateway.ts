@@ -89,7 +89,8 @@ export class PrimaryToolGateway {
     const binding = this.store.getBinding(request.bindingId);
     const prompt = this.store.getActiveOrdinaryPrompt(request.bindingId, request.generation);
     if (!binding?.projectId || !prompt) throw new Error("Primary tool calls require a current active ordinary binding prompt");
-    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id }, this.messaging);
+    if (!binding.rootMessageId) throw new Error("Primary tool calls require a Lark topic root message");
+    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id, sourceMessageId: prompt.larkMessageId, rootMessageId: binding.rootMessageId }, this.messaging);
     return await (broker[request.tool] as (input: Record<string, unknown>) => unknown)(request.arguments);
   }
 }

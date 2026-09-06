@@ -54,9 +54,10 @@ active turn；没有 active turn、目标已经换代或 Agent 不支持 steerin
 `/stop reviewer` 只中断该 Worker 当前唯一的 exact active turn，不停止 Worker 实例，也不取消
 其 FIFO backlog。旧命令 `/interrupt reviewer` 暂时作为同一操作的兼容别名。
 
-每次 `/to` 都会立即创建独立的 Worker task card。卡片从排队、准备、运行或阻塞推进到完成、
-失败、取消或 `dispatch-uncertain`，可信的结构化输出会持续写入这张卡。长输出会分页；已经
-冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
+每次 `/to` 都会立即创建独立的 Worker task card。卡片在排队、准备、运行或阻塞期间只展示
+请求、状态和结构化进度；可信输出仍会持久化，但不会把中间草稿持续展示到飞书。任务完成后，
+最终输出会一次性写入卡片，超过 9,000 字符时分页；失败、取消或 `dispatch-uncertain` 只展示
+原因，不展示部分输出。已经冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
 capture 状态，点击“打开”只读取该任务的持久化卡片，不会再次执行任务。
 
 每个 Worker session generation 还拥有一张持久 Worker Main Card。它只汇总 Worker 身份、
@@ -95,7 +96,10 @@ TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“�
 Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
 目标会失效，必须刷新后重新选择。Primary 可直接调用同项目中已存在的 Worker，不需要
 逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
-触发 Primary turn。
+触发 Primary turn。Primary 通过内置 Worker 工具发起的新任务和 follow-up 也会在当前飞书
+话题创建独立的 Worker Task Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
+不能由工具调用参数伪造。调用 `follow_up_instance` 时必须显式传入 `inspect_instance` 返回的
+已终结 `parentTurnId`；服务端拒绝跨 Worker、跨 generation 或尚未结束的父任务。
 
 实例停止不删除 worktree。删除前系统会重新检查 dirty、conflict、ahead、generation 和
 fingerprint；任何不安全或不确定状态都会保留实例/worktree，不提供危险确认按钮。

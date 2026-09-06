@@ -63,16 +63,19 @@ export class SqliteWorkerTurnStore {
         if (!parent || parent.projectId !== input.projectId || parent.instanceId !== input.instanceId || !["completed", "failed", "cancelled"].includes(parent.state)) throw new Error("Worker follow-up parent must be a settled turn on the same instance");
       }
       if (input.view.turnId !== input.id || input.view.instanceId !== input.instanceId || input.view.instanceGeneration !== input.instanceGeneration || input.view.parentTurnId !== input.parentTurnId || input.view.rootMessageId.length === 0) throw new Error("Worker turn card identity does not match the accepted turn");
+      const queuePosition = priority === "priority" ? 0 : Number((this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").get(input.instanceId, input.instanceGeneration) as { count: number }).count) + 1;
+      const acceptedView = { ...input.view, queuePosition };
+      const card = input.render(acceptedView);
       const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
         .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
       const turn = this.getInstanceTurnByKey(input.idempotencyKey);
       if (!turn) throw new Error("Accepted instance turn could not be loaded");
       if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority || turn.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
       if (inserted) {
-        this.saveWorkerTurnCard(input.view);
+        this.saveWorkerTurnCard(acceptedView);
         this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
-        this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id, viewVersion: input.view.viewVersion, rootMessageId: input.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: 0, pageStart: 0, elementId: input.view.elementId } }) });
-        this.dependencies.invalidateWorkerCardContexts(input.view, "turn.accepted");
+        this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id, viewVersion: acceptedView.viewVersion, rootMessageId: acceptedView.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card, stream: { pageIndex: 0, pageStart: 0, elementId: acceptedView.elementId } }) });
+        this.dependencies.invalidateWorkerCardContexts(acceptedView, "turn.accepted");
       }
       const view = this.loadWorkerTurnCard(turn.id);
       if (!view) throw new Error("Accepted Worker turn card could not be loaded");
@@ -172,7 +175,7 @@ export class SqliteWorkerTurnStore {
       if (!pageRow || !view) return "stale";
       const page = mapWorkerTurnCardPage(pageRow);
       const liveContinuation = page.pageIndex > 0 && page.state === "active" && (view.phase === "running" || view.phase === "blocked");
-      const completedPage = page.state === "finished" && view.phase === "completed";
+      const completedPage = ["active", "finished"].includes(page.state) && view.phase === "completed";
       if ((!liveContinuation && !completedPage) || page.cardId !== input.cardId || page.messageId !== input.messageId) return "stale";
       const key = `worker-turn:hydrate:${input.turnId}:${input.pageIndex}:${input.cardId}:${view.phase}`;
       if (this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) return "waiting";

@@ -70,7 +70,7 @@ export class SqliteTurnControlStore {
     });
   }
 
-  convertToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "card"> & { view?: AcceptInstanceTurnWithCardInput["view"]; card?: object }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
+  convertToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "render"> & { view?: AcceptInstanceTurnWithCardInput["view"]; render?: AcceptInstanceTurnWithCardInput["render"] }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
     return this.context.transaction(() => {
       const operation = this.get(input.operationId);
       if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "instance" || operation.target.owner.id !== input.turn.instanceId) return null;
@@ -81,8 +81,8 @@ export class SqliteTurnControlStore {
       const timestamp = now();
       this.database.prepare("INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'priority', ?, 'queued', ?, ?, ?, ?)").run(input.turn.id, input.turn.idempotencyKey, input.turn.projectId, input.turn.instanceId, input.turn.instanceGeneration, JSON.stringify(input.turn.actor), input.turn.kind, input.turn.text, input.turn.parentTurnId, input.turn.sourceMessageId, timestamp, timestamp);
       this.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, 'turn.accepted', ?, ?)").run(input.turn.projectId, input.turn.instanceId, input.turn.id, JSON.stringify({ kind: input.turn.kind }), timestamp);
-      if ((input.turn.view === undefined) !== (input.turn.card === undefined)) throw new Error("Worker priority card view and payload must be provided together");
-      if (input.turn.view && input.turn.card) { this.dependencies.saveWorkerTurnCard(input.turn.view); this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turn.id}:0`, bindingId: null, workerTurnId: input.turn.id, viewVersion: input.turn.view.viewVersion, rootMessageId: input.turn.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.turn.card, stream: { pageIndex: 0, pageStart: 0, elementId: input.turn.view.elementId } }) }); this.dependencies.invalidateWorkerCardContexts(input.turn.view, "turn.accepted"); }
+      if ((input.turn.view === undefined) !== (input.turn.render === undefined)) throw new Error("Worker priority card view and renderer must be provided together");
+      if (input.turn.view && input.turn.render) { const renderedCard = input.turn.render(input.turn.view); this.dependencies.saveWorkerTurnCard(input.turn.view); this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turn.id}:0`, bindingId: null, workerTurnId: input.turn.id, viewVersion: input.turn.view.viewVersion, rootMessageId: input.turn.view.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: renderedCard, stream: { pageIndex: 0, pageStart: 0, elementId: input.turn.view.elementId } }) }); this.dependencies.invalidateWorkerCardContexts(input.turn.view, "turn.accepted"); }
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
       const converted = this.get(input.operationId)!; if (input.card) this.updateResult(converted, input.card);
       return { operation: converted, logicalTurnId: input.turn.id };

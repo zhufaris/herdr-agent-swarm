@@ -23,7 +23,12 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
   const actionMessageId = page ? page.messageId : view.messageId;
-  const content = renderLarkMarkdownPage(workerTurnContent(view), page?.pageStart ?? view.pageStart, 9_000).page || workerTurnStatusContent(view);
+  const showOutput = view.phase === "completed";
+  const content = showOutput
+    ? page?.state === "active"
+      ? "正在整理最终输出…"
+      : renderLarkMarkdownPage(workerTurnContent(view), page?.pageStart ?? view.pageStart, 9_000).page || workerTurnStatusContent(view)
+    : "";
   const metadata = [
     `${state.icon} ${state.label}`,
     view.phase === "queued" ? `队列第 ${view.queuePosition} 位` : null,
@@ -37,7 +42,7 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view) });
   if (view.parentTurnId) elements.push({ tag: "markdown", content: `${cardSection("🔗", "承接任务")}  \`${escapeCode(view.parentTurnId)}\`` });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
-  elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
+  if (showOutput) elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
   const interaction = workerTaskInteraction(view.phase);
   elements.push({ tag: "markdown", content: interaction.guidance });
   if (interaction.actionLabel && actionMessageId) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
@@ -62,6 +67,7 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
 }
 
 function workerTurnContent(view: WorkerTurnCardView): string {
+  if (view.phase !== "completed") return "";
   const output = workerTurnStreamContent(view);
   if (output.trim()) return normalizeLarkPreview(redactSecrets(output));
   return "";

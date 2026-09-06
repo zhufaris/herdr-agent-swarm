@@ -62,16 +62,22 @@ export class TraexTranscriptProjector {
     if (call.success) {
       if (this.emittedItemIds.has(call.data.id) || this.callsById.has(call.data.call_id)) return "";
       const projected = projectToolCall(call.data.name, call.data.arguments); this.emittedItemIds.add(call.data.id); if (call.data.name === "update_plan") return "";
-      this.callsById.set(call.data.call_id, projected.descriptor); toolActivities.push(projectActivity(call.data.call_id, projected.descriptor, "active")); return projected.entry;
+      this.callsById.set(call.data.call_id, projected.descriptor);
+      const activity = projectActivity(call.data.call_id, projected.descriptor, "active");
+      if (activity) toolActivities.push(activity);
+      return projected.entry;
     }
     const result = functionOutputSchema.safeParse(item);
     if (!result.success || this.emittedItemIds.has(result.data.id) || !this.callsById.has(result.data.call_id)) return "";
-    this.emittedItemIds.add(result.data.id); const descriptor = this.callsById.get(result.data.call_id)!; toolActivities.push(projectActivity(result.data.call_id, descriptor, projectToolResultState(result.data.output))); return projectToolResult(descriptor, result.data.output);
+    this.emittedItemIds.add(result.data.id); const descriptor = this.callsById.get(result.data.call_id)!;
+    const activity = projectActivity(result.data.call_id, descriptor, projectToolResultState(result.data.output));
+    if (activity) toolActivities.push(activity);
+    return projectToolResult(descriptor, result.data.output);
   }
 }
 
 function parseEnvelope(line: string): z.infer<typeof envelopeSchema> | null { try { const parsed = envelopeSchema.safeParse(JSON.parse(line)); return parsed.success ? parsed.data : null; } catch { return null; } }
-function projectActivity(callId: string, descriptor: ToolActivityDescriptor, state: "active" | "done" | "failed"): NonNullable<TraexTranscriptObservation["toolActivities"]>[number] { const kind = descriptor.category === "Read" ? "read" : descriptor.category === "Search" ? "search" : descriptor.category === "Edit" ? "edit" : descriptor.category === "Command" && /(?:^|\s)(?:npm|npx|pnpm|yarn|bun|uv|pytest|cargo|go)\b.*\btest(?:s|ing)?\b|\b(?:vitest|jest|pytest)\b/i.test(descriptor.target) ? "test" : "step"; return { key: `tool:${callId}`, kind, label: `${descriptor.category} · ${descriptor.target || "未提供目标"}`, state }; }
+function projectActivity(callId: string, descriptor: ToolActivityDescriptor, state: "active" | "done" | "failed"): NonNullable<TraexTranscriptObservation["toolActivities"]>[number] | null { if (descriptor.category === "Command" && !descriptor.target) return null; const kind = descriptor.category === "Read" ? "read" : descriptor.category === "Search" ? "search" : descriptor.category === "Edit" ? "edit" : descriptor.category === "Command" && /(?:^|\s)(?:npm|npx|pnpm|yarn|bun|uv|pytest|cargo|go)\b.*\btest(?:s|ing)?\b|\b(?:vitest|jest|pytest)\b/i.test(descriptor.target) ? "test" : "step"; return { key: `tool:${callId}`, kind, label: `${descriptor.category} · ${descriptor.target}`, state }; }
 function reduceTurnLifecycle(current: TraexTranscriptObservation["turnLifecycle"], envelope: z.infer<typeof envelopeSchema>, max: number): TraexTranscriptObservation["turnLifecycle"] { if (envelope.type !== "event_msg") return current; const started = taskStartedEventSchema.safeParse(envelope.payload); if (started.success) return { turnId: started.data.turn_id, state: "active", startedAt: eventTime(started.data.started_at) }; const completed = taskCompleteEventSchema.safeParse(envelope.payload); if (completed.success) { if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current; const finalAnswer = completed.data.last_agent_message ? boundMarkdown(redactSecrets(completed.data.last_agent_message.trim()), max) : ""; return { turnId: completed.data.turn_id, state: "completed", startedAt: current.startedAt, ...(finalAnswer ? { finalAnswer } : {}) }; } const aborted = turnAbortedEventSchema.safeParse(envelope.payload); if (!aborted.success || current?.state !== "active" || current.turnId !== aborted.data.turn_id) return current; return { turnId: aborted.data.turn_id, state: "aborted", startedAt: current.startedAt, ...(aborted.data.reason ? { reason: boundMarkdown(redactSecrets(aborted.data.reason), max) } : {}) }; }
 function eventTime(seconds: number): string { return new Date(seconds * 1_000).toISOString(); }
 function extractStatusTitle(text: string): string | null { const match = /^\s*\*\*([^*\n]+)\*\*/.exec(text); const title = match?.[1]?.replace(/\s+/g, " " ).trim(); return title ? title.slice(0, 160) : null; }

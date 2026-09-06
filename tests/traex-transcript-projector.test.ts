@@ -22,4 +22,24 @@ describe("TraexTranscriptProjector", () => {
     expect(result.observation.answerDelta).not.toContain("private instruction");
     expect(result.lifecycle).toBeUndefined();
   });
+
+  it("omits Command progress when a wrapped tool call has no extractable target", () => {
+    const result = new TraexTranscriptProjector().project({
+      lines: [
+        line("history_mutation", { operation: "append", items: [{
+          type: "function_call", id: "opaque-command", call_id: "opaque-command-call", name: "exec",
+          arguments: JSON.stringify({ input: "const results = await Promise.all(ids.map(run)); results.forEach(text);" })
+        }] }),
+        line("history_mutation", { operation: "append", items: [{
+          type: "function_call_output", id: "opaque-command-result", call_id: "opaque-command-call", output: "Script completed"
+        }] })
+      ],
+      initialLifecycle: undefined,
+      tokenBaseline: null,
+      maxRenderedDeltaChars: 1_000
+    });
+
+    expect(result.observation.toolActivities).toBeUndefined();
+    expect(JSON.stringify(result.observation)).not.toContain("未提供目标");
+  });
 });

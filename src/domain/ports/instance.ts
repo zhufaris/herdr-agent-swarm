@@ -14,7 +14,7 @@ import type { RunCardView } from "../run-card-view.js";
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
-  kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; card: object;
+  kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; render(view: WorkerTurnCardView): object;
 }
 
 export interface InstanceStore {
