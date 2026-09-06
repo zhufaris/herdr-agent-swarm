@@ -34,7 +34,7 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
     const currentPage = this.store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view.pageIndex);
     const shouldHydrate = currentPage && workerTaskInteraction(view.phase).actionLabel && (
       (currentPage.pageIndex > 0 && currentPage.state === "active" && (view.phase === "running" || view.phase === "blocked"))
-      || (currentPage.state === "finished" && view.phase === "completed")
+      || (["active", "finished"].includes(currentPage.state) && view.phase === "completed")
     );
     if (shouldHydrate && currentPage.cardId && currentPage.messageId) {
       const hydration = this.store.reserveWorkerTurnCardHydration({ turnId, pageIndex: currentPage.pageIndex, cardId: currentPage.cardId, messageId: currentPage.messageId, card: renderWorkerTurnCard(view, currentPage) });
@@ -52,14 +52,15 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
       }
       if (progressOutcome === "stale") return;
     }
+    if (!["completed", "failed", "cancelled"].includes(view.phase)) return;
     const content = redactSecrets(workerTurnStreamContent(view));
     const rendered = renderLarkMarkdownPage(content, page.pageStart, PAGE_LIMIT);
     const facts = this.store.getWorkerTurnCardDeliveryFacts(turnId, page.pageIndex);
     if (facts.continuationPending || facts.latestContent?.state === "pending" || facts.latestContent?.state === "dead_letter") return;
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
-    if (facts.latestContent?.content !== rendered.page && rendered.page) {
+    if (view.phase === "completed" && facts.latestContent?.content !== rendered.page && rendered.page) {
       outcome = this.store.reserveWorkerTurnContent({ turnId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: rendered.page, sourceEnd: rendered.nextPageStart ?? content.length });
-    } else if (rendered.nextPageStart !== null) {
+    } else if (view.phase === "completed" && rendered.nextPageStart !== null) {
       const nextPageIndex = page.pageIndex + 1;
       const nextElementId = workerTurnElementId(turnId, nextPageIndex);
       const nextPage = { id: `${turnId}:${nextPageIndex}`, turnId, pageIndex: nextPageIndex, pageStart: rendered.nextPageStart, elementId: nextElementId, messageId: null, cardId: null, state: "creating" as const, sequence: 0, createdAt: view.updatedAt, updatedAt: view.updatedAt };

@@ -317,7 +317,13 @@ boundary for observation and never calls the submission boundary again.
 
 Each task uses a separate `worker-turn:<turnId>` outbox lane. A permanent CardKit
 failure quarantines only that lane, so another task card or unrelated reply can
-still advance. Output pages are ordered within the task. Once a continuation page
+still advance. While a task is queued, preparing, running, or blocked, the task
+card publishes only lifecycle and structured progress; transcript output remains
+durable but is not sent as visible draft content. Completion first updates the
+card structure, then publishes the final sanitized output through the ordered task
+lane. Failed, cancelled, and dispatch-uncertain tasks expose only their reason and
+never publish partial output. Final output pages are ordered within the task and
+split at the 9,000-character render boundary. Once a continuation page
 is created, earlier pages are frozen and are not patched. SQLite retains the full
 sanitized canonical result; recent Worker history and card previews are bounded
 render-only summaries.

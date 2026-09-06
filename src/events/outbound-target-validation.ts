@@ -65,7 +65,9 @@ export function assertWorkerCardCreateTarget(
   const expectedElementId = workerTurnElementId(turnId, stream.pageIndex);
   const cardElementIds = collectElementIds(card);
   const expectedProgressElementId = workerTurnProgressElementId(turnId, stream.pageIndex);
-  if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || !cardElementIds.includes(expectedElementId) || !cardElementIds.includes(expectedProgressElementId)) throw new PermanentDeliveryError(`Worker card element mismatch for turn ${turnId}`);
+  const allowedElementIds = new Set([expectedProgressElementId, expectedElementId]);
+  const outputElementIsValid = view.phase === "completed" ? cardElementIds.includes(expectedElementId) : !cardElementIds.includes(expectedElementId);
+  if (stream.elementId !== expectedElementId || !cardElementIds.includes(expectedProgressElementId) || !outputElementIsValid || cardElementIds.some((id) => !allowedElementIds.has(id))) throw new PermanentDeliveryError(`Worker card element mismatch for turn ${turnId}`);
 }
 
 export function assertWorkerCardTarget(store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, cardId: string, elementId?: string): void {

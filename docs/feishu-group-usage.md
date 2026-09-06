@@ -54,9 +54,10 @@ active turn；没有 active turn、目标已经换代或 Agent 不支持 steerin
 `/stop reviewer` 只中断该 Worker 当前唯一的 exact active turn，不停止 Worker 实例，也不取消
 其 FIFO backlog。旧命令 `/interrupt reviewer` 暂时作为同一操作的兼容别名。
 
-每次 `/to` 都会立即创建独立的 Worker task card。卡片从排队、准备、运行或阻塞推进到完成、
-失败、取消或 `dispatch-uncertain`，可信的结构化输出会持续写入这张卡。长输出会分页；已经
-冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
+每次 `/to` 都会立即创建独立的 Worker task card。卡片在排队、准备、运行或阻塞期间只展示
+请求、状态和结构化进度；可信输出仍会持久化，但不会把中间草稿持续展示到飞书。任务完成后，
+最终输出会一次性写入卡片，超过 9,000 字符时分页；失败、取消或 `dispatch-uncertain` 只展示
+原因，不展示部分输出。已经冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
 capture 状态，点击“打开”只读取该任务的持久化卡片，不会再次执行任务。
 
 每个 Worker session generation 还拥有一张持久 Worker Main Card。它只汇总 Worker 身份、

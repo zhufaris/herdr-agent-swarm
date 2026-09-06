@@ -14,7 +14,7 @@ const primary = { bindingId: "binding-1", generation: 3, paneId: "w1:p0", state:
 describe("instance cards", () => {
   it.each(["queued", "preparing", "running", "blocked", "completed", "failed", "cancelled", "dispatch-uncertain"] as const)("renders a bounded and actionable %s Worker task card", (phase) => {
     const queued = createQueuedWorkerTurnCard({ turnId: "turn:unsafe/id", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: "parent-turn", rootMessageId: "root-1", requestText: `review ${"x".repeat(4_000)}`, queuePosition: 3, occurredAt: "2026-09-01T00:00:00.000Z" });
-    const view = { ...queued, phase, answer: phase === "completed" ? "final finding" : "", notice: ["blocked", "failed", "cancelled", "dispatch-uncertain"].includes(phase) ? "Bearer live-secret" : null, resultCapture: phase === "completed" ? "captured" as const : "pending" as const };
+    const view = { ...queued, phase, answer: phase === "completed" ? "final finding" : "partial private draft", notice: ["blocked", "failed", "cancelled", "dispatch-uncertain"].includes(phase) ? "Bearer live-secret" : null, resultCapture: phase === "completed" ? "captured" as const : "pending" as const };
     const card = renderWorkerTurnCard(view);
     const text = JSON.stringify(card);
 
@@ -27,6 +27,8 @@ describe("instance cards", () => {
     expect(text).not.toContain("View Worker Main");
     expect(text).not.toContain("card_target_open");
     expect(text).not.toContain("live-secret");
+    if (phase === "completed") expect(text).toContain("final finding");
+    else expect(text).not.toContain("partial private draft");
     expect(text).not.toContain('\"tag\":\"note\"');
     if (phase === "running") { expect(text).toContain("精确发送到此 Worker turn"); expect(text).toContain("直接回复卡片仍会进入 Primary"); }
     if (phase === "blocked") { expect(text).toContain("精确发送到此 Worker turn"); expect(text).toContain("审批仍须在对应 Herdr Pane 完成"); expect(text).toContain("直接回复卡片仍会进入 Primary"); }

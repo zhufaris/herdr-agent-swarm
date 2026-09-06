@@ -811,7 +811,7 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
       if (!pageRow || !view) { this.database.exec("COMMIT"); return "stale"; }
       const page = mapWorkerTurnCardPage(pageRow);
       const liveContinuation = page.pageIndex > 0 && page.state === "active" && (view.phase === "running" || view.phase === "blocked");
-      const completedPage = page.state === "finished" && view.phase === "completed";
+      const completedPage = ["active", "finished"].includes(page.state) && view.phase === "completed";
       if ((!liveContinuation && !completedPage) || page.cardId !== input.cardId || page.messageId !== input.messageId) { this.database.exec("COMMIT"); return "stale"; }
       const key = `worker-turn:hydrate:${input.turnId}:${input.pageIndex}:${input.cardId}:${view.phase}`;
       if (this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) { this.database.exec("COMMIT"); return "waiting"; }
