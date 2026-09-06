@@ -2,8 +2,12 @@
 
 ## Status
 
-Approved direction. This document defines the Worker interaction model and its
-acceptance evidence before implementation.
+Implemented. This document is the behavioral contract for Worker Task Card
+replies and the acceptance evidence required when changing that routing.
+
+The intended reader is an engineer maintaining Lark ingress, Worker messaging,
+or durable card projection. After reading it, they should be able to modify the
+reply path without routing an instruction to the wrong Worker or replaying work.
 
 ## Goal
 
@@ -50,7 +54,15 @@ generation, Worker session generation, and task identity.
   unstarted task may be added only through a dedicated, transactional workflow.
 - Do not expose Stop, Steer, or Retry.
 
-### Preparing and running
+### Preparing
+
+- Explain that dispatch has started but exact runtime-turn ownership is not yet
+  established.
+- Reject contextual replies instead of guessing whether they are a steer or a
+  new FIFO task.
+- Once exact ownership is established, project the card as running.
+
+### Running
 
 - Show the current trusted status, plan, recent tool activity, and streamed
   answer already owned by this exact runtime turn.
@@ -116,14 +128,19 @@ silently choose a different semantic.
 No new lifecycle authority is introduced. The existing boundaries remain:
 
 1. Lark reply or callback is normalized by the adapter.
-2. `InstanceInteractionWorkflow` resolves the direct parent Task Card and reloads
-   its durable turn plus Worker and Primary ownership.
-3. Active/blocked replies call exact-turn steering; terminal replies call
+2. For a direct reply, the normalized Lark `parent_id` is the exact replied-card
+   message identity. The store resolves that identity across the Task Card's
+   main page and continuation pages. Exactly one durable turn must match; zero
+   or multiple matches fail closed.
+3. `InstanceInteractionWorkflow` obtains the Worker from the resolved turn's
+   `instanceId`. The selected conversation target and Worker names do not
+   participate in routing. It then reloads the Worker and Primary ownership.
+4. Active/blocked replies call exact-turn steering; terminal replies call
    `InstanceMessagingWorkflow.submit` with `kind: followup` and `parentTurnId`.
-4. Independent Main Card submissions call the same messaging workflow with
+5. Independent Main Card submissions call the same messaging workflow with
    `kind: turn` and no parent.
-5. SQLite persists the turn/card/outbox intent before any Lark delivery.
-6. The Worker scheduler dispatches at most one ordinary turn for the Worker; the
+6. SQLite persists the turn/card/outbox intent before any Lark delivery.
+7. The Worker scheduler dispatches at most one ordinary turn for the Worker; the
    observer projects only exact owned transcript output.
 
 The direct parent message remains the routing authority. The system does not
@@ -138,24 +155,27 @@ message. Worker completion never automatically starts a Primary turn.
 - A failed card or Toast delivery retries only presentation, never the Agent
   prompt.
 - A generation/session mismatch invalidates the old card.
+- An absent or ambiguous card-message mapping is not routed through the currently
+  selected Worker; ordinary Primary routing may handle it only after the Worker
+  reply path declines it.
 - Missing exact transcript ownership cannot produce progress or completion.
 - Stop interrupts only the exact active turn and does not cancel FIFO backlog.
 - The bridge never exposes remote approval for high-risk TraeX prompts.
 
-## Implementation Scope
+## Implemented Scope
 
-1. Add state-specific guidance and legal actions to Worker Task Cards.
-2. Add an independent `发起新任务` form to Worker Main Card.
-3. Reuse the existing direct-reply routing for steer and follow-up; centralize
-   state-to-intent decisions so card buttons and replies cannot diverge.
-4. Return intent-specific success and rejection feedback with queue position.
-5. Update the Feishu user guide and interaction tests.
-6. Repair the real multi-agent smoke script to use the current Thread Primary
+1. State-specific guidance and legal actions are present on Worker Task Cards.
+2. Worker Main Card provides an independent `发起新任务` form.
+3. Direct-reply routing is shared by steer and follow-up; a centralized
+   state-to-intent decision keeps card buttons and replies from diverging.
+4. Intent-specific success and rejection feedback includes queue position.
+5. The Feishu user guide and interaction tests describe the same behavior.
+6. The real multi-agent smoke script uses the current Thread Primary
    binding model instead of the removed persistent Primary instance API.
 
-The first implementation should not add queued-task cancellation, remote
-approval, automatic retry, Worker-to-Worker delegation, or automatic Primary
-wake-up. Those require separate workflow and authorization designs.
+This contract does not include queued-task cancellation, remote approval,
+automatic retry, Worker-to-Worker delegation, or automatic Primary wake-up.
+Those require separate workflow and authorization designs.
 
 ## Test and Acceptance Matrix
 
@@ -165,6 +185,10 @@ wake-up. Those require separate workflow and authorization designs.
   turn and never enqueues fallback work.
 - A direct reply to completed, failed, or cancelled creates one idempotent
   follow-up with the correct `parentTurnId` and FIFO position.
+- With multiple Workers present and a different Worker selected, the exact
+  replied Task Card still determines the destination Worker.
+- Replies to continuation pages resolve to the same task and Worker as the main
+  Task Card. Missing or ambiguous message mappings fail closed.
 - Replies to queued and dispatch-uncertain tasks are rejected without terminal
   input or new turns.
 - `/to` remains an independent turn even when replying to a Task Card.
@@ -200,19 +224,18 @@ not acceptance evidence.
 
 ### Required commands
 
-Run the focused Worker interaction tests, `npm run typecheck`, `npm run build`,
-the full `npm test`, smoke preflight, and the executed real smoke. Completion
-requires all layers to pass against the current checkout.
+Always run the focused Worker interaction tests, `npm run typecheck`, and
+`npm run build`. Run the full `npm test` for persistence, scheduling, or shared
+runtime changes. Run smoke preflight and the executed real smoke when the
+Herdr/TraeX dispatch path changes. Completion requires every applicable layer
+to pass against the current checkout.
 
-## Baseline Evidence and Known Gap
+## Verification Evidence
 
-Before this design was written, the focused Worker suite passed 90 tests across
-seven files. The full suite passed 1,780 tests across 143 files; typecheck and
-build also passed.
-
-The real smoke did not reach the product path. It failed at
-`scripts/smoke-headless-multi-agent.ts` because the script still called the
-removed `InstanceControlWorkflow.create()` API and attempted to construct a
-persistent Primary instance. The current workflow exposes `createWorker()` and
-requires an active Primary binding/pane. Repairing and rerunning this smoke is a
-required deliverable, not an optional follow-up.
+Evidence is recorded by the implementing change rather than frozen as historical
+test counts in this contract. Every change to direct-reply routing must run the
+focused instance-routing and SQLite-store tests plus typecheck and build. Changes
+that alter persistence, scheduling, or shared runtime behavior additionally run
+the full suite. The real smoke remains required when the Herdr/TraeX dispatch
+path itself changes; a pure fail-closed lookup correction does not require live
+Agent execution.

@@ -737,9 +737,9 @@ export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
     return mapWorkerTurnCard(this.database.prepare("SELECT * FROM worker_turn_cards WHERE turn_id = ?").get(turnId) as Record<string, unknown> | undefined);
   }
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
-    const row = this.database.prepare("SELECT turn_id FROM worker_turn_card_pages WHERE message_id = ? UNION SELECT turn_id FROM worker_turn_cards WHERE message_id = ? LIMIT 1").get(messageId, messageId) as { turn_id: string } | undefined;
-    if (!row) return null;
-    const turn = this.getInstanceTurn(row.turn_id); const view = this.loadWorkerTurnCard(row.turn_id);
+    const rows = this.database.prepare("SELECT turn_id FROM worker_turn_card_pages WHERE message_id = ? UNION SELECT turn_id FROM worker_turn_cards WHERE message_id = ?").all(messageId, messageId) as Array<{ turn_id: string }>;
+    if (rows.length !== 1) return null;
+    const turn = this.getInstanceTurn(rows[0]!.turn_id); const view = this.loadWorkerTurnCard(rows[0]!.turn_id);
     return turn && view ? { turn, view } : null;
   }
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[] {

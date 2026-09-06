@@ -78,6 +78,23 @@ describe("instance routing", () => {
     expect(messaging.submit).not.toHaveBeenCalled();
   });
 
+  it("routes by the replied Task Card when multiple Workers exist and another Worker is selected", async () => {
+    const { create, workflow, messaging } = setup();
+    const repliedWorker = create("reviewer", "worker");
+    const selectedWorker = create("implementer", "worker");
+    const task = taskCard(repliedWorker.id, "completed", "turn-reviewer-completed");
+    store!.setConversationTarget({ chatId: "binding:binding-default", projectId: "p1", target: { kind: "instance", instanceId: selectedWorker.id, expectedGeneration: selectedWorker.generation } });
+
+    await expect(workflow.handleOrdinaryMessage({ ...message("continue the review", "reply-reviewer"), parentMessageId: task.cardMessageId })).resolves.toBe(true);
+
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({
+      targetInstanceId: repliedWorker.id,
+      content: { kind: "followup", text: "continue the review" },
+      source: expect.objectContaining({ parentTurnId: task.turnId })
+    }));
+    expect(messaging.submit).not.toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: selectedWorker.id }));
+  });
+
   it("uses the shared task policy for blocked and preparing direct replies", async () => {
     const { create, workflow, messaging, outbound } = setup();
     const worker = create("reviewer", "worker");

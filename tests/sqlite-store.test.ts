@@ -320,6 +320,33 @@ describe("SQLite store", () => {
     expect(summaries[1]).toMatchObject({ resultCapture: "pending" });
   });
 
+  it("resolves a delivered Worker card message only when it identifies one turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const workerId of ["reviewer", "implementer"]) {
+      store.createAgentInstance({ id: workerId, projectId: "p1", name: workerId, role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: `ws-${workerId}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+      const worker = store.attachAgentInstanceRuntime({ instanceId: workerId, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: `w1:${workerId}`, nativeSessionId: `session-${workerId}` })!;
+      const turnId = `turn-${workerId}`;
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-06T00:00:00.000Z" });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, card: {} });
+    }
+    const reviewerReply = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-reviewer")!;
+    store.markOutboundReplyDelivered(reviewerReply.id, "task-card-reviewer", "cardkit-reviewer");
+
+    expect(store.findWorkerTurnByCardMessage("task-card-reviewer")).toMatchObject({
+      turn: { id: "turn-reviewer", instanceId: "reviewer" },
+      view: { turnId: "turn-reviewer", instanceId: "reviewer" }
+    });
+    expect(store.findWorkerTurnByCardMessage("missing-card")).toBeNull();
+
+    store.database.prepare("UPDATE worker_turn_card_pages SET message_id = ? WHERE turn_id = ? AND page_index = 0").run("continuation-reviewer", "turn-reviewer");
+    expect(store.findWorkerTurnByCardMessage("continuation-reviewer")).toMatchObject({
+      turn: { id: "turn-reviewer", instanceId: "reviewer" }
+    });
+
+    store.database.prepare("UPDATE worker_turn_card_pages SET message_id = ? WHERE turn_id = ? AND page_index = 0").run("task-card-reviewer", "turn-implementer");
+    expect(store.findWorkerTurnByCardMessage("task-card-reviewer")).toBeNull();
+  });
+
   it("adds Worker card schema without backfilling historical turns", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-card-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
