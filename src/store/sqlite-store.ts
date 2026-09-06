@@ -35,6 +35,7 @@ import { sessionOperationRejection } from "../domain/session-operation-policy.js
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
 import type { AcceptCommandIntentInput, AcceptCommandIntentResult, CommandIntent, CommandIntentTerminalState } from "../domain/command-intent.js";
 import { SqliteContext } from "./sqlite/context.js";
+import { SqliteApprovalStore } from "./sqlite/approval-store.js";
 
 const FENCED_TABLES = [
   "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
@@ -59,71 +60,27 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
 export class SqliteBindingStore implements BindingStorePort, TurnControlStore {
   readonly database: DatabaseSync;
   private readonly context: SqliteContext;
+  private readonly approvals: SqliteApprovalStore;
 
   constructor(path: string) {
     this.context = new SqliteContext(path);
     this.database = this.context.database;
     this.migrate();
+    this.approvals = new SqliteApprovalStore(this.context);
   }
 
   close(): void { this.context.close(); }
 
   createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest {
-    const instance = this.getAgentInstance(input.instanceId);
-    if (!instance || instance.projectId !== input.projectId || instance.generation !== input.instanceGeneration) throw new Error("Instance generation changed before approval request");
-    const timestamp = now();
-    this.database.prepare(`INSERT INTO approval_requests(id, actor_id, project_id, instance_id, instance_generation, action_fingerprint, resource_scope, policy_version, tier, state, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'remote-confirmation', 'pending', ?, ?)`)
-      .run(input.id, input.actorId, input.projectId, input.instanceId, input.instanceGeneration, input.actionFingerprint, input.resourceScope, input.policyVersion, input.expiresAt, timestamp);
-    return this.getApprovalRequest(input.id)!;
+    return this.approvals.createApprovalRequest(input);
   }
 
   resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const request = this.getApprovalRequest(input.requestId);
-      if (!request) { this.database.exec("COMMIT"); return { outcome: "missing", request: null, grant: null }; }
-      if (request.actorId !== input.actorId) { this.database.exec("COMMIT"); return { outcome: "unauthorized", request, grant: null }; }
-      if (request.state !== "pending") { this.database.exec("COMMIT"); return { outcome: "duplicate", request, grant: this.getApprovalGrantByRequest(request.id) }; }
-      if (request.expiresAt <= input.now) {
-        this.database.prepare("UPDATE approval_requests SET state = 'expired', resolved_at = ? WHERE id = ? AND state = 'pending'").run(input.now, request.id);
-        const expired = this.getApprovalRequest(request.id); this.database.exec("COMMIT"); return { outcome: "expired", request: expired, grant: null };
-      }
-      const state = input.approved ? "approved" : "rejected";
-      this.database.prepare("UPDATE approval_requests SET state = ?, resolved_at = ? WHERE id = ? AND state = 'pending'").run(state, input.now, request.id);
-      if (input.approved) this.database.prepare(`INSERT INTO approval_grants(id, request_id, actor_id, project_id, instance_id, instance_generation, action_fingerprint, resource_scope, policy_version, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(input.grantId, request.id, request.actorId, request.projectId, request.instanceId, request.instanceGeneration, request.actionFingerprint, request.resourceScope, request.policyVersion, request.expiresAt, input.now);
-      const resolved = this.getApprovalRequest(request.id);
-      const grant = input.approved ? this.getApprovalGrant(input.grantId) : null;
-      this.database.exec("COMMIT"); return { outcome: state, request: resolved, grant };
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
+    return this.approvals.resolveApprovalRequest(input);
   }
 
   consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch" {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const grant = this.getApprovalGrant(input.grantId);
-      if (!grant) { this.database.exec("COMMIT"); return "missing"; }
-      if (grant.consumedAt) { this.database.exec("COMMIT"); return "used"; }
-      if (grant.expiresAt <= input.now) { this.database.exec("COMMIT"); return "expired"; }
-      if (!approvalIdentityMatches(grant, input)) { this.database.exec("COMMIT"); return "mismatch"; }
-      const instance = this.getAgentInstance(input.instanceId);
-      if (!instance || instance.projectId !== input.projectId || instance.generation !== input.instanceGeneration) { this.database.exec("COMMIT"); return "mismatch"; }
-      const changed = this.database.prepare("UPDATE approval_grants SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").run(input.now, grant.id);
-      this.database.exec("COMMIT"); return changed.changes === 1 ? "consumed" : "used";
-    } catch (error) { if (this.database.isTransaction) this.database.exec("ROLLBACK"); throw error; }
-  }
-
-  private getApprovalRequest(id: string): ApprovalRequest | null {
-    const row = this.database.prepare("SELECT * FROM approval_requests WHERE id = ?").get(id) as Record<string, unknown> | undefined;
-    return row ? mapApprovalRequest(row) : null;
-  }
-  private getApprovalGrant(id: string): ApprovalGrant | null {
-    const row = this.database.prepare("SELECT * FROM approval_grants WHERE id = ?").get(id) as Record<string, unknown> | undefined;
-    return row ? mapApprovalGrant(row) : null;
-  }
-  private getApprovalGrantByRequest(requestId: string): ApprovalGrant | null {
-    const row = this.database.prepare("SELECT * FROM approval_grants WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
-    return row ? mapApprovalGrant(row) : null;
+    return this.approvals.consumeApprovalGrant(input);
   }
 
   activateWriteFence(ownerId: string, fencingToken: number): void {
@@ -5575,20 +5532,6 @@ function durationSeconds(startedAt: string | null, finishedAt: string | null): n
   if (!startedAt) return null;
   const start = Date.parse(startedAt); const finish = Date.parse(finishedAt ?? now());
   return Number.isFinite(start) && Number.isFinite(finish) ? Math.max(0, Math.floor((finish - start) / 1_000)) : null;
-}
-function approvalIdentityMatches(left: ApprovalIdentity, right: ApprovalIdentity): boolean {
-  return left.actorId === right.actorId && left.projectId === right.projectId && left.instanceId === right.instanceId
-    && left.instanceGeneration === right.instanceGeneration && left.actionFingerprint === right.actionFingerprint
-    && left.resourceScope === right.resourceScope && left.policyVersion === right.policyVersion;
-}
-function mapApprovalIdentity(row: Record<string, unknown>): ApprovalIdentity {
-  return { actorId: String(row.actor_id), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actionFingerprint: String(row.action_fingerprint), resourceScope: String(row.resource_scope), policyVersion: String(row.policy_version) };
-}
-function mapApprovalRequest(row: Record<string, unknown>): ApprovalRequest {
-  return { id: String(row.id), ...mapApprovalIdentity(row), tier: "remote-confirmation", state: String(row.state) as ApprovalRequest["state"], expiresAt: String(row.expires_at), createdAt: String(row.created_at), resolvedAt: row.resolved_at === null ? null : String(row.resolved_at) };
-}
-function mapApprovalGrant(row: Record<string, unknown>): ApprovalGrant {
-  return { id: String(row.id), requestId: String(row.request_id), ...mapApprovalIdentity(row), expiresAt: String(row.expires_at), consumedAt: row.consumed_at === null ? null : String(row.consumed_at), createdAt: String(row.created_at) };
 }
 function normalizeLiveStatus(value: unknown): MainCardLiveStatus | null {
   if (!isRecord(value)) return null;
