@@ -13,6 +13,7 @@ describe("application composition boundaries", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
@@ -23,6 +24,8 @@ describe("application composition boundaries", () => {
     expect(main).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
     expect(main).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
     expect(main).not.toContain("new SqliteBindingStore");
+    expect(storeBundle).toContain("new SqliteStoreKernel");
+    expect(storeBundle).not.toContain("SqliteBindingStore");
     expect(factory).toContain("stores.promptRun");
     expect(factory).toContain("stores.outbox");
     expect(factory).toContain("stores.instance");

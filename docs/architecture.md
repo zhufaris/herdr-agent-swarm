@@ -117,10 +117,14 @@ The production implementation uses the following modules and seams.
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
 | `LarkOutboxDispatcher` | Durable Lark delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore`; no direct aggregate mutation |
-| `createSqliteStoreBundle` | Constructs all SQLite capabilities once and exposes consumer-specific port views | One shared `SqliteContext`; production workflows do not receive the broad compatibility facade |
-| `SqliteBindingStore` | Compatibility facade and remaining binding/instance orchestration persistence | Delegates extracted Prompt, Worker-turn, projection, outbox, lease, approval, command, and operations capabilities |
-| `SqlitePromptStore` / `SqliteWorkerTurnStore` | Prompt and Worker-turn aggregates | Deep aggregate operations preserve cross-table state, projection, event, invalidation, and outbox transactions |
-| `SqliteProjectionStore` / `SqliteOutboxStore` | Card projections/pages and durable delivery lifecycle | Internal transaction-participating seams over the shared context |
+| `createSqliteStoreBundle` / `SqliteStoreKernel` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production workflows do not construct or receive the broad compatibility facade |
+| `SqliteBindingStore` | Test and migration-fixture compatibility facade | An inheritance-only alias of `SqliteStoreKernel`; it contains no SQL, schema logic, or workflow implementation |
+| `SqliteBindingLifecycleStore` / `SqliteBindingProjectionStore` | Binding lifecycle, reset, cleanup, runtime convergence, and binding-owned projections | Keep lifecycle and projection responsibilities separate while sharing one transaction context |
+| `SqlitePromptStore` / `SqliteWorkerTurnStore` / `SqliteTurnControlStore` | Prompt, Worker-turn, and exact-turn control aggregates | Deep aggregate operations preserve cross-table state, projection, event, invalidation, and outbox transactions |
+| `SqliteInstanceStore` / `SqliteInstanceOperationStore` | Agent instance, workspace lease, conversation target, and instance-operation persistence | Instance identity and generation fences remain inside capability operations |
+| `SqliteProjectionStore` / `SqliteCardContextStore` / `SqliteOutboxStore` | Card projections/pages, invalidation state, and durable delivery lifecycle | Internal transaction-participating seams over the shared context |
+| `SqliteInboundProjectStore` / `SqlitePaneOperationStore` | Durable inbound/project selection and pane operation capabilities | Workflow-specific atomic transitions, not table repositories |
+| `SqliteLeaseStore` / `SqliteApprovalStore` / `SqliteCommandIntentStore` / `SqliteSessionOperationStore` / `SqliteOperationsStore` | Lease/fencing, approvals, commands, session operations, diagnostics, audit, and recovery | Low-coupling capabilities over the same context and write fence |
 | `SqliteMigrations` | Latest-schema creation and ordered compatibility migration | Runs once during bundle construction before capability use |
 
 ### Ubiquitous language and target module names
@@ -169,8 +173,9 @@ when ports are narrowed; splitting a large store interface must not split a
 workflow transaction.
 
 The production composition root creates one `SqliteStoreBundle`. The bundle
-constructs one compatibility facade, which in turn creates exactly one
-`SqliteContext` and one `DatabaseSync` connection. Each workflow receives only
+constructs one internal `SqliteStoreKernel`, which creates exactly one
+`SqliteContext`, one `DatabaseSync` connection, and every capability module.
+Each workflow receives only
 the domain port it consumes, such as `PromptRunStore`, `InstanceStore`,
 `OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
 facade type. Tests that inspect migration fixtures may still construct
@@ -181,8 +186,10 @@ entry points use `SqliteContext.transaction()`, where only the outermost call
 issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`; nested Prompt, Worker-turn,
 projection, and outbox calls participate in the existing transaction. Capability
 modules never instantiate their own database connection. The compatibility
-facade still coordinates its not-yet-extracted binding and instance aggregates
-on that same connection. This keeps prompt/card/outbox and Worker
+facade is an implementation-free alias and is not part of production
+composition. The kernel only wires capability calls and exposes their existing
+domain-port operations; business SQL lives in the capability modules. This
+keeps prompt/card/outbox and Worker
 turn/card/page/event changes atomic even though their implementations live in
 separate files.
 
