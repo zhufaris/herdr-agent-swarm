@@ -36,8 +36,12 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 23").get()).toEqual({ version: 23 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 24").get()).toEqual({ version: 24 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 27").get()).toEqual({ version: 27 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 28").get()).toEqual({ version: 28 });
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('instance_turns_primary_source','worker_turn_cards_session_phase') ORDER BY name").all()).toEqual([
       { name: "instance_turns_primary_source" }, { name: "worker_turn_cards_session_phase" }
+    ]);
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('outbound_replies_worker_pending','outbound_replies_worker_stream') ORDER BY name").all()).toEqual([
+      { name: "outbound_replies_worker_pending" }, { name: "outbound_replies_worker_stream" }
     ]);
   });
 
@@ -400,6 +404,31 @@ describe("SQLite store", () => {
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: false, turn: { id: "turn-1" } });
     expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ requestText: "review", queuePosition: 1 });
     expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === "turn-1")).toHaveLength(1);
+    expect(store.database.prepare("SELECT stream_page_index, stream_element_id FROM outbound_replies WHERE worker_turn_id = 'turn-1'").get()).toEqual({ stream_page_index: 0, stream_element_id: view.elementId });
+    expect(store.hasPendingOutboundReplyForWorkerTurn("turn-1")).toBe(true);
+    expect(store.hasPendingOutboundReplyForWorkerTurn("missing")).toBe(false);
+    const pendingPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND state = 'pending' LIMIT 1").all("turn-1") as Array<{ detail: string }>;
+    expect(pendingPlan.some(({ detail }) => detail.includes("outbound_replies_worker_pending"))).toBe(true);
+  });
+
+  it("backfills bounded Worker stream metadata and tolerates malformed legacy payloads", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-outbox-metadata-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store.acceptInstanceTurn({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "review" });
+    store.enqueueOutboundReply({ id: "content", idempotencyKey: "content", workerTurnId: "turn-1", rootMessageId: "card", kind: "stream_content", payload: JSON.stringify({ pageIndex: 3, elementId: "answer-3", content: "done" }) });
+    store.enqueueOutboundReply({ id: "malformed", idempotencyKey: "malformed", workerTurnId: "turn-1", rootMessageId: "card", kind: "stream_content", payload: "not-json" });
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 28; UPDATE outbound_replies SET stream_page_index = NULL, stream_element_id = NULL;");
+
+    store.close(); store = undefined;
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT id, stream_page_index, stream_element_id FROM outbound_replies WHERE worker_turn_id = 'turn-1' ORDER BY delivery_order").all()).toEqual([
+      { id: "content", stream_page_index: 3, stream_element_id: "answer-3" },
+      { id: "malformed", stream_page_index: null, stream_element_id: null }
+    ]);
+    const streamPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT payload FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND stream_page_index = ? AND selection_id IS NULL AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC LIMIT 1").all("turn-1", 3) as Array<{ detail: string }>;
+    expect(streamPlan.some(({ detail }) => detail.includes("outbound_replies_worker_stream"))).toBe(true);
   });
 
   it("assigns the Worker card queue position inside the acceptance transaction", () => {

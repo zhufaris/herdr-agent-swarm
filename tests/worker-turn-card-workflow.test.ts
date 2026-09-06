@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { WorkerTurnCardWorkflow } from "../src/coordinator/worker-turn-card-workflow.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
-import { workerTurnProgressElementId } from "../src/domain/worker-turn-card-view.js";
+import { workerTurnElementId, workerTurnProgressElementId } from "../src/domain/worker-turn-card-view.js";
 import { SqliteBindingStore } from "../src/store/sqlite-store.js";
 
 function setup(turnId = "turn-1") {
@@ -25,6 +25,7 @@ describe("WorkerTurnCardWorkflow", () => {
     const [progress] = store.listPendingOutboundReplies();
     expect(progress).toMatchObject({ workerTurnId: "turn-1", kind: "stream_content", selectionId: "worker-progress", rootMessageId: "worker-card-1" });
     expect(JSON.parse(progress!.payload)).toMatchObject({ workerElement: "progress", elementId: workerTurnProgressElementId("turn-1", 0) });
+    expect(store.database.prepare("SELECT stream_page_index, stream_element_id FROM outbound_replies WHERE id = ?").get(progress!.id)).toEqual({ stream_page_index: 0, stream_element_id: workerTurnProgressElementId("turn-1", 0) });
     expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(progress!.id)).toEqual({ lane_key: "worker-progress:turn-1" });
   });
 
@@ -82,11 +83,13 @@ describe("WorkerTurnCardWorkflow", () => {
     expect(content).toMatchObject({ workerTurnId: "turn-1", rootMessageId: "worker-card-1" });
     expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(content.id)).toEqual({ lane_key: "worker-turn:turn-1" });
     expect(JSON.parse(content.payload)).toMatchObject({ pageIndex: 0, content: "finding", sequence: 1 });
+    expect(store.database.prepare("SELECT stream_page_index, stream_element_id FROM outbound_replies WHERE id = ?").get(content.id)).toEqual({ stream_page_index: 0, stream_element_id: workerTurnElementId("turn-1", 0) });
     store.markOutboundReplyDelivered(content.id, "worker-card-1");
     await workflow.converge("turn-1");
 
     const finish = store.listPendingOutboundReplies().find(({ kind }) => kind === "stream_finish")!;
     expect(finish).toMatchObject({ workerTurnId: "turn-1" });
+    expect(store.database.prepare("SELECT stream_page_index, stream_element_id FROM outbound_replies WHERE id = ?").get(finish.id)).toEqual({ stream_page_index: 0, stream_element_id: null });
     expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(finish.id)).toEqual({ lane_key: "worker-turn:turn-1" });
     store.markOutboundReplyDelivered(finish.id, "worker-card-1");
     expect(store.listWorkerTurnCardPages("turn-1")).toEqual([expect.objectContaining({ state: "finished", sequence: 2 })]);
@@ -128,6 +131,7 @@ describe("WorkerTurnCardWorkflow", () => {
 
     const finish = store.listPendingOutboundReplies().find(({ kind }) => kind === "stream_finish")!;
     const continuation = store.listPendingOutboundReplies().find(({ kind }) => kind === "stream_card_create")!;
+    expect(store.database.prepare("SELECT stream_page_index, stream_element_id FROM outbound_replies WHERE id = ?").get(continuation.id)).toEqual({ stream_page_index: 1, stream_element_id: workerTurnElementId("turn-1", 1) });
     store.markOutboundReplyDelivered(finish.id, "worker-card-1");
     expect(store.listWorkerTurnCardPages("turn-1")).toEqual([
       expect.objectContaining({ pageIndex: 0, state: "frozen" }),

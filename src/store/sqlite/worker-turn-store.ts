@@ -119,17 +119,11 @@ export class SqliteWorkerTurnStore {
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts {
     const page = this.context.database.prepare("SELECT element_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(turnId, pageIndex) as { element_id: string } | undefined;
     if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
-    const rows = this.context.database.prepare("SELECT kind, payload, state, view_version FROM outbound_replies WHERE worker_turn_id = ? AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC").all(turnId) as Array<{ kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
-    let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
-    let finishPending = false;
-    let continuationPending = false;
-    for (const row of rows) {
-      const payload = parseJsonRecord(row.payload);
-      if (row.kind === "stream_card_create" && row.state === "pending" && Number((payload.stream as Record<string, unknown> | undefined)?.pageIndex) === pageIndex + 1) continuationPending = true;
-      if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
-      if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
-      if (row.kind === "stream_content" && payload.workerElement !== "progress" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null };
-    }
+    const contentRow = this.context.database.prepare("SELECT payload, state, view_version FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND stream_page_index = ? AND selection_id IS NULL AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC LIMIT 1").get(turnId, pageIndex) as { payload: string; state: OutboundReplyState; view_version: number | null } | undefined;
+    const contentPayload = contentRow ? parseJsonRecord(contentRow.payload) : null;
+    const latestContent = contentRow && contentPayload ? { content: typeof contentPayload.content === "string" ? contentPayload.content : "", sequence: Number(contentPayload.sequence ?? contentRow.view_version ?? 0), state: contentRow.state, sourceEnd: Number.isInteger(contentPayload.sourceEnd) ? Number(contentPayload.sourceEnd) : null } : null;
+    const finishPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_finish' AND stream_page_index = ? AND state = 'pending' LIMIT 1").get(turnId, pageIndex) !== undefined;
+    const continuationPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_card_create' AND stream_page_index = ? AND state = 'pending' LIMIT 1").get(turnId, pageIndex + 1) !== undefined;
     return { latestContent, finishPending, continuationPending, finalUpdateState: null };
   }
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome {
@@ -149,8 +143,8 @@ export class SqliteWorkerTurnStore {
       if (page.cardId !== input.cardId) return "stale";
       const view = this.loadWorkerTurnCard(input.turnId);
       if (!view) return "stale";
-      const rows = this.context.database.prepare("SELECT payload, state FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND state IN ('pending', 'delivered', 'dead_letter') ORDER BY delivery_order DESC").all(input.turnId) as Array<{ payload: string; state: OutboundReplyState }> ;
-      const latest = rows.map((row) => ({ ...row, payload: parseJsonRecord(row.payload) })).find((row) => row.payload.workerElement === "progress" && Number(row.payload.pageIndex) === input.pageIndex);
+      const row = this.context.database.prepare("SELECT payload, state FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND stream_page_index = ? AND selection_id = 'worker-progress' AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC LIMIT 1").get(input.turnId, input.pageIndex) as { payload: string; state: OutboundReplyState } | undefined;
+      const latest = row ? { ...row, payload: parseJsonRecord(row.payload) } : undefined;
       if (latest?.state === "pending" || latest?.state === "dead_letter" || latest?.payload.content === input.content) return "waiting";
       const sequence = view.progressSequence + 1;
       const changed = this.context.database.prepare("UPDATE worker_turn_cards SET progress_sequence = ?, updated_at = ? WHERE turn_id = ? AND progress_sequence = ?").run(sequence, now(), input.turnId, view.progressSequence);

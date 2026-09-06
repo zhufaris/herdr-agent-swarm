@@ -877,6 +877,10 @@ export class SqliteStoreKernel implements BindingStorePort, TurnControlStore {
     return this.outbox.listPendingOutboundReplies();
   }
 
+  hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean {
+    return this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId);
+  }
+
   getOutboundReply(id: string): OutboundReply | null {
     return this.outbox.getOutboundReply(id);
   }

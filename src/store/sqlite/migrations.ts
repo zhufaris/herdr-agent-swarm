@@ -63,6 +63,7 @@ export class SqliteMigrations {
     this.ensureActiveWorkerScopedNames();
     this.ensureWorkerTurnContextReferences();
     this.ensureInstanceTurnActorProvenance();
+    this.ensureWorkerOutboxStreamMetadata();
     this.ensureWorkerMainOutboxIdentity();
     this.ensurePrimaryCardContextColumns();
     this.ensureCardContextStartupInvalidations();
@@ -520,6 +521,37 @@ export class SqliteMigrations {
         CREATE INDEX IF NOT EXISTS instance_turns_primary_source ON instance_turns(source_parent_prompt_id, source_binding_id, source_binding_generation) WHERE actor_kind = 'thread-primary';
         CREATE INDEX IF NOT EXISTS worker_turn_cards_session_phase ON worker_turn_cards(instance_id, worker_session_generation, phase, created_at, turn_id);
         INSERT INTO schema_migrations(version) VALUES (27);
+      `);
+      this.context.database.exec("COMMIT");
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private ensureWorkerOutboxStreamMetadata(): void {
+    const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 28").get();
+    const existingColumns = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
+    const existingIndexes = new Set((this.context.database.prepare("PRAGMA index_list(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (migrated && existingColumns.has("stream_page_index") && existingColumns.has("stream_element_id") && existingIndexes.has("outbound_replies_worker_pending") && existingIndexes.has("outbound_replies_worker_stream")) return;
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!names.has("stream_page_index")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN stream_page_index INTEGER");
+      if (!names.has("stream_element_id")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN stream_element_id TEXT");
+      this.context.database.exec(`
+        UPDATE outbound_replies SET
+          stream_page_index = CASE
+            WHEN kind = 'stream_card_create' AND json_valid(payload) AND json_type(payload, '$.stream.pageIndex') = 'integer' THEN json_extract(payload, '$.stream.pageIndex')
+            WHEN kind IN ('stream_content','stream_finish') AND json_valid(payload) AND json_type(payload, '$.pageIndex') = 'integer' THEN json_extract(payload, '$.pageIndex')
+            ELSE NULL
+          END,
+          stream_element_id = CASE
+            WHEN kind = 'stream_card_create' AND json_valid(payload) AND json_type(payload, '$.stream.elementId') = 'text' THEN json_extract(payload, '$.stream.elementId')
+            WHEN kind = 'stream_content' AND json_valid(payload) AND json_type(payload, '$.elementId') = 'text' THEN json_extract(payload, '$.elementId')
+            ELSE NULL
+          END
+        WHERE worker_turn_id IS NOT NULL AND (stream_page_index IS NULL OR stream_element_id IS NULL);
+        CREATE INDEX IF NOT EXISTS outbound_replies_worker_pending ON outbound_replies(worker_turn_id, state) WHERE worker_turn_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS outbound_replies_worker_stream ON outbound_replies(worker_turn_id, kind, stream_page_index, selection_id, delivery_order DESC) WHERE worker_turn_id IS NOT NULL AND state IN ('pending','delivered','dead_letter');
+        INSERT OR IGNORE INTO schema_migrations(version) VALUES (28);
       `);
       this.context.database.exec("COMMIT");
     } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }

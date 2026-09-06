@@ -2,7 +2,6 @@ import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservatio
 import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { InstanceStore } from "./instance.js";
-import type { OutboundReply } from "../types.js";
 import type { ModelPreference } from "../model-selection.js";
 
 export interface AnswerPageStore {
@@ -22,7 +21,7 @@ export interface AnswerPageStore {
 }
 
 export type WorkerTurnCardStore = Pick<InstanceStore, "getWorkerTurnCardDeliveryFacts" | "listWorkerTurnCardPages" | "loadWorkerTurnCard" | "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnContinuation" | "reserveWorkerTurnFinish" | "reserveWorkerTurnCardHydration"> & {
-  listPendingOutboundReplies(): OutboundReply[];
+  hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean;
 };
 
 export interface MainCardStore {

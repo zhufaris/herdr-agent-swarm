@@ -28,7 +28,7 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardWorkflowPort {
     const view = this.store.loadWorkerTurnCard(turnId);
     if (!view) return;
     if (!view.cardId || !view.messageId) {
-      if (this.store.listPendingOutboundReplies().some((reply) => reply.workerTurnId === turnId)) this.wakeOutbound();
+      if (this.store.hasPendingOutboundReplyForWorkerTurn(turnId)) this.wakeOutbound();
       return;
     }
     const currentPage = this.store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view.pageIndex);
