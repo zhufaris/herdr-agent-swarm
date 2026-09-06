@@ -9,6 +9,14 @@ describe("application composition boundaries", () => {
     expect(store).not.toContain("BindingStorePort");
   });
 
+  it("keeps pane workflows behind the application-owned presentation seam", () => {
+    for (const file of ["pane-closure-workflow.ts", "pane-control-workflow.ts", "pane-retention-workflow.ts"]) {
+      const source = readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8");
+      expect(source).not.toContain('../cards/');
+      expect(source).toContain('ports/presentation.js');
+    }
+  });
+
   it("keeps durable prompt safety scans out of Herdr reconciliation", () => {
     const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     expect(reconciler).not.toContain("scanDurablePromptWork");

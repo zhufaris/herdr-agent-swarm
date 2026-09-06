@@ -25,6 +25,7 @@ import { SwarmCommandContextResolver } from "../../src/coordinator/swarm-command
 import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway.js";
 import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
 import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
+import { cardKitPanePresentation } from "../../src/cards/cardkit-pane-presentation.js";
 import type { BridgeEventBus } from "../../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier, type InboundWorkNotifier } from "../../src/events/inbound-work-notifier.js";
 import type { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
@@ -76,11 +77,11 @@ export function createTestRouter(
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), logger });
   const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }) });
-  const paneControl = new PaneControlWorkflow({ store, outbound: writer, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
+  const paneControl = new PaneControlWorkflow({ store, outbound: writer, presentation: cardKitPanePresentation, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, logger });
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, logger });
-  const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
+  const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, presentation: cardKitPanePresentation, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
   const cardInteractions = new CardInteractionWorkflow({ store, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), logger });
   const reconciler = new HerdrRuntimeReconciler({
