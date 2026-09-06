@@ -9,10 +9,20 @@ describe("application composition boundaries", () => {
     expect(reconciler).not.toContain('scheduler.wake({ kind: "prompt-ready", bindingId: binding.id })');
   });
 
+  it("keeps latest SQLite schema bootstrap separate from compatibility migrations", () => {
+    const schema = readFileSync(new URL("../src/store/sqlite/schema.ts", import.meta.url), "utf8");
+    const migrations = readFileSync(new URL("../src/store/sqlite/migrations.ts", import.meta.url), "utf8");
+    expect(schema).toContain("export function createLatestSchema");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS schema_migrations");
+    expect(migrations).toContain("createLatestSchema(this.context)");
+    expect(migrations).not.toContain("CREATE TABLE IF NOT EXISTS schema_migrations");
+  });
+
   it("keeps concrete workflow and adapter construction in the composition factory", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
@@ -20,7 +30,15 @@ describe("application composition boundaries", () => {
       expect(factory).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
-    expect(main).toContain("createBridgeRuntime(config, store, logger, { codex, claude, pi })");
+    expect(main).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
+    expect(main).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
+    expect(main).not.toContain("new SqliteBindingStore");
+    expect(storeBundle).toContain("new SqliteStoreKernel");
+    expect(storeBundle).not.toContain("SqliteBindingStore");
+    expect(factory).toContain("stores.promptRun");
+    expect(factory).toContain("stores.outbox");
+    expect(factory).toContain("stores.instance");
+    expect(factory).not.toContain("SqliteBindingStore");
     expect(factory).not.toContain("lease.acquire(");
     expect(factory).not.toContain("activateWriteFence(");
     expect(factory).not.toContain("startHealthServer(");
