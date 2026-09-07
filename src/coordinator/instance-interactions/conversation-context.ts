@@ -26,9 +26,9 @@ export class InstanceConversationContext {
     return !binding || binding.chatId !== chatId || !binding.projectId ? "invalid" : binding.projectId;
   }
 
-  isCurrentBindingCard(value: Record<string, unknown>, conversationKey: string, chatId: string): boolean {
+  isCurrentBindingCard(value: { bindingId?: string; bindingGeneration?: number }, conversationKey: string, chatId: string): boolean {
     const binding = this.store.getBinding(conversationKey.slice("binding:".length));
-    return Boolean(binding && binding.chatId === chatId && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && value.bindingId === binding.id && Number(value.bindingGeneration) === binding.generation);
+    return Boolean(binding && binding.chatId === chatId && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && value.bindingId === binding.id && value.bindingGeneration === binding.generation);
   }
 
   workers(conversationKey: string): AgentInstance[] {

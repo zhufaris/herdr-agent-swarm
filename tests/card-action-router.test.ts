@@ -22,8 +22,8 @@ const action = (value: unknown, option?: string) => ({ messageId: "card", chatId
 
 describe("card action router", () => {
   it.each([
-    ...instanceCardActionNames.map((name) => [name, { action: name }, undefined, "instance"] as const),
-    ...sessionCardActionNames.map((name) => [name, { action: name }, undefined, "session"] as const),
+    ...instanceCardActionNames.map((name) => [name, validPayload(name), undefined, "instance"] as const),
+    ...sessionCardActionNames.map((name) => [name, validPayload(name), undefined, "session"] as const),
     ["select_model", { action: "select_model", bindingId: "b1" }, "gpt-5.4", "model"],
     ["select_model_mode", { action: "select_model_mode", bindingId: "b1", operationId: "op1" }, "high", "model-mode"],
     ["open_project_thread", { action: "open_project_thread", bindingId: "b1" }, undefined, "open-thread"],
@@ -67,3 +67,14 @@ describe("card action router", () => {
     expect(h.instanceInteractions.handleCardAction).not.toHaveBeenCalled();
   });
 });
+
+function validPayload(action: typeof instanceCardActionNames[number] | typeof sessionCardActionNames[number]): Record<string, unknown> {
+  const binding = { bindingId: "b1", bindingGeneration: 1 };
+  if (action === "create_new_task") return { action };
+  if ((sessionCardActionNames as readonly string[]).includes(action)) return { action, ...binding, ...(["open_rename", "open_reattach", "submit_rename", "submit_reattach", "session_stop", "session_model", "session_reset", "session_archive", "session_replace", "session_resume", "session_pane_close"].includes(action) ? { interactionId: "interaction-1" } : {}) };
+  if (action === "card_target_open") return { action, aggregateKind: "worker-turn", aggregateId: "turn-1", generation: 1, messageId: "card-1" };
+  if (action === "instance_create_form" || action === "instance_create_submit") return { action, projectId: "p1", ...(action.endsWith("submit") ? { requestedBy: "user" } : {}) };
+  if (action.startsWith("worker_new_task_")) return { action, instanceId: "i1", generation: 1, workerSessionGeneration: 1, sourceCardMessageId: "card-1", ...(action.endsWith("submit") ? { interactionId: "interaction-1", requestedBy: "user" } : {}) };
+  if (action.startsWith("worker_task_")) return { action, turnId: "turn-1", instanceId: "i1", generation: 1, workerSessionGeneration: 1, sourceCardMessageId: "card-1", ...(action.endsWith("submit") ? { interactionId: "interaction-1", requestedBy: "user", intent: "steer" } : {}) };
+  return { action, instanceId: "i1", generation: 1, ...(action === "instance_turn_open" ? { turnId: "turn-1" } : {}), ...(action === "instance_steer_submit" ? { requestedBy: "user" } : {}), ...(action === "instance_confirm_removal" ? { requestedBy: "user", planId: "plan-1" } : {}) };
+}

@@ -29,7 +29,7 @@ describe("card interactions", () => {
     const h = harness();
     const member = await handle(h.workflow, { messageId: "main", chatId: "chat", operatorOpenId: "member", value: { action: "open_more_actions", bindingId: "b1" } });
     expect(JSON.stringify(member?.card)).toContain("刷新状态"); expect(JSON.stringify(member?.card)).not.toContain("停止当前任务");
-    const forged = await handle(h.workflow, { messageId: "more", chatId: "chat", operatorOpenId: "member", value: { action: "session_archive", bindingId: "b1", bindingGeneration: 1 } });
+    const forged = await handle(h.workflow, { messageId: "more", chatId: "chat", operatorOpenId: "member", value: { action: "session_archive", bindingId: "b1", bindingGeneration: 1, interactionId: "forged" } });
     expect(forged?.toast?.type).toBe("error");
     const creator = await handle(h.workflow, { messageId: "main", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1" } });
     expect(JSON.stringify(creator?.card)).toContain("停止当前任务"); expect(JSON.stringify(creator?.card)).toContain("关闭 Pane"); expect(JSON.stringify(creator?.card)).not.toContain("模型"); h.store.close();

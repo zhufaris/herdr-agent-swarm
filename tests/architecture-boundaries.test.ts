@@ -293,6 +293,11 @@ describe("application composition boundaries", () => {
     expect(cardActions).not.toContain("parsePaneClaimAction");
     expect(parser).toContain("export type CardActionCommand");
     expect(parser).toContain("export function parseCardActionCommand");
+    const actionOwners = ["card-interaction-workflow.ts", "instance-interaction-workflow.ts", "instance-interactions/worker-card-actions.ts", "instance-interactions/worker-lifecycle-actions.ts"]
+      .map((file) => readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8"))
+      .join("\n");
+    expect(actionOwners).not.toContain("action.value");
+    expect(actionOwners).not.toContain("Record<string, unknown>");
   });
 
   it("routes query and session administration through dedicated workflow seams", () => {
