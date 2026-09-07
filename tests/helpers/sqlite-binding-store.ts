@@ -1,30 +1,45 @@
-import { SqliteStoreKernel } from "../../src/store/sqlite-store-kernel.js";
 import type { HealthStore, LeaseStore } from "../../src/domain/ports/health.js";
 import type { InboundMessageDispatchStore } from "../../src/domain/ports/workflow.js";
 import type { WorkerCardDisplayStore } from "../../src/domain/ports/worker-card-display.js";
 import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
+import { SqliteStoreKernel } from "../../src/store/sqlite-store-kernel.js";
 
-/** Legacy broad test driver. Production code must depend on named store capabilities. */
-export class SqliteBindingStore extends SqliteStoreKernel {
-  private readonly compatibility = this.capabilityModules();
+export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & LeaseStore & HealthStore &
+  InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & {
+    inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
+  };
 
-  activateWriteFence(...args: Parameters<SqliteStoreLifecycle["activateWriteFence"]>): void { this.compatibility.lifecycle.activateWriteFence(...args); }
-  deactivateWriteFence(): void { this.compatibility.lifecycle.deactivateWriteFence(); }
-  acquireInstanceLease(...args: Parameters<LeaseStore["acquireInstanceLease"]>): ReturnType<LeaseStore["acquireInstanceLease"]> { return this.compatibility.lease.acquireInstanceLease(...args); }
-  renewInstanceLease(...args: Parameters<LeaseStore["renewInstanceLease"]>): ReturnType<LeaseStore["renewInstanceLease"]> { return this.compatibility.lease.renewInstanceLease(...args); }
-  releaseInstanceLease(...args: Parameters<LeaseStore["releaseInstanceLease"]>): boolean { return this.compatibility.lease.releaseInstanceLease(...args); }
-  getOperationalSummary(): ReturnType<HealthStore["getOperationalSummary"]> { return this.compatibility.health.getOperationalSummary(); }
-  inspectIntegrity(limit: number) { return this.compatibility.integrity.inspectIntegrity(limit); }
-  listBindings(): ReturnType<HealthStore["listBindings"]> { return this.compatibility.health.listBindings(); }
-  recordInboundMessage(...args: Parameters<InboundMessageDispatchStore["recordInboundMessage"]>): boolean { return this.compatibility.inboundDispatch.recordInboundMessage(...args); }
-  claimNextInboundMessage(): ReturnType<InboundMessageDispatchStore["claimNextInboundMessage"]> { return this.compatibility.inboundDispatch.claimNextInboundMessage(); }
-  markInboundMessageAccepted(...args: Parameters<InboundMessageDispatchStore["markInboundMessageAccepted"]>): void { this.compatibility.inboundDispatch.markInboundMessageAccepted(...args); }
-  releaseInboundMessage(...args: Parameters<InboundMessageDispatchStore["releaseInboundMessage"]>): void { this.compatibility.inboundDispatch.releaseInboundMessage(...args); }
-  recoverProcessingInboundMessages(): number { return this.compatibility.inboundDispatch.recoverProcessingInboundMessages(); }
-  isBridgeMessage(...args: Parameters<InboundMessageDispatchStore["isBridgeMessage"]>): boolean { return this.compatibility.inboundDispatch.isBridgeMessage(...args); }
-  recordBridgeMessage(messageId: string): void { this.compatibility.inboundDispatch.recordBridgeMessage(messageId); }
-  pruneDeliveredOutboundReplies(...args: Parameters<SqliteRetentionStore["pruneDeliveredOutboundReplies"]>): number { return this.compatibility.retention.pruneDeliveredOutboundReplies(...args); }
-  pruneAcceptedInboundMessages(...args: Parameters<SqliteRetentionStore["pruneAcceptedInboundMessages"]>): number { return this.compatibility.retention.pruneAcceptedInboundMessages(...args); }
-  pruneTerminalSessionOperations(...args: Parameters<SqliteRetentionStore["pruneTerminalSessionOperations"]>): number { return this.compatibility.retention.pruneTerminalSessionOperations(...args); }
-  reserveWorkerCardDisplay(...args: Parameters<WorkerCardDisplayStore["reserveWorkerCardDisplay"]>): ReturnType<WorkerCardDisplayStore["reserveWorkerCardDisplay"]> { return this.compatibility.workerCardDisplay.reserveWorkerCardDisplay(...args); }
-}
+type StoreConstructor = new (path: string) => SqliteBindingStore;
+
+/**
+ * Legacy broad test harness. It composes production capabilities without making
+ * the production kernel inherit test-only convenience methods. New tests should
+ * prefer createTestStoreBundle() and pass one named capability at a time.
+ */
+export const SqliteBindingStore: StoreConstructor = class {
+  constructor(path: string) {
+    const kernel = new SqliteStoreKernel(path);
+    const modules = kernel.capabilityModules();
+    return Object.assign(kernel, {
+      activateWriteFence: modules.lifecycle.activateWriteFence.bind(modules.lifecycle),
+      deactivateWriteFence: modules.lifecycle.deactivateWriteFence.bind(modules.lifecycle),
+      acquireInstanceLease: modules.lease.acquireInstanceLease.bind(modules.lease),
+      renewInstanceLease: modules.lease.renewInstanceLease.bind(modules.lease),
+      releaseInstanceLease: modules.lease.releaseInstanceLease.bind(modules.lease),
+      getOperationalSummary: modules.health.getOperationalSummary.bind(modules.health),
+      inspectIntegrity: modules.integrity.inspectIntegrity.bind(modules.integrity),
+      listBindings: modules.health.listBindings.bind(modules.health),
+      recordInboundMessage: modules.inboundDispatch.recordInboundMessage.bind(modules.inboundDispatch),
+      claimNextInboundMessage: modules.inboundDispatch.claimNextInboundMessage.bind(modules.inboundDispatch),
+      markInboundMessageAccepted: modules.inboundDispatch.markInboundMessageAccepted.bind(modules.inboundDispatch),
+      releaseInboundMessage: modules.inboundDispatch.releaseInboundMessage.bind(modules.inboundDispatch),
+      recoverProcessingInboundMessages: modules.inboundDispatch.recoverProcessingInboundMessages.bind(modules.inboundDispatch),
+      isBridgeMessage: modules.inboundDispatch.isBridgeMessage.bind(modules.inboundDispatch),
+      recordBridgeMessage: modules.inboundDispatch.recordBridgeMessage.bind(modules.inboundDispatch),
+      pruneDeliveredOutboundReplies: modules.retention.pruneDeliveredOutboundReplies.bind(modules.retention),
+      pruneAcceptedInboundMessages: modules.retention.pruneAcceptedInboundMessages.bind(modules.retention),
+      pruneTerminalSessionOperations: modules.retention.pruneTerminalSessionOperations.bind(modules.retention),
+      reserveWorkerCardDisplay: modules.workerCardDisplay.reserveWorkerCardDisplay.bind(modules.workerCardDisplay)
+    });
+  }
+} as StoreConstructor;

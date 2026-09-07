@@ -91,7 +91,8 @@ describe("application composition boundaries", () => {
     expect(productionFiles).not.toContain('from "../store/sqlite-store.js"');
     expect(existsSync(new URL("../src/store/sqlite-store.ts", import.meta.url))).toBe(false);
     const compatibility = readFileSync(new URL("./helpers/sqlite-binding-store.ts", import.meta.url), "utf8");
-    expect(compatibility).toContain("extends SqliteStoreKernel");
+    expect(compatibility).toContain("new SqliteStoreKernel(path)");
+    expect(compatibility).not.toContain("extends SqliteStoreKernel");
   });
 
   it("bounds renderer-bearing store ports to documented atomic transition seams", () => {
