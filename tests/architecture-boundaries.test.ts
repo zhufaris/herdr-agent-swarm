@@ -142,6 +142,18 @@ describe("application composition boundaries", () => {
     expect(integration).not.toContain("publish(event: any");
   });
 
+  it("separates outbound drain scheduling from single-reply delivery", () => {
+    const drain = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const delivery = readFileSync(new URL("../src/events/outbound-delivery-executor.ts", import.meta.url), "utf8");
+    expect(drain).toContain("new OutboundDeliveryExecutor(store, lark, logger)");
+    expect(drain).not.toContain("outbound-intent-materializer");
+    expect(drain).not.toContain("outbound-target-validation");
+    expect(drain).not.toContain("delivery-error-classifier");
+    expect(delivery).toContain("materializeOutboundReply");
+    expect(delivery).toContain("classifyDeliveryError");
+    expect(delivery).toContain("markOutboundReplyDelivered");
+  });
+
   it("gives child composition factories consumer-specific SQLite capabilities", () => {
     for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
       const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");

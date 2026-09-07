@@ -1,14 +1,12 @@
 import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports/external.js";
 import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports/outbox.js";
-import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
-import { materializeOutboundReply } from "./outbound-intent-materializer.js";
+import type { OutboxDispatcherDiagnostics } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
-import { classifyDeliveryError } from "./delivery-error-classifier.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerProgressTarget } from "./outbound-target-validation.js";
+import { OutboundDeliveryExecutor } from "./outbound-delivery-executor.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
@@ -25,11 +23,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private safetyTimer: ReturnType<typeof setInterval> | null = null;
   private scanRequested = false;
   private forceRequested = false;
-  private readonly answerCheckpointListeners = new Set<(promptId: string, viewVersion: number) => void>();
-  private readonly workerTurnCheckpointListeners = new Set<(turnId: string, viewVersion: number) => void>();
-  private readonly workerMainCheckpointListeners = new Set<(workerId: string, workerSessionGeneration: number, viewVersion: number) => void>();
-  private readonly mainCardCheckpointListeners = new Set<(bindingId: string, viewVersion: number) => void>();
-  private scheduler: PromptWorkScheduler | null = null;
+  private readonly delivery: OutboundDeliveryExecutor;
   private lastScanAt: string | null = null;
   private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
   private lastSuccessfulScanAt: string | null = null;
@@ -40,11 +34,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 
   constructor(
     private readonly store: OutboxStore,
-    private readonly lark: LarkPort,
+    lark: LarkPort,
     private readonly logger: Logger,
     private readonly work: OutboundWorkNotifier,
     private readonly safetyScanIntervalMs = 30_000
-  ) {}
+  ) { this.delivery = new OutboundDeliveryExecutor(store, lark, logger); }
 
   start(): () => void {
     if (this.unsubscribe) return this.unsubscribe;
@@ -58,26 +52,22 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   }
 
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void {
-    this.answerCheckpointListeners.add(listener);
-    return () => this.answerCheckpointListeners.delete(listener);
+    return this.delivery.onAnswerCheckpoint(listener);
   }
 
   onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void {
-    this.workerTurnCheckpointListeners.add(listener);
-    return () => this.workerTurnCheckpointListeners.delete(listener);
+    return this.delivery.onWorkerTurnCheckpoint(listener);
   }
 
   onWorkerMainCheckpoint(listener: (workerId: string, workerSessionGeneration: number, viewVersion: number) => void): () => void {
-    this.workerMainCheckpointListeners.add(listener);
-    return () => this.workerMainCheckpointListeners.delete(listener);
+    return this.delivery.onWorkerMainCheckpoint(listener);
   }
 
   onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void {
-    this.mainCardCheckpointListeners.add(listener);
-    return () => this.mainCardCheckpointListeners.delete(listener);
+    return this.delivery.onMainCardCheckpoint(listener);
   }
 
-  connectPromptScheduler(scheduler: PromptWorkScheduler): void { this.scheduler = scheduler; }
+  connectPromptScheduler(scheduler: PromptWorkScheduler): void { this.delivery.connectPromptScheduler(scheduler); }
 
   snapshot(): OutboxDispatcherDiagnostics {
     return {
@@ -178,7 +168,12 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       const deliverable = batch.filter((reply) => !attemptedReplyIds.has(reply.id));
       if (deliverable.length === 0) continue;
       for (const reply of deliverable) attemptedReplyIds.add(reply.id);
-      const results = await Promise.all(deliverable.map((reply) => this.trackHandler(this.deliverReply(reply, blockedTargets))));
+      const results = await Promise.all(deliverable.map((reply) => this.trackHandler(this.delivery.deliver(reply))));
+      const completedAt = new Date().toISOString();
+      deliverable.forEach((reply, index) => {
+        if (results[index] === "failed") { blockedTargets.add(reply.laneKey); this.lastDeliveryFailureAt = completedAt; }
+        else this.lastDeliveryAt = completedAt;
+      });
       deliveryCount += deliverable.length;
       if (results.includes("failed")) outcome = "failed";
       else if (outcome === "idle" && results.includes("delivered")) outcome = "delivered";
@@ -216,121 +211,4 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     this.retryTimer.unref?.();
   }
 
-  private async deliverReply(reply: OutboundReply, blockedTargets: Set<string>): Promise<"delivered" | "failed"> {
-    try {
-      const materializedPayload = materializeOutboundReply(reply);
-      if ((reply.kind === "stream_content" || reply.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(reply.id)) {
-        this.logger.info({ event: "lark-outbox-answer-stream-dismissed", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, replyKind: reply.kind, outcome: "dismissed" }, "dismissed an Answer stream event superseded by a continuation page");
-        return "delivered";
-      }
-      if (reply.kind === "card_update") {
-        if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
-        if (reply.workerTurnId) assertWorkerMessageTarget(this.store, reply.workerTurnId, reply.rootMessageId);
-        if (reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainMessageTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
-        const card = JSON.parse(materializedPayload) as object;
-        if (reply.targetRole === "session_status" && this.lark.updateCardKit) {
-          await this.lark.updateCardKit(reply.rootMessageId, card, reply.cardSequence ?? 1);
-        } else await this.lark.updateCard(reply.rootMessageId, card);
-        this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
-        if (reply.workerTurnId) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
-        if (reply.workerId && reply.workerSessionGeneration !== null) this.notifyCheckpointListeners("worker-main", this.workerMainCheckpointListeners, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
-        if (reply.bindingId && reply.targetRole === "session_status") this.notifyCheckpointListeners("main-card", this.mainCardCheckpointListeners, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);
-      } else if (reply.kind === "stream_card_create") {
-        const decoded = decodeStreamingCardPayload(materializedPayload);
-        if (reply.workerTurnId) assertWorkerCardCreateTarget(this.store, reply.workerTurnId, reply.rootMessageId, decoded.card, decoded.stream);
-        else assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, decoded.card, decoded.stream);
-        const card = decoded.card;
-        let sent: { messageId: string; cardId?: string };
-        if (this.lark.createStreamingCard && this.lark.replyStreamingCardReference) {
-          const cardId = reply.cardIdCheckpoint ?? (await this.lark.createStreamingCard(card)).cardId;
-          if (!reply.cardIdCheckpoint) this.store.checkpointOutboundReplyCard(reply.id, cardId);
-          sent = { ...(await this.lark.replyStreamingCardReference(reply.rootMessageId, cardId, reply.idempotencyKey)), cardId };
-        } else if (this.lark.replyStreamingCard) sent = await this.lark.replyStreamingCard(reply.rootMessageId, card);
-        else sent = await this.lark.replyCard(reply.rootMessageId, card, reply.idempotencyKey);
-        this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sent.cardId);
-        this.store.recordBridgeMessage(sent.messageId);
-        if (reply.bindingId && reply.promptId) {
-          const prompt = this.store.getPrompt(reply.promptId);
-          if (prompt) this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
-        }
-        if (reply.promptId && decoded.stream) this.notifyCheckpointListeners("answer", this.answerCheckpointListeners, (listener) => listener(reply.promptId!, (reply.viewVersion ?? 0) + 1), reply);
-        if (reply.workerTurnId && decoded.stream) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, (reply.viewVersion ?? 0) + 1), reply);
-      } else if (reply.kind === "stream_content") {
-        if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
-        const payload = JSON.parse(materializedPayload) as { elementId: string; content: string; sequence: number; pageIndex: number; workerElement?: "progress" };
-        if (reply.workerTurnId) {
-          if (payload.workerElement === "progress") assertWorkerProgressTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId, payload.pageIndex);
-          else assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId, payload.elementId);
-        }
-        else assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId, payload.elementId);
-        if (payload.content) await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
-        else this.logger.info({ event: "lark-outbox-empty-answer-content-skipped", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: payload.sequence, outcome: "checkpointed" }, "checkpointed an empty legacy Answer update without sending it to Lark");
-        this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
-        if (reply.promptId) this.notifyCheckpointListeners("answer", this.answerCheckpointListeners, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
-        if (reply.workerTurnId) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
-      } else if (reply.kind === "stream_finish") {
-        if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
-        const payload = JSON.parse(materializedPayload) as { summary: string; sequence: number };
-        if (reply.workerTurnId) assertWorkerCardTarget(this.store, reply.workerTurnId, reply.rootMessageId);
-        else assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
-        await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
-        this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
-        if (reply.promptId) this.notifyCheckpointListeners("answer", this.answerCheckpointListeners, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
-        if (reply.workerTurnId) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
-      } else {
-        if (reply.kind === "card_reply" && reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainCreateTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
-        const sent = reply.kind === "text"
-          ? await this.lark.replyText(reply.rootMessageId, materializedPayload, reply.idempotencyKey)
-          : await this.lark.replyCard(reply.rootMessageId, JSON.parse(materializedPayload) as object, reply.idempotencyKey);
-        const sentCardId = "cardId" in sent && typeof sent.cardId === "string" ? sent.cardId : undefined;
-        this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sentCardId);
-        this.store.recordBridgeMessage(sent.messageId);
-        if (reply.workerId && reply.workerSessionGeneration !== null) this.notifyCheckpointListeners("worker-main", this.workerMainCheckpointListeners, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
-        if (reply.bindingId && reply.targetRole === "session_status") this.notifyCheckpointListeners("main-card", this.mainCardCheckpointListeners, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);
-      }
-      this.lastDeliveryAt = new Date().toISOString();
-      return "delivered";
-    } catch (error) {
-      const classified = classifyDeliveryError(error);
-      const permanent = classified.failureClass === "permanent";
-      const metadata = { failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode };
-      const transition = this.store.markOutboundReplyFailedWithQuarantine(reply.id, classified.message, metadata, classified.retryDelayMs);
-      const failed = transition?.reply ?? null;
-      const context = {
-        event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled",
-        err: safeLogError(error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId,
-        attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt,
-        failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, autoRecoveryCount: failed?.autoRecoveryCount ?? reply.autoRecoveryCount,
-        laneClass: transition?.laneClass, quarantineAction: transition?.action,
-        outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry"
-      };
-      if (failed?.state === "dead_letter") this.logger.error(context, permanent ? "Lark outbox reply rejected by durable target validation" : "Lark outbox reply exhausted retries");
-      else this.logger.warn(context, "Lark outbox reply delivery failed; retry scheduled");
-      if (transition?.action === "rebuild_answer" && transition.promptId) {
-        for (const listener of this.answerCheckpointListeners) listener(transition.promptId, failed?.viewVersion ?? 0);
-      }
-      blockedTargets.add(reply.laneKey);
-      this.lastDeliveryFailureAt = new Date().toISOString();
-      return "failed";
-    }
-  }
-
-  private notifyCheckpointListeners<Listener>(name: string, listeners: ReadonlySet<Listener>, notify: (listener: Listener) => void, reply: OutboundReply): void {
-    for (const listener of listeners) try { notify(listener); } catch (error) {
-      this.logger.error({ event: "lark-outbox-checkpoint-listener-failed", err: safeLogError(error), subscriber: name, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, outcome: "isolated" }, "post-delivery checkpoint listener failed; durable delivery remains authoritative");
-    }
-  }
-}
-
-function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" } } {
-  const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown; deliveryMode?: unknown } };
-  if (!decoded.card || !decoded.stream) return { card: decoded };
-  const stream = {
-    pageIndex: typeof decoded.stream.pageIndex === "number" ? decoded.stream.pageIndex : -1,
-    pageStart: typeof decoded.stream.pageStart === "number" ? decoded.stream.pageStart : -1,
-    elementId: typeof decoded.stream.elementId === "string" ? decoded.stream.elementId : ""
-  };
-  return decoded.stream.deliveryMode === "static"
-    ? { card: decoded.card, stream: { ...stream, deliveryMode: "static" } }
-    : { card: decoded.card, stream };
 }
