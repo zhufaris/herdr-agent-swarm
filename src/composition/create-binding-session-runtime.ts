@@ -8,8 +8,8 @@ import { PaneClosureWorkflow } from "../coordinator/pane-closure-workflow.js";
 import { PaneRetentionWorkflow } from "../coordinator/pane-retention-workflow.js";
 import { RetiredPaneCleanupWorkflow } from "../coordinator/retired-pane-cleanup-workflow.js";
 import { SessionAdministrationWorkflow } from "../coordinator/session-administration-workflow.js";
-import type { BridgeEventBus } from "../events/bridge-event-bus.js";
-import type { InProcessPromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
+import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { HerdrEventRouter } from "../runtime/herdr-event-router.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
@@ -21,7 +21,7 @@ import type { ApplicationPresentation, PanePresentation } from "../domain/ports/
 export type BindingSessionStores = Pick<SqliteStoreBundle, "retiredPaneCleanup" | "bindingProvisioning" | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose" | "paneRetention" | "runtimeReconciliation">;
 
 export function createBindingSessionRuntime(options: {
-  config: BridgeConfig; stores: BindingSessionStores; logger: Logger; bus: BridgeEventBus; scheduler: InProcessPromptWorkScheduler;
+  config: BridgeConfig; stores: BindingSessionStores; logger: Logger; bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   presentation: { application: ApplicationPresentation; pane: PanePresentation };

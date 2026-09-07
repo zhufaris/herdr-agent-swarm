@@ -6,7 +6,7 @@ import { materializeOutboundReply } from "./outbound-intent-materializer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
-import { InProcessOutboundWorkNotifier, type OutboundWorkNotifier } from "./outbound-work-notifier.js";
+import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { classifyDeliveryError } from "./delivery-error-classifier.js";
 import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerProgressTarget } from "./outbound-target-validation.js";
 
@@ -42,7 +42,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     private readonly store: OutboxStore,
     private readonly lark: LarkPort,
     private readonly logger: Logger,
-    private readonly work: OutboundWorkNotifier = new InProcessOutboundWorkNotifier(logger),
+    private readonly work: OutboundWorkNotifier,
     private readonly safetyScanIntervalMs = 30_000
   ) {}
 

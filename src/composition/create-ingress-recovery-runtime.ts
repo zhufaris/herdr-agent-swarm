@@ -6,9 +6,9 @@ import { InboundMessageRoutingWorkflow } from "../coordinator/inbound-message-ro
 import { InboundRouter } from "../coordinator/inbound-router.js";
 import { StartupRecoveryWorkflow } from "../coordinator/startup-recovery-workflow.js";
 import { StartupViewConverger } from "../coordinator/startup-view-converger.js";
-import type { BridgeEventBus } from "../events/bridge-event-bus.js";
-import type { InProcessInboundWorkNotifier } from "../events/inbound-work-notifier.js";
-import type { InProcessPromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
+import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
+import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
 import type { createCommandControlRuntime } from "./create-command-control-runtime.js";
@@ -20,7 +20,7 @@ import type { ApplicationPresentation, PrimaryPresentation } from "../domain/por
 export type IngressRecoveryStores = Pick<SqliteStoreBundle, "promptAcceptance" | "inboundDispatch" | "inboundMessages" | "inboundRouting" | "startupRecovery">;
 
 export function createIngressRecoveryRuntime(options: {
-  config: BridgeConfig; stores: IngressRecoveryStores; logger: Logger; bus: BridgeEventBus; scheduler: InProcessPromptWorkScheduler; inboundWork: InProcessInboundWorkNotifier;
+  config: BridgeConfig; stores: IngressRecoveryStores; logger: Logger; bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>; primary: ReturnType<typeof createPrimaryRuntime>;
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; commandControl: ReturnType<typeof createCommandControlRuntime>;
   presentation: { application: ApplicationPresentation; primary: PrimaryPresentation };

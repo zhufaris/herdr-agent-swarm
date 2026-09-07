@@ -126,6 +126,15 @@ describe("application composition boundaries", () => {
     expect(factory).not.toMatch(/new (?:BridgeEventBus|InProcessPromptWorkScheduler|InProcessInboundWorkNotifier|InProcessOutboundWorkNotifier|WorkWakeupHub)/);
     expect(outbound).toContain("outboundWork: OutboundWorkNotifier");
     expect(outbound).not.toContain("new InProcessOutboundWorkNotifier");
+    const dispatcher = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
+    expect(dispatcher).toContain("private readonly work: OutboundWorkNotifier,");
+    expect(dispatcher).not.toContain("InProcessOutboundWorkNotifier");
+    for (const file of ["create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
+      const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");
+      expect(source).not.toContain("BridgeEventBus");
+      expect(source).not.toContain("InProcessInboundWorkNotifier");
+      expect(source).not.toContain("InProcessPromptWorkScheduler");
+    }
     for (const implementation of ["BridgeEventBus", "InProcessInboundWorkNotifier", "InProcessOutboundWorkNotifier", "InProcessPromptWorkScheduler", "WorkWakeupHub"]) {
       expect(integration).toContain(`new ${implementation}`);
     }

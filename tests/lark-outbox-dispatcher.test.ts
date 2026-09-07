@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Logger } from "pino";
 import type { LarkPort, OutboundIntentPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { LarkOutboxDispatcher as ProductionLarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { OutboundIntentWriter } from "../src/events/outbound-intent-writer.js";
 import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
@@ -18,6 +18,13 @@ import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answ
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createWorkerMainView } from "../src/domain/worker-main-view.js";
+import type { OutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
+
+class LarkOutboxDispatcher extends ProductionLarkOutboxDispatcher {
+  constructor(store: SqliteBindingStore, lark: LarkPort, logger: Logger, work: OutboundWorkNotifier = new InProcessOutboundWorkNotifier(logger), safetyScanIntervalMs = 30_000) {
+    super(store, lark, logger, work, safetyScanIntervalMs);
+  }
+}
 
 afterEach(() => vi.useRealTimers());
 

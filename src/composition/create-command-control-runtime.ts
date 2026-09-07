@@ -8,7 +8,7 @@ import { SessionOperationWorkflow } from "../coordinator/session-operation-workf
 import { SwarmCommandContextResolver } from "../coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../coordinator/swarm-command-gateway.js";
 import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
-import type { InProcessPromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
@@ -20,7 +20,7 @@ import type { ApplicationPresentation, PanePresentation } from "../domain/ports/
 export type CommandControlStores = Pick<SqliteStoreBundle, "modelSelection" | "paneControl" | "sessionOperations" | "cardInteraction" | "inboundRouting" | "commandIntents" | "instance">;
 
 export function createCommandControlRuntime(options: {
-  config: BridgeConfig; stores: CommandControlStores; logger: Logger; turnControl: TurnControlWorkflow; scheduler: InProcessPromptWorkScheduler;
+  config: BridgeConfig; stores: CommandControlStores; logger: Logger; turnControl: TurnControlWorkflow; scheduler: PromptWorkScheduler;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; presentation: { application: ApplicationPresentation; pane: PanePresentation };

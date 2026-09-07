@@ -4,9 +4,9 @@ import { cardKitPanePresentation } from "../cards/cardkit-pane-presentation.js";
 import { cardKitPrimaryPresentation } from "../cards/cardkit-primary-presentation.js";
 import { cardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
 import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
-import type { BridgeEventBus } from "../events/bridge-event-bus.js";
-import type { InProcessInboundWorkNotifier } from "../events/inbound-work-notifier.js";
-import type { InProcessPromptWorkScheduler } from "../events/prompt-work-scheduler.js";
+import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
+import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
+import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
 import type { createOutboundRuntime } from "./create-outbound-runtime.js";
@@ -26,7 +26,7 @@ export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
 
 export function createApplicationRuntime(options: {
   config: BridgeConfig; stores: ApplicationRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;
-  bus: BridgeEventBus; scheduler: InProcessPromptWorkScheduler; inboundWork: InProcessInboundWorkNotifier;
+  bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   presentation?: { application: ApplicationPresentation; primary: PrimaryPresentation; pane: PanePresentation };
