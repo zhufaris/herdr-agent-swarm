@@ -26,7 +26,7 @@ export class PromptSafetyScanner {
   private nextDelayMs: number | null = null;
   private diagnostics: SafetyScanDiagnostics = {
     currentSafetyScanDelayMs: null, nextSafetyScanAt: null, lastScanAt: null, lastScanOutcome: null,
-    lastDiscovered: { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 },
+    lastDiscovered: { turns: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 },
     lastScanFailureAt: null
   };
 
@@ -71,7 +71,7 @@ export class PromptSafetyScanner {
         event: "prompt-backlog-converged", cancelled: result.cancelled, failedDetached: result.failedDetached, outcome: "terminalized"
       }, "converged prompt work whose bindings can no longer dispatch or observe");
     } catch (error) {
-      this.diagnostics.lastDiscovered = { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 };
+      this.diagnostics.lastDiscovered = { turns: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 };
       this.diagnostics.lastScanOutcome = "failed";
       const decision = decidePromptSafetyScanFailure(this.options.intervalMs);
       this.consecutiveIdleScans = decision.consecutiveIdleScans;

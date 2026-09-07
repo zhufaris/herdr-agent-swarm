@@ -18,7 +18,7 @@ export class SqliteWorkerCardDisplayStore implements WorkerCardDisplayStore {
     if (!idempotencyKey || idempotencyKey.length > 256) throw new Error("Idempotency key must contain 1 to 256 characters");
     return this.context.transaction(() => {
       const binding = this.context.database.prepare("SELECT project_id, pane_id, root_message_id, generation FROM bindings WHERE id = ?").get(input.bindingId) as { project_id: string | null; pane_id: string | null; root_message_id: string | null; generation: number } | undefined;
-      const prompt = this.context.database.prepare("SELECT id FROM prompt_jobs WHERE id = ? AND binding_id = ? AND state = 'running' AND dispatch_kind = 'turn'").get(input.parentPromptId, input.bindingId);
+      const prompt = this.context.database.prepare("SELECT id FROM prompt_jobs WHERE id = ? AND binding_id = ? AND state = 'running'").get(input.parentPromptId, input.bindingId);
       if (!binding || binding.project_id !== input.projectId || binding.generation !== input.bindingGeneration || binding.root_message_id !== input.rootMessageId || !binding.pane_id || !prompt) throw new Error("Caller is not the authorized current thread Primary");
       const existing = this.context.database.prepare("SELECT worker_name, receipt_json FROM worker_card_display_requests WHERE binding_id = ? AND binding_generation = ? AND idempotency_key = ?").get(input.bindingId, input.bindingGeneration, idempotencyKey) as { worker_name: string; receipt_json: string } | undefined;
       if (existing) {

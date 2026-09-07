@@ -1,5 +1,5 @@
 import type { AttachmentState, SessionLifecycle } from "../../domain/pane-thread-lifecycle.js";
-import type { BindingState, DeliveryFailureClass, OperationalSummary, OutboundReply, OutboundReplyState, OutboxLaneClass, PromptDispatchKind, PromptState, RetiredPaneCleanupState, SessionOperationState, SqliteIntegrityInspection } from "../../domain/types.js";
+import type { BindingState, DeliveryFailureClass, OperationalSummary, OutboundReply, OutboundReplyState, OutboxLaneClass, PromptState, RetiredPaneCleanupState, SessionOperationState, SqliteIntegrityInspection } from "../../domain/types.js";
 import { inspectSqliteIntegrity } from "../sqlite-integrity.js";
 import type { SqliteContext } from "./context.js";
 
@@ -76,28 +76,16 @@ export class SqliteOperationsStore {
     const cleanupCandidates = this.context.database.prepare("SELECT COUNT(*) AS count FROM bindings WHERE lifecycle = 'archived' AND pane_id IS NOT NULL AND archived_at <= datetime('now', '-30 days')").get() as { count: number };
     const oldestActiveCleanup = this.context.database.prepare("SELECT MIN(created_at) AS value FROM retired_pane_cleanup_operations WHERE state IN ('pending','waiting_busy','executing')").get() as { value: string | null };
     const latestCleanup = this.context.database.prepare("SELECT id, state, updated_at, detail FROM retired_pane_cleanup_operations ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { id: string; state: RetiredPaneCleanupState; updated_at: string; detail: string | null } | undefined;
-    const automaticSteering = this.context.database.prepare(`
-      SELECT
-        SUM(CASE WHEN p.state = 'queued' THEN 1 ELSE 0 END) AS queued,
-        SUM(CASE WHEN p.state = 'delivered' THEN 1 ELSE 0 END) AS delivered,
-        SUM(CASE WHEN p.state = 'failed' THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN p.state = 'failed' AND c.steering_failure_kind = 'rejected' THEN 1 ELSE 0 END) AS rejected,
-        SUM(CASE WHEN p.state = 'failed' AND c.steering_failure_kind = 'uncertain' THEN 1 ELSE 0 END) AS uncertain
-      FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
-      WHERE p.dispatch_kind = 'steering' AND p.steering_origin = 'automatic'
-    `).get() as Record<"queued" | "delivered" | "failed" | "rejected" | "uncertain", number | null>;
     const queueFeedback = this.context.database.prepare(`
       SELECT
         SUM(CASE WHEN c.queue_feedback_json IS NOT NULL AND json_extract(c.queue_feedback_json, '$.estimateLowerSeconds') IS NOT NULL AND json_extract(c.queue_feedback_json, '$.estimateUpperSeconds') IS NOT NULL THEN 1 ELSE 0 END) AS with_estimate,
         SUM(CASE WHEN c.queue_feedback_json IS NULL OR json_extract(c.queue_feedback_json, '$.estimateLowerSeconds') IS NULL OR json_extract(c.queue_feedback_json, '$.estimateUpperSeconds') IS NULL THEN 1 ELSE 0 END) AS without_estimate
       FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
-      WHERE p.state = 'queued' AND p.dispatch_kind = 'turn' AND c.phase = 'queued'
+      WHERE p.state = 'queued' AND c.phase = 'queued'
     `).get() as { with_estimate: number | null; without_estimate: number | null };
     return {
       bindings: groupedCounts<BindingState>("bindings", "state", ["pending", "active", "archived", "orphaned", "failed"]),
       prompts: groupedCounts<PromptState>("prompt_jobs", "state", ["queued", "running", "delivered", "failed", "cancelled"]),
-      promptDispatch: groupedCounts<PromptDispatchKind>("prompt_jobs", "dispatch_kind", ["turn", "steering"]),
-      automaticSteering: { queued: Number(automaticSteering.queued ?? 0), delivered: Number(automaticSteering.delivered ?? 0), failed: Number(automaticSteering.failed ?? 0), rejected: Number(automaticSteering.rejected ?? 0), uncertain: Number(automaticSteering.uncertain ?? 0) },
       queueFeedback: { withEstimate: Number(queueFeedback.with_estimate ?? 0), withoutEstimate: Number(queueFeedback.without_estimate ?? 0) },
       promptLatency: { windowSize: promptLatencyWindowSize, sampleCount: Number(promptLatency.sample_count ?? 0), queue: latencyPhase("queue"), execution: latencyPhase("execution"), delivery: latencyPhase("delivery") },
       inbound: {

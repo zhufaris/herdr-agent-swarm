@@ -29,12 +29,10 @@ export class SqliteMigrations {
     this.ensureStreamingCardColumns();
     this.ensureAnswerPageDeliveryMode();
     this.ensureAnswerPages();
-    this.ensurePromptDispatchColumns();
     this.ensureProjectSelectionColumns();
     this.ensureBindingLifecycleColumns();
     this.ensureBindingPrimaryToolCapabilities();
     this.ensureBindingCreatorColumn();
-    this.ensureFailedSteeringInteractionKind();
     this.ensureSessionOperations();
     this.ensureAgentSessionColumns();
     this.removeReportedTraexSessionColumns();
@@ -48,7 +46,7 @@ export class SqliteMigrations {
     this.ensureModelPreferenceSchema();
     this.ensurePromptExecutionOriginColumn();
     this.ensureRunCardActivityColumn();
-    this.ensureRunCardSteeringColumns();
+    this.convergeRetiredPromptSteering();
     this.ensureOutboundDeliveryOrder();
     this.ensureOutboundDismissedState();
     this.ensureOutboundDeliveryOrder();
@@ -237,7 +235,7 @@ export class SqliteMigrations {
       CREATE INDEX IF NOT EXISTS outbound_replies_binding_target_version ON outbound_replies(binding_id, target_role, view_version);
       CREATE INDEX IF NOT EXISTS outbound_replies_retention ON outbound_replies(state, updated_at, delivery_order);
       CREATE INDEX IF NOT EXISTS inbound_messages_retention ON inbound_messages(state, updated_at, event_id);
-      CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
+      CREATE INDEX IF NOT EXISTS prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, priority, created_at);
     `);
   }
 
@@ -447,14 +445,6 @@ export class SqliteMigrations {
     if (!outboundColumns.some((column) => column.name === "selection_id")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN selection_id TEXT");
   }
 
-  private ensurePromptDispatchColumns(): void {
-    const columns = this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>;
-    const names = new Set(columns.map((column) => column.name));
-    if (!names.has("dispatch_kind")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering'))");
-    if (!names.has("parent_prompt_id")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN parent_prompt_id TEXT");
-    this.context.database.exec("CREATE INDEX IF NOT EXISTS prompt_jobs_dispatch ON prompt_jobs(binding_id, dispatch_kind, parent_prompt_id, state, created_at)");
-  }
-
   private ensurePromptObservationColumn(): void {
     const columns = this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "observation_state")) {
@@ -465,10 +455,7 @@ export class SqliteMigrations {
 
   private ensurePromptProvenanceColumns(): void {
     const names = new Set((this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
-    if (!names.has("steering_origin")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))");
-    if (!names.has("source_prompt_id")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN source_prompt_id TEXT REFERENCES prompt_jobs(id)");
     if (!names.has("was_detached")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1))");
-    this.context.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS prompt_jobs_source_prompt_once ON prompt_jobs(source_prompt_id) WHERE source_prompt_id IS NOT NULL");
   }
 
   private ensurePromptTranscriptProvenanceColumns(): void {
@@ -484,7 +471,7 @@ export class SqliteMigrations {
     const turnNames = new Set((this.context.database.prepare("PRAGMA table_info(instance_turns)").all() as Array<{ name: string }>).map(({ name }) => name));
     if (!turnNames.has("priority")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority'))");
     this.context.database.exec(`
-      CREATE INDEX IF NOT EXISTS prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, dispatch_kind, priority, created_at);
+      CREATE INDEX IF NOT EXISTS prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, priority, created_at);
       CREATE INDEX IF NOT EXISTS instance_turns_priority_queue ON instance_turns(instance_id, instance_generation, state, priority, created_at);
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (26);
     `);
@@ -577,11 +564,56 @@ export class SqliteMigrations {
     this.context.database.exec("UPDATE run_cards SET activity_at = created_at WHERE activity_at IS NULL");
   }
 
-  private ensureRunCardSteeringColumns(): void {
-    const names = new Set((this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
-    if (!names.has("steering_origin")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))");
-    if (!names.has("steering_failure_kind")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))");
-    this.context.database.exec("UPDATE run_cards SET steering_origin = (SELECT steering_origin FROM prompt_jobs WHERE prompt_jobs.id = run_cards.prompt_id) WHERE steering_origin IS NULL");
+  private convergeRetiredPromptSteering(): void {
+    if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 30").get()) return;
+    const promptColumns = new Set((this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!promptColumns.has("dispatch_kind")) {
+      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (30)").run();
+      return;
+    }
+    const runCardColumns = new Set((this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!runCardColumns.has("steering_origin")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))");
+    if (!runCardColumns.has("steering_failure_kind")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))");
+    const retiredPromptColumns = ["source_prompt_id", "steering_origin", "parent_prompt_id", "dispatch_kind"].filter((column) => promptColumns.has(column));
+    const timestamp = now();
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.context.database.prepare(`
+        UPDATE prompt_jobs
+        SET state = 'failed', observation_state = 'completed', was_detached = CASE state WHEN 'running' THEN 1 ELSE was_detached END,
+          error = CASE state
+            WHEN 'queued' THEN 'Retired steering work was rejected during upgrade and was not sent.'
+            ELSE 'Retired steering delivery may already have reached Herdr; inspect the pane before retrying.'
+          END, updated_at = ?
+        WHERE dispatch_kind = 'steering' AND state IN ('queued','running')
+      `).run(timestamp);
+      this.context.database.prepare(`
+        UPDATE run_cards
+        SET phase = 'failed', finished_at = ?, queue_position = 0,
+          notice = CASE (SELECT state FROM prompt_jobs WHERE prompt_jobs.id = run_cards.prompt_id)
+            WHEN 'failed' THEN CASE (SELECT was_detached FROM prompt_jobs WHERE prompt_jobs.id = run_cards.prompt_id)
+              WHEN 1 THEN 'Retired steering delivery may already have reached Herdr; inspect the pane before retrying.'
+              ELSE 'Retired steering work was rejected during upgrade and was not sent.'
+            END
+            ELSE notice
+          END,
+          activity_at = ?, view_version = view_version + 1, updated_at = ?
+        WHERE prompt_id IN (SELECT id FROM prompt_jobs WHERE dispatch_kind = 'steering' AND state = 'failed' AND updated_at = ?)
+      `).run(timestamp, timestamp, timestamp, timestamp);
+      this.context.database.exec(`
+        DROP VIEW IF EXISTS run_cards_view;
+        DROP INDEX IF EXISTS prompt_jobs_dispatch;
+        DROP INDEX IF EXISTS prompt_jobs_source_prompt_once;
+        DROP INDEX IF EXISTS prompt_jobs_queue_kind;
+        DROP INDEX IF EXISTS prompt_jobs_priority_queue;
+        ALTER TABLE run_cards DROP COLUMN steering_failure_kind;
+        ALTER TABLE run_cards DROP COLUMN steering_origin;
+        ${retiredPromptColumns.map((column) => `ALTER TABLE prompt_jobs DROP COLUMN ${column};`).join("\n        ")}
+        CREATE INDEX prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, priority, created_at);
+      `);
+      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (30)").run();
+      this.context.database.exec("COMMIT");
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
   }
 
   private ensureRunCardQueueFeedbackColumn(): void {
@@ -1220,7 +1252,7 @@ export class SqliteMigrations {
     this.context.database.exec(`
       DROP VIEW IF EXISTS run_cards_view;
       CREATE VIEW run_cards_view AS SELECT *, json_object(
-        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'sessionTitle', session_title, 'requestText', request_text,
+        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'sessionTitle', session_title, 'requestText', request_text,
         'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END, 'progressEvents', json(progress_events_json), 'progressSummary', json(progress_summary_json),
         'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'workerActivity', json(worker_activity_json), 'workerDependencyRevision', worker_dependency_revision, 'workerContextFrozenAt', worker_context_frozen_at, 'activityAt', activity_at,
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'answerDeliveredVersion', answer_delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
@@ -1233,7 +1265,7 @@ export class SqliteMigrations {
     if (!view) return true;
     const columns = new Set((this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
     return [
-      "binding_generation", "conversion_parent_prompt_id", "steering_origin", "steering_failure_kind", "queue_feedback_json",
+      "binding_generation", "conversion_parent_prompt_id", "queue_feedback_json",
       "answer_message_id", "answer_card_id", "answer_element_id", "answer_sequence", "answer_page_index", "answer_page_start",
       "request_text", "space_name", "session_title", "answer_segments_json", "answer_draft", "answer_draft_transient", "progress_summary_json", "worker_activity_json", "worker_dependency_revision", "worker_context_frozen_at", "activity_at", "answer_delivered_version"
     ].some((column) => !columns.has(column));

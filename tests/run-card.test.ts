@@ -494,26 +494,6 @@ describe("run card", () => {
     expect(requestCard).toMatchObject({ header: { template: "red" } });
   });
 
-  it("offers replay only for rejected automatic steering with fenced identifiers", () => {
-    const queued = createQueuedRunCard({ promptId: "auto-steer", bindingId: "b1", bindingGeneration: 3, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "now", steeringOrigin: "automatic" });
-    const rejected = reduceRunCard(queued, { type: "steering-failed", occurredAt: "later", notice: "当前任务已结束，未自动注入", failureKind: "rejected" });
-    const uncertain = reduceRunCard(queued, { type: "steering-failed", occurredAt: "later", notice: "投递结果无法确认", failureKind: "uncertain" });
-    const explicit = reduceRunCard({ ...queued, steeringOrigin: "explicit" }, { type: "steering-failed", occurredAt: "later", notice: "未注入", failureKind: "rejected" });
-    const converted = reduceRunCard({ ...queued, steeringOrigin: "converted" }, { type: "steering-failed", occurredAt: "later", notice: "未注入", failureKind: "rejected" });
-
-    expect(findTaggedNodes(renderRequestAnswerCard(rejected), "button").map(callbackValue)).toContainEqual({ action: "enqueue_failed_steering", bindingId: "b1", bindingGeneration: 3, sourcePromptId: "auto-steer" });
-    for (const view of [uncertain, explicit, converted]) expect(findTaggedNodes(renderRequestAnswerCard(view), "button").map(callbackValue).map((value) => value.action)).not.toContain("enqueue_failed_steering");
-  });
-
-  it("distinguishes automatic and explicit steering success copy", () => {
-    const base = createQueuedRunCard({ promptId: "steer", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "now" });
-    const automatic = reduceRunCard({ ...base, steeringOrigin: "automatic" }, { type: "steering-delivered", occurredAt: "later", notice: "已自动加入当前执行" });
-    const explicit = reduceRunCard({ ...base, steeringOrigin: "explicit" }, { type: "steering-delivered", occurredAt: "later", notice: "已加入当前执行" });
-
-    expect(automatic).toMatchObject({ steeringOrigin: "automatic", steeringFailureKind: null, notice: "已自动加入当前执行" });
-    expect(explicit).toMatchObject({ steeringOrigin: "explicit", steeringFailureKind: null, notice: "已加入当前执行" });
-  });
-
   it("renders lifecycle only on the task card and gives the answer a stable stream element", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", sessionTitle: "datasage_semantic_knowledge / task-7kq2", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerSnapshot: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });

@@ -88,7 +88,7 @@ the source of workflow policy.
                         │ depends on domain contracts
                         v
 ┌──────────────────────────────── Domain ──────────────────────────────────┐
-│ Binding and Prompt entities; Turn and Steering execution concepts; state │
+│ Binding and Prompt entities; Turn execution and exact-control concepts;  │
 │ transitions; FIFO, uncertain-dispatch, and approval invariants;          │
 │ lifecycle event types; capability-focused ports.                         │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -113,7 +113,7 @@ The production implementation uses the following modules and seams.
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
-| `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
+| `PromptRunWorkflow` | FIFO turn execution and detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
@@ -144,7 +144,7 @@ responsibility is a business or application concern.
 | --- | --- | --- |
 | `Binding` | `TopicPaneBinding` in explanatory and external-facing contexts | The controlled association between a Lark topic or root message and a Herdr pane. `Binding` remains an acceptable short internal domain term. |
 | `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
-| prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, steering, detached observation, `TurnSupervisor`, and prompt-specific shutdown behavior. |
+| prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, detached observation, `TurnSupervisor`, and prompt-specific shutdown behavior. |
 | `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
 | workflow wake-up bus | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
 | `BridgeEventBus` | `LifecycleEventPublisher` | Distributes lifecycle outcomes to projections. Before this rename, its inbound-message channel must be split into a separate ingress contract. |
@@ -154,7 +154,7 @@ responsibility is a business or application concern.
 
 `RunCardView`, `TopicViewState`, and Answer-page state are projections or read
 models. They are not domain entities alongside `Binding` and `Prompt`, nor are
-they execution concepts like `Turn` and `Steering`. Their renderers and reducers
+they execution concepts like `Turn` or exact-turn control. Their renderers and reducers
 belong to the presentation and projection side of the application, while
 durable storage for them remains an infrastructure concern.
 
@@ -352,7 +352,7 @@ Lark message or card action                 Herdr Socket event
                               |                    -> authoritative snapshot
                               v
                        PromptRunWorkflow
-                       FIFO turn / legacy steering rejection / observer
+                       FIFO turn / detached observer
                               |
                               v
                      Herdr port -> TraeX
@@ -482,7 +482,8 @@ change during the target decomposition without changing these steps.
    delegating to existing workflows. Current cards do not advertise supplement
    or queued-to-steering actions. Callbacks from older cards are rejected without
    terminal input, and queued prompts keep their FIFO position. Legacy durable
-   steering rows are marked rejected during recovery and are never replayed.
+   prompt-steering rows are terminalized during migration and their retired schema is removed.
+   Queued rows are rejected before delivery; running rows become uncertain and are never replayed.
 4. A per-binding worker claims one dispatchable job. The user text is sent to
    Herdr unchanged through `herdr agent prompt`; the bridge adds no hidden prompt
    suffix and has no raw Pane-input fallback. Structured `agent_not_found`,
@@ -641,9 +642,8 @@ delay an update, but must not change the final converged state.
 
 ## Answer streaming and pagination
 
-Every new prompt, including steering prompts, owns an Answer CardKit entity and
-run-card entry. Ordinary prompts and steering prompts differ in execution and
-final-content semantics, not in whether delivery state exists. Its fixed
+Every new prompt owns an Answer CardKit entity and run-card entry. Explicit native
+steering is a separate exact-turn control operation rather than a prompt job. Its fixed
 Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
@@ -971,8 +971,8 @@ The same endpoint reports the Herdr circuit state, bounded last failure, recover
 time, and rejection/failure counters. Open and half-open states degrade status.
 It also reports each startup recovery stage with its bounded duration and error;
 an isolated failed stage degrades status without making the process unavailable.
-The operational summary includes aggregate automatic-steering outcomes and
-queued-card counts with or without wait estimates. It does not expose prompt
+The operational summary includes queued-card counts with or without wait
+estimates. It does not expose prompt
 text or actor identity.
 
 Queued ordinary turns carry durable presentation feedback. The exact queue

@@ -17,7 +17,7 @@ separate acknowledgement or final-answer text messages.
 ## How it works
 
 ```text
-Lark message -> durable turn or steering job -> Herdr pane -> TraeX
+Lark message -> durable FIFO turn -> Herdr pane -> TraeX
      |                                  |
      +-> SQLite workflow state <--- authoritative Herdr observation
               |

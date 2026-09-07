@@ -38,6 +38,7 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 27").get()).toEqual({ version: 27 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 28").get()).toEqual({ version: 28 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 29").get()).toEqual({ version: 29 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 30").get()).toEqual({ version: 30 });
     const outboxColumns = (store.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name);
     expect(outboxColumns).toEqual(expect.arrayContaining(["intent_kind", "intent_json", "renderer_revision"]));
     const typedIntentTriggers = store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'outbound_replies_typed_intent_%' ORDER BY name").all();
@@ -51,6 +52,54 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('outbound_replies_worker_pending','outbound_replies_worker_stream') ORDER BY name").all()).toEqual([
       { name: "outbound_replies_worker_pending" }, { name: "outbound_replies_worker_stream" }
     ]);
+  });
+
+  it("terminalizes retired prompt steering exactly once without changing ordinary FIFO work", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-retired-prompt-steering-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const add = (id: string, state: "queued" | "running" | "delivered" | "failed") => {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: null, requestText: id, queuePosition: 1, occurredAt: "2026-09-07T00:00:00.000Z" });
+      store!.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+      store!.database.prepare("UPDATE prompt_jobs SET state = ?, observation_state = CASE WHEN ? = 'running' THEN 'attached' WHEN ? = 'queued' THEN 'not_started' ELSE 'completed' END, updated_at = '2026-09-07T00:00:00.000Z' WHERE id = ?").run(state, state, state, id);
+      store!.database.prepare("UPDATE run_cards SET phase = CASE WHEN ? = 'queued' THEN 'queued' WHEN ? = 'running' THEN 'running' WHEN ? = 'delivered' THEN 'completed' ELSE 'failed' END, view_version = 1, updated_at = '2026-09-07T00:00:00.000Z' WHERE prompt_id = ?").run(state, state, state, id);
+    };
+    add("ordinary", "queued");
+    add("steer-queued", "queued");
+    add("steer-running", "running");
+    add("steer-done", "delivered");
+    store.database.exec(`
+      DROP VIEW run_cards_view;
+      ALTER TABLE prompt_jobs ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'turn';
+      ALTER TABLE prompt_jobs ADD COLUMN parent_prompt_id TEXT;
+      ALTER TABLE prompt_jobs ADD COLUMN steering_origin TEXT;
+      ALTER TABLE prompt_jobs ADD COLUMN source_prompt_id TEXT;
+      ALTER TABLE run_cards ADD COLUMN steering_origin TEXT;
+      ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT;
+      CREATE INDEX prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
+      CREATE INDEX prompt_jobs_dispatch ON prompt_jobs(binding_id, dispatch_kind, parent_prompt_id, state, created_at);
+      CREATE UNIQUE INDEX prompt_jobs_source_prompt_once ON prompt_jobs(source_prompt_id) WHERE source_prompt_id IS NOT NULL;
+      UPDATE prompt_jobs SET dispatch_kind = 'steering', steering_origin = 'automatic' WHERE id LIKE 'steer-%';
+    `);
+    store.database.prepare("DELETE FROM schema_migrations WHERE version = 30").run();
+    store.close(); store = undefined;
+
+    store = new SqliteBindingStore(path);
+    expect(store.getPrompt("ordinary")).toMatchObject({ state: "queued" });
+    expect(store.getPrompt("steer-queued")).toMatchObject({ state: "failed", observationState: "completed", wasDetached: false });
+    expect(store.loadRunCard("steer-queued")).toMatchObject({ phase: "failed" });
+    expect(store.getPrompt("steer-running")).toMatchObject({ state: "failed", observationState: "completed", wasDetached: true });
+    expect(store.loadRunCard("steer-running")).toMatchObject({ phase: "failed" });
+    expect(store.getPrompt("steer-done")).toMatchObject({ state: "delivered" });
+    expect((store.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name)).not.toEqual(expect.arrayContaining(["dispatch_kind", "parent_prompt_id", "steering_origin", "source_prompt_id"]));
+    expect((store.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => name)).not.toEqual(expect.arrayContaining(["steering_origin", "steering_failure_kind"]));
+    const snapshot = store.database.prepare("SELECT prompt_id, phase, notice, view_version FROM run_cards WHERE prompt_id LIKE 'steer-%' ORDER BY prompt_id").all();
+    store.close(); store = undefined;
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT prompt_id, phase, notice, view_version FROM run_cards WHERE prompt_id LIKE 'steer-%' ORDER BY prompt_id").all()).toEqual(snapshot);
+    expect(store.database.prepare("PRAGMA quick_check").get()).toEqual({ quick_check: "ok" });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   it("deduplicates Command intents and serializes claims by lane", () => {
@@ -761,7 +810,7 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
-    store.database.prepare("INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, state, observation_state, dispatched_at, transcript_turn_id, transcript_turn_started_at, attempt_count, created_at, updated_at) VALUES ('old','b1','m-old','u1','old','turn','running','detached','2026-08-31T10:00:01.000Z','old-turn','2026-08-31T10:00:01.250Z',1,'2026-08-31T10:00:00.000Z','2026-08-31T10:00:01.250Z')").run();
+    store.database.prepare("INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, state, observation_state, dispatched_at, transcript_turn_id, transcript_turn_started_at, attempt_count, created_at, updated_at) VALUES ('old','b1','m-old','u1','old','running','detached','2026-08-31T10:00:01.000Z','old-turn','2026-08-31T10:00:01.250Z',1,'2026-08-31T10:00:00.000Z','2026-08-31T10:00:01.250Z')").run();
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "New", workspaceId: "w1", paneId: "w1:p1", requestText: "new", queuePosition: 0, occurredAt: "2026-08-31T10:00:02.000Z" });
     const result = store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new", externalPromptId: "external", externalMessageId: "external", supersede: { promptId: "old", turnId: "wrong-turn", startedAt: "2026-08-31T10:00:01.250Z" }, externalView, answerCardFor: renderRequestAnswerCard });
     expect(result.outcome).toBe("conflict");
@@ -809,17 +858,17 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
     store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c1", topicId: "t2", rootMessageId: "other-root", title: "Other" });
-    const seed = (id: string, bindingId: string, occurredAt: string, dispatchKind: "turn" | "steering" = "turn") => {
+    const seed = (id: string, bindingId: string, occurredAt: string) => {
       const view = createQueuedRunCard({ promptId: id, bindingId, title: id, workspaceId: bindingId === "b1" ? "w1" : "w2", paneId: `${bindingId}:p1`, requestText: `private ${id}`, queuePosition: 1, occurredAt });
-      store!.acceptPrompt({ prompt: { id, bindingId, larkMessageId: `m-${id}`, actorOpenId: "u1", body: `private ${id}`, dispatchKind, parentPromptId: dispatchKind === "steering" ? "oldest" : null }, view, rootMessageId: bindingId === "b1" ? "root" : "other-root", answerCard: { phase: "queued", id } });
+      store!.acceptPrompt({ prompt: { id, bindingId, larkMessageId: `m-${id}`, actorOpenId: "u1", body: `private ${id}` }, view, rootMessageId: bindingId === "b1" ? "root" : "other-root", answerCard: { phase: "queued", id } });
     };
     seed("oldest", "b1", "2026-09-05T00:00:00.000Z");
     seed("newer", "b1", "2026-09-05T00:00:01.000Z");
     seed("queued", "b1", "2026-09-05T00:00:02.000Z");
-    seed("steering", "b1", "2026-09-05T00:00:03.000Z", "steering");
+    seed("third", "b1", "2026-09-05T00:00:03.000Z");
     seed("other", "b2", "2026-09-05T00:00:00.000Z");
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id IN ('oldest','newer','steering','other')").run();
-    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id IN ('oldest','newer','steering','other')").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id IN ('oldest','newer','third','other')").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id IN ('oldest','newer','third','other')").run();
     const initialCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "oldest")!;
     store.markOutboundReplyDelivered(initialCreate.id, "answer-oldest", "card-oldest");
 
@@ -834,7 +883,7 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("oldest")).toMatchObject({ phase: "failed", notice: reason, finishedAt: "2026-09-05T00:01:00.000Z" });
     expect(store.getPrompt("newer")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started" });
-    expect(store.getPrompt("steering")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("third")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.getPrompt("other")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({
       idempotencyKey: "run-card:update:oldest:answer:2", kind: "card_update", rootMessageId: "answer-oldest", payload: JSON.stringify({ phase: "failed", notice: reason, version: 2 })
@@ -1141,17 +1190,16 @@ describe("SQLite store", () => {
   });
 
   it.each([
-    ["queued", "turn", "not_started", 0],
-    ["running steering", "steering", "attached", 0],
-    ["completed", "turn", "completed", 0],
-    ["already detached", "turn", "detached", 1]
-  ] as const)("does not make a first transcript claim for a %s prompt", (_label, dispatchKind, observationState, wasDetached) => {
+    ["queued", "not_started", 0],
+    ["completed", "completed", 0],
+    ["already detached", "detached", 1]
+  ] as const)("does not make a first transcript claim for a %s prompt", (_label, observationState, wasDetached) => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     const state = observationState === "not_started" ? "queued" : observationState === "completed" ? "delivered" : "running";
-    store.database.prepare("UPDATE prompt_jobs SET dispatch_kind = ?, state = ?, observation_state = ?, was_detached = ?, dispatched_at = ? WHERE id = 'p1'").run(dispatchKind, state, observationState, wasDetached, "2026-08-30T00:00:00.000Z");
+    store.database.prepare("UPDATE prompt_jobs SET state = ?, observation_state = ?, was_detached = ?, dispatched_at = ? WHERE id = 'p1'").run(state, observationState, wasDetached, "2026-08-30T00:00:00.000Z");
 
     expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:00.250Z" })).toMatchObject({ state: "ineligible", prompt: { transcriptTurnId: null } });
   });
@@ -1165,16 +1213,15 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     store.database.exec(`
       PRAGMA foreign_keys = OFF;
-      DROP INDEX prompt_jobs_source_prompt_once;
       CREATE TABLE prompt_jobs_legacy(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), priority TEXT NOT NULL DEFAULT 'normal', parent_prompt_id TEXT,
         steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs_legacy(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
         state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       INSERT INTO prompt_jobs_legacy(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at)
-        SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
+        SELECT id, binding_id, lark_message_id, actor_open_id, body, 'turn', NULL, NULL, NULL, was_detached, state, observation_state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
       DROP TABLE prompt_jobs;
       ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
       PRAGMA foreign_keys = ON;
@@ -1196,7 +1243,7 @@ describe("SQLite store", () => {
 
     expect(store.setBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(true);
     expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(true);
-    expect(store.getActiveOrdinaryPrompt("b1", 3)).toMatchObject({ id: "parent", dispatchKind: "turn", state: "running" });
+    expect(store.getActiveOrdinaryPrompt("b1", 3)).toMatchObject({ id: "parent", state: "running" });
     expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 2, capabilityHash: "hash" })).toBe(false);
     expect(store.setBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 4, capabilityHash: "next-hash" })).toBe(true);
     expect(store.verifyBindingPrimaryToolCapability({ bindingId: "b1", expectedGeneration: 3, capabilityHash: "hash" })).toBe(true);
@@ -2109,8 +2156,6 @@ describe("SQLite store", () => {
     const second = createQueuedRunCard({ promptId: "p2", bindingId: "b1", title: "second", workspaceId: "w1", paneId: "w1:p1", requestText: "second", queuePosition: 2, occurredAt: "2026-01-01T00:00:01.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "first" }, view: first, rootMessageId: "root", answerCard: {} });
     store.acceptPrompt({ prompt: { id: "p2", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "second" }, view: second, rootMessageId: "root", answerCard: {} });
-    store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "p1" }, view: { ...second, promptId: "s1" }, rootMessageId: "root", answerCard: {} });
-
     expect(store.listQueuedTurnRunCards("b1").map((view) => view.promptId)).toEqual(["p1", "p2"]);
   });
 
@@ -2213,20 +2258,20 @@ describe("SQLite store", () => {
     expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
   });
 
-  it("atomically cancels queued turns and steering with terminal delivery intents", () => {
+  it("atomically cancels queued turns with terminal delivery intents", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-    const seed = (id: string, kind: "turn" | "steering" = "turn") => {
+    const seed = (id: string) => {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "2026-08-29T00:00:00.000Z" });
-      store!.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id, dispatchKind: kind, parentPromptId: kind === "steering" ? "running" : null }, view, rootMessageId: "m1", answerCard: { phase: "queued", id } });
+      store!.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "m1", answerCard: { phase: "queued", id } });
       return store!.listPendingOutboundReplies().find((reply) => reply.promptId === id)!;
     };
     const runningCreate = seed("running");
     store.markOutboundReplyDelivered(runningCreate.id, "answer-running", "card-running");
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("running");
     const pendingCreate = seed("pending");
-    const checkpointedCreate = seed("checkpointed", "steering");
+    const checkpointedCreate = seed("checkpointed");
     store.checkpointOutboundReplyCard(checkpointedCreate.id, "card-checkpointed");
     const deliveredCreate = seed("delivered");
     store.markOutboundReplyDelivered(deliveredCreate.id, "answer-delivered");
@@ -2291,7 +2336,7 @@ describe("SQLite store", () => {
     const summary = store.getOperationalSummary();
     const serialized = JSON.stringify(summary);
     expect(summary).toMatchObject({
-      bindings: { pending: 1 }, prompts: { failed: 1 }, promptDispatch: { turn: 1 },
+      bindings: { pending: 1 }, prompts: { failed: 1 },
       outbound: { dead_letter: 1 }, pendingOutbox: 0, deadLetters: 1,
       recentFailedPrompt: { promptId: "p1", bindingId: "b1" },
       recentDeadLetter: { replyId: "o1", bindingId: "b1", promptId: "p1", attemptCount: 5 }
@@ -2405,21 +2450,6 @@ describe("SQLite store", () => {
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "done", activePromptId: null });
   });
 
-  it("keeps the Main Card running when a steering prompt completes", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
-    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "running", agentState: "working", activePromptId: "parent" });
-    const steering = createQueuedRunCard({ promptId: "steering", bindingId: "b1", title: "Supplement", workspaceId: "w1", paneId: "w1:p1", requestText: "add tests", queuePosition: 0, occurredAt: "2026-08-24T00:00:00Z" });
-    store.acceptPrompt({ prompt: { id: "steering", bindingId: "b1", larkMessageId: "m-steering", actorOpenId: "u1", body: "add tests", dispatchKind: "steering", parentPromptId: "parent" }, view: steering, rootMessageId: "root-1", answerCard: {} });
-    store.updatePrompt("steering", "running");
-
-    store.completeSteering({ promptId: "steering", notice: "已加入当前执行", occurredAt: "2026-08-24T00:01:00Z" });
-
-    expect(store.loadRunCard("steering")).toMatchObject({ phase: "completed", notice: "已加入当前执行" });
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "running", agentState: "working", activePromptId: "parent" });
-  });
-
   it("reopens a completed turn without lifecycle replay or prompt duplication", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-terminal-projection-"));
     const path = join(temporaryDirectory, "bridge.db");
@@ -2505,66 +2535,9 @@ describe("SQLite store", () => {
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
     expect(store.loadRunCard("p1")).toMatchObject({ phase: "running", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求", queuePosition: 0, viewVersion: 2 });
-    expect(store.getPrompt("p1")).toMatchObject({ steeringOrigin: null, sourcePromptId: null, wasDetached: true });
+    expect(store.getPrompt("p1")).toMatchObject({ wasDetached: true });
   });
 
-  it("atomically accepts an eligible classified prompt as automatic steering", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "working" });
-    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", bindingGeneration: 3, title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
-    store.updatePrompt("parent", "running");
-    store.markPromptDispatched("parent");
-    store.saveRunCard({ ...store.loadRunCard("parent")!, phase: "running", activityAt: "2026-08-29T10:04:00.000Z" });
-    const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", bindingGeneration: 3, title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
-    const answerCardFor = vi.fn(() => ({ card: "answer" }));
-
-    const accepted = store.acceptClassifiedPrompt({
-      prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" },
-      ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root", maxQueueDepth: 20,
-      expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor
-    });
-
-    expect(accepted).toMatchObject({ inserted: true, decision: "automatic_steering", fallbackReason: null, prompt: { dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic", sourcePromptId: null, wasDetached: false }, view: { title: "Steering", queuePosition: 0, activityAt: "2026-08-29T10:05:00.000Z", createdAt: "2026-08-29T10:05:00.000Z", updatedAt: "2026-08-29T10:05:00.000Z" } });
-    expect(answerCardFor).toHaveBeenCalledWith(expect.objectContaining({ title: "Steering", queuePosition: 0 }));
-    expect(store.listPendingOutboundReplies()).toHaveLength(2);
-    expect(store.acceptClassifiedPrompt({
-      prompt: { id: "duplicate", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" },
-      ordinaryView: { ...ordinaryView, promptId: "duplicate" }, steeringView: { ...ordinaryView, promptId: "duplicate" }, rootMessageId: "root", maxQueueDepth: 20,
-      expectedBindingGeneration: 99, candidateParentPromptId: null, activeAfter: "2099-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({})
-    })).toMatchObject({ inserted: false, decision: "automatic_steering", prompt: { id: "next" } });
-    expect(store.listPendingOutboundReplies()).toHaveLength(2);
-    expect(store.database.prepare("SELECT created_at, updated_at FROM prompt_jobs WHERE id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z" });
-    expect(store.database.prepare("SELECT created_at, updated_at FROM answer_pages WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z" });
-    expect(store.database.prepare("SELECT created_at, updated_at, next_attempt_at FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ created_at: "2026-08-29T10:05:00.000Z", updated_at: "2026-08-29T10:05:00.000Z", next_attempt_at: "2026-08-29T10:05:00.000Z" });
-  });
-
-  it("atomically rejects an ordinary fallback when the queue is full", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "working" });
-    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
-    store.updatePrompt("parent", "running");
-    store.markPromptDispatched("parent");
-    store.saveRunCard({ ...store.loadRunCard("parent")!, phase: "running", activityAt: "2026-08-29T10:04:00.000Z" });
-    const queuedView = createQueuedRunCard({ promptId: "queued", bindingId: "b1", title: "Queued", workspaceId: "w1", paneId: "w1:p1", requestText: "queued", queuePosition: 1, occurredAt: "2026-08-29T10:04:30.000Z" });
-    store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m-queued", actorOpenId: "u1", body: "queued" }, view: queuedView, rootMessageId: "root", answerCard: {} });
-    store.markPromptObservationDetached("parent", "test race");
-    const nextView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 2, occurredAt: "2026-08-29T10:05:00.000Z" });
-
-    const accepted = store.acceptClassifiedPrompt({
-      prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" },
-      ordinaryView: nextView, steeringView: nextView, rootMessageId: "root", maxQueueDepth: 1,
-      expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({})
-    });
-
-    expect(accepted).toEqual({ inserted: false, decision: "queue_full", fallbackReason: "parent_detached" });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE lark_message_id = 'm-next'").get()).toEqual({ count: 0 });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM run_cards WHERE prompt_id = 'next'").get()).toEqual({ count: 0 });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ count: 0 });
-  });
 
   it("projects changed queued run cards in one batch with per-card answer lanes", () => {
     store = new SqliteBindingStore(":memory:");
@@ -2652,70 +2625,6 @@ describe("SQLite store", () => {
   });
 
   it.each([
-    ["no_candidate", null, 3, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
-    ["binding_changed", "parent", 2, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
-    ["parent_inactive", "parent", 3, "working", "attached", false, "2026-08-29T10:04:00.000Z"],
-    ["parent_detached", "parent", 3, "working", "detached", true, "2026-08-29T10:04:00.000Z"],
-    ["parent_state", "parent", 3, "idle", "attached", false, "2026-08-29T10:04:00.000Z"],
-    ["parent_stale", "parent", 3, "working", "attached", false, "2026-08-29T09:59:59.000Z"]
-  ] as const)("falls back atomically for %s", (reason, candidateParentPromptId, expectedGeneration, agentState, observationState, wasDetached, activityAt) => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: agentState });
-    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: activityAt });
-    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
-    if (reason !== "parent_inactive") {
-      store.updatePrompt("parent", "running");
-      if (observationState === "attached") store.markPromptDispatched("parent");
-      else store.database.prepare("UPDATE prompt_jobs SET observation_state = 'detached', was_detached = ? WHERE id = 'parent'").run(wasDetached ? 1 : 0);
-    } else store.updatePrompt("parent", "delivered");
-    const queuedAhead = createQueuedRunCard({ promptId: "ahead", bindingId: "b1", title: "Ahead", workspaceId: "w1", paneId: "w1:p1", requestText: "ahead", queuePosition: 1, occurredAt: "2026-08-29T10:04:30.000Z" });
-    store.acceptPrompt({ prompt: { id: "ahead", bindingId: "b1", larkMessageId: "m-ahead", actorOpenId: "u1", body: "ahead" }, view: queuedAhead, rootMessageId: "root", answerCard: {} });
-    const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
-
-    const first = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: { ...ordinaryView, title: "Steering" }, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: expectedGeneration, candidateParentPromptId, activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) });
-    const duplicate = store.acceptClassifiedPrompt({ prompt: { id: "other", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "changed" }, ordinaryView: { ...ordinaryView, promptId: "other" }, steeringView: { ...ordinaryView, promptId: "other" }, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "1900-01-01T00:00:00.000Z", acceptedAt: "2026-08-29T10:06:00.000Z", answerCardFor: () => ({}) });
-
-    expect(first).toMatchObject({ inserted: true, decision: "ordinary", fallbackReason: reason, prompt: { dispatchKind: "turn", parentPromptId: null, steeringOrigin: null }, view: { queuePosition: 2 } });
-    expect(duplicate).toMatchObject({ inserted: false, decision: "ordinary", prompt: { id: "next" }, view: { promptId: "next", queuePosition: 2 } });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE lark_message_id = 'm-next'").get()).toEqual({ count: 1 });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'next'").get()).toEqual({ count: 1 });
-  });
-
-  it("filters recent eligible ordinary durations and enriches the initial ordinary card atomically", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", generation: 3, lastAgentState: "idle" });
-    for (const [index, duration] of [30, 60, 90, 120].entries()) {
-      const id = `history-${index}`;
-      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: `2026-08-29T09:0${index}:00.000Z` });
-      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
-      store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed', was_detached = 0 WHERE id = ?").run(id);
-      store.database.prepare("UPDATE run_cards SET phase = 'completed', started_at = ?, finished_at = ? WHERE prompt_id = ?").run(`2026-08-29T09:0${index}:00.000Z`, new Date(Date.parse(`2026-08-29T09:0${index}:00.000Z`) + duration * 1_000).toISOString(), id);
-    }
-    store.database.prepare("UPDATE prompt_jobs SET was_detached = 1 WHERE id = 'history-0'").run();
-    const invalid = createQueuedRunCard({ promptId: "invalid", bindingId: "b1", title: "invalid", workspaceId: "w1", paneId: "w1:p1", requestText: "invalid", queuePosition: 1, occurredAt: "2026-08-29T09:04:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "invalid", bindingId: "b1", larkMessageId: "m-invalid", actorOpenId: "u1", body: "invalid" }, view: invalid, rootMessageId: "root", answerCard: {} });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed' WHERE id = 'invalid'").run();
-    store.database.prepare("UPDATE run_cards SET phase = 'completed', started_at = '2026-08-29T09:05:00.000Z', finished_at = '2026-08-29T09:05:00.000Z' WHERE prompt_id = 'invalid'").run();
-    expect(store.listCompletedOrdinaryTurnDurations("b1", 20)).toEqual([120_000, 90_000, 60_000]);
-
-    const active = createQueuedRunCard({ promptId: "active", bindingId: "b1", title: "active", workspaceId: "w1", paneId: "w1:p1", requestText: "active", queuePosition: 1, occurredAt: "2026-08-29T10:00:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "active", bindingId: "b1", larkMessageId: "m-active", actorOpenId: "u1", body: "active" }, view: active, rootMessageId: "root", answerCard: {} });
-    store.updatePrompt("active", "running");
-    store.markPromptDispatched("active");
-    store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T10:00:00.000Z' WHERE prompt_id = 'active'").run();
-    const ahead = createQueuedRunCard({ promptId: "ahead", bindingId: "b1", title: "ahead", workspaceId: "w1", paneId: "w1:p1", requestText: "ahead", queuePosition: 1, occurredAt: "2026-08-29T10:00:10.000Z" });
-    store.acceptPrompt({ prompt: { id: "ahead", bindingId: "b1", larkMessageId: "m-ahead", actorOpenId: "u1", body: "ahead" }, view: ahead, rootMessageId: "root", answerCard: {} });
-    const next = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "next", workspaceId: "w1", paneId: "w1:p1", requestText: "next", queuePosition: 99, occurredAt: "old" });
-    const answerCardFor = vi.fn(renderRequestAnswerCard);
-    const accepted = store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "next" }, ordinaryView: next, steeringView: next, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: 3, candidateParentPromptId: null, activeAfter: "2026-08-29T09:00:00.000Z", acceptedAt: "2026-08-29T10:00:20.000Z", answerCardFor });
-    expect(accepted.view.queueFeedback).toMatchObject({ aheadCount: 1, activeElapsedSeconds: 20, sampleCount: 3, estimateLowerSeconds: 60, estimateUpperSeconds: 240 });
-    expect(answerCardFor).toHaveBeenCalledWith(expect.objectContaining({ queuePosition: 2, queueFeedback: expect.objectContaining({ aheadCount: 1, activeElapsedSeconds: 20 }) }));
-    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "next")!.payload).toContain("⏳ 已排队 · 前方 1 条\\n当前任务已运行 20 秒\\n预计等待约 1–4 分钟");
-  });
-
-  it.each([
     ["detached", false],
     ["recovered but previously detached", true]
   ] as const)("omits active queue timing for a %s running prompt", (_label, recover) => {
@@ -2733,38 +2642,21 @@ describe("SQLite store", () => {
     expect(store.loadQueueFeedbackInputs("b1").activeStartedAt).toBeNull();
   });
 
-  it.each([
-    ["archived binding", { state: "archived", lifecycle: "archived", attachment: "attached" }],
-    ["degraded attachment", { state: "active", lifecycle: "active", attachment: "degraded" }]
-  ] as const)("falls back when the %s is not dispatchable", (_label, bindingState) => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", generation: 3, lastAgentState: "working", ...bindingState });
-    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", title: "Parent", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-29T10:04:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "m-parent", actorOpenId: "u1", body: "work" }, view: parentView, rootMessageId: "root", answerCard: {} });
-    store.updatePrompt("parent", "running");
-    store.markPromptDispatched("parent");
-    const ordinaryView = createQueuedRunCard({ promptId: "next", bindingId: "b1", title: "Next", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "old" });
-
-    expect(store.acceptClassifiedPrompt({ prompt: { id: "next", bindingId: "b1", larkMessageId: "m-next", actorOpenId: "u1", body: "继续" }, ordinaryView, steeringView: ordinaryView, rootMessageId: "root", maxQueueDepth: 20, expectedBindingGeneration: 3, candidateParentPromptId: "parent", activeAfter: "2026-08-29T10:00:00.000Z", acceptedAt: "2026-08-29T10:05:00.000Z", answerCardFor: () => ({}) })).toMatchObject({ decision: "ordinary", fallbackReason: "parent_inactive", prompt: { dispatchKind: "turn" } });
-  });
-
-  it("migrates prompt provenance and run-card activity idempotently", () => {
+  it("migrates prompt detachment and run-card activity idempotently", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-classified-prompt-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m-legacy", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root", answerCard: {} });
-    store.database.exec("DROP INDEX prompt_jobs_source_prompt_once; DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN steering_origin; ALTER TABLE prompt_jobs DROP COLUMN source_prompt_id; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at; ALTER TABLE run_cards DROP COLUMN queue_feedback_json;");
+    store.database.exec("DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at; ALTER TABLE run_cards DROP COLUMN queue_feedback_json;");
     store.close();
     store = undefined;
 
     store = new SqliteBindingStore(path);
-    expect(store.getPrompt("legacy")).toMatchObject({ steeringOrigin: null, sourcePromptId: null, wasDetached: false });
+    expect(store.getPrompt("legacy")).toMatchObject({ wasDetached: false });
     expect(store.loadRunCard("legacy")?.activityAt).toBe("2026-08-29T09:00:00.000Z");
     expect(store.loadRunCard("legacy")?.queueFeedback).toBeNull();
-    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'prompt_jobs_source_prompt_once'").get()).toEqual({ name: "prompt_jobs_source_prompt_once" });
   });
 
   it("derives cumulative progress before trimming legacy run-card history", () => {
@@ -2807,34 +2699,15 @@ describe("SQLite store", () => {
       );
       DROP TABLE card_interactions_current;
       CREATE INDEX card_interactions_expiry ON card_interactions(state, expires_at);
-      ALTER TABLE run_cards DROP COLUMN steering_failure_kind;
-      ALTER TABLE run_cards DROP COLUMN steering_origin;
       CREATE VIEW run_cards_view AS SELECT *, json_object(
-        'promptId', prompt_id, 'steeringOrigin', steering_origin, 'steeringFailureKind', steering_failure_kind
+        'promptId', prompt_id, 'requestText', request_text
       ) AS state_json FROM run_cards;
     `);
     legacy.close();
 
     expect(() => { store = new SqliteBindingStore(path); }).not.toThrow();
-    expect(store!.database.prepare("PRAGMA table_info(run_cards)").all()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "steering_origin" }),
-      expect.objectContaining({ name: "steering_failure_kind" })
-    ]));
+    expect((store!.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => name)).not.toEqual(expect.arrayContaining(["steering_origin", "steering_failure_kind"]));
     expect(store!.database.prepare("SELECT state_json FROM run_cards_view LIMIT 1").all()).toEqual([]);
-  });
-
-  it("enforces one conversion source and preserves activity across presentation-only changes", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    const source = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Source", workspaceId: "w1", paneId: null, requestText: "source", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "m-source", actorOpenId: "u1", body: "source" }, view: source, rootMessageId: "root", answerCard: {} });
-    const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: null, requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
-    expect(store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", steeringOrigin: "converted", sourcePromptId: "source" }, view: converted, rootMessageId: "root", answerCard: {} }).prompt).toMatchObject({ steeringOrigin: "converted", sourcePromptId: "source" });
-    expect(() => store!.acceptPrompt({ prompt: { id: "duplicate-source", bindingId: "b1", larkMessageId: "m-duplicate-source", actorOpenId: "u1", body: "duplicate", steeringOrigin: "converted", sourcePromptId: "source" }, view: { ...converted, promptId: "duplicate-source" }, rootMessageId: "root", answerCard: {} })).toThrow();
-
-    const originalActivity = store.loadRunCard("converted")!.activityAt;
-    store.saveRunCard({ ...store.loadRunCard("converted")!, queuePosition: 1, updatedAt: "2026-08-29T09:02:00.000Z" });
-    expect(store.loadRunCard("converted")?.activityAt).toBe(originalActivity);
   });
 
   it("preserves prompt provenance while rebuilding the legacy prompt state constraint", () => {
@@ -2845,22 +2718,21 @@ describe("SQLite store", () => {
     const source = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Source", workspaceId: "w1", paneId: null, requestText: "source", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "m-source", actorOpenId: "u1", body: "source" }, view: source, rootMessageId: "root", answerCard: {} });
     const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: null, requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true }, view: converted, rootMessageId: "root", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", wasDetached: true }, view: converted, rootMessageId: "root", answerCard: {} });
     store.database.prepare("UPDATE prompt_jobs SET dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ? WHERE id = 'converted'")
       .run("2026-08-29T09:01:01.000Z", "01a052d3-9c14-70e1-a375-397e2ecb55e9", "2026-08-29T09:01:01.250Z");
     store.database.exec(`
       PRAGMA foreign_keys = OFF;
-      DROP INDEX prompt_jobs_source_prompt_once;
       CREATE TABLE prompt_jobs_legacy(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
+        actor_open_id TEXT NOT NULL, body TEXT NOT NULL, dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), priority TEXT NOT NULL DEFAULT 'normal', parent_prompt_id TEXT,
         steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs_legacy(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
         dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT,
         state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
         attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       INSERT INTO prompt_jobs_legacy(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at)
-        SELECT id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
+        SELECT id, binding_id, lark_message_id, actor_open_id, body, 'turn', NULL, NULL, NULL, was_detached, dispatched_at, transcript_turn_id, transcript_turn_started_at, state, observation_state, attempt_count, error, created_at, updated_at FROM prompt_jobs;
       DROP TABLE prompt_jobs;
       ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
       PRAGMA foreign_keys = ON;
@@ -2870,7 +2742,7 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.getPrompt("converted")).toMatchObject({
-      steeringOrigin: "converted", sourcePromptId: "source", wasDetached: true,
+      wasDetached: true,
       dispatchedAt: "2026-08-29T09:01:01.000Z", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptTurnStartedAt: "2026-08-29T09:01:01.250Z"
     });
   });
@@ -3043,24 +2915,24 @@ describe("SQLite store", () => {
     expect(inboundPlan.map((row) => row.detail).join(" " )).toContain("inbound_messages_retention");
   });
 
-  it("creates the ordinary prompt queue index with the exact column order", () => {
+  it("creates the prompt priority queue index with the exact column order", () => {
     store = new SqliteBindingStore(":memory:");
 
-    const columns = store.database.prepare("PRAGMA index_info(prompt_jobs_queue_kind)").all() as Array<{ name: string }>;
+    const columns = store.database.prepare("PRAGMA index_info(prompt_jobs_priority_queue)").all() as Array<{ name: string }>;
 
-    expect(columns.map((column) => column.name)).toEqual(["binding_id", "state", "dispatch_kind", "created_at"]);
+    expect(columns.map((column) => column.name)).toEqual(["binding_id", "state", "priority", "created_at"]);
   });
 
-  it("repairs a missing ordinary prompt queue index without changing schema on later reopens", () => {
+  it("repairs a missing prompt priority queue index without changing schema on later reopens", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-prompt-queue-index-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
-    store.database.exec("DROP INDEX IF EXISTS prompt_jobs_queue_kind");
+    store.database.exec("DROP INDEX IF EXISTS prompt_jobs_priority_queue");
     store.close();
 
     store = new SqliteBindingStore(path);
-    const repaired = store.database.prepare("PRAGMA index_info(prompt_jobs_queue_kind)").all() as Array<{ name: string }>;
-    expect(repaired.map((column) => column.name)).toEqual(["binding_id", "state", "dispatch_kind", "created_at"]);
+    const repaired = store.database.prepare("PRAGMA index_info(prompt_jobs_priority_queue)").all() as Array<{ name: string }>;
+    expect(repaired.map((column) => column.name)).toEqual(["binding_id", "state", "priority", "created_at"]);
     store.close();
 
     store = new SqliteBindingStore(path);
@@ -3071,7 +2943,7 @@ describe("SQLite store", () => {
     expect(after.schema_version).toBe(before.schema_version);
   });
 
-  it("uses the queue-kind index for ordinary prompt hot paths under mixed queue load", () => {
+  it("uses the priority queue index for prompt hot paths under mixed queue load", () => {
     store = new SqliteBindingStore(":memory:");
     for (let bindingIndex = 0; bindingIndex < 4; bindingIndex += 1) {
       const bindingId = `queue-plan-${bindingIndex}`;
@@ -3079,8 +2951,8 @@ describe("SQLite store", () => {
       store.updateBinding(bindingId, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w${bindingIndex}:p1`, lastAgentState: "idle" });
     }
     const insertPrompt = store.database.prepare(`
-      INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, dispatch_kind, parent_prompt_id, steering_origin, source_prompt_id, was_detached, state, observation_state, attempt_count, error, created_at, updated_at)
-      VALUES (?, ?, ?, 'u1', 'fixture', ?, NULL, NULL, NULL, 0, ?, 'not_started', 0, NULL, ?, ?)
+      INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, priority, was_detached, state, observation_state, attempt_count, error, created_at, updated_at)
+      VALUES (?, ?, ?, 'u1', 'fixture', ?, 0, ?, 'not_started', 0, NULL, ?, ?)
     `);
     const insertRunCard = store.database.prepare(`
       INSERT INTO run_cards(prompt_id, binding_id, answer_message_id, answer_card_id, phase, title, workspace_id, pane_id, answer, progress_events_json, queue_position, activity_at, view_version, delivered_version, created_at, updated_at)
@@ -3091,10 +2963,10 @@ describe("SQLite store", () => {
       const bindingIndex = index % 4;
       const bindingId = `queue-plan-${bindingIndex}`;
       const promptId = `queue-plan-prompt-${index}`;
-      const dispatchKind = Math.floor(index / 4) % 2 === 0 ? "turn" : "steering";
+      const priority = Math.floor(index / 4) % 2 === 0 ? "normal" : "priority";
       const state = Math.floor(index / 8) % 20 < 2 ? "queued" : "delivered";
       const timestamp = `2026-08-29T00:${String(Math.floor(index / 60) % 60).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.${String(index).padStart(4, "0")}Z`;
-      insertPrompt.run(promptId, bindingId, `queue-plan-message-${index}`, dispatchKind, state, timestamp, timestamp);
+      insertPrompt.run(promptId, bindingId, `queue-plan-message-${index}`, priority, state, timestamp, timestamp);
       insertRunCard.run(promptId, bindingId, `answer-${index}`, `card-${index}`, state === "queued" ? "queued" : "completed", `w${bindingIndex}`, `w${bindingIndex}:p1`, timestamp, timestamp, timestamp);
     }
     store.database.exec("COMMIT; ANALYZE");
@@ -3102,18 +2974,18 @@ describe("SQLite store", () => {
     const explain = (sql: string, ...parameters: string[]) => (store!.database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters) as Array<{ detail: string }>)
       .map((row) => row.detail.toLowerCase().replace(/\s+/g, " "));
     const expectQueueKindSearch = (details: string[]) => {
-      expect(details.some((detail) => detail.includes("prompt_jobs_queue_kind")
+      expect(details.some((detail) => detail.includes("prompt_jobs_priority_queue")
         && detail.includes("binding_id=?")
-        && detail.includes("state=?") && detail.includes("dispatch_kind=?")), details.join(" | ")).toBe(true);
+        && detail.includes("state=?") && detail.includes("priority=?")), details.join(" | " )).toBe(true);
     };
 
     expectQueueKindSearch(explain(
-      "SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND dispatch_kind = 'turn' ORDER BY created_at, rowid",
+      "SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' AND priority = 'normal' ORDER BY created_at, rowid",
       "queue-plan-0"
     ));
     expectQueueKindSearch(explain(`
       SELECT p.* FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id
-      WHERE p.binding_id = ? AND p.state = 'queued' AND p.dispatch_kind = 'turn'
+      WHERE p.binding_id = ? AND p.state = 'queued' AND p.priority = 'normal'
         AND c.answer_message_id IS NOT NULL AND (c.answer_card_id IS NOT NULL OR c.lark_message_id IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
         AND NOT EXISTS (SELECT 1 FROM pane_control_operations control WHERE control.binding_id = p.binding_id AND control.kind = 'model' AND control.state IN ('accepted','running','applied'))
@@ -3121,7 +2993,7 @@ describe("SQLite store", () => {
     `, "queue-plan-0"));
     expectQueueKindSearch(explain(`
       SELECT DISTINCT p.binding_id FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id
-      WHERE p.state = 'queued' AND p.dispatch_kind = 'turn'
+      WHERE p.state = 'queued' AND p.priority = 'normal'
         AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached' AND b.pane_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM prompt_jobs active WHERE active.binding_id = p.binding_id AND active.state = 'running')
       ORDER BY p.binding_id
@@ -4128,23 +4000,6 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("prompt-archived")).toMatchObject({ phase: "running", notice: null, finishedAt: null, viewVersion: 1 });
   });
 
-  it("discovers steering and detached observer work without claiming or replaying it", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
-    for (const [id, kind, parent] of [["parent", "turn", null], ["steer", "steering", "parent"]] as const) {
-      store.enqueuePrompt({ id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: `body-${id}`, dispatchKind: kind, parentPromptId: parent });
-    }
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'parent'").run();
-
-    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, failedDetached: 0, hints: [
-      { kind: "detached-observer-ready", bindingId: "b1", promptId: "parent" },
-      { kind: "steering-ready", bindingId: "b1", parentPromptId: "parent" }
-    ] });
-    expect(store.getPrompt("parent")).toMatchObject({ state: "running", observationState: "detached", attemptCount: 0 });
-    expect(store.getPrompt("steer")).toMatchObject({ state: "queued", attemptCount: 0 });
-  });
-
   it("does not report an ordinary queued turn while its binding already has a running prompt", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -4189,125 +4044,6 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE prompt_jobs SET updated_at = '2026-09-05T00:00:01.000Z' WHERE id = 'p1'").run();
 
     expect(store.listStaleUndispatchedPromptClaims("2026-09-05T00:00:02.000Z", 10)).toEqual([]);
-  });
-
-  it("claims steering in order and fails leftovers instead of converting them to turns", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-    const makeView = (promptId: string) => createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 0, occurredAt: new Date().toISOString() });
-    for (const [id, messageId, steeringOrigin] of [["s1", "m2", "explicit"], ["s2", "m3", "automatic"], ["s3", "m4", "explicit"], ["s4", "m5", "converted"]] as const) {
-      store.acceptPrompt({
-        prompt: { id, bindingId: "b1", larkMessageId: messageId, actorOpenId: "u1", body: id, dispatchKind: "steering", parentPromptId: "parent", steeringOrigin },
-        view: makeView(id), rootMessageId: "m1", taskCard: {}, answerCard: {}
-      });
-    }
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`, `cardkit-${reply.promptId}`);
-
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-    expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
-    expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
-    store.markPromptDispatched("s1");
-    store.updatePrompt("s1", "delivered");
-    expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s2");
-
-    // A queued steering job whose parent ended is failed, never promoted to a turn.
-    store.updatePrompt("s2", "queued");
-    expect(store.failQueuedSteering("b1", "parent", "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。")).toEqual(["s2", "s3", "s4"]);
-    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed", notice: "当前任务已结束，未自动注入", steeringFailureKind: "rejected" });
-    expect(store.loadRunCard("s3")).toMatchObject({ phase: "failed", notice: "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。", steeringFailureKind: "rejected" });
-    expect(store.loadRunCard("s4")).toMatchObject({ phase: "failed", notice: "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。", steeringFailureKind: "rejected" });
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-    expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
-  });
-
-  it("fails queued steering on restart recovery instead of replaying it as a turn", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-    const view = createQueuedRunCard({ promptId: "s2", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "s2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `card-${reply.promptId}`, `cardkit-${reply.promptId}`);
-
-    expect(store.recoverRunningPrompts()).toBe(0);
-    expect(store.getPrompt("s2")).toMatchObject({ dispatchKind: "steering", state: "failed" });
-    expect(store.loadRunCard("s2")).toMatchObject({ phase: "failed", notice: "当前任务已结束，未自动注入", steeringOrigin: "automatic", steeringFailureKind: "rejected" });
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-  });
-
-  it("marks interrupted steering as uncertain instead of replaying it", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "s1", bindingId: "b1", title: "Steer", workspaceId: "w1", paneId: "w1:p1", requestText: "steer", queuePosition: 0, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "s1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "steer", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, `${reply.cardRole}-card-s1`, "cardkit-s1");
-    expect(store.claimNextReadySteering("b1", "parent")?.id).toBe("s1");
-    store.markPromptDispatched("s1");
-
-    expect(store.recoverRunningPrompts()).toBe(1);
-    expect(store.loadRunCard("s1")).toMatchObject({ phase: "failed", notice: "自动注入结果无法确认，请检查 Herdr pane；Bridge 不会自动重试。", steeringOrigin: "automatic", steeringFailureKind: "uncertain" });
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-  });
-
-  it("reports aggregate-only automatic steering and queue feedback counts", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    const makeView = (id: string, queueFeedback: ReturnType<typeof createQueuedRunCard>["queueFeedback"] = null) => ({ ...createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: `secret-${id}`, queuePosition: 1, occurredAt: "now" }), queueFeedback });
-    for (const [id, state, failureKind] of [["queued", "queued", null], ["delivered", "delivered", null], ["rejected", "failed", "rejected"], ["uncertain", "failed", "uncertain"]] as const) {
-      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: `actor-${id}`, body: `secret-${id}`, dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view: makeView(id), rootMessageId: "m1", answerCard: {} });
-      store.database.prepare("UPDATE prompt_jobs SET state = ? WHERE id = ?").run(state, id);
-      if (failureKind) store.database.prepare("UPDATE run_cards SET phase = 'failed', steering_failure_kind = ? WHERE prompt_id = ?").run(failureKind, id);
-    }
-    const estimate = { aheadCount: 0, activeElapsedSeconds: null, estimateLowerSeconds: 30, estimateUpperSeconds: 90, sampleCount: 3, elapsedBucket: null };
-    for (const [id, feedback] of [["estimated", estimate], ["unestimated", null]] as const) {
-      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: `actor-${id}`, body: `secret-${id}` }, view: makeView(id, feedback), rootMessageId: "m1", answerCard: {} });
-    }
-
-    const summary = store.getOperationalSummary();
-    expect(summary).toMatchObject({ automaticSteering: { queued: 1, delivered: 1, failed: 2, rejected: 1, uncertain: 1 }, queueFeedback: { withEstimate: 1, withoutEstimate: 1 } });
-    expect(JSON.stringify({ automaticSteering: summary.automaticSteering, queueFeedback: summary.queueFeedback })).not.toContain("secret-");
-    expect(JSON.stringify({ automaticSteering: summary.automaticSteering, queueFeedback: summary.queueFeedback })).not.toContain("actor-");
-  });
-
-  it("atomically converts only rejected automatic steering into one ordinary prompt", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", creatorOpenId: "creator", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
-    const sourceView = createQueuedRunCard({ promptId: "source", bindingId: "b1", bindingGeneration: 1, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "2026-08-29T00:00:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "source-message", actorOpenId: "member", body: "继续", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view: sourceView, rootMessageId: "root", answerCard: {} });
-    store.failPrompt({ promptId: "source", error: "not working", occurredAt: "2026-08-29T00:01:00.000Z", steeringFailureKind: "rejected" });
-    const interaction = store.createCardInteraction({ id: "interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "member", actionKind: "enqueue_failed_steering", parentPromptId: null, targetPromptId: "source", expiresAt: "2026-08-29T01:00:00.000Z" });
-    const replacementView = createQueuedRunCard({ promptId: "replacement", bindingId: "b1", bindingGeneration: 1, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 99, occurredAt: "2026-08-29T00:02:00.000Z" });
-    const input = { interactionId: interaction.id, actorOpenId: "member", bindingId: "b1", bindingGeneration: 1, sourcePromptId: "source", newPromptId: "replacement", newLarkMessageId: "card:interaction", now: "2026-08-29T00:02:00.000Z", view: replacementView, rootMessageId: "root", answerCardFor: () => ({ kind: "replacement" }) };
-
-    expect(store.convertFailedSteeringToTurn({ ...input, actorOpenId: "other" })).toEqual({ outcome: "unauthorized", prompt: null });
-    for (const [column, value] of [["state", "orphaned"], ["lifecycle", "draining"], ["attachment", "degraded"]] as const) {
-      store.database.prepare(`UPDATE bindings SET ${column} = ? WHERE id = 'b1'`).run(value);
-      expect(store.convertFailedSteeringToTurn(input)).toEqual({ outcome: "stale", prompt: null });
-      expect(store.getCardInteraction("interaction")).toMatchObject({ state: "active" });
-      store.database.prepare("UPDATE bindings SET state = 'active', lifecycle = 'active', attachment = 'attached' WHERE id = 'b1'").run();
-    }
-    expect(store.convertFailedSteeringToTurn(input)).toMatchObject({ outcome: "converted", prompt: { id: "replacement", dispatchKind: "turn", steeringOrigin: null, sourcePromptId: "source", body: "继续" } });
-    expect(store.loadRunCard("replacement")).toMatchObject({ queuePosition: 1, steeringOrigin: null, steeringFailureKind: null });
-    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "replacement")).toHaveLength(1);
-    store.createCardInteraction({ id: "forged-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "other", actionKind: "enqueue_failed_steering", parentPromptId: null, targetPromptId: "source", expiresAt: "2026-08-29T01:00:00.000Z" });
-    expect(store.convertFailedSteeringToTurn({ ...input, interactionId: "forged-interaction", actorOpenId: "other", newPromptId: "forged-replacement" })).toEqual({ outcome: "unauthorized", prompt: null });
-    expect(store.convertFailedSteeringToTurn({ ...input, newPromptId: "replacement-2" })).toMatchObject({ outcome: "duplicate", prompt: { id: "replacement" } });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE source_prompt_id = 'source'").get()).toEqual({ count: 1 });
-  });
-
-  it("preserves automatic steering provenance and failure kind across reopen", () => {
-    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-steering-failure-"));
-    const path = join(temporaryDirectory, "bridge.db");
-    store = new SqliteBindingStore(path);
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "source-message", actorOpenId: "member", body: "继续", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "root", answerCard: {} });
-    store.failPrompt({ promptId: "source", error: "not working", occurredAt: "later", steeringFailureKind: "rejected" });
-    store.close();
-
-    store = new SqliteBindingStore(path);
-    expect(store.loadRunCard("source")).toMatchObject({ steeringOrigin: "automatic", steeringFailureKind: "rejected", phase: "failed" });
   });
 
   it("deduplicates legacy model controls without blocking ordinary prompt dispatch", () => {

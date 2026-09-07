@@ -39,7 +39,6 @@ export interface DeliveryRecoveryStore {
 }
 
 export interface CardInteractionStore {
-  convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null };
   countPendingPrompts(bindingId: string): number;
   createCardInteraction(input: { id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind; parentPromptId: string | null; targetPromptId: string | null; expiresAt: string }): CardInteraction;
   getBinding(id: string): Binding | null;
@@ -59,7 +58,7 @@ export interface ExternalTurnObservationStore {
   adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption;
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding;
   countPendingPrompts(bindingId: string): number;
-  failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void;
+  failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
   findBindingByPane(paneId: string): Binding | null;
   getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null;
   getBinding(id: string): Binding | null;

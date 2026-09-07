@@ -4,7 +4,7 @@ import type { PromptJob } from "../src/domain/types.js";
 
 const prompt: PromptJob = {
   id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work", executionOrigin: "bridge",
-  dispatchKind: "turn", parentPromptId: null, steeringOrigin: null, sourcePromptId: null, wasDetached: true,
+  wasDetached: true,
   dispatchedAt: "2026-09-03T00:00:00.000Z", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-09-03T00:00:01.000Z",
   observationState: "detached", state: "running", attemptCount: 1, error: null, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z"
 };

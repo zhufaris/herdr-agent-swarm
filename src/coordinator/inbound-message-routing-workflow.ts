@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
-import { classifyContinuation } from "../domain/continuation-classifier.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -76,13 +75,16 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
 
   private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<boolean> {
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
-    const classification = classifyContinuation({ text: body, hasUnsupportedContent: message.hasUnsupportedContent ?? false });
-    if (!classification.eligible && this.options.store.countPendingPrompts(binding.id) >= this.options.config.maxQueueDepth) throw new Error("This topic's prompt queue is full");
     const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
     const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
-    const result = this.options.store.acceptClassifiedPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, ordinaryView: createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 }), steeringView: createQueuedRunCard({ ...common, conversionParentPromptId: null, queuePosition: 0 }), rootMessageId: binding.rootMessageId, maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation, candidateParentPromptId: null, activeAfter: new Date(Date.parse(acceptedAt) - 5 * 60_000).toISOString(), acceptedAt, answerCardFor: this.options.presentation.answerCard });
-    this.options.logger.info({ event: "auto-steering-classified", bindingId: binding.id, messageId: message.messageId, outcome: result.decision, reason: classification.eligible ? result.fallbackReason : classification.reason }, "classified continuation message");
-    if (result.decision === "queue_full") { await this.reject(message, "This topic's prompt queue is full"); return false; }
+    let result: ReturnType<PromptAcceptanceStore["acceptPrompt"]>;
+    try {
+      const view = createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 });
+      result = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, view, rootMessageId: binding.rootMessageId, answerCard: this.options.presentation.answerCard(view), maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation });
+    } catch (error) {
+      if (error instanceof Error && error.message === "This topic's prompt queue is full") { await this.reject(message, error.message); return false; }
+      throw error;
+    }
     if (!result.inserted) return true;
     this.options.outboundWork.wake(); const depth = this.options.store.countPendingPrompts(binding.id); this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
     await this.options.lifecycleEvents.publish(createBridgeEvent(binding.id, "PromptQueued", "lark", { promptId: result.prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId }));

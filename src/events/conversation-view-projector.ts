@@ -176,7 +176,7 @@ function isInteractiveMainEvent(event: BridgeEvent): boolean {
 }
 
 function promptIdOf(event: BridgeEvent): string | null {
-  if (event.type === "PromptQueued" || event.type === "PromptCancelled" || event.type === "SteeringQueued" || event.type === "RunQueuePositionChanged" || event.type === "TurnStarted" || event.type === "SteeringStarted" || event.type === "SteeringDelivered" || event.type === "SteeringFailed" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted" || event.type === "TurnFailed") return event.payload.promptId;
+  if (event.type === "PromptQueued" || event.type === "PromptCancelled" || event.type === "RunQueuePositionChanged" || event.type === "TurnStarted" || event.type === "TurnOutputObserved" || event.type === "TurnCompleted" || event.type === "TurnFailed") return event.payload.promptId;
   if (event.type === "AgentStateChanged") return event.payload.promptId ?? null;
   return null;
 }
@@ -185,12 +185,8 @@ function runCardChange(event: BridgeEvent): RunCardChange | null {
   switch (event.type) {
     case "PromptQueued": return null;
     case "PromptCancelled": return { type: "failed", occurredAt: event.occurredAt, notice: event.payload.reason };
-    case "SteeringQueued": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: 0 };
     case "RunQueuePositionChanged": return { type: "queue-position", occurredAt: event.occurredAt, queuePosition: event.payload.queuePosition };
     case "TurnStarted": return { type: "started", occurredAt: event.occurredAt };
-    case "SteeringStarted": return { type: "started", occurredAt: event.occurredAt };
-    case "SteeringDelivered": return { type: "steering-delivered", occurredAt: event.occurredAt, notice: event.payload.automatic ? "已自动加入当前执行" : "已加入当前执行" };
-    case "SteeringFailed": return { type: "steering-failed", occurredAt: event.occurredAt, notice: event.payload.error, failureKind: event.payload.failureKind };
     case "TurnOutputObserved": {
       const answer = normalizeTurnOutputObservation(event.payload).answer;
       return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };

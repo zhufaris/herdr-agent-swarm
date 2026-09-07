@@ -1,20 +1,16 @@
 export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
-export type PromptDispatchKind = "turn" | "steering";
 export type TurnPriority = "normal" | "priority";
 export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
-export type SteeringOrigin = "explicit" | "automatic" | "converted";
 export type PromptWorkHint =
   | { kind: "prompt-ready"; bindingId: string }
   | { kind: "control-ready"; bindingId: string }
-  | { kind: "steering-ready"; bindingId: string; parentPromptId: string }
   | { kind: "detached-observer-ready"; bindingId: string; promptId: string }
   | { kind: "binding-runtime-changed"; bindingId: string };
 export interface DurablePromptWorkScan { cancelled: number; failedDetached: number; hints: PromptWorkHint[] }
 export interface StalePromptClaim { promptId: string; bindingId: string; updatedAt: string }
 export interface PromptJob {
   id: string; bindingId: string; larkMessageId: string; actorOpenId: string; body: string; executionOrigin: "bridge" | "herdr";
-  dispatchKind: PromptDispatchKind; priority: TurnPriority; parentPromptId: string | null; steeringOrigin: SteeringOrigin | null;
-  sourcePromptId: string | null; wasDetached: boolean; dispatchedAt: string | null; transcriptTurnId: string | null; transcriptTurnStartedAt: string | null;
+  priority: TurnPriority; wasDetached: boolean; dispatchedAt: string | null; transcriptTurnId: string | null; transcriptTurnStartedAt: string | null;
   modelName?: string | null; modelRevision?: number | null; observationState: PromptObservationState; state: PromptState; attemptCount: number;
   error: string | null; createdAt: string; updatedAt: string;
 }

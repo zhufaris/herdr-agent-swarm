@@ -42,7 +42,9 @@ describe("operational commands", () => {
     expect(JSON.stringify(failureCard)).toContain("retry_dead_letter");
     const value = findAction(failureCard, "retry_dead_letter");
     await onAction!({ messageId: "failure-card", chatId: "chat", operatorOpenId: "u1", value });
+    await publisher.drain(true);
 
+    expect(store.getOutboundReply("o1")).toMatchObject({ state: "delivered" });
     expect(replyCard).toHaveBeenCalledWith("root", {}, "failed-output");
     expect(store.getOperationalSummary().prompts.failed).toBe(1);
     expect(store.countPendingPrompts("b1")).toBe(0);

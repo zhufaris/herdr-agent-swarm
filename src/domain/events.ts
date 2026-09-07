@@ -58,12 +58,8 @@ export type BridgeEvent =
   | EventBase<"BindingOrphaned", { reason: string }>
   | EventBase<"PromptQueued", { promptId: string; queueDepth: number; actorOpenId: string }>
   | EventBase<"PromptCancelled", { promptId: string; reason: string }>
-  | EventBase<"SteeringQueued", { promptId: string; parentPromptId: string; actorOpenId: string }>
   | EventBase<"RunQueuePositionChanged", { promptId: string; queuePosition: number }>
   | EventBase<"TurnStarted", { promptId: string; queueDepth: number }>
-  | EventBase<"SteeringStarted", { promptId: string; parentPromptId: string }>
-  | EventBase<"SteeringDelivered", { promptId: string; parentPromptId: string; automatic: boolean }>
-  | EventBase<"SteeringFailed", { promptId: string; parentPromptId: string; error: string; failureKind: "rejected" | "uncertain"; automatic: boolean }>
   | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number; promptId?: string }>
   | EventBase<"TurnOutputObserved", { promptId: string; observation: TurnOutputObservation }>
   | EventBase<"PaneOutputObserved", { observation?: TurnOutputObservation; answer?: string; model?: string; context?: string; tabId?: string | null; worktreeName?: string | null }>

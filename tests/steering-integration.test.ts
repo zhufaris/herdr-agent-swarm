@@ -285,7 +285,7 @@ describe("active-turn steering", () => {
   });
 });
 
-describe("automatic continuation steering", () => {
+describe("ordinary continuation messages", () => {
   it("wakes durable ordinary work before queued-card projection completes", async () => {
     const harness = await createAutomaticSteeringHarness();
     harness.release();
@@ -321,25 +321,22 @@ describe("automatic continuation steering", () => {
     const harness = await createAutomaticSteeringHarness();
     await harness.send("auto-message", "继续");
     expect(harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId)).toMatchObject({
-      dispatchKind: "turn", parentPromptId: null, steeringOrigin: null
+      body: "继续", state: "queued"
     });
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "steering-ready")).toHaveLength(0);
     expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
-    expect(harness.store.loadQueueFeedbackInputs(harness.bindingId).queued.every((view) => view.steeringOrigin === null)).toBe(true);
+    expect(harness.store.loadQueueFeedbackInputs(harness.bindingId).queued.map((view) => view.requestText)).toContain("继续");
     await harness.close();
   });
 
   it.each([
-    ["ambiguous new work", "修复另一个问题", false, "not_allowlisted"],
-    ["unsupported rich content", "继续", true, "unsupported_content"]
-  ])("keeps %s as an ordinary FIFO turn", async (_label, text, hasUnsupportedContent, reason) => {
+    ["ambiguous new work", "修复另一个问题", false],
+    ["unsupported rich content", "继续", true]
+  ])("keeps %s as an ordinary FIFO turn", async (_label, text, hasUnsupportedContent) => {
     const harness = await createAutomaticSteeringHarness();
-    await harness.send(`ordinary-${reason}`, text, hasUnsupportedContent);
+    await harness.send(`ordinary-${_label.replaceAll(" ", "-")}`, text, hasUnsupportedContent);
     const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === text)!.promptId);
-    expect(prompt).toMatchObject({ dispatchKind: "turn", parentPromptId: null, steeringOrigin: null });
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "steering-ready")).toHaveLength(0);
+    expect(prompt).toMatchObject({ body: text, state: "queued" });
     expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
-    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-classified", outcome: "ordinary", reason }), "classified continuation message"]);
     await harness.close();
   });
 
@@ -347,8 +344,7 @@ describe("automatic continuation steering", () => {
     const harness = await createAutomaticSteeringHarness();
     await harness.send("instances-message", "/instances");
     expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
-    expect(harness.info.mock.calls.some(([record]) => record.event === "auto-steering-classified" && record.messageId === "instances-message")).toBe(false);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
     await harness.close();
   });
 
@@ -357,10 +353,9 @@ describe("automatic continuation steering", () => {
     const duplicate = harness.message("duplicate-message", "继续");
     await harness.coordinator.handleMessage(duplicate);
     await harness.coordinator.handleMessage(duplicate);
-    const rows = harness.store.database.prepare("SELECT id, dispatch_kind, parent_prompt_id, steering_origin FROM prompt_jobs WHERE lark_message_id = ?").all(duplicate.messageId);
-    expect(rows).toEqual([{ id: expect.any(String), dispatch_kind: "turn", parent_prompt_id: null, steering_origin: null }]);
+    const rows = harness.store.database.prepare("SELECT id, body, state FROM prompt_jobs WHERE lark_message_id = ?").all(duplicate.messageId);
+    expect(rows).toEqual([{ id: expect.any(String), body: "继续", state: "queued" }]);
     expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "steering-ready")).toHaveLength(0);
     await harness.close();
   });
 
@@ -369,7 +364,7 @@ describe("automatic continuation steering", () => {
     expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
     await harness.send("full-auto-message", "继续");
     expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
     await harness.close();
   });
 
@@ -378,7 +373,7 @@ describe("automatic continuation steering", () => {
     await harness.send("full-ordinary-message", "修复另一个问题");
     expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
     expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
     await harness.close();
   });
 
@@ -387,20 +382,19 @@ describe("automatic continuation steering", () => {
     const eventsBefore = harness.bridgeEvents.length;
     const auditsBefore = Number((harness.store.database.prepare("SELECT COUNT(*) AS count FROM audit_log").get() as { count: number }).count);
     harness.replyCard.mockClear();
-    const acceptClassifiedPrompt = harness.store.acceptClassifiedPrompt.bind(harness.store);
-    vi.spyOn(harness.store, "acceptClassifiedPrompt").mockImplementation((input) => {
+    const acceptPrompt = harness.store.acceptPrompt.bind(harness.store);
+    vi.spyOn(harness.store, "acceptPrompt").mockImplementation((input) => {
       harness.store.markPromptObservationDetached(harness.parent.promptId, "test race");
-      return acceptClassifiedPrompt(input);
+      return acceptPrompt(input);
     });
     await harness.send("full-fallback-message", "继续");
     await vi.waitFor(() => expect(harness.replyCard).toHaveBeenCalledTimes(1));
     expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
     expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready" || hint.kind === "steering-ready")).toHaveLength(0);
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
     expect(harness.bridgeEvents).toHaveLength(eventsBefore);
     expect(harness.store.database.prepare("SELECT COUNT(*) AS count FROM audit_log").get()).toEqual({ count: auditsBefore });
     expect(harness.error.mock.calls.some(([record]) => record.event === "lark-message-handling-failed")).toBe(false);
-    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "auto-steering-classified", outcome: "queue_full", reason: "no_candidate" }), "classified continuation message"]);
     expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "lark-message-accepted", messageId: "full-fallback-message", disposition: "rejected" }), "completed durable inbound handling"]);
     await harness.close();
   });

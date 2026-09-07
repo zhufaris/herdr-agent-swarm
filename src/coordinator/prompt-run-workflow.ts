@@ -120,7 +120,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const safety = this.safetyScanner.snapshot();
     return {
       state: this.stopping ? "stopping" : this.started ? "running" : "idle",
-      activeTurnWorkers: this.registry.activeWorkerCount, activeSteeringWorkers: this.registry.activeSteeringWorkerCount,
+      activeTurnWorkers: this.registry.activeWorkerCount,
       ...safety
     };
   }
@@ -128,10 +128,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   wake(event: PromptWorkHint): void {
     if (this.stopping) return;
     try {
-      if (event.kind === "steering-ready") {
-        this.scheduleSteering(event.bindingId, event.parentPromptId);
-        return;
-      }
       if (event.kind === "detached-observer-ready") {
         const prompt = this.options.store.getPrompt(event.promptId);
         if (prompt?.bindingId === event.bindingId && prompt.state === "running" && prompt.observationState === "detached") this.scheduleDetachedObserver(prompt);
@@ -163,7 +159,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       this.registry.abortTurn(bindingId);
       await existing;
     }
-    if (this.registry.hasWorker(bindingId) || this.registry.hasSteeringWorker(bindingId)) return { outcome: "busy", reason: "binding_busy" };
+    if (this.registry.hasWorker(bindingId)) return { outcome: "busy", reason: "binding_busy" };
     const recovery = this.options.recoverExternalTurns(binding, prompt);
     const worker = recovery.then(() => undefined);
     this.registry.registerWorker(bindingId, worker);
@@ -218,29 +214,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     }
   }
 
-  private scheduleSteering(bindingId: string, parentPromptId: string): void {
-    const previous = this.registry.steeringWorker(bindingId) ?? Promise.resolve();
-    const worker = previous.catch(() => undefined).then(() => this.drainSteering(bindingId, parentPromptId)).finally(() => {
-      this.registry.releaseSteeringWorker(bindingId, worker);
-    });
-    this.registry.registerSteeringWorker(bindingId, worker);
-  }
-
   private pruneDetachedTracking(): void {
     for (const promptId of this.legacyDetachedWithoutIdentity) {
       const prompt = this.options.store.getPrompt(promptId);
       if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.legacyDetachedWithoutIdentity.delete(promptId);
     }
     this.transcriptObserver.prune();
-  }
-
-  private async drainSteering(bindingId: string, parentPromptId: string): Promise<void> {
-    for (let prompt = this.options.store.claimNextReadySteering(bindingId, parentPromptId); prompt; prompt = this.options.store.claimNextReadySteering(bindingId, parentPromptId)) {
-      const message = "Steering is unsupported; text was not injected and will not be replayed.";
-      this.options.store.failPrompt({ promptId: prompt.id, error: message, occurredAt: new Date().toISOString(), steeringFailureKind: "rejected" });
-      await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: prompt.id, parentPromptId, error: message, failureKind: "rejected", automatic: prompt.steeringOrigin === "automatic" });
-      this.options.logger.warn({ event: "steering-rejected", bindingId, promptId: prompt.id, parentPromptId, outcome: "failed", reason: "unsupported" }, "rejected legacy steering work without terminal input");
-    }
   }
 
   private scheduleWorker(bindingId: string): void {
@@ -263,15 +242,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       try {
         ({ observerDetached } = await this.turnExecutor.execute(claimed, abortController));
       } finally {
-        const steeringWorker = this.registry.steeringWorker(bindingId);
-        if (steeringWorker) await steeringWorker;
-        const notice = "父任务已结束，本次 `/swarm steer` 未注入，也不会转为普通任务。";
-        const orphaned = this.options.store.failQueuedSteering(bindingId, prompt.id, notice);
-        for (const steeringId of orphaned) {
-          const steering = this.options.store.getPrompt(steeringId);
-          const automatic = steering?.steeringOrigin === "automatic";
-          await this.publish(bindingId, "SteeringFailed", "bridge", { promptId: steeringId, parentPromptId: prompt.id, error: automatic ? "当前任务已结束，未自动注入" : notice, failureKind: "rejected", automatic });
-        }
         this.registry.detachTurn(bindingId, prompt.id);
         this.options.scheduler.wake({ kind: "control-ready", bindingId });
         const latestBinding = this.options.store.getBinding(bindingId);

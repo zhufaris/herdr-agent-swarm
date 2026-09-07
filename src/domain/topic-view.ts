@@ -62,12 +62,8 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
       ? { ...base, queueDepth: event.payload.queueDepth }
       : { ...base, phase: "queued", queueDepth: event.payload.queueDepth, notice: null };
     case "PromptCancelled": return state;
-    case "SteeringQueued": return state;
     case "RunQueuePositionChanged": return state;
     case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, liveStatus: null };
-    case "SteeringStarted":
-    case "SteeringDelivered":
-    case "SteeringFailed": return state;
     case "TurnOutputObserved": {
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       const observation = normalizeTurnOutputObservation(event.payload);

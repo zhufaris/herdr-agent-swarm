@@ -148,12 +148,4 @@ describe("request run-card view", () => {
     expect(reduceRunCard(updated, { type: "queue-feedback", occurredAt: "latest", feedback })).toBe(updated);
   });
 
-  it("completes a steering card with an acknowledgement instead of a copied answer", () => {
-    const queued = createQueuedRunCard({
-      promptId: "s1", bindingId: "b1", title: "Change course", workspaceId: "w1",
-      paneId: "w1:p1", requestText: "Change course", queuePosition: 0, occurredAt: "start"
-    });
-    const delivered = reduceRunCard(queued, { type: "steering-delivered", occurredAt: "done", notice: "已加入当前执行" });
-    expect(delivered).toMatchObject({ phase: "completed", answer: "", notice: "已加入当前执行", queuePosition: 0, finishedAt: "done" });
-  });
 });

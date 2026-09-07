@@ -251,8 +251,7 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         this.store.recordBridgeMessage(sent.messageId);
         if (reply.bindingId && reply.promptId) {
           const prompt = this.store.getPrompt(reply.promptId);
-          if (prompt?.dispatchKind === "steering" && prompt.parentPromptId) this.scheduler?.wake({ kind: "steering-ready", bindingId: reply.bindingId, parentPromptId: prompt.parentPromptId });
-          else this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
+          if (prompt) this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
         if (reply.promptId && decoded.stream) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
         if (reply.workerTurnId && decoded.stream) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, (reply.viewVersion ?? 0) + 1);

@@ -50,7 +50,6 @@ export class InProcessPromptWorkScheduler implements PromptWorkScheduler {
 }
 
 function wakeupKey(event: PromptWorkHint): string {
-  if (event.kind === "steering-ready") return `${event.kind}:${event.bindingId}:${event.parentPromptId}`;
   if (event.kind === "detached-observer-ready") return `${event.kind}:${event.bindingId}:${event.promptId}`;
   return `${event.kind}:${event.bindingId}`;
 }

@@ -13,14 +13,13 @@ describe("prompt safety scan policy", () => {
       cancelled: 2, failedDetached: 3,
       hints: [
         { kind: "prompt-ready", bindingId: "private-binding" },
-        { kind: "steering-ready", bindingId: "private-binding", parentPromptId: "private-parent" },
         { kind: "detached-observer-ready", bindingId: "private-binding", promptId: "private-prompt" }
       ]
     }, 5, 100);
 
     expect(result).toEqual({
       outcome: "work_found", consecutiveIdleScans: 0, nextDelayMs: 100,
-      discovered: { turns: 1, steering: 1, detached: 1, recoveredClaims: 0, cancelled: 2, failedDetached: 3 }
+      discovered: { turns: 1, detached: 1, recoveredClaims: 0, cancelled: 2, failedDetached: 3 }
     });
     expect(JSON.stringify(result.discovered)).not.toContain("private");
   });
@@ -28,7 +27,7 @@ describe("prompt safety scan policy", () => {
   it("treats terminal convergence without hints as work", () => {
     expect(decidePromptSafetyScan({ cancelled: 1, failedDetached: 0, hints: [] }, 5, 100)).toMatchObject({
       outcome: "work_found", consecutiveIdleScans: 0, nextDelayMs: 100,
-      discovered: { turns: 0, steering: 0, detached: 0, recoveredClaims: 0, cancelled: 1, failedDetached: 0 }
+      discovered: { turns: 0, detached: 0, recoveredClaims: 0, cancelled: 1, failedDetached: 0 }
     });
   });
 

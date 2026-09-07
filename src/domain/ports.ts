@@ -1,7 +1,7 @@
 export type { HerdrPort, LarkPort, ModelPromptDispatchOptions, TraexTranscriptCursorPort, TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptPlanStep, TraexTranscriptReaderPort, TraexTranscriptUnavailableReason } from "./ports/external.js";
 export type { AcceptInstanceTurnWithCardInput, InstanceLifecycleStore, InstanceStore, InstanceTurnStore } from "./ports/instance.js";
 export type { TurnControlStore } from "./ports/turn-control.js";
-export type { AcceptPromptInput, ClassifiedPromptAcceptance, ClassifiedPromptInput, ClaimedPrompt, DetachedPromptSkipResult, PromptAcceptanceStore, PromptRunStore } from "./ports/prompt.js";
+export type { AcceptPromptInput, ClaimedPrompt, DetachedPromptSkipResult, PromptAcceptanceStore, PromptRunStore } from "./ports/prompt.js";
 export type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "./ports/projection.js";
 export type { BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore } from "./ports/binding.js";
 export type { PaneCloseStore, PaneControlStore } from "./ports/pane-operations.js";

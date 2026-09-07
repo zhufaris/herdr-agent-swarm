@@ -411,7 +411,8 @@ FIFO 调度。此前 TraeX 执行结果仍然不确定，Bridge 不会重放该�
 有效历史 turn 样本时，卡片还显示基于最近最多十个样本中位数计算的粗略等待区间。该区间
 用于解释队列进展，不是截止时间或倒计时。
 
-旧版本留下的 legacy steering 记录在恢复时会标记为 rejected，不会自动重放。
+旧版本留下的 queued legacy steering 记录在升级时会标记为 rejected；可能已发送的 running
+记录会标记为 uncertain。迁移完成后旧 prompt-steering 字段会被删除，两者都不会自动重放。
 当前 native steering 操作在外部发送前持久化；若发送结果不确定，则标记为 uncertain，
 不会自动重试。`/swarm stop` 使用相同的 durable exact-turn effect fence。
 

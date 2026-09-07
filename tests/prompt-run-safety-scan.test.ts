@@ -56,7 +56,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     expect(claim).toHaveBeenCalledWith("b1");
     expect(workflow.snapshot()).toMatchObject({
       state: "running", lastScanOutcome: "work_found",
-      lastDiscovered: { turns: 1, steering: 0, detached: 0, cancelled: 0, failedDetached: 0 },
+      lastDiscovered: { turns: 1, detached: 0, cancelled: 0, failedDetached: 0 },
       currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.400Z"
     });
     await workflow.stop();
@@ -127,7 +127,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
 
     expect(workflow.snapshot()).toMatchObject({
       state: "running", lastScanOutcome: "work_found",
-      lastDiscovered: { turns: 0, steering: 0, detached: 0, cancelled: 0, failedDetached: 2 },
+      lastDiscovered: { turns: 0, detached: 0, cancelled: 0, failedDetached: 2 },
       currentSafetyScanDelayMs: 100, nextSafetyScanAt: "2026-08-29T00:00:00.100Z"
     });
     expect(info).toHaveBeenCalledWith({

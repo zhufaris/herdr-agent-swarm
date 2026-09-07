@@ -93,7 +93,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE TABLE IF NOT EXISTS bridge_messages(message_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS card_interactions(
     id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
-    action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','enqueue_failed_steering','more_actions','session_control')),
+    action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','more_actions','session_control')),
     parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
     expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
   );
@@ -108,14 +108,13 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE INDEX IF NOT EXISTS swarm_command_intents_recovery ON swarm_command_intents(state, updated_at);
   CREATE TABLE IF NOT EXISTS prompt_jobs(
     id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-    actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), parent_prompt_id TEXT,
-    steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), source_prompt_id TEXT REFERENCES prompt_jobs(id), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
+    actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
     dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT, model_name TEXT, model_revision INTEGER CHECK(model_revision IS NULL OR model_revision >= 0),
     state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
     attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
-  CREATE INDEX IF NOT EXISTS prompt_jobs_queue_kind ON prompt_jobs(binding_id, state, dispatch_kind, created_at);
+  CREATE INDEX IF NOT EXISTS prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, priority, created_at);
   CREATE TABLE IF NOT EXISTS binding_model_preferences(
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id), binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
     desired_model TEXT NOT NULL CHECK(length(desired_model) > 0), desired_revision INTEGER NOT NULL CHECK(desired_revision >= 1),
@@ -202,7 +201,7 @@ export function createLatestSchema(context: SqliteContext): void {
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id), state_json TEXT NOT NULL, updated_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS run_cards(
-    prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL DEFAULT 1, conversion_parent_prompt_id TEXT, steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted')), steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain')), queue_feedback_json TEXT, lark_message_id TEXT, answer_message_id TEXT, answer_card_id TEXT, answer_element_id TEXT NOT NULL DEFAULT '', answer_sequence INTEGER NOT NULL DEFAULT 0, answer_page_index INTEGER NOT NULL DEFAULT 0, answer_page_start INTEGER NOT NULL DEFAULT 0,
+    prompt_id TEXT PRIMARY KEY REFERENCES prompt_jobs(id), binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL DEFAULT 1, conversion_parent_prompt_id TEXT, queue_feedback_json TEXT, lark_message_id TEXT, answer_message_id TEXT, answer_card_id TEXT, answer_element_id TEXT NOT NULL DEFAULT '', answer_sequence INTEGER NOT NULL DEFAULT 0, answer_page_index INTEGER NOT NULL DEFAULT 0, answer_page_start INTEGER NOT NULL DEFAULT 0,
     phase TEXT NOT NULL CHECK(phase IN ('queued','running','blocked','completed','failed')), title TEXT NOT NULL, session_title TEXT, request_text TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL, space_name TEXT NOT NULL DEFAULT 'unknown', pane_id TEXT,
     answer TEXT NOT NULL, answer_segments_json TEXT NOT NULL DEFAULT '[]', answer_draft TEXT NOT NULL DEFAULT '', answer_draft_transient INTEGER NOT NULL DEFAULT 0, progress_events_json TEXT NOT NULL, progress_summary_json TEXT NOT NULL DEFAULT '{"total":0,"stepTotal":0,"stepDone":0}', queue_position INTEGER NOT NULL, started_at TEXT, finished_at TEXT, notice TEXT, worker_activity_json TEXT NOT NULL DEFAULT '[]', worker_dependency_revision INTEGER NOT NULL DEFAULT 0, worker_context_frozen_at TEXT, activity_at TEXT NOT NULL,
     view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, answer_delivered_version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL

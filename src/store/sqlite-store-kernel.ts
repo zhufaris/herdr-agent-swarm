@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
-import type { AcceptInstanceTurnWithCardInput, ClassifiedPromptAcceptance, ClassifiedPromptInput } from "../domain/ports.js";
+import type { AcceptInstanceTurnWithCardInput } from "../domain/ports.js";
 import type { AcceptPromptInput } from "../domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../domain/ports/workflow.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -124,8 +124,7 @@ export class SqliteStoreKernel implements TurnControlStore {
       transitionBinding: (id, transition) => this.transitionBinding(id, transition),
       loadCardContextInvalidation: (target) => this.loadCardContextInvalidation(target),
       loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.loadPrimaryWorkerActivity(promptId, bindingGeneration),
-      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
-      getCardInteraction: (id) => this.sessionOperations.getInteraction(id)
+      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input)
     });
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.getAgentInstance(id),
@@ -454,10 +453,6 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   consumeCardInteraction(input: { id: string; actorOpenId: string; bindingId: string; bindingGeneration: number; now: string; resultCode: string }): { outcome: "consumed" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } { return this.sessionOperations.consumeInteraction(input); }
 
-  convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
-    return this.prompts.convertFailedSteeringToTurn(input);
-  }
-
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
     return this.bindings.createResetCandidate(input);
   }
@@ -758,16 +753,12 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.operations.recoverLegacyElementIdDeadLetters((timestamp) => this.migrations.canonicalizeLegacyAnswerTargets(timestamp));
   }
 
-  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "dispatchKind" | "priority" | "parentPromptId" | "steeringOrigin" | "sourcePromptId" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
+  enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "priority" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "priority" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
     return this.prompts.enqueuePrompt(input);
   }
 
   acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
     return this.prompts.acceptPrompt(input);
-  }
-
-  acceptClassifiedPrompt(input: ClassifiedPromptInput): ClassifiedPromptAcceptance {
-    return this.prompts.acceptClassifiedPrompt(input);
   }
 
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
@@ -778,14 +769,6 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.claimNextDispatchablePrompt(bindingId);
   }
 
-  claimNextReadySteering(bindingId: string, parentPromptId: string): PromptJob | null {
-    return this.prompts.claimNextReadySteering(bindingId, parentPromptId);
-  }
-
-  failQueuedSteering(bindingId: string, parentPromptId: string, notice: string): string[] {
-    return this.prompts.failQueuedSteering(bindingId, parentPromptId, notice);
-  }
-
   updatePrompt(id: string, state: PromptState, error: string | null = null): void {
     this.prompts.updatePrompt(id, state, error);
   }
@@ -794,12 +777,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.completeTurn(input);
   }
 
-  failPrompt(input: { promptId: string; error: string; occurredAt: string; steeringFailureKind?: "rejected" | "uncertain" }): void {
+  failPrompt(input: { promptId: string; error: string; occurredAt: string }): void {
     this.prompts.failPrompt(input);
-  }
-
-  completeSteering(input: { promptId: string; notice: string; occurredAt: string }): void {
-    this.prompts.completeSteering(input);
   }
 
   cancelQueuedPromptsWithProjection(input: { bindingId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): { cancelledPromptIds: string[]; outboxReserved: boolean } {

@@ -3,8 +3,6 @@ import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
 import type { PrimaryWorkerActivitySummary } from "./card-context-summary.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
-export type SteeringFailureKind = "rejected" | "uncertain";
-export type RunCardSteeringOrigin = "explicit" | "automatic" | "converted";
 export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
 export type ProgressEventState = "pending" | "active" | "done" | "failed";
 
@@ -31,8 +29,6 @@ export interface RunCardView {
   bindingId: string;
   bindingGeneration: number;
   conversionParentPromptId: string | null;
-  steeringOrigin: RunCardSteeringOrigin | null;
-  steeringFailureKind: SteeringFailureKind | null;
   larkMessageId: string | null;
   answerMessageId: string | null;
   answerCardId: string | null;
@@ -73,8 +69,6 @@ export type RunCardChange =
   | { type: "queue-position"; occurredAt: string; queuePosition: number }
   | { type: "queue-feedback"; occurredAt: string; feedback: QueueWaitFeedback | null }
   | { type: "started"; occurredAt: string }
-  | { type: "steering-delivered"; occurredAt: string; notice: string }
-  | { type: "steering-failed"; occurredAt: string; notice: string; failureKind: SteeringFailureKind }
   | { type: "blocked"; occurredAt: string; notice: string }
   | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string; replaceAnswer?: boolean }
@@ -82,10 +76,10 @@ export type RunCardChange =
 
 export function createQueuedRunCard(input: {
   promptId: string; bindingId: string; title: string; sessionTitle?: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
-  queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null; steeringOrigin?: RunCardSteeringOrigin | null;
+  queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null;
 }): RunCardView {
   return {
-    promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, steeringOrigin: input.steeringOrigin ?? null, steeringFailureKind: null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
+    promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
     title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
@@ -122,14 +116,6 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       if (state.phase === "running" && state.notice === null) return state;
       patch = { phase: "running", startedAt: state.startedAt ?? change.occurredAt, notice: null };
       break;
-    case "steering-delivered":
-      if (state.phase === "completed" && state.notice === change.notice) return state;
-      patch = { phase: "completed", answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice, steeringFailureKind: null };
-      break;
-    case "steering-failed":
-      if (state.phase === "failed" && state.notice === change.notice && state.steeringFailureKind === change.failureKind) return state;
-      patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice, steeringFailureKind: change.failureKind };
-      break;
     case "blocked":
       if (state.phase === "blocked" && state.notice === change.notice) return state;
       patch = { phase: "blocked", notice: change.notice };
@@ -157,7 +143,7 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }
-  const activityAt = change.type === "queue-position" || change.type === "queue-feedback" || change.type === "steering-delivered" ? state.activityAt : change.occurredAt;
+  const activityAt = change.type === "queue-position" || change.type === "queue-feedback" ? state.activityAt : change.occurredAt;
   return { ...state, ...patch, activityAt, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
 }
 

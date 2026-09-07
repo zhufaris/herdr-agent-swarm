@@ -1,9 +1,9 @@
 import type { AgentState, HerdrPane } from "./runtime-observation.js";
 import type { DeliveryFailureClass, OutboundReplyKind, OutboundReplyState, OutboxLaneClass } from "./delivery.js";
 import type { Binding, BindingState } from "./binding.js";
-import type { PromptDispatchKind, PromptJob, PromptState } from "./prompt.js";
+import type { PromptJob, PromptState } from "./prompt.js";
 export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
-export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, SteeringOrigin, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
+export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
 export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
@@ -99,7 +99,7 @@ export interface ProjectConfig {
   paneRetention?: { mode: "persistent" | "ephemeral"; idleAfterMs?: number | undefined; graceMs?: number | undefined } | undefined;
 }
 
-export type CardInteractionActionKind = "supplement" | "convert_queued_prompt" | "enqueue_failed_steering" | "more_actions" | "session_control";
+export type CardInteractionActionKind = "supplement" | "more_actions" | "session_control";
 export type CardInteractionState = "active" | "claimed" | "consumed" | "expired";
 export interface CardInteraction {
   id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind;
@@ -156,8 +156,6 @@ export interface PromptLatencySummary {
 export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;
-  promptDispatch: Record<PromptDispatchKind, number>;
-  automaticSteering: { queued: number; delivered: number; failed: number; rejected: number; uncertain: number };
   queueFeedback: { withEstimate: number; withoutEstimate: number };
   promptLatency: PromptLatencySummary;
   inbound: {

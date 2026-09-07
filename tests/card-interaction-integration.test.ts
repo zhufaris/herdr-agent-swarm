@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
 function harness() {
@@ -25,13 +24,13 @@ describe("card interactions", () => {
     h.store.close();
   });
 
-  it("rejects legacy queued-steering callbacks without changing FIFO state", async () => {
+  it("rejects retired card actions without changing FIFO state", async () => {
     const h = harness();
     h.store.enqueuePrompt({ id: "queued", bindingId: "b1", larkMessageId: "queued-message", actorOpenId: "member", body: "follow-up" });
     const value = { action: "convert_queued_prompt", bindingId: "b1", bindingGeneration: 1, parentPromptId: "parent", targetPromptId: "queued" };
     const converted = await h.workflow.handle({ messageId: "answer", chatId: "chat", operatorOpenId: "member", value });
-    expect(converted?.toast).toEqual({ type: "warning", content: "当前 Agent 不支持立即补充；请将内容作为普通消息发送。" });
-    expect(h.store.getPrompt("queued")).toMatchObject({ dispatchKind: "turn", parentPromptId: null });
+    expect(converted?.toast).toEqual({ type: "warning", content: "该操作已失效，请刷新卡片后重试。" });
+    expect(h.store.getPrompt("queued")).toMatchObject({ state: "queued" });
     h.store.close();
   });
 
@@ -98,50 +97,6 @@ describe("card interactions", () => {
     h.store.close();
   });
 
-  it("converts rejected automatic steering once and wakes ordinary work only after commit", async () => {
-    const h = harness();
-    const view = createQueuedRunCard({ promptId: "failed-auto", bindingId: "b1", bindingGeneration: 1, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "now" });
-    h.store.acceptPrompt({ prompt: { id: "failed-auto", bindingId: "b1", larkMessageId: "auto-message", actorOpenId: "member", body: "继续", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin: "automatic" }, view, rootMessageId: "root", answerCard: {} });
-    h.store.failPrompt({ promptId: "failed-auto", error: "not working", occurredAt: new Date().toISOString(), steeringFailureKind: "rejected" });
-    const value = { action: "enqueue_failed_steering", bindingId: "b1", bindingGeneration: 1, sourcePromptId: "failed-auto" };
-
-    const converted = await h.workflow.handle({ messageId: "failed-card", chatId: "chat", operatorOpenId: "member", value });
-    expect(converted?.toast).toEqual({ type: "success", content: "已作为新任务排队。" });
-    const replacement = h.store.database.prepare("SELECT id FROM prompt_jobs WHERE source_prompt_id = 'failed-auto'").get() as { id: string };
-    expect(h.store.getPrompt(replacement.id)).toMatchObject({ dispatchKind: "turn", steeringOrigin: null, sourcePromptId: "failed-auto", body: "继续" });
-    expect(h.wakePrompt).toHaveBeenCalledTimes(1);
-    expect(h.store.loadRunCard(replacement.id)).toMatchObject({ sessionTitle: "task" });
-    expect(h.store.listPendingOutboundReplies().some((reply) => reply.promptId === replacement.id)).toBe(true);
-
-    const duplicate = await h.workflow.handle({ messageId: "failed-card", chatId: "chat", operatorOpenId: "member", value });
-    expect(duplicate?.toast).toEqual({ type: "success", content: "已作为新任务排队。" });
-    expect(h.wakePrompt).toHaveBeenCalledTimes(1);
-    expect(h.store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE source_prompt_id = 'failed-auto'").get()).toEqual({ count: 1 });
-    h.store.close();
-  });
-
-  it.each([
-    { name: "uncertain automatic steering", steeringOrigin: "automatic" as const, failureKind: "uncertain" as const, operatorOpenId: "member", generation: 1, chatId: "chat" },
-    { name: "rejected explicit steering", steeringOrigin: "explicit" as const, failureKind: "rejected" as const, operatorOpenId: "member", generation: 1, chatId: "chat" },
-    { name: "rejected converted steering", steeringOrigin: "converted" as const, failureKind: "rejected" as const, operatorOpenId: "member", generation: 1, chatId: "chat" },
-    { name: "a different actor", steeringOrigin: "automatic" as const, failureKind: "rejected" as const, operatorOpenId: "other", generation: 1, chatId: "chat" },
-    { name: "a stale binding generation", steeringOrigin: "automatic" as const, failureKind: "rejected" as const, operatorOpenId: "member", generation: 2, chatId: "chat" },
-    { name: "a different chat", steeringOrigin: "automatic" as const, failureKind: "rejected" as const, operatorOpenId: "member", generation: 1, chatId: "other-chat" }
-  ])("does not convert $name through a forged callback", async ({ steeringOrigin, failureKind, operatorOpenId, generation, chatId }) => {
-    const h = harness();
-    const sourcePromptId = `failed-${steeringOrigin}-${failureKind}-${operatorOpenId}-${generation}`;
-    const view = createQueuedRunCard({ promptId: sourcePromptId, bindingId: "b1", bindingGeneration: 1, title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "继续", queuePosition: 0, occurredAt: "now" });
-    h.store.acceptPrompt({ prompt: { id: sourcePromptId, bindingId: "b1", larkMessageId: `${sourcePromptId}-message`, actorOpenId: "member", body: "继续", dispatchKind: "steering", parentPromptId: "parent", steeringOrigin }, view, rootMessageId: "root", answerCard: {} });
-    h.store.failPrompt({ promptId: sourcePromptId, error: "delivery failed", occurredAt: new Date().toISOString(), steeringFailureKind: failureKind });
-
-    const result = await h.workflow.handle({ messageId: `${sourcePromptId}-card`, chatId, operatorOpenId, value: { action: "enqueue_failed_steering", bindingId: "b1", bindingGeneration: generation, sourcePromptId } });
-
-    expect(result?.toast?.type).toBe(operatorOpenId === "other" ? "error" : "warning");
-    expect(h.store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE source_prompt_id = ?").get(sourcePromptId)).toEqual({ count: 0 });
-    expect(h.store.getCardInteraction(`failed-steering:${sourcePromptId}-card:${sourcePromptId}`)).toBeNull();
-    expect(h.wakePrompt).not.toHaveBeenCalled();
-    h.store.close();
-  });
 });
 
 function findValue(card: object, action: string): Record<string, unknown> {
