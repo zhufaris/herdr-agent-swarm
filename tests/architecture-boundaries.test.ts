@@ -30,15 +30,23 @@ describe("application composition boundaries", () => {
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
     const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
     const application = readFileSync(new URL("../src/composition/create-application-runtime.ts", import.meta.url), "utf8");
+    const bindingSession = readFileSync(new URL("../src/composition/create-binding-session-runtime.ts", import.meta.url), "utf8");
+    const commandControl = readFileSync(new URL("../src/composition/create-command-control-runtime.ts", import.meta.url), "utf8");
+    const ingressRecovery = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
     const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
+    const composition = `${factory}\n${application}\n${bindingSession}\n${commandControl}\n${ingressRecovery}\n${primary}`;
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
     for (const component of ["InboundMessageDispatcher", "CardActionRouter", "PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger", "StartupRecoveryWorkflow"]) {
-      expect(`${factory}\n${application}\n${primary}`).toContain(`new ${component}`);
+      expect(composition).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
+    for (const childFactory of ["createBindingSessionRuntime", "createCommandControlRuntime", "createIngressRecoveryRuntime"]) {
+      expect(application).toContain(`${childFactory}({`);
+    }
+    expect(application).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(main).toContain("createManagedBridgeRuntime({");
     expect(main).not.toContain("createSqliteStoreBundle");
     expect(main).not.toContain("createBridgeRuntime");
@@ -76,8 +84,8 @@ describe("application composition boundaries", () => {
       ), "utf8")).not.toMatch(/store: InstanceStore(?:;|,)/);
     }
     expect(storeBundle).not.toContain("SqliteBindingStore");
-    expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
-    expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");
+    expect(composition).toContain("stores.promptRun");
+    expect(composition).toContain("stores.instance");
     const worker = readFileSync(new URL("../src/composition/create-worker-runtime.ts", import.meta.url), "utf8");
     expect(worker).toContain("stores.instanceLifecycle");
     expect(worker).toContain("stores.instanceTurns");
@@ -92,9 +100,9 @@ describe("application composition boundaries", () => {
   });
 
   it("gives child composition factories consumer-specific SQLite capabilities", () => {
-    for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts"]) {
+    for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
       const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");
-      expect(source).toMatch(/export type [A-Za-z]+RuntimeStores = Pick<SqliteStoreBundle,/);
+      expect(source).toMatch(/export type [A-Za-z]+Stores = Pick<SqliteStoreBundle,/);
       expect(source).not.toMatch(/stores:\s*SqliteStoreBundle/);
     }
   });
@@ -115,6 +123,9 @@ describe("application composition boundaries", () => {
       "../src/main.ts",
       "../src/composition/create-bridge-runtime.ts",
       "../src/composition/create-application-runtime.ts",
+      "../src/composition/create-binding-session-runtime.ts",
+      "../src/composition/create-command-control-runtime.ts",
+      "../src/composition/create-ingress-recovery-runtime.ts",
       "../src/composition/create-primary-runtime.ts",
       "../src/composition/create-worker-runtime.ts",
       "../src/composition/create-outbound-runtime.ts",
