@@ -29,17 +29,6 @@ interface ShutdownDependencies {
   abortSettlementMs?: number;
 }
 
-interface StartupCleanupDependencies {
-  integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
-  herdrSocketSubscriber?: { stop(): Promise<void> };
-  primaryToolGateway?: { stop(): Promise<void> };
-  lease: { release(): void };
-  store: { deactivateWriteFence(): void; close(): void };
-  logger: ShutdownLogger;
-  shutdownGraceMs?: number;
-  abortSettlementMs?: number;
-}
-
 export type BridgeRuntimeShutdownOutcome =
   | { outcome: "completed"; unsettledWriters: [] }
   | { outcome: "ownership_retained"; unsettledWriters: string[] };
@@ -119,40 +108,6 @@ export class BridgeRuntimeShutdown {
     logger.error({ event: "bridge-shutdown-component-timed-out", component, remainingMs: context.remainingMs(), outcome: "timed_out" }, "shutdown component exceeded the shared deadline");
     return { settled, isSettled: () => hasSettled };
   }
-}
-
-export async function cleanupStartupFailure(dependencies: StartupCleanupDependencies): Promise<BridgeRuntimeShutdownOutcome> {
-  const { context, abort } = createShutdownContext(dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS);
-  const deadlineTimer = setTimeout(() => abort(new Error("startup cleanup deadline exceeded")), context.remainingMs());
-  deadlineTimer.unref?.();
-  const failures: string[] = [];
-  const launch = (component: string, stop: () => Promise<void>) => trackWriter(component, stopSafely(component, stop, dependencies.logger, failures));
-  const writers: TrackedWriter[] = [];
-  const cleanup: Promise<void>[] = [];
-  if (dependencies.integrityAuditor) cleanup.push(stopSafely("integrityAuditor", () => dependencies.integrityAuditor!.stop(context), dependencies.logger, failures));
-  if (dependencies.herdrSocketSubscriber) cleanup.push(stopSafely("herdrSocketSubscriber", () => dependencies.herdrSocketSubscriber!.stop(), dependencies.logger, failures));
-  if (dependencies.primaryToolGateway) {
-    const writer = launch("primaryToolGateway", () => dependencies.primaryToolGateway!.stop());
-    writers.push(writer); cleanup.push(writer.settled);
-  }
-  await settlesWithin(Promise.all(cleanup), context.remainingMs());
-  if (!await settlesWithin(Promise.all(writers.map(({ settled }) => settled)), dependencies.abortSettlementMs ?? 1_000)) {
-    const writerNames = writers.filter((writer) => !writer.isSettled()).map(({ component }) => component);
-    dependencies.logger.error({ event: "bridge-startup-cleanup-writers-unsettled", components: writerNames, outcome: "ownership_retained" }, "write-capable startup cleanup did not settle; retaining SQLite ownership");
-    clearTimeout(deadlineTimer);
-    return { outcome: "ownership_retained", unsettledWriters: writerNames };
-  }
-  clearTimeout(deadlineTimer);
-  await stopSafely("writeFence", async () => { dependencies.store.deactivateWriteFence(); }, dependencies.logger);
-  await stopSafely("lease", async () => { dependencies.lease.release(); }, dependencies.logger);
-  await stopSafely("store", async () => { dependencies.store.close(); }, dependencies.logger);
-  return { outcome: "completed", unsettledWriters: [] };
-}
-
-function trackWriter(component: string, settled: Promise<void>): TrackedWriter {
-  let hasSettled = false;
-  void settled.finally(() => { hasSettled = true; });
-  return { component, settled, isSettled: () => hasSettled };
 }
 
 async function stopSafely(component: string, stop: () => Promise<void>, logger: ShutdownLogger, failures: string[] = []): Promise<void> {

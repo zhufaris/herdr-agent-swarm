@@ -1,5 +1,14 @@
+import type { Logger } from "pino";
+import type { BridgeConfig } from "../config.js";
+import { startHealthServer } from "../health/server.js";
+import { ExecFileCommandRunner } from "../infra/command-runner.js";
+import type { BuildIdentity } from "../runtime/build-identity.js";
+import { detectAgentRuntimeAvailability } from "../runtime/agents/agent-availability.js";
+import { InstanceLeaseController } from "../runtime/instance-lease.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { BridgeRuntimeShutdown, type BridgeRuntimeShutdownOutcome } from "../runtime/shutdown.js";
+import { createSqliteStoreBundle } from "../store/sqlite-store-bundle.js";
+import { createBridgeRuntime } from "./create-bridge-runtime.js";
 
 export type RuntimeStopReason = "SIGINT" | "SIGTERM" | "lease-lost" | "startup-failure";
 
@@ -37,6 +46,53 @@ export interface ManagedBridgeRuntimeDependencies {
 export interface ManagedBridgeRuntimePort {
   start(): Promise<void>;
   stop(reason: RuntimeStopReason): Promise<BridgeRuntimeShutdownOutcome>;
+}
+
+export async function createManagedBridgeRuntime(options: {
+  config: BridgeConfig;
+  buildIdentity: BuildIdentity;
+  logger: Logger;
+  onFatalStop?(reason: "lease-lost", result: BridgeRuntimeShutdownOutcome): void | Promise<void>;
+}): Promise<ManagedBridgeRuntimePort> {
+  const { config, buildIdentity, logger, onFatalStop } = options;
+  const availabilityRunner = new ExecFileCommandRunner(config.commandTimeoutMs);
+  const [codex, claude, pi] = await Promise.all([
+    detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
+    detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
+    detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
+  ]);
+  const stores = createSqliteStoreBundle(config.databasePath);
+  try {
+    const lease = new InstanceLeaseController(stores.lease, config.instanceLease, logger);
+    const runtime = createBridgeRuntime(config, stores, logger, { codex, claude, pi });
+    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, lark, bus, sessionOperations, reconciler, promptRun } = runtime;
+    return new ManagedBridgeRuntime({
+      reconcileIntervalMs: config.reconcileIntervalMs,
+      store: stores.lifecycle,
+      lease,
+      primaryToolGateway,
+      sqliteIntegrity,
+      instanceRuntime,
+      instanceTurns,
+      instanceWork,
+      createHealthServer: () => startHealthServer({
+        ...config.http, store: stores.health, herdr, lark, projects: config.projects, lease,
+        workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator,
+        inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() },
+        sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime,
+        instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector,
+        outboxDispatcher: channelPublisher, promptWorker: promptRun,
+        ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity
+      }),
+      channelPublisher, outboxRetention, projector, cardContextRebuilder, queueFeedbackProjector, bus,
+      coordinator, paneRetention, externalTurns,
+      ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}),
+      ...(onFatalStop ? { onFatalStop } : {}), logger
+    });
+  } catch (error) {
+    stores.lifecycle.close();
+    throw error;
+  }
 }
 
 export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {

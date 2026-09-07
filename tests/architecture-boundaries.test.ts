@@ -22,6 +22,7 @@ describe("application composition boundaries", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
     const application = readFileSync(new URL("../src/composition/create-application-runtime.ts", import.meta.url), "utf8");
     const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
@@ -32,8 +33,11 @@ describe("application composition boundaries", () => {
       expect(`${factory}\n${application}\n${primary}`).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
-    expect(main).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
-    expect(main).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
+    expect(main).toContain("createManagedBridgeRuntime({");
+    expect(main).not.toContain("createSqliteStoreBundle");
+    expect(main).not.toContain("createBridgeRuntime");
+    expect(lifecycle).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
+    expect(lifecycle).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
     expect(main).not.toContain("new SqliteBindingStore");
     expect(storeBundle).toContain("new SqliteStoreKernel");
     expect(storeBundle).not.toContain("SqliteBindingStore");
@@ -270,14 +274,23 @@ describe("application composition boundaries", () => {
   });
 
   it("starts the database lease heartbeat before long startup audits", () => {
-    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-    expect(main.indexOf("lease.start(")).toBeGreaterThan(main.indexOf("lease.acquire()"));
-    expect(main.indexOf("lease.start(")).toBeLessThan(main.indexOf("await sqliteIntegrity.run()"));
+    const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
+    expect(lifecycle.indexOf("d.lease.start(")).toBeGreaterThan(lifecycle.indexOf("d.lease.acquire()"));
+    expect(lifecycle.indexOf("d.lease.start(")).toBeLessThan(lifecycle.indexOf("await d.sqliteIntegrity.run()"));
   });
 
   it("puts the integrity auditor inside the shared runtime shutdown boundary", () => {
+    const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
+    expect(lifecycle).toContain("integrityAuditor: d.sqliteIntegrity");
+    expect(lifecycle).not.toContain("await d.sqliteIntegrity.stop(); return shutdown.shutdown(signal)");
+  });
+
+  it("keeps process entrypoint lifecycle-free beyond start and stop", () => {
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-    expect(main).toContain("integrityAuditor: sqliteIntegrity");
-    expect(main).not.toContain("await sqliteIntegrity.stop(); return shutdown.shutdown(signal)");
+    for (const implementation of ["BridgeRuntimeShutdown", "cleanupStartupFailure", "startHealthServer", "InstanceLeaseController", "createSqliteStoreBundle", "createBridgeRuntime"]) {
+      expect(main).not.toContain(implementation);
+    }
+    expect(main).toContain("await runtime.start()");
+    expect(main).toContain("await runtime.stop(signal)");
   });
 });

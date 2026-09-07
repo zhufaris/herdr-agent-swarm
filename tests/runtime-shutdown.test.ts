@@ -1,47 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
-import { BridgeRuntimeShutdown, cleanupStartupFailure } from "../src/runtime/shutdown.js";
+import { BridgeRuntimeShutdown } from "../src/runtime/shutdown.js";
 import type { ShutdownContext } from "../src/runtime/shutdown-context.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("bridge runtime shutdown", () => {
-  it("bounds a hung startup integrity stop before releasing SQLite ownership", async () => {
-    vi.useFakeTimers();
-    const calls: string[] = [];
-    let integrityAborted = false;
-    const cleanup = cleanupStartupFailure({
-      integrityAuditor: { async stop(context) {
-        context?.signal.addEventListener("abort", () => { integrityAborted = true; }, { once: true });
-        await new Promise(() => {});
-      } },
-      primaryToolGateway: { async stop() { calls.push("gateway"); } },
-      lease: { release() { calls.push("lease"); } },
-      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
-      logger: { info() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
-    });
-
-    await vi.advanceTimersByTimeAsync(70);
-    await expect(cleanup).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
-    expect(integrityAborted).toBe(true);
-    expect(calls).toEqual(["gateway", "fence", "lease", "store"]);
-  });
-
-  it("retains startup SQLite ownership when a write-capable stop remains hung", async () => {
-    vi.useFakeTimers();
-    const calls: string[] = [];
-    const cleanup = cleanupStartupFailure({
-      primaryToolGateway: { async stop() { await new Promise(() => {}); } },
-      lease: { release() { calls.push("lease"); } },
-      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
-      logger: { info() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
-    });
-
-    await vi.advanceTimersByTimeAsync(70);
-    await expect(cleanup).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["primaryToolGateway"] });
-    expect(calls).toEqual([]);
-  });
-
   it("waits for async components and closes the store last", async () => {
     const calls: string[] = [];
     let releaseProjector!: () => void;
