@@ -1,7 +1,7 @@
 import type { BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore } from "../domain/ports/binding.js";
 import type { CardContextProjectionStore } from "../domain/ports/card-context.js";
 import type { HealthStore, LeaseStore } from "../domain/ports/health.js";
-import type { InstanceStore } from "../domain/ports/instance.js";
+import type { InstanceLifecycleStore, InstanceStore, InstanceTurnStore } from "../domain/ports/instance.js";
 import type { OutboundIntentStore, OutboxStore } from "../domain/ports/outbox.js";
 import type { PaneCloseStore, PaneControlStore } from "../domain/ports/pane-operations.js";
 import type { PromptAcceptanceStore, PromptRunStore } from "../domain/ports/prompt.js";
@@ -29,6 +29,8 @@ export interface SqliteStoreBundle {
   readonly lease: LeaseStore;
   readonly health: HealthStore;
   readonly instance: InstanceStore;
+  readonly instanceLifecycle: InstanceLifecycleStore;
+  readonly instanceTurns: InstanceTurnStore;
   readonly turnControl: TurnControlStore & Pick<InstanceStore, "getBinding" | "getActiveOrdinaryPrompt" | "getAgentInstance" | "getActiveInstanceTurn" | "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "countPendingInstanceTurns"> & Pick<PromptAcceptanceStore, "acceptPrompt" | "countPendingPrompts">;
   readonly promptAcceptance: PromptAcceptanceStore;
   readonly promptRun: PromptRunStore;
@@ -66,7 +68,7 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
   const store = new SqliteStoreKernel(path);
   const modules = store.capabilityModules();
   return {
-    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, turnControl: store,
+    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, instanceLifecycle: store, instanceTurns: store, turnControl: store,
     promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
     answerPages: store, workerTurnCards: store, mainCards: store, projection: store,
     queueFeedback: store, cardContext: modules.cardContext, bindingProvisioning: store,

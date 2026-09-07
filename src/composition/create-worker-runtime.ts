@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
+import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
 import { InstanceControlWorkflow } from "../coordinator/instance-control-workflow.js";
 import { InstanceMessagingWorkflow } from "../coordinator/instance-messaging-workflow.js";
 import { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
@@ -21,7 +22,7 @@ import type { TraexTranscriptReader } from "../runtime/traex-transcript.js";
 import { RuntimeLink } from "./runtime-link.js";
 import { cardKitWorkerPresentation } from "../cards/cardkit-worker-presentation.js";
 
-export type WorkerRuntimeStores = Pick<SqliteStoreBundle, "instance" | "workerCardDisplay">;
+export type WorkerRuntimeStores = Pick<SqliteStoreBundle, "instance" | "instanceLifecycle" | "instanceTurns" | "workerCardDisplay">;
 
 export function createWorkerRuntime(options: {
   config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;
@@ -30,11 +31,13 @@ export function createWorkerRuntime(options: {
 }) {
   const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork } = options;
   const instanceWorkLink = new RuntimeLink<InstanceWorkScheduler>("instance work scheduler");
-  const workerTurns = new WorkerTurnObserver({ store: stores.instance, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
-  const instanceWork = new InstanceWorkScheduler({ store: stores.instance, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
+  if (stores.instanceLifecycle !== stores.instanceTurns as unknown) throw new Error("Instance lifecycle and turn capabilities must share one SQLite transaction context");
+  const executionStore = stores.instanceLifecycle as InstanceLifecycleStore & InstanceTurnStore;
+  const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
+  const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
   instanceWorkLink.connect(instanceWork);
-  const instanceTurns = new InstanceTurnSupervisor({ store: stores.instance, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
-  const instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store: stores.instance, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeCardContext: () => outboundWork.wake(), logger });
+  const instanceTurns = new InstanceTurnSupervisor({ store: executionStore, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
+  const instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store: executionStore, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeCardContext: () => outboundWork.wake(), logger });
   const instanceMessaging = new InstanceMessagingWorkflow({ store: stores.instance, turnControl, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, presentation: cardKitWorkerPresentation, maxQueueDepth: config.maxQueueDepth });
   const workerCardDisplay = new WorkerCardDisplayWorkflow(stores.workerCardDisplay, () => outboundWork.wake());
   const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("../cli/primary-tools-mcp.js", import.meta.url))], stores.instance, instanceMessaging, logger, [], {}, workerCardDisplay);

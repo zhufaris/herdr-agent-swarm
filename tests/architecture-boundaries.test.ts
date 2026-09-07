@@ -54,6 +54,8 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("inboundDispatch: modules.inboundDispatch");
     expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
     expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");
+    expect(storeBundle).toContain("instanceLifecycle: store");
+    expect(storeBundle).toContain("instanceTurns: store");
     expect(storeBundle).toContain("commandIntents: modules.commandIntents");
     expect(storeBundle).toContain("sessionOperations: modules.sessionOperations");
     expect(storeBundle).toContain("cardContext: modules.cardContext");
@@ -70,6 +72,12 @@ describe("application composition boundaries", () => {
     expect(storeBundle).not.toContain("SqliteBindingStore");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");
+    const worker = readFileSync(new URL("../src/composition/create-worker-runtime.ts", import.meta.url), "utf8");
+    expect(worker).toContain("stores.instanceLifecycle");
+    expect(worker).toContain("stores.instanceTurns");
+    for (const component of ["WorkerTurnObserver", "InstanceWorkScheduler", "InstanceTurnSupervisor", "InstanceRuntimeReconciler"]) {
+      expect(worker).toMatch(new RegExp(`new ${component}\\(\\{[^\\n]*store: executionStore`));
+    }
     expect(readFileSync(new URL("../src/composition/create-outbound-runtime.ts", import.meta.url), "utf8")).toContain("stores.outbox");
     expect(factory).not.toContain("SqliteBindingStore");
     expect(factory).not.toContain("lease.acquire(");
