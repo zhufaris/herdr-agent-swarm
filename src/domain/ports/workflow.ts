@@ -13,15 +13,10 @@ export interface OperationsQueryStore {
 }
 
 export interface InboundRoutingStore {
-  claimNextInboundMessage(): IncomingLarkMessage | null;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   getBinding(id: string): Binding | null;
   isBridgeMessage(messageId: string): boolean;
   listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[];
-  markInboundMessageAccepted(eventId: string): void;
-  recordInboundMessage(message: IncomingLarkMessage): boolean;
-  recoverProcessingInboundMessages(): number;
-  releaseInboundMessage(eventId: string, error: string): void;
 }
 
 /** Durable inbox operations. Claim/release remains owned by the single SQLite

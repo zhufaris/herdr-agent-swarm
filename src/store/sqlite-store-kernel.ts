@@ -437,17 +437,6 @@ export class SqliteStoreKernel implements TurnControlStore {
     };
   }
 
-  recordInboundMessage(message: import("../domain/types.js").IncomingLarkMessage): boolean {
-    return this.inboundProjects.recordInboundMessage(message);
-  }
-
-  claimNextInboundMessage(): import("../domain/types.js").IncomingLarkMessage | null {
-    return this.inboundProjects.claimNextInboundMessage();
-  }
-
-  markInboundMessageAccepted(eventId: string): void { this.inboundProjects.markInboundMessageAccepted(eventId); }
-  releaseInboundMessage(eventId: string, error: string): void { this.inboundProjects.releaseInboundMessage(eventId, error); }
-  recoverProcessingInboundMessages(): number { return this.inboundProjects.recoverProcessingInboundMessages(); }
   isBridgeMessage(messageId: string): boolean { return this.inboundProjects.isBridgeMessage(messageId); }
   recordBridgeMessage(messageId: string): void { this.inboundProjects.recordBridgeMessage(messageId); }
 

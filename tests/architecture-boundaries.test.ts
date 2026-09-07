@@ -52,6 +52,7 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("health: modules.health");
     expect(storeBundle).toContain("retention: modules.retention");
     expect(storeBundle).toContain("inboundDispatch: modules.inboundDispatch");
+    expect(storeBundle).not.toMatch(/inboundDispatch:\s*store/);
     expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
     expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");
     expect(storeBundle).toContain("instanceLifecycle: store");
@@ -61,6 +62,11 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("cardContext: modules.cardContext");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("listPendingCardContextInvalidations");
+    const workflowPorts = readFileSync(new URL("../src/domain/ports/workflow.ts", import.meta.url), "utf8");
+    const routingPort = workflowPorts.slice(workflowPorts.indexOf("export interface InboundRoutingStore"), workflowPorts.indexOf("export interface InboundMessageDispatchStore"));
+    expect(routingPort).not.toMatch(/recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages/);
+    const kernel = readFileSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url), "utf8");
+    expect(kernel).not.toMatch(/^  (?:recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages)\(/m);
     const instancePorts = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
     expect(instancePorts).toContain("export type InstanceLifecycleStore");
     expect(instancePorts).toContain("export type InstanceTurnStore");

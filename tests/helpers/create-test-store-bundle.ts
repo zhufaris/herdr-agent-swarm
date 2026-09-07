@@ -17,7 +17,7 @@ export function createTestStoreBundle(path = ":memory:"): TestStoreBundle {
 function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
   const modules = store.capabilityModules();
   return {
-    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, turnControl: store,
+    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, instanceLifecycle: store, instanceTurns: store, turnControl: store,
     promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
     answerPages: store, workerTurnCards: store, mainCards: store, projection: store,
     queueFeedback: store, cardContext: modules.cardContext, bindingProvisioning: store,

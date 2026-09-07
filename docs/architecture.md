@@ -114,7 +114,7 @@ The production implementation uses the following modules and seams.
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
-| `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced `InstanceStore` transitions and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
+| `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
@@ -125,7 +125,7 @@ The production implementation uses the following modules and seams.
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
 | `LarkOutboxDispatcher` | Durable Lark delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore`; no direct aggregate mutation |
 | `createSqliteStoreBundle` / `SqliteStoreKernel` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production workflows do not construct or receive the broad compatibility facade |
-| `SqliteBindingStore` | Test and migration-fixture compatibility facade | An inheritance-only alias of `SqliteStoreKernel`; it contains no SQL, schema logic, or workflow implementation |
+| `SqliteBindingStore` | Test and migration-fixture compatibility facade | A test-only composition adapter over `SqliteStoreKernel` and named capability modules; it contains no SQL, schema logic, or workflow implementation |
 | `SqliteBindingLifecycleStore` / `SqliteBindingProjectionStore` | Binding lifecycle, reset, cleanup, runtime convergence, and binding-owned projections | Keep lifecycle and projection responsibilities separate while sharing one transaction context |
 | `SqlitePromptStore` / `SqliteWorkerTurnStore` / `SqliteTurnControlStore` | Prompt, Worker-turn, and exact-turn control aggregates | Deep aggregate operations preserve cross-table state, projection, event, invalidation, and outbox transactions |
 | `SqliteInstanceStore` / `SqliteInstanceOperationStore` | Agent instance, workspace lease, conversation target, and instance-operation persistence | Instance identity and generation fences remain inside capability operations |
@@ -182,14 +182,14 @@ workflow transaction.
 The production composition root creates one `SqliteStoreBundle`. The bundle
 constructs one internal `SqliteStoreKernel`, which creates exactly one
 `SqliteContext`, one `DatabaseSync` connection, and every capability module.
-Lifecycle, lease, health, retention, inbound-dispatch, operations-query, and
-Worker-card-display consumers receive concrete capability modules or focused
+Lifecycle, lease, health, retention, inbound-dispatch, operations-query,
+instance-lifecycle, instance-turn, and Worker-card-display consumers receive concrete capability modules or focused
 aggregate adapters directly. The kernel no longer forwards those production
 interfaces. Interfaces that coordinate prompt, binding, projection, and outbox
 changes remain explicit kernel-backed aggregates until their atomic operations
 have one deeper owning module; they must not be mechanically split into table
 repositories. Each workflow receives only
-the domain port it consumes, such as `PromptRunStore`, `InstanceStore`,
+the domain port it consumes, such as `PromptRunStore`, `InstanceLifecycleStore`, `InstanceTurnStore`,
 `OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
 facade type. Legacy tests that inspect migration fixtures may still construct the
 test-only `SqliteBindingStore` from `tests/helpers/sqlite-binding-store.ts`. The
@@ -218,6 +218,11 @@ SQL lives in the capability modules. This
 keeps prompt/card/outbox and Worker
 turn/card/page/event changes atomic even though their implementations live in
 separate files.
+
+Durable inbox insertion, claim, acceptance, release, and interrupted-claim
+recovery belong exclusively to `InboundMessageDispatchStore`. Message routing
+retains only binding/project lookup and bridge-message classification; the
+kernel does not mirror the dispatcher operations as forwarding methods.
 
 Some atomic store operations still accept a renderer callback or an already
 materialized card. These are bounded transition seams for prompt and Worker-turn
