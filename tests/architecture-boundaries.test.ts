@@ -100,6 +100,10 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("commandIntents: modules.commandIntents");
     expect(storeBundle).toContain("sessionOperations: modules.sessionOperations");
     expect(storeBundle).toContain("cardContext: modules.cardContext");
+    for (const capability of ["answerPages", "workerTurnCards", "mainCards", "projection", "queueFeedback"]) {
+      expect(storeBundle).toContain(`${capability}: modules.${capability}`);
+      expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
+    }
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("listPendingCardContextInvalidations");
     const workflowPorts = readFileSync(new URL("../src/domain/ports/workflow.ts", import.meta.url), "utf8");

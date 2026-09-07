@@ -60,6 +60,7 @@ export class SqliteCapabilityGraph {
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
       hasPendingAnswerContinuation: (promptId, pageIndex) => this.outbox.hasPendingAnswerContinuation(promptId, pageIndex),
       getBinding: (id) => this.bindings.getBinding(id),
+      getModelPreference: (bindingId) => this.prompts.getModelPreference(bindingId),
       refreshOutboxLaneHead: (laneKey) => this.outbox.refreshOutboxLaneHead(laneKey)
     });
     this.outbox = new SqliteOutboxStore(this.context, {
@@ -79,6 +80,7 @@ export class SqliteCapabilityGraph {
     });
     this.prompts = new SqlitePromptStore(this.context, this.projections, {
       getBinding: (id) => this.bindings.getBinding(id),
+      listBindings: () => this.bindings.listBindings(),
       persistBindingPatch: (id, patch) => this.bindings.persistBindingPatch(id, patch),
       transitionBinding: (id, transition) => this.bindings.transitionBinding(id, transition),
       loadCardContextInvalidation: (target) => this.cardContexts.loadCardContextInvalidation(target),
@@ -88,7 +90,8 @@ export class SqliteCapabilityGraph {
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.instances.getAgentInstance(id),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
-      invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason)
+      invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason),
+      hasPendingOutboundReplyForWorkerTurn: (turnId) => this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId)
     });
     this.instances = new SqliteInstanceStore(this.context, {
       invalidateWorkerInstanceContexts: (instance, reason) => this.cardContexts.invalidateWorkerInstanceContexts(instance, reason)
@@ -149,6 +152,11 @@ export class SqliteCapabilityGraph {
         getBinding: (id) => this.bindings.getBinding(id)
       }),
       sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.bindings.getBinding(id)),
+      projection: this.projections,
+      mainCards: this.projections,
+      answerPages: this.projections,
+      queueFeedback: this.prompts,
+      workerTurnCards: this.workerTurns,
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox

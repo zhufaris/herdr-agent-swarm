@@ -13,10 +13,15 @@ export interface WorkerTurnStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
   invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void;
+  hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean;
 }
 
 export class SqliteWorkerTurnStore {
   constructor(private readonly context: SqliteContext, private readonly dependencies: WorkerTurnStoreDependencies) {}
+
+  hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean {
+    return this.dependencies.hasPendingOutboundReplyForWorkerTurn(turnId);
+  }
 
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean } {
     const timestamp = now();

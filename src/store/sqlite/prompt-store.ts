@@ -19,6 +19,7 @@ import type { SqliteProjectionStore } from "./projection-store.js";
 
 export interface PromptStoreDependencies {
   getBinding(id: string): Binding | null;
+  listBindings(): Binding[];
   persistBindingPatch(id: string, patch: Partial<Binding>): Binding;
   transitionBinding(id: string, transition: SessionTransition): Binding;
   loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null;
@@ -32,6 +33,8 @@ export class SqlitePromptStore {
     private readonly projections: SqliteProjectionStore,
     private readonly dependencies: PromptStoreDependencies
   ) {}
+
+  listBindings(): Binding[] { return this.dependencies.listBindings(); }
 
   getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
     const rows = this.context.database.prepare(`SELECT p.* FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id JOIN run_cards r ON r.prompt_id = p.id

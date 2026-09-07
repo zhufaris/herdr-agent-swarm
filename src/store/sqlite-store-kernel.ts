@@ -32,13 +32,6 @@ import type { SqlitePaneOperationStore } from "./sqlite/pane-operation-store.js"
 import type { SqliteBindingLifecycleStore } from "./sqlite/binding-store.js";
 import type { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.js";
 import type { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
-import type { SqliteStoreLifecycleAdapter, SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter } from "./sqlite/runtime-stores.js";
-import type { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./sqlite/workflow-stores.js";
-import type { SqliteApprovalStore } from "./sqlite/approval-store.js";
-import type { SqliteLeaseStore } from "./sqlite/lease-store.js";
-import type { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
-import type { SqliteInstanceCapabilityStore } from "./sqlite/instance-capability-store.js";
-import type { SqliteOutboxCapabilityStore } from "./sqlite/outbox-capability-store.js";
 export class SqliteStoreKernel implements TurnControlStore {
   readonly database: DatabaseSync;
   private readonly graph: SqliteCapabilityGraph;
@@ -77,23 +70,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   /** Concrete capabilities that already satisfy a complete consumer port. */
-  capabilityModules(): {
-    lifecycle: SqliteStoreLifecycleAdapter;
-    approvals: SqliteApprovalStore;
-    cardContext: SqliteCardContextStore;
-    lease: SqliteLeaseStore;
-    health: SqliteHealthStoreAdapter;
-    integrity: SqliteOperationsStore;
-    inboundDispatch: SqliteInboundProjectStore;
-    operationsQuery: SqliteBindingLifecycleStore;
-    retention: SqliteRetentionStoreAdapter;
-    workerCardDisplay: SqliteWorkerCardDisplayStore;
-    commandIntents: SqliteCommandIntentStoreAdapter;
-    sessionOperations: SqliteSessionOperationStoreAdapter;
-    instance: SqliteInstanceCapabilityStore;
-    outbox: SqliteOutboxCapabilityStore;
-    outboxAdmin: SqliteOutboxStore;
-  } {
+  capabilityModules() {
     return this.graph.capabilityModules();
   }
 

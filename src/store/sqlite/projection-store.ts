@@ -3,6 +3,7 @@ import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, MainCardReservationOutcome, OutboundReplyState } from "../../domain/types.js";
 import type { MainCardLiveStatus, RunCardView } from "../../domain/run-card-view.js";
 import { initialTopicView, type TopicViewState } from "../../domain/topic-view.js";
+import type { ModelPreference } from "../../domain/model-selection.js";
 import { mapAnswerPage, type AnswerPageRow } from "../sqlite-records.js";
 import { outboundLaneKey } from "../outbox-lanes.js";
 import type { SqliteContext } from "./context.js";
@@ -15,9 +16,13 @@ export class SqliteProjectionStore {
       enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
       hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean;
       getBinding(id: string): Binding | null;
+      getModelPreference(bindingId: string): ModelPreference | null;
       refreshOutboxLaneHead(laneKey: string): void;
     }
   ) {}
+
+  getBinding(id: string): Binding | null { return this.dependencies.getBinding(id); }
+  getModelPreference(bindingId: string): ModelPreference | null { return this.dependencies.getModelPreference(bindingId); }
 
   saveTopicView(view: TopicViewState): void {
     const current = this.loadTopicView(view.bindingId);
