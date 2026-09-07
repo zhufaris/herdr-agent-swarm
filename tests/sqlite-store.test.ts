@@ -3945,7 +3945,7 @@ describe("SQLite store", () => {
         prompt: { id: promptId, bindingId, larkMessageId: `message-${bindingId}`, actorOpenId: "u1", body: `private-${bindingId}` },
         view, rootMessageId: bindingId, answerCard: {}
       });
-      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached', was_detached = ? WHERE id = ?").run(bindingId === "state-archived" ? 0 : 1, promptId);
+      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached', was_detached = ?, transcript_turn_id = ?, transcript_turn_started_at = ? WHERE id = ?").run(bindingId === "state-archived" ? 0 : 1, `turn-${bindingId}`, "2026-08-29T01:00:01.000Z", promptId);
       store.database.prepare("UPDATE run_cards SET phase = 'running', started_at = '2026-08-29T01:00:01.000Z' WHERE prompt_id = ?").run(promptId);
     }
 
@@ -3977,6 +3977,24 @@ describe("SQLite store", () => {
     });
     expect(terminalCases.map(([bindingId]) => store.loadRunCard(`prompt-${bindingId}`)?.viewVersion)).toEqual(versions);
     expect(JSON.stringify(result)).not.toMatch(/private-|message-/);
+  });
+
+  it("schedules detached observation only for prompts with an exact transcript identity", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "active", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("active", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    for (const promptId of ["identityless", "identified"]) {
+      store.enqueuePrompt({ id: promptId, bindingId: "active", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached', was_detached = 1 WHERE id = ?").run(promptId);
+    }
+    store.database.prepare("UPDATE prompt_jobs SET transcript_turn_id = 'turn-1', transcript_turn_started_at = '2026-08-29T01:00:01.000Z' WHERE id = 'identified'").run();
+
+    expect(store.scanDurablePromptWork()).toEqual({
+      cancelled: 0,
+      failedDetached: 0,
+      hints: [{ kind: "detached-observer-ready", bindingId: "active", promptId: "identified" }]
+    });
+    expect(store.getPrompt("identityless")).toMatchObject({ state: "running", observationState: "detached", transcriptTurnId: null });
   });
 
   it("rolls back detached Run Card convergence when the prompt transition fails", () => {

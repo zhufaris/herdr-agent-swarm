@@ -481,9 +481,8 @@ describe("pane/thread lifecycle integration", () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(transcriptOpen).not.toHaveBeenCalled();
     expect(store.getPrompt("p2")).toMatchObject({ state: "queued", observationState: "not_started" });
-    const diagnostics = warnings.filter((record) => record.event === "detached-turn-identity-missing");
-    expect(diagnostics).toHaveLength(1);
-    expect(JSON.stringify(diagnostics)).not.toMatch(/already sent|forbidden|Live detached|Recovered answer/i);
+    expect(warnings.filter((record) => record.event === "detached-turn-identity-missing")).toEqual([]);
+    expect(JSON.stringify(warnings)).not.toMatch(/already sent|forbidden|Live detached|Recovered answer/i);
 
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });

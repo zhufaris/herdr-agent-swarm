@@ -69,8 +69,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private unsubscribe: (() => void) | null = null;
   private started = false;
   private stopping = false;
-  private readonly legacyDetachedWithoutIdentity = new Set<string>();
-
   constructor(private readonly options: PromptRunWorkflowOptions) {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
     const intervalMs = options.safetyScanIntervalMs ?? 5_000;
@@ -78,7 +76,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       store: options.store, scheduler: options.scheduler, logger: options.logger, intervalMs,
       staleClaimGraceMs: options.staleClaimGraceMs ?? Math.max(10_000, intervalMs * 2),
       isBindingOwned: (bindingId) => this.registry.hasWorker(bindingId) || this.registry.hasTurn(bindingId),
-      pruneDetachedTracking: () => this.pruneDetachedTracking()
+      maintainObserverCaches: () => this.transcriptObserver.prune()
     });
     this.transcriptObserver = new TranscriptObserver({
       store: options.store, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
@@ -187,7 +185,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   async stop(context?: ShutdownContext): Promise<void> {
     this.stopping = true;
-    this.legacyDetachedWithoutIdentity.clear();
     this.transcriptObserver.clear();
     this.safetyScanner.stop();
     this.unsubscribe?.();
@@ -212,14 +209,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       abortObservers();
       await settled;
     }
-  }
-
-  private pruneDetachedTracking(): void {
-    for (const promptId of this.legacyDetachedWithoutIdentity) {
-      const prompt = this.options.store.getPrompt(promptId);
-      if (!prompt || prompt.state !== "running" || prompt.observationState !== "detached") this.legacyDetachedWithoutIdentity.delete(promptId);
-    }
-    this.transcriptObserver.prune();
   }
 
   private scheduleWorker(bindingId: string): void {
@@ -251,7 +240,6 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private scheduleDetachedObserver(prompt: PromptJob): void {
-    if (this.legacyDetachedWithoutIdentity.has(prompt.id)) return;
     if (this.registry.hasWorker(prompt.bindingId)) return;
     const worker = this.observeDetachedTurn(prompt).finally(() => {
       this.registry.releaseWorker(prompt.bindingId, worker);
@@ -266,13 +254,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private async observeDetachedTurn(prompt: PromptJob): Promise<void> {
     const currentPrompt = this.options.store.getPrompt(prompt.id);
     if (!currentPrompt || currentPrompt.state !== "running" || currentPrompt.observationState !== "detached") return;
-    if (!currentPrompt.transcriptTurnId || !currentPrompt.transcriptTurnStartedAt) {
-      if (!this.legacyDetachedWithoutIdentity.has(currentPrompt.id)) {
-        this.legacyDetachedWithoutIdentity.add(currentPrompt.id);
-        this.options.logger.warn({ event: "detached-turn-identity-missing", bindingId: currentPrompt.bindingId, promptId: currentPrompt.id, outcome: "uncertain" }, "detached prompt has no exact transcript turn identity; observation remains uncertain");
-      }
-      return;
-    }
+    if (!currentPrompt.transcriptTurnId || !currentPrompt.transcriptTurnStartedAt) return;
     prompt = currentPrompt;
     const binding = this.options.store.getBinding(prompt.bindingId);
     if (!binding?.paneId || binding.state !== "active") return;

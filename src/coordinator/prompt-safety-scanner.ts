@@ -16,7 +16,7 @@ interface PromptSafetyScannerOptions {
   intervalMs: number;
   staleClaimGraceMs: number;
   isBindingOwned(bindingId: string): boolean;
-  pruneDetachedTracking(): void;
+  maintainObserverCaches(): void;
 }
 
 export class PromptSafetyScanner {
@@ -59,7 +59,7 @@ export class PromptSafetyScanner {
         }, "requeued an unowned prompt claim with no durable dispatch evidence");
       }
       const result = this.options.store.scanDurablePromptWork();
-      this.options.pruneDetachedTracking();
+      this.options.maintainObserverCaches();
       const decision = decidePromptSafetyScan(result, this.consecutiveIdleScans, this.options.intervalMs, recoveredClaims);
       for (const hint of result.hints) this.options.scheduler.wake(hint);
       for (const bindingId of recoveredBindings) this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
