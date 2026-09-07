@@ -17,7 +17,7 @@ export function createTestStoreBundle(path = ":memory:"): TestStoreBundle {
 function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
   const modules = store.capabilityModules();
   return {
-    lifecycle: store, lease: modules.lease, health: store, instance: store, turnControl: store,
+    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, turnControl: store,
     promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
     answerPages: store, workerTurnCards: store, mainCards: store, projection: store,
     queueFeedback: store, cardContext: store, bindingProvisioning: store,
@@ -26,6 +26,6 @@ function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
     sessionOperations: store, modelSelection: store, sessionAdministration: store,
     paneRetention: store, commandIntents: store, inboundMessages: store,
-    startupRecovery: store, retention: store, workerCardDisplay: modules.workerCardDisplay
+    startupRecovery: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
   };
 }

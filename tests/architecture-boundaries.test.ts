@@ -42,6 +42,9 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("new SqliteStoreKernel");
     expect(storeBundle).toContain("const modules = store.capabilityModules()");
     expect(storeBundle).toContain("lease: modules.lease");
+    expect(storeBundle).toContain("lifecycle: modules.lifecycle");
+    expect(storeBundle).toContain("health: modules.health");
+    expect(storeBundle).toContain("retention: modules.retention");
     expect(storeBundle).toContain("inboundDispatch: modules.inboundDispatch");
     expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
     expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");

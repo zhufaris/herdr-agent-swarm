@@ -5,7 +5,7 @@ import type { AcceptInstanceTurnWithCardInput, ClassifiedPromptAcceptance, Class
 import type { AcceptPromptInput } from "../domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../domain/ports/workflow.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, IncomingLarkMessage, InstanceLease, MainCardReservationOutcome, OperationalSummary, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, SqliteIntegrityInspection, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptDispatchKind, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
@@ -50,7 +50,7 @@ import { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.
 import { SqliteInstanceOperationStore } from "./sqlite/instance-operation-store.js";
 import { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
 import { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
-import type { WorkerCardDisplayReceipt, WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
+import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./sqlite/runtime-stores.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -65,7 +65,7 @@ const BINDING_COLUMNS: Record<keyof Binding, string> = {
   createdAt: "created_at", updatedAt: "updated_at"
 };
 
-export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplayStore {
+export class SqliteStoreKernel implements TurnControlStore {
   readonly database: DatabaseSync;
   private readonly context: SqliteContext;
   private readonly approvals: SqliteApprovalStore;
@@ -176,15 +176,23 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
 
   /** Concrete capabilities that already satisfy a complete consumer port. */
   capabilityModules(): {
+    lifecycle: SqliteStoreLifecycleAdapter;
     lease: SqliteLeaseStore;
+    health: SqliteHealthStoreAdapter;
+    integrity: SqliteOperationsStore;
     inboundDispatch: SqliteInboundProjectStore;
     operationsQuery: SqliteBindingLifecycleStore;
+    retention: SqliteRetentionStoreAdapter;
     workerCardDisplay: SqliteWorkerCardDisplayStore;
   } {
     return {
+      lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       lease: this.leases,
+      health: new SqliteHealthStoreAdapter(this.operations, this.bindings),
+      integrity: this.operations,
       inboundDispatch: this.inboundProjects,
       operationsQuery: this.bindings,
+      retention: new SqliteRetentionStoreAdapter(this.outbox, this.inboundProjects, this.sessionOperations),
       workerCardDisplay: this.workerCardDisplays
     };
   }
@@ -201,26 +209,6 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
 
   consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch" {
     return this.approvals.consumeApprovalGrant(input);
-  }
-
-  activateWriteFence(ownerId: string, fencingToken: number): void {
-    this.leases.activateWriteFence(ownerId, fencingToken);
-  }
-
-  deactivateWriteFence(): void {
-    this.leases.deactivateWriteFence();
-  }
-
-  acquireInstanceLease(ownerId: string, currentTime: string, expiresAt: string): InstanceLease | null {
-    return this.leases.acquireInstanceLease(ownerId, currentTime, expiresAt);
-  }
-
-  renewInstanceLease(ownerId: string, fencingToken: number, currentTime: string, expiresAt: string): InstanceLease | null {
-    return this.leases.renewInstanceLease(ownerId, fencingToken, currentTime, expiresAt);
-  }
-
-  releaseInstanceLease(ownerId: string, fencingToken: number): boolean {
-    return this.leases.releaseInstanceLease(ownerId, fencingToken);
   }
 
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
@@ -245,10 +233,6 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
 
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
     return this.cardContexts.reserveWorkerMainCard(view, rootMessageId, card);
-  }
-
-  reserveWorkerCardDisplay(input: Parameters<WorkerCardDisplayStore["reserveWorkerCardDisplay"]>[0]): WorkerCardDisplayReceipt {
-    return this.workerCardDisplays.reserveWorkerCardDisplay(input);
   }
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
@@ -466,33 +450,19 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
     };
   }
 
-  recordInboundMessage(message: IncomingLarkMessage): boolean {
+  recordInboundMessage(message: import("../domain/types.js").IncomingLarkMessage): boolean {
     return this.inboundProjects.recordInboundMessage(message);
   }
 
-  claimNextInboundMessage(): IncomingLarkMessage | null {
+  claimNextInboundMessage(): import("../domain/types.js").IncomingLarkMessage | null {
     return this.inboundProjects.claimNextInboundMessage();
   }
 
-  markInboundMessageAccepted(eventId: string): void {
-    this.inboundProjects.markInboundMessageAccepted(eventId);
-  }
-
-  releaseInboundMessage(eventId: string, error: string): void {
-    this.inboundProjects.releaseInboundMessage(eventId, error);
-  }
-
-  recoverProcessingInboundMessages(): number {
-    return this.inboundProjects.recoverProcessingInboundMessages();
-  }
-
-  isBridgeMessage(messageId: string): boolean {
-    return this.inboundProjects.isBridgeMessage(messageId);
-  }
-
-  recordBridgeMessage(messageId: string): void {
-    this.inboundProjects.recordBridgeMessage(messageId);
-  }
+  markInboundMessageAccepted(eventId: string): void { this.inboundProjects.markInboundMessageAccepted(eventId); }
+  releaseInboundMessage(eventId: string, error: string): void { this.inboundProjects.releaseInboundMessage(eventId, error); }
+  recoverProcessingInboundMessages(): number { return this.inboundProjects.recoverProcessingInboundMessages(); }
+  isBridgeMessage(messageId: string): boolean { return this.inboundProjects.isBridgeMessage(messageId); }
+  recordBridgeMessage(messageId: string): void { this.inboundProjects.recordBridgeMessage(messageId); }
 
   createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding {
     return this.bindings.createPendingBinding(input);
@@ -541,8 +511,6 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
   recoverExecutingCommandIntents(recoveredAt: string): number {
     return this.commandIntents.recoverExecuting(recoveredAt);
   }
-
-  pruneTerminalSessionOperations(cutoff: string, limit: number): number { return this.sessionOperations.pruneTerminal(cutoff, limit); }
 
   convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
     return this.prompts.convertFailedSteeringToTurn(input);
@@ -707,9 +675,7 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
     return this.bindings.getBinding(id);
   }
 
-  listBindings(): Binding[] {
-    return this.bindings.listBindings();
-  }
+  listBindings(): Binding[] { return this.bindings.listBindings(); }
 
   listBindingsByState(state: Binding["state"]): Binding[] {
     return this.bindings.listBindingsByState(state);
@@ -979,17 +945,7 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
     return this.outbox.dismissDeadLetter(id, chatId, actorOpenId);
   }
 
-  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number {
-    return this.outbox.pruneDeliveredOutboundReplies(cutoff, limit);
-  }
-
-  pruneAcceptedInboundMessages(cutoff: string, limit: number): number {
-    return this.inboundProjects.pruneAcceptedInboundMessages(cutoff, limit);
-  }
-
-  inspectIntegrity(limit: number): SqliteIntegrityInspection { return this.operations.inspectIntegrity(limit); }
-
-  getOperationalSummary(): OperationalSummary { return this.operations.getOperationalSummary(); }
+  getOperationalSummary(): import("../domain/types.js").OperationalSummary { return this.operations.getOperationalSummary(); }
 
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void { this.operations.audit(input); }
 
