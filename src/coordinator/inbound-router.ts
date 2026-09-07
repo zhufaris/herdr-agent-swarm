@@ -4,7 +4,6 @@ import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { CardActionRouterPort } from "./card-action-router.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
 import type { InboundMessageDispatcherPort } from "./inbound-message-dispatcher.js";
-import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
@@ -21,7 +20,7 @@ export interface InboundRouterPort {
 }
 
 export interface InboundRouterOptions {
-  lark: Pick<LarkPort, "stop">; modelSelection: ModelSelectionWorkflowPort; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
+  lark: Pick<LarkPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {
@@ -39,7 +38,7 @@ export class InboundRouter implements InboundRouterPort {
   async handleCardAction(action: IncomingLarkCardAction): Promise<import("../domain/types.js").LarkCardActionResult | void> { return this.options.cardActionRouter.handle(action); }
 
   async stop(context?: ShutdownContext): Promise<void> {
-    await this.options.startupRecovery.stop(); this.options.modelSelection.shutdown();
+    await this.options.startupRecovery.stop();
     await Promise.allSettled([this.options.lark.stop(), this.options.inboundDispatcher.stop(), this.options.cardActionRouter.stop()]);
     await this.options.swarmCommands.stop();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop()]);

@@ -77,6 +77,6 @@ export function createApplicationRuntime(options: {
   const messageRouting = new InboundMessageRoutingWorkflow({ config, store: stores.inboundMessages, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery, instanceInteractions, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
   const startupRecovery = new StartupRecoveryWorkflow({ config, store: stores.startupRecovery, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
-  const coordinator = new InboundRouter({ lark, modelSelection, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
+  const coordinator = new InboundRouter({ lark, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
   return { coordinator, paneRetention, sessionOperations, reconciler, retiredPaneCleanup, herdrEventRouter };
 }

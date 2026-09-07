@@ -9,11 +9,6 @@ const TASK_CONTINUATION = /^\s{2,}\S/;
 const META = /\([^)]*(?:tokens?|esc to)[^)]*\)/i;
 const STATES = { "✔": "done", "✓": "done", "■": "active", "◻": "pending", "□": "pending", "✕": "failed", "✖": "failed", "✘": "failed", "×": "failed" } as const;
 
-export function findNativeTaskFrame(source: string): NativeTaskFrame | null {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
-  return findNativeTaskFrameLines(lines);
-}
-
 function findNativeTaskFrameLines(lines: readonly string[]): NativeTaskFrame | null {
   for (let taskCount = lines.length - 1; taskCount >= 0; taskCount -= 1) {
     if (!TASK_COUNT.test(lines[taskCount]!)) continue;

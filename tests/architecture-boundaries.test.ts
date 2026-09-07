@@ -319,6 +319,8 @@ describe("application composition boundaries", () => {
     expect(commands).toContain("sessionAdministration.archive");
     expect(commands).toContain("async stop(): Promise<void>");
     expect(router).toContain("swarmCommands.stop()");
+    expect(router).not.toContain("modelSelection");
+    expect(readFileSync(new URL("../src/coordinator/model-selection-workflow.ts", import.meta.url), "utf8")).not.toContain("shutdown(): void");
   });
 
   it("keeps lifecycle publishers and subscribers behind their ports", () => {

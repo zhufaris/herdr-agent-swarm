@@ -17,7 +17,6 @@ const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模�
 
 export interface ModelSelectionWorkflowPort {
   recover(): Promise<void>;
-  shutdown(): void;
   runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean>;
   selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void>;
   selectModelMode(action: IncomingLarkCardAction, bindingId: string, operationId: string, mode: string): Promise<void>;
@@ -30,8 +29,6 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   constructor(private readonly options: Options) {
     this.projectRoutes = new ProjectRouteIndex(options.config.projects);
   }
-
-  shutdown(): void {}
 
   async recover(): Promise<void> {
     for (const operation of this.options.store.listRecoverablePaneControlOperations()) {
