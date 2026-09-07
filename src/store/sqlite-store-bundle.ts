@@ -58,7 +58,7 @@ export interface SqliteStoreBundle {
   readonly sessionAdministration: SessionAdministrationStore;
   readonly paneRetention: PaneRetentionStore;
   readonly commandIntents: CommandIntentStore & Pick<DeliveryRecoveryStore, "audit" | "getBinding">;
-  readonly inboundMessages: InboundRoutingStore & PromptAcceptanceStore & InstanceStore;
+  readonly inboundMessages: InboundRoutingStore & PromptAcceptanceStore;
   readonly startupRecovery: InboundRoutingStore & PromptAcceptanceStore;
   readonly retention: SqliteRetentionStore;
   readonly workerCardDisplay: WorkerCardDisplayStore;
@@ -68,7 +68,7 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
   const store = new SqliteStoreKernel(path);
   const modules = store.capabilityModules();
   return {
-    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, instanceLifecycle: store, instanceTurns: store, turnControl: store,
+    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: store,
     promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
     answerPages: store, workerTurnCards: store, mainCards: store, projection: store,
     queueFeedback: store, cardContext: modules.cardContext, bindingProvisioning: store,

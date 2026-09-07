@@ -10,9 +10,9 @@ import type { BridgeEvent } from "../domain/events.js";
 import type { SessionTransition } from "../domain/pane-thread-lifecycle.js";
 import type { PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import type { ModelPreference } from "../domain/model-selection.js";
-import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
+import type { AgentInstance } from "../domain/agent-instance.js";
 import type { ControlActor } from "../domain/commands.js";
-import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
+import type { InstanceEvent, InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../domain/worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
@@ -37,6 +37,7 @@ import { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.
 import { SqliteInstanceOperationStore } from "./sqlite/instance-operation-store.js";
 import { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
 import { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
+import { SqliteInstanceCapabilityStore } from "./sqlite/instance-capability-store.js";
 import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./sqlite/runtime-stores.js";
 import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./sqlite/workflow-stores.js";
 export class SqliteStoreKernel implements TurnControlStore {
@@ -70,7 +71,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.bindings = new SqliteBindingLifecycleStore(this.context, (bindingId, reason) => this.cardContexts.invalidateBindingWorkerContexts(bindingId, reason));
     this.operations = new SqliteOperationsStore(this.context);
     this.commandIntents = new SqliteCommandIntentStore(this.context);
-    this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.getBinding(id));
+    this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.bindings.getBinding(id));
     this.projections = new SqliteProjectionStore(this.context, {
       enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
       hasPendingAnswerContinuation: (promptId, pageIndex) => this.hasPendingAnswerContinuation(promptId, pageIndex),
@@ -161,7 +162,9 @@ export class SqliteStoreKernel implements TurnControlStore {
     workerCardDisplay: SqliteWorkerCardDisplayStore;
     commandIntents: SqliteCommandIntentStoreAdapter;
     sessionOperations: SqliteSessionOperationStoreAdapter;
+    instance: SqliteInstanceCapabilityStore;
   } {
+    const instance = new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations);
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       approvals: this.approvals,
@@ -177,19 +180,12 @@ export class SqliteStoreKernel implements TurnControlStore {
         audit: (input) => this.operations.audit(input),
         getBinding: (id) => this.bindings.getBinding(id)
       }),
-      sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.getBinding(id))
+      sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.getBinding(id)),
+      instance
     };
   }
 
   close(): void { this.context.close(); }
-
-  createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
-    return this.instances.createAgentInstance(input);
-  }
-
-  createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } | { outcome: "duplicate-name" } {
-    return this.instances.createWorkerAgentInstance(input, maxWorkers);
-  }
 
   getAgentInstance(id: string): AgentInstance | null {
     return this.instances.getAgentInstance(id);
@@ -227,82 +223,6 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.cardContexts.loadPrimaryWorkerActivity(promptId, bindingGeneration);
   }
 
-  findAgentInstanceByPane(paneId: string): AgentInstance | null {
-    return this.instances.findAgentInstanceByPane(paneId);
-  }
-
-  listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[] {
-    return this.instances.listWorkerInstancesByParent(input);
-  }
-
-  listAgentInstances(projectId: string): AgentInstance[] {
-    return this.instances.listAgentInstances(projectId);
-  }
-
-  setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance {
-    return this.instances.setPrimaryAgentInstance(projectId, instanceId);
-  }
-
-  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null {
-    return this.instances.attachAgentInstanceRuntime(input);
-  }
-
-  checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null {
-    return this.instances.checkpointAgentInstance(input);
-  }
-
-  updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null {
-    return this.instances.updateAgentInstanceLifecycle(input);
-  }
-
-  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null {
-    return this.instances.updateAgentInstanceObservation(input);
-  }
-
-  reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
-    return this.instances.reserveAgentInstanceStop(instanceId, expectedGeneration);
-  }
-
-  finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null {
-    return this.instances.finishAgentInstanceStop(instanceId, expectedGeneration);
-  }
-
-  rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null {
-    return this.instances.rollbackAgentInstanceStop(instanceId, expectedGeneration, error);
-  }
-
-  detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null {
-    return this.instances.detachAgentInstanceRuntime(input);
-  }
-
-  terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null {
-    return this.instances.terminateWorkerSession(input);
-  }
-
-  getWorkspaceLease(id: string): WorkspaceLease | null {
-    return this.instances.getWorkspaceLease(id);
-  }
-
-  updateWorkspaceLease(input: { id: string; expectedGeneration: number; state: WorkspaceLeaseState; cwd?: string; branch?: string | null; baseCommit?: string }): WorkspaceLease | null {
-    return this.instances.updateWorkspaceLease(input);
-  }
-
-  createInstanceRemovalPlan(plan: InstanceRemovalPlan): InstanceRemovalPlan {
-    return this.instances.createInstanceRemovalPlan(plan);
-  }
-
-  getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null {
-    return this.instances.getInstanceRemovalPlan(id);
-  }
-
-  consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null {
-    return this.instances.consumeInstanceRemovalPlan(input);
-  }
-
-  removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean {
-    return this.instances.removeAgentInstance(input);
-  }
-
   acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean } { return this.workerTurns.acceptInstanceTurn(input); }
   acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean } { return this.workerTurns.acceptInstanceTurnWithCard(input); }
   getInstanceTurn(id: string): InstanceTurn | null { return this.workerTurns.getInstanceTurn(id); }
@@ -321,12 +241,6 @@ export class SqliteStoreKernel implements TurnControlStore {
   listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } { return this.workerTurns.listInstanceTurns(instanceId, options); }
   listRecentInstanceTurnSummaries(instanceId: string, requestedLimit = 5): InstanceTurnSummary[] { return this.workerTurns.listRecentInstanceTurnSummaries(instanceId, requestedLimit); }
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null { return this.workerTurns.getActiveInstanceTurn(instanceId, expectedGeneration); }
-  setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
-    return this.bindings.setPrimaryToolCapability(input);
-  }
-  verifyBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
-    return this.bindings.verifyPrimaryToolCapability(input);
-  }
   hasBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean {
     return this.bindings.hasPrimaryToolCapability(bindingId, expectedGeneration);
   }
@@ -350,15 +264,6 @@ export class SqliteStoreKernel implements TurnControlStore {
   completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null { return this.workerTurns.completeInstanceTurn(input); }
   listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] { return this.workerTurns.listInstanceEvents(instanceId, afterId); }
   countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number { return this.workerTurns.countPendingInstanceTurns(instanceId, expectedGeneration); }
-  acceptInstanceOperation(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceOperation["kind"]; payload: string | null }): { operation: InstanceOperation; inserted: boolean } {
-    return this.instanceOperations.acceptInstanceOperation(input);
-  }
-  claimInstanceOperation(id: string, expectedGeneration: number): InstanceOperation | null {
-    return this.instanceOperations.claimInstanceOperation(id, expectedGeneration);
-  }
-  updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null {
-    return this.instanceOperations.updateInstanceOperation(input);
-  }
   acceptTurnControlOperation(input: AcceptTurnControlOperationInput): { operation: TurnControlOperation; inserted: boolean } {
     return this.turnControls.accept(input);
   }
@@ -389,26 +294,6 @@ export class SqliteStoreKernel implements TurnControlStore {
   recoverTurnControlOperations(renderResult?: (operation: TurnControlOperation) => object): { accepted: TurnControlOperation[]; uncertain: TurnControlOperation[] } {
     return this.turnControls.recover(renderResult);
   }
-  getConversationTarget(chatId: string): { projectId: string; target: import("../domain/agent-instance.js").InstanceTarget } | null {
-    return this.instanceOperations.getConversationTarget(chatId);
-  }
-  setConversationTarget(input: { chatId: string; projectId: string; target: import("../domain/agent-instance.js").InstanceTarget }): void {
-    this.instanceOperations.setConversationTarget(input);
-  }
-  projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null {
-    const binding = this.getBinding(bindingId);
-    if (!binding?.projectId) return null;
-    return {
-      id: `legacy:${binding.id}`, projectId: binding.projectId, name: binding.title, role: "worker", agentKind: "traex", model: null, sourcePrimaryPaneLabel: null,
-      parent: null, workerSessionLifecycle: "legacy", workerSessionGeneration: 1,
-      desiredState: binding.state === "archived" ? "stopped" : "running",
-      observedState: binding.state === "failed" ? "failed" : binding.state === "archived" ? "stopped" : binding.lastAgentState === "done" ? "idle" : binding.lastAgentState === "unknown" ? "detached" : binding.lastAgentState,
-      workspaceLeaseId: `legacy:${binding.id}:workspace`, generation: binding.generation,
-      runtimeRef: binding.paneId ? { herdrWorkspaceId: binding.workspaceId, paneId: binding.paneId, nativeSessionId: binding.traexSessionId, generation: binding.generation } : null,
-      pendingRuntimeRef: null, provisioningCheckpoint: "verified", lastError: null
-    };
-  }
-
   isBridgeMessage(messageId: string): boolean { return this.inboundProjects.isBridgeMessage(messageId); }
   recordBridgeMessage(messageId: string): void { this.inboundProjects.recordBridgeMessage(messageId); }
 

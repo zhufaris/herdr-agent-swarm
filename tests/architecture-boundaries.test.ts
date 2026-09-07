@@ -63,8 +63,10 @@ describe("application composition boundaries", () => {
     expect(storeBundle).not.toMatch(/inboundDispatch:\s*store/);
     expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
     expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");
-    expect(storeBundle).toContain("instanceLifecycle: store");
-    expect(storeBundle).toContain("instanceTurns: store");
+    expect(storeBundle).toContain("instance: modules.instance");
+    expect(storeBundle).toContain("instanceLifecycle: modules.instance");
+    expect(storeBundle).toContain("instanceTurns: modules.instance");
+    expect(storeBundle).not.toMatch(/instance(?:Lifecycle|Turns)?:\s*store/);
     expect(storeBundle).toContain("commandIntents: modules.commandIntents");
     expect(storeBundle).toContain("sessionOperations: modules.sessionOperations");
     expect(storeBundle).toContain("cardContext: modules.cardContext");
@@ -75,6 +77,7 @@ describe("application composition boundaries", () => {
     expect(routingPort).not.toMatch(/recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages/);
     const kernel = readFileSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url), "utf8");
     expect(kernel).not.toMatch(/^  (?:recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages)\(/m);
+    expect(kernel).not.toMatch(/^  (?:createAgentInstance|createWorkerAgentInstance|attachAgentInstanceRuntime|updateAgentInstanceLifecycle|acceptInstanceOperation|projectLegacyBindingAsAgentInstance)\(/m);
     const instancePorts = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
     expect(instancePorts).toContain("export type InstanceLifecycleStore");
     expect(instancePorts).toContain("export type InstanceTurnStore");

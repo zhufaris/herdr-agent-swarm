@@ -4,7 +4,6 @@ import type { BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
-import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
@@ -27,7 +26,7 @@ export interface InboundMessageRoutingWorkflowPort {
   enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void>;
 }
 
-type Store = InboundRoutingStore & PromptAcceptanceStore & InstanceStore;
+type Store = InboundRoutingStore & PromptAcceptanceStore;
 interface Options {
   config: BridgeConfig; store: Store; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;

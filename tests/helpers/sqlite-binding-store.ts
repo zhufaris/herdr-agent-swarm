@@ -25,6 +25,7 @@ export const SqliteBindingStore: StoreConstructor = class {
     const kernel = new SqliteStoreKernel(path);
     const modules = kernel.capabilityModules();
     return Object.assign(kernel, {
+      ...bindMethods(modules.instance, ["createAgentInstance", "createWorkerAgentInstance", "findAgentInstanceByPane", "listWorkerInstancesByParent", "listAgentInstances", "setPrimaryAgentInstance", "attachAgentInstanceRuntime", "checkpointAgentInstance", "updateAgentInstanceLifecycle", "updateAgentInstanceObservation", "reserveAgentInstanceStop", "finishAgentInstanceStop", "rollbackAgentInstanceStop", "detachAgentInstanceRuntime", "terminateWorkerSession", "getWorkspaceLease", "updateWorkspaceLease", "createInstanceRemovalPlan", "getInstanceRemovalPlan", "consumeInstanceRemovalPlan", "removeAgentInstance", "setBindingPrimaryToolCapability", "verifyBindingPrimaryToolCapability", "hasBindingPrimaryToolCapability", "revokeBindingPrimaryToolCapability", "acceptInstanceOperation", "claimInstanceOperation", "updateInstanceOperation", "getConversationTarget", "setConversationTarget", "projectLegacyBindingAsAgentInstance"]),
       activateWriteFence: modules.lifecycle.activateWriteFence.bind(modules.lifecycle),
       deactivateWriteFence: modules.lifecycle.deactivateWriteFence.bind(modules.lifecycle),
       acquireInstanceLease: modules.lease.acquireInstanceLease.bind(modules.lease),
