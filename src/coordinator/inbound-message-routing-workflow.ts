@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { projectSpaceName, type BridgeConfig } from "../config.js";
+import type { BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
@@ -21,6 +21,7 @@ import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-wor
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
+import { ProjectRouteIndex } from "./project-route-index.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -34,12 +35,10 @@ interface Options {
 }
 
 export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkflowPort {
-  private readonly projectsById: Map<string, BridgeConfig["projects"][number]>;
-  private readonly uniqueProjectByWorkspace: Map<string, BridgeConfig["projects"][number] | null>;
+  private readonly projectRoutes: ProjectRouteIndex;
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
-    this.uniqueProjectByWorkspace = uniqueProjectsByWorkspace(options.config.projects);
+    this.projectRoutes = new ProjectRouteIndex(options.config.projects);
   }
 
   async enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void> {
@@ -92,11 +91,10 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     return true;
   }
 
-  private spaceNameFor(binding: Binding): string { const project = binding.projectId ? this.projectsById.get(binding.projectId) : this.uniqueProjectByWorkspace.get(binding.workspaceId); return project ? projectSpaceName(project) : "legacy/unresolved"; }
+  private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
 }
 
-function uniqueProjectsByWorkspace(projects: readonly BridgeConfig["projects"][number][]): Map<string, BridgeConfig["projects"][number] | null> { const result = new Map<string, BridgeConfig["projects"][number] | null>(); for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project); return result; }
 function permanentInstanceCommandRejection(error: unknown): string | null {
   const message = error instanceof Error ? error.message : String(error);
   return [

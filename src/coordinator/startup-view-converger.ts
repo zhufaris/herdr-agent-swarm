@@ -1,4 +1,4 @@
-import { projectSpaceName, type BridgeConfig } from "../config.js";
+import type { BridgeConfig } from "../config.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
@@ -13,14 +13,14 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { Logger } from "pino";
 import { safeLogError } from "../runtime/safe-error.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import { ProjectRouteIndex } from "./project-route-index.js";
 
 const WORKER_TASK_CARD_RENDERER_REVISION = "explicit-continuation-v1";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 
 export class StartupViewConverger implements StartupViewConvergerPort {
-  private readonly projectsById = new Map<string, BridgeConfig["projects"][number]>();
-  private readonly uniqueProjectsByWorkspace = new Map<string, BridgeConfig["projects"][number] | null>();
+  private readonly projectRoutes: ProjectRouteIndex;
   private readonly pageWorkflow: AnswerPageWorkflowPort;
   private readonly mainCardWorkflow: MainCardWorkflowPort;
 
@@ -36,11 +36,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   ) {
     this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake(), presentation);
     this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake(), presentation);
-    for (const project of config.projects) {
-      this.projectsById.set(project.id, project);
-      const existing = this.uniqueProjectsByWorkspace.get(project.workspaceId);
-      this.uniqueProjectsByWorkspace.set(project.workspaceId, existing === undefined ? project : null);
-    }
+    this.projectRoutes = new ProjectRouteIndex(config.projects);
   }
 
   async converge(): Promise<void> {
@@ -88,10 +84,5 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       await this.mainCardWorkflow.project(finalTopic);
   }
 
-  private spaceNameFor(binding: Binding): string {
-    const project = binding.projectId
-      ? this.projectsById.get(binding.projectId)
-      : this.uniqueProjectsByWorkspace.get(binding.workspaceId) ?? null;
-    return project ? projectSpaceName(project) : "legacy/unresolved";
-  }
+  private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }
 }

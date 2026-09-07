@@ -1,14 +1,15 @@
 import type { Logger } from "pino";
-import { projectSpaceName, type BridgeConfig } from "../config.js";
+import type { BridgeConfig } from "../config.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ModelSelectionStore } from "../domain/ports/workflow.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
-import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation, ProjectConfig } from "../domain/types.js";
+import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { resolveCatalogModel } from "../domain/model-selection.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
+import { ProjectRouteIndex } from "./project-route-index.js";
 
 interface Options { config: BridgeConfig; store: ModelSelectionStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
@@ -24,12 +25,10 @@ export interface ModelSelectionWorkflowPort {
 }
 
 export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
-  private readonly projectsById: Map<string, ProjectConfig>;
-  private readonly uniqueProjectByWorkspace: Map<string, ProjectConfig | null>;
+  private readonly projectRoutes: ProjectRouteIndex;
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
-    this.uniqueProjectByWorkspace = uniqueProjectsByWorkspace(options.config.projects);
+    this.projectRoutes = new ProjectRouteIndex(options.config.projects);
   }
 
   shutdown(): void {}
@@ -118,10 +117,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
     }
   }
 
-  private spaceNameFor(binding: Binding): string {
-    const project = binding.projectId ? this.projectsById.get(binding.projectId) : this.uniqueProjectByWorkspace.get(binding.workspaceId);
-    return project ? projectSpaceName(project) : "legacy/unresolved";
-  }
+  private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }
 
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> {
     await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason));
@@ -133,9 +129,3 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   }
 }
 function errorMessage(error: unknown): string { return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " " ).slice(0, 300); }
-
-function uniqueProjectsByWorkspace(projects: readonly ProjectConfig[]): Map<string, ProjectConfig | null> {
-  const result = new Map<string, ProjectConfig | null>();
-  for (const project of projects) result.set(project.workspaceId, result.has(project.workspaceId) ? null : project);
-  return result;
-}

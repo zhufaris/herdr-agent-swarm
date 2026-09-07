@@ -1,20 +1,21 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { projectSpaceName, type BridgeConfig } from "../config.js";
+import type { BridgeConfig } from "../config.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PaneCloseStore } from "../domain/ports/pane-operations.js";
 import type { PanePresentation } from "../domain/ports/presentation.js";
-import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
+import type { Binding, IncomingLarkMessage } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import { evaluatePaneClosureSafety } from "../domain/pane-retention-policy.js";
+import { ProjectRouteIndex } from "./project-route-index.js";
 
 interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: PanePresentation; isBindingBusy(bindingId: string): boolean; confirmationTtlMs?: number; }
 export interface PaneClosureWorkflowPort { recover(): Promise<void>; requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>; }
 
 export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
-  private readonly projectsById: Map<string, ProjectConfig>;
-  constructor(private readonly options: Options) { this.projectsById = new Map(options.config.projects.map((project) => [project.id, project])); }
+  private readonly projectRoutes: ProjectRouteIndex;
+  constructor(private readonly options: Options) { this.projectRoutes = new ProjectRouteIndex(options.config.projects); }
 
   async recover(): Promise<void> {
     const { store, herdr } = this.options;
@@ -69,7 +70,7 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
     const safety = evaluatePaneClosureSafety({ binding, pane, busy: this.options.isBindingBusy(binding.id), pendingWork: store.countPendingPrompts(binding.id) > 0, ...(expectedPaneId !== undefined ? { expectedPaneId } : {}) });
     if (!safety.allowed) { await this.reject(message, safety.reason === "pane runtime state is idle" || safety.reason === "pane runtime state is done" ? "Pane 状态不允许关闭。" : safety.reason === "pane runtime identity changed" ? "Pane identity 已变化，不能关闭。" : "当前 Pane 正在执行任务或仍有排队请求，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: safety.reason }); return null; } return { binding, pane };
   }
-  private spaceNameFor(binding: Binding): string { const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; return project ? projectSpaceName(project) : "legacy/unresolved"; }
+  private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }
   private async reply(message: IncomingLarkMessage, card: object): Promise<void> { const root = message.rootMessageId ?? message.messageId; await this.options.outbound.enqueueCard(root, "standalone:" + root + ":" + JSON.stringify(card), card); }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, "rejected:" + message.messageId, this.options.presentation.requestRejected(reason)); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
