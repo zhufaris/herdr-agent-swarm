@@ -75,6 +75,9 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("lifecycle: modules.lifecycle");
     expect(storeBundle).toContain("health: modules.health");
     expect(storeBundle).toContain("retention: modules.retention");
+    expect(storeBundle).toContain("outbox: modules.outbox");
+    expect(storeBundle).toContain("outboundIntent: modules.outbox");
+    expect(storeBundle).not.toMatch(/outbox:\s*store/);
     expect(storeBundle).toContain("inboundDispatch: modules.inboundDispatch");
     expect(storeBundle).not.toMatch(/inboundDispatch:\s*store/);
     expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
@@ -94,6 +97,7 @@ describe("application composition boundaries", () => {
     const kernel = readFileSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url), "utf8");
     expect(kernel).not.toMatch(/^  (?:recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages)\(/m);
     expect(kernel).not.toMatch(/^  (?:createAgentInstance|createWorkerAgentInstance|attachAgentInstanceRuntime|updateAgentInstanceLifecycle|acceptInstanceOperation|projectLegacyBindingAsAgentInstance)\(/m);
+    expect(kernel).not.toMatch(/^  (?:enqueueOutboundReply|listPendingOutboundReplies|getOutboundReply|dismissSupersededAnswerStream|listOutboundLaneHeads|getNextOutboundLaneHeadAttemptAt|markOutboundReplyDelivered|checkpointOutboundReplyCard|markOutboundReplyFailed|markOutboundReplyDeadLetter|markOutboundReplyFailedWithQuarantine|recoverEligibleDeadLetters)\(/m);
     const instancePorts = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
     expect(instancePorts).toContain("export type InstanceLifecycleStore");
     expect(instancePorts).toContain("export type InstanceTurnStore");

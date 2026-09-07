@@ -8,17 +8,21 @@ export interface TestStoreBundle extends SqliteStoreBundle {
 
 export function createTestStoreBundle(path = ":memory:"): TestStoreBundle {
   const driver = new SqliteStoreKernel(path);
+  const modules = driver.capabilityModules();
+  Object.assign(driver,
+    bindMethods(modules.outbox, ["checkpointOutboundReplyCard", "enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "markOutboundReplyDelivered", "markOutboundReplyFailedWithQuarantine", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
+    bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter"])
+  );
   return {
-    ...createCapabilities(driver),
+    ...createCapabilities(driver, modules),
     driver
   };
 }
 
-function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
-  const modules = store.capabilityModules();
+function createCapabilities(store: SqliteStoreKernel, modules = store.capabilityModules()): SqliteStoreBundle {
   return {
     lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: store,
-    promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
+    promptAcceptance: store, promptRun: store, outboundIntent: modules.outbox, outbox: modules.outbox,
     answerPages: store, workerTurnCards: store, mainCards: store, projection: store,
     queueFeedback: store, cardContext: modules.cardContext, bindingProvisioning: store,
     runtimeReconciliation: store, retiredPaneCleanup: store, paneControl: store,
@@ -28,4 +32,8 @@ function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
     paneRetention: store, commandIntents: modules.commandIntents, inboundMessages: store,
     startupRecovery: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
   };
+}
+
+function bindMethods<T extends object, K extends keyof T>(target: T, keys: readonly K[]): Pick<T, K> {
+  return Object.fromEntries(keys.map((key) => [key, (target[key] as Function).bind(target)])) as Pick<T, K>;
 }

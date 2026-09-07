@@ -3,7 +3,7 @@ import type { AcceptInstanceTurnWithCardInput } from "../domain/ports.js";
 import type { AcceptPromptInput } from "../domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../domain/ports/workflow.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -28,6 +28,7 @@ import { SqliteWorkerTurnStore } from "./sqlite/worker-turn-store.js";
 import { SqliteProjectionStore } from "./sqlite/projection-store.js";
 import { SqlitePromptStore } from "./sqlite/prompt-store.js";
 import { SqliteOutboxStore } from "./sqlite/outbox-store.js";
+import { SqliteOutboxCapabilityStore } from "./sqlite/outbox-capability-store.js";
 import { SqliteInstanceStore } from "./sqlite/instance-store.js";
 import { SqliteCardContextStore } from "./sqlite/card-context-store.js";
 import { SqliteInboundProjectStore } from "./sqlite/inbound-project-store.js";
@@ -73,8 +74,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.commandIntents = new SqliteCommandIntentStore(this.context);
     this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.bindings.getBinding(id));
     this.projections = new SqliteProjectionStore(this.context, {
-      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
-      hasPendingAnswerContinuation: (promptId, pageIndex) => this.hasPendingAnswerContinuation(promptId, pageIndex),
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
+      hasPendingAnswerContinuation: (promptId, pageIndex) => this.outbox.hasPendingAnswerContinuation(promptId, pageIndex),
       getBinding: (id) => this.getBinding(id),
       refreshOutboxLaneHead: (laneKey) => this.outbox.refreshOutboxLaneHead(laneKey)
     });
@@ -99,11 +100,11 @@ export class SqliteStoreKernel implements TurnControlStore {
       transitionBinding: (id, transition) => this.transitionBinding(id, transition),
       loadCardContextInvalidation: (target) => this.loadCardContextInvalidation(target),
       loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.loadPrimaryWorkerActivity(promptId, bindingGeneration),
-      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input)
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
     });
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.getAgentInstance(id),
-      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
       invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason)
     });
     this.instances = new SqliteInstanceStore(this.context, {
@@ -163,6 +164,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     commandIntents: SqliteCommandIntentStoreAdapter;
     sessionOperations: SqliteSessionOperationStoreAdapter;
     instance: SqliteInstanceCapabilityStore;
+    outbox: SqliteOutboxCapabilityStore;
+    outboxAdmin: SqliteOutboxStore;
   } {
     const instance = new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations);
     return {
@@ -181,7 +184,9 @@ export class SqliteStoreKernel implements TurnControlStore {
         getBinding: (id) => this.bindings.getBinding(id)
       }),
       sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.getBinding(id)),
-      instance
+      instance,
+      outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
+      outboxAdmin: this.outbox
     };
   }
 
@@ -643,61 +648,12 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.cancelQueuedPromptsWithProjection(input);
   }
 
-  enqueueOutboundReply(input: Parameters<import("../domain/ports/outbox.js").OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): OutboundReply {
-    return this.outbox.enqueueOutboundReply(input);
-  }
-
-  listPendingOutboundReplies(): OutboundReply[] {
-    return this.outbox.listPendingOutboundReplies();
-  }
-
-  hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean {
-    return this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId);
-  }
-
-  getOutboundReply(id: string): OutboundReply | null {
-    return this.outbox.getOutboundReply(id);
-  }
-
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean {
     return this.outbox.hasPendingAnswerContinuation(promptId, pageIndex);
   }
 
-  dismissSupersededAnswerStream(replyId: string): boolean {
-    return this.outbox.dismissSupersededAnswerStream(replyId);
-  }
-
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = []): OutboundReply[] {
-    return this.outbox.listOutboundLaneHeads(limit, dueAt, excludedLaneKeys);
-  }
-
-  getNextOutboundLaneHeadAttemptAt(): string | null {
-    return this.outbox.getNextOutboundLaneHeadAttemptAt();
-  }
-
-  markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
-    this.outbox.markOutboundReplyDelivered(id, messageId, cardId);
-  }
-
-
-  checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null {
-    return this.outbox.checkpointOutboundReplyCard(id, cardId);
-  }
-
-  markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
-    return this.outbox.markOutboundReplyFailed(id, error, retryDelayMs, metadata);
-  }
-
-  markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null {
-    return this.outbox.markOutboundReplyDeadLetter(id, error, metadata);
-  }
-
-  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null {
-    return this.outbox.markOutboundReplyFailedWithQuarantine(id, error, metadata, retryDelayMs);
-  }
-
-  recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] {
-    return this.outbox.recoverEligibleDeadLetters(cutoff, limit);
+  hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean {
+    return this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId);
   }
 
   recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[] {
