@@ -225,6 +225,18 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("composes startup projection workflows through explicit consumer stores", () => {
+    const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
+    const composition = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
+    expect(converger).toContain("export interface StartupViewProjectionStores");
+    for (const capability of ["startupViews", "answerPages", "mainCards"]) {
+      expect(converger).toContain(`${capability}:`);
+      expect(composition).toContain(`${capability}: stores.${capability}`);
+    }
+    expect(converger).not.toMatch(/store as .*Store/);
+    expect(composition).toContain("new StartupViewConverger({");
+  });
+
   it("keeps context-owned delivery, runtime, and project-selection models out of the compatibility type barrel", () => {
     const types = readFileSync(new URL("../src/domain/types.ts", import.meta.url), "utf8");
     expect(types).toContain('export type { AnswerPage');

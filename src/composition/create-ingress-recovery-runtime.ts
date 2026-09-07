@@ -17,7 +17,7 @@ import type { createOutboundRuntime } from "./create-outbound-runtime.js";
 import type { createPrimaryRuntime } from "./create-primary-runtime.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 
-export type IngressRecoveryStores = Pick<SqliteStoreBundle, "inboundDispatch" | "inboundMessages" | "inboundRouting" | "startupRecovery" | "startupViews">;
+export type IngressRecoveryStores = Pick<SqliteStoreBundle, "inboundDispatch" | "inboundMessages" | "inboundRouting" | "startupRecovery" | "startupViews" | "answerPages" | "mainCards">;
 
 export function createIngressRecoveryRuntime(options: {
   config: BridgeConfig; stores: IngressRecoveryStores; logger: Logger; bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
@@ -29,7 +29,12 @@ export function createIngressRecoveryRuntime(options: {
   const { herdr, lark } = infrastructure; const { outbound, outboundWork, answerPages, mainCards } = delivery; const { promptRun } = primary;
   const { provisioning, paneClosure, reconciler, retiredPaneCleanup } = bindingSession;
   const { paneControl, sessionOperations, cardInteractions, swarmCommands, instanceInteractions, modelSelection } = commandControl;
-  const startupViews = new StartupViewConverger(config, stores.startupViews, outbound, outboundWork, presentation.primary, answerPages, mainCards, logger);
+  const startupViews = new StartupViewConverger({
+    config,
+    stores: { startupViews: stores.startupViews, answerPages: stores.answerPages, mainCards: stores.mainCards },
+    outbound, outboundWork, presentation: presentation.primary,
+    answerPageWorkflow: answerPages, mainCardWorkflow: mainCards, logger
+  });
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, inboundWork, logger });
   const messageRouting = new InboundMessageRoutingWorkflow({ config, store: stores.inboundMessages, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery: bindingSession.deliveryRecovery, instanceInteractions, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });

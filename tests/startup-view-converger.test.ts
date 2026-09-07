@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { StartupViewConverger } from "../src/coordinator/startup-view-converger.js";
+import { StartupViewConverger, type StartupViewConvergerOptions } from "../src/coordinator/startup-view-converger.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { OutboundIntentPort } from "../src/domain/ports.js";
@@ -11,13 +11,24 @@ const config = {
   projects: [{ id: "bridge", displayName: "Bridge", spaceName: "herdr-lark-bridge", description: "Bridge", workspaceId: "wH", cwd: "/work/bridge" }]
 } as const satisfies Pick<BridgeConfig, "projects">;
 
+function createConverger(store: SqliteBindingStore, overrides: Partial<StartupViewConvergerOptions> = {}): StartupViewConverger {
+  return new StartupViewConverger({
+    config,
+    stores: { startupViews: store, answerPages: store, mainCards: store },
+    outbound: { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort,
+    outboundWork: { wake: () => {}, subscribe: () => () => {} },
+    presentation: primaryPresentation,
+    ...overrides
+  });
+}
+
 describe("StartupViewConverger", () => {
   it("recovers stale outbox quarantines before projecting views and wakes delivery", async () => {
     const store = new SqliteBindingStore(":memory:");
     const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 1, terminalizedQuarantines: 0 });
     const wake = vi.fn();
 
-    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store, { outboundWork: { wake, subscribe: () => () => {} } }).converge();
 
     expect(recover).toHaveBeenCalledOnce();
     expect(wake).toHaveBeenCalledOnce();
@@ -32,10 +43,7 @@ describe("StartupViewConverger", () => {
     const wake = vi.fn();
     const logger = { warn: vi.fn() };
 
-    await new StartupViewConverger(
-      config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort,
-      { wake, subscribe: () => () => {} }, primaryPresentation, undefined, undefined, logger as never
-    ).converge();
+    await createConverger(store, { outboundWork: { wake, subscribe: () => () => {} }, logger }).converge();
 
     expect(wake).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -53,7 +61,7 @@ describe("StartupViewConverger", () => {
     }
     const mainCards = { project: vi.fn(async (view: { bindingId: string }) => { if (view.bindingId === "bad") throw new Error("bad view"); }) };
     const logger = { warn: vi.fn() };
-    const converger = new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation, undefined, mainCards, logger as never);
+    const converger = createConverger(store, { mainCardWorkflow: mainCards, logger });
 
     await expect(converger.converge()).resolves.toBeUndefined();
     expect(mainCards.project).toHaveBeenCalledTimes(2);
@@ -72,7 +80,7 @@ describe("StartupViewConverger", () => {
     });
     const enqueueCardUpdate = vi.fn<OutboundIntentPort["enqueueCardUpdate"]>().mockResolvedValue(undefined);
     const outbound = { enqueueCardUpdate } as Pick<OutboundIntentPort, "enqueueCardUpdate">;
-    await new StartupViewConverger(config, store, outbound as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store, { outbound: outbound as OutboundIntentPort }).converge();
 
     expect(store.loadTopicView("b1")).toMatchObject({
       title: "herdr-lark-bridge / task-ab12", spaceName: "herdr-lark-bridge", paneId: "wH:p2H"
@@ -92,7 +100,7 @@ describe("StartupViewConverger", () => {
       { id: "two", displayName: "Two", spaceName: "two", description: "Two", workspaceId: "w1", cwd: "/two" }
     ] } as const satisfies Pick<BridgeConfig, "projects">;
 
-    await new StartupViewConverger(multiProjectConfig, store, { enqueueCardUpdate } as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store, { config: multiProjectConfig, outbound: { enqueueCardUpdate } as OutboundIntentPort }).converge();
 
     expect(store.loadTopicView("legacy")?.spaceName).toBe("legacy/unresolved");
     store.close();
@@ -104,7 +112,7 @@ describe("StartupViewConverger", () => {
     store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
     store.saveTopicView({ ...initialTopicView("b1"), title: "task", workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: "wH:p1", phase: "ready", viewVersion: 1, deliveredVersion: 1 });
 
-    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store).converge();
 
     expect(store.listPendingOutboundReplies()).toEqual([]);
     expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 1, deliveredVersion: 1 });
@@ -121,7 +129,7 @@ describe("StartupViewConverger", () => {
     const completed = createQueuedRunCard({ promptId: "completed", bindingId: "b1", title: "completed", workspaceId: "wH", paneId: "wH:p1", requestText: "more", queuePosition: 0, occurredAt: "2026-08-28T00:01:00Z" });
     store.acceptPrompt({ prompt: { id: "completed", bindingId: "b1", larkMessageId: "completed-message", actorOpenId: "u1", body: "more" }, view: { ...completed, phase: "completed" }, rootMessageId: "root", answerCard: {} });
 
-    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store).converge();
 
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "running", agentState: "working", activePromptId: "parent" });
     store.close();
@@ -138,7 +146,7 @@ describe("StartupViewConverger", () => {
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "durable answer", answerSegments: ["durable answer"], viewVersion: 3, answerDeliveredVersion: 1 });
     const outbound = { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort;
 
-    await new StartupViewConverger(config, store, outbound, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store, { outbound }).converge();
 
     const pending = store.listPendingOutboundReplies();
     const answer = pending.find((reply) => reply.promptId === "p1");
@@ -155,7 +163,7 @@ describe("StartupViewConverger", () => {
     const legacy = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "work", workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: "wH:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "request", actorOpenId: "u1", body: "go" }, view: legacy, rootMessageId: "root", answerCard: {} });
 
-    await new StartupViewConverger(config, store, { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort, { wake: () => {}, subscribe: () => () => {} }, primaryPresentation).converge();
+    await createConverger(store).converge();
 
     expect(store.loadRunCard("p1")).toMatchObject({ sessionTitle: "herdr-lark-bridge / task-ab12", viewVersion: 2 });
     const answerCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1" && reply.kind === "stream_card_create");

@@ -96,7 +96,10 @@ export function createTestRouter(
   const swarmCommands = new SwarmCommandGateway({ store, resolver: commandResolver, outbound: writer, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: { createWorker: async () => { throw new Error("Worker creation is not configured in this test fixture"); }, inspect: () => { throw new Error("Worker inspection is not configured in this test fixture"); } }, presentation: cardKitApplicationPresentation });
   const messageRouting = new InboundMessageRoutingWorkflow({ config, store, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, presentation: cardKitPrimaryPresentation, promptRun, provisioning, swarmCommands });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
-  const startupViews = new StartupViewConverger(config, store, writer, outboundWork, cardKitPrimaryPresentation, undefined, undefined, logger);
+  const startupViews = new StartupViewConverger({
+    config, stores: { startupViews: store, answerPages: store, mainCards: store },
+    outbound: writer, outboundWork, presentation: cardKitPrimaryPresentation, logger
+  });
   const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
   const router = new InboundRouter({ lark, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
   return router;

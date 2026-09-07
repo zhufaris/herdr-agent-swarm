@@ -22,7 +22,8 @@ export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
   | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose"
   | "paneRetention" | "sessionOperations" | "cardInteraction" | "runtimeReconciliation"
   | "inboundRouting" | "commandIntents" | "instance"
-  | "inboundDispatch" | "inboundMessages" | "startupRecovery" | "startupViews">;
+  | "inboundDispatch" | "inboundMessages" | "startupRecovery" | "startupViews"
+  | "answerPages" | "mainCards">;
 
 export function createApplicationRuntime(options: {
   config: BridgeConfig; stores: ApplicationRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;

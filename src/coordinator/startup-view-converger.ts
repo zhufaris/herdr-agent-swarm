@@ -18,25 +18,42 @@ import { ProjectCatalog } from "./project-catalog.js";
 const WORKER_TASK_CARD_RENDERER_REVISION = "explicit-continuation-v1";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
+export interface StartupViewProjectionStores {
+  startupViews: StartupViewStore;
+  answerPages: AnswerPageStore;
+  mainCards: MainCardStore;
+}
+
+export interface StartupViewConvergerOptions {
+  config: Pick<BridgeConfig, "projects">;
+  stores: StartupViewProjectionStores;
+  outbound: OutboundIntentPort;
+  outboundWork: OutboundWorkNotifier;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">;
+  answerPageWorkflow?: AnswerPageWorkflowPort;
+  mainCardWorkflow?: MainCardWorkflowPort;
+  logger?: Pick<Logger, "warn">;
+}
 
 export class StartupViewConverger implements StartupViewConvergerPort {
   private readonly projectRoutes: ProjectCatalog;
   private readonly pageWorkflow: AnswerPageWorkflowPort;
   private readonly mainCardWorkflow: MainCardWorkflowPort;
+  private readonly store: StartupViewStore;
+  private readonly outbound: OutboundIntentPort;
+  private readonly outboundWork: OutboundWorkNotifier;
+  private readonly presentation: StartupViewConvergerOptions["presentation"];
+  private readonly logger: Pick<Logger, "warn"> | undefined;
 
-  constructor(
-    config: Pick<BridgeConfig, "projects">,
-    private readonly store: StartupViewStore,
-    private readonly outbound: OutboundIntentPort,
-    private readonly outboundWork: OutboundWorkNotifier,
-    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
-    answerPages?: AnswerPageWorkflowPort,
-    mainCards?: MainCardWorkflowPort,
-    private readonly logger?: Pick<Logger, "warn">
-  ) {
-    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as StartupViewStore & AnswerPageStore, () => outboundWork.wake(), presentation);
-    this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as StartupViewStore & MainCardStore, () => outboundWork.wake(), presentation);
-    this.projectRoutes = new ProjectCatalog(config.projects);
+  constructor(options: StartupViewConvergerOptions) {
+    this.store = options.stores.startupViews;
+    this.outbound = options.outbound;
+    this.outboundWork = options.outboundWork;
+    this.presentation = options.presentation;
+    this.logger = options.logger;
+    this.pageWorkflow = options.answerPageWorkflow ?? new AnswerPageWorkflow(options.stores.answerPages, () => options.outboundWork.wake(), options.presentation);
+    this.mainCardWorkflow = options.mainCardWorkflow ?? new MainCardWorkflow(options.stores.mainCards, () => options.outboundWork.wake(), options.presentation);
+    this.projectRoutes = new ProjectCatalog(options.config.projects);
   }
 
   async converge(): Promise<void> {
