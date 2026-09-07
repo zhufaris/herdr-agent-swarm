@@ -55,9 +55,11 @@ describe("TraeX two-phase model prompt", () => {
   it("cannot abort after commit owns the dispatch fence", async () => {
     const operationDir = await fixture();
     const release = Promise.withResolvers<string>();
+    const dispatchStarted = Promise.withResolvers<void>();
     const prepared = await prepareTraexModelPrompt({ peer, target: "primary", model: "GPT-5.4", revision: 3, promptSha256: digest }, { operationDir });
-    const commit = commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart: () => release.promise });
-    await vi.waitFor(async () => expect((await abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).state).toBe("dispatching"), { timeout: 5_000 });
+    const commit = commitTraexModelPrompt({ operationId: prepared.operationId, text: "hello", promptSha256: digest }, { operationDir, callTurnStart: () => { dispatchStarted.resolve(); return release.promise; } });
+    await dispatchStarted.promise;
+    await expect(abortTraexModelPrompt({ operationId: prepared.operationId }, { operationDir })).resolves.toMatchObject({ state: "dispatching" });
     release.resolve("turn-1");
     await expect(commit).resolves.toMatchObject({ state: "accepted" });
   });
