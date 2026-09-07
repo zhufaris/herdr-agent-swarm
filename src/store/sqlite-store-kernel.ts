@@ -17,38 +17,33 @@ import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } fro
 import type { WorkerMainView } from "../domain/worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState } from "../domain/turn-control.js";
-import { SqliteContext } from "./sqlite/context.js";
-import { SqliteApprovalStore } from "./sqlite/approval-store.js";
-import { SqliteLeaseStore } from "./sqlite/lease-store.js";
-import { SqliteMigrations } from "./sqlite/migrations.js";
-import { SqliteOperationsStore } from "./sqlite/operations-store.js";
-import { SqliteCommandIntentStore } from "./sqlite/command-intent-store.js";
-import { SqliteSessionOperationStore } from "./sqlite/session-operation-store.js";
-import { SqliteWorkerTurnStore } from "./sqlite/worker-turn-store.js";
-import { SqliteProjectionStore } from "./sqlite/projection-store.js";
-import { SqlitePromptStore } from "./sqlite/prompt-store.js";
-import { SqliteOutboxStore } from "./sqlite/outbox-store.js";
-import { SqliteOutboxCapabilityStore } from "./sqlite/outbox-capability-store.js";
-import { SqliteInstanceStore } from "./sqlite/instance-store.js";
-import { SqliteCardContextStore } from "./sqlite/card-context-store.js";
-import { SqliteInboundProjectStore } from "./sqlite/inbound-project-store.js";
-import { SqlitePaneOperationStore } from "./sqlite/pane-operation-store.js";
-import { SqliteBindingLifecycleStore } from "./sqlite/binding-store.js";
-import { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.js";
-import { SqliteInstanceOperationStore } from "./sqlite/instance-operation-store.js";
-import { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
-import { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
-import { SqliteInstanceCapabilityStore } from "./sqlite/instance-capability-store.js";
-import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./sqlite/runtime-stores.js";
-import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./sqlite/workflow-stores.js";
+import { SqliteCapabilityGraph } from "./sqlite/capability-graph.js";
+import type { SqliteMigrations } from "./sqlite/migrations.js";
+import type { SqliteOperationsStore } from "./sqlite/operations-store.js";
+import type { SqliteSessionOperationStore } from "./sqlite/session-operation-store.js";
+import type { SqliteWorkerTurnStore } from "./sqlite/worker-turn-store.js";
+import type { SqliteProjectionStore } from "./sqlite/projection-store.js";
+import type { SqlitePromptStore } from "./sqlite/prompt-store.js";
+import type { SqliteOutboxStore } from "./sqlite/outbox-store.js";
+import type { SqliteInstanceStore } from "./sqlite/instance-store.js";
+import type { SqliteCardContextStore } from "./sqlite/card-context-store.js";
+import type { SqliteInboundProjectStore } from "./sqlite/inbound-project-store.js";
+import type { SqlitePaneOperationStore } from "./sqlite/pane-operation-store.js";
+import type { SqliteBindingLifecycleStore } from "./sqlite/binding-store.js";
+import type { SqliteBindingProjectionStore } from "./sqlite/binding-projection-store.js";
+import type { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
+import type { SqliteStoreLifecycleAdapter, SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter } from "./sqlite/runtime-stores.js";
+import type { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./sqlite/workflow-stores.js";
+import type { SqliteApprovalStore } from "./sqlite/approval-store.js";
+import type { SqliteLeaseStore } from "./sqlite/lease-store.js";
+import type { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
+import type { SqliteInstanceCapabilityStore } from "./sqlite/instance-capability-store.js";
+import type { SqliteOutboxCapabilityStore } from "./sqlite/outbox-capability-store.js";
 export class SqliteStoreKernel implements TurnControlStore {
   readonly database: DatabaseSync;
-  private readonly context: SqliteContext;
-  private readonly approvals: SqliteApprovalStore;
-  private readonly leases: SqliteLeaseStore;
+  private readonly graph: SqliteCapabilityGraph;
   private readonly migrations: SqliteMigrations;
   private readonly operations: SqliteOperationsStore;
-  private readonly commandIntents: SqliteCommandIntentStore;
   private readonly sessionOperations: SqliteSessionOperationStore;
   private readonly workerTurns: SqliteWorkerTurnStore;
   private readonly projections: SqliteProjectionStore;
@@ -60,93 +55,25 @@ export class SqliteStoreKernel implements TurnControlStore {
   private readonly paneOperations: SqlitePaneOperationStore;
   private readonly bindings: SqliteBindingLifecycleStore;
   private readonly bindingProjections: SqliteBindingProjectionStore;
-  private readonly instanceOperations: SqliteInstanceOperationStore;
   private readonly turnControls: SqliteTurnControlStore;
-  private readonly workerCardDisplays: SqliteWorkerCardDisplayStore;
 
   constructor(path: string) {
-    this.context = new SqliteContext(path);
-    this.database = this.context.database;
-    this.migrations = new SqliteMigrations(this.context);
-    this.migrations.run();
-    this.bindings = new SqliteBindingLifecycleStore(this.context, (bindingId, reason) => this.cardContexts.invalidateBindingWorkerContexts(bindingId, reason));
-    this.operations = new SqliteOperationsStore(this.context);
-    this.commandIntents = new SqliteCommandIntentStore(this.context);
-    this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.bindings.getBinding(id));
-    this.projections = new SqliteProjectionStore(this.context, {
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
-      hasPendingAnswerContinuation: (promptId, pageIndex) => this.outbox.hasPendingAnswerContinuation(promptId, pageIndex),
-      getBinding: (id) => this.getBinding(id),
-      refreshOutboxLaneHead: (laneKey) => this.outbox.refreshOutboxLaneHead(laneKey)
-    });
-    this.outbox = new SqliteOutboxStore(this.context, {
-      getBinding: (id) => this.getBinding(id),
-      loadRunCard: (promptId) => this.projections.loadRunCard(promptId),
-      getActiveAnswerPage: (promptId) => this.projections.getActiveAnswerPage(promptId),
-      loadWorkerTurnCard: (turnId) => this.workerTurns.loadWorkerTurnCard(turnId),
-      listWorkerTurnCardPages: (turnId) => this.workerTurns.listWorkerTurnCardPages(turnId),
-      loadWorkerMainView: (workerId, generation) => this.loadWorkerMainView(workerId, generation),
-      saveRunCard: (view) => this.projections.saveRunCard(view),
-      persistBindingPatch: (id, patch) => this.persistBindingPatch(id, patch),
-      invalidateCardContexts: (targets) => this.invalidateCardContexts(targets)
-    });
-    this.bindingProjections = new SqliteBindingProjectionStore(this.context, this.bindings, this.projections, {
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
-      listRunCardsByPhases: (bindingId, phases) => this.listRunCardsByPhases(bindingId, phases)
-    });
-    this.prompts = new SqlitePromptStore(this.context, this.projections, {
-      getBinding: (id) => this.getBinding(id),
-      persistBindingPatch: (id, patch) => this.persistBindingPatch(id, patch),
-      transitionBinding: (id, transition) => this.transitionBinding(id, transition),
-      loadCardContextInvalidation: (target) => this.loadCardContextInvalidation(target),
-      loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.loadPrimaryWorkerActivity(promptId, bindingGeneration),
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
-    });
-    this.workerTurns = new SqliteWorkerTurnStore(this.context, {
-      getAgentInstance: (id) => this.getAgentInstance(id),
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
-      invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason)
-    });
-    this.instances = new SqliteInstanceStore(this.context, {
-      invalidateWorkerInstanceContexts: (instance, reason) => this.cardContexts.invalidateWorkerInstanceContexts(instance, reason)
-    });
-    this.instanceOperations = new SqliteInstanceOperationStore(this.context, (id) => this.instances.getAgentInstance(id));
-    this.cardContexts = new SqliteCardContextStore(this.context, {
-      getAgentInstance: (id) => this.instances.getAgentInstance(id),
-      getWorkspaceLease: (id) => this.instances.getWorkspaceLease(id),
-      getBinding: (id) => this.getBinding(id),
-      listWorkerInstancesByParent: (input) => this.instances.listWorkerInstancesByParent(input),
-      loadWorkerTurnCard: (id) => this.workerTurns.loadWorkerTurnCard(id),
-      saveWorkerTurnCard: (view) => this.workerTurns.saveWorkerTurnCard(view),
-      loadTopicView: (id) => this.projections.loadTopicView(id),
-      saveTopicView: (view) => this.projections.saveTopicView(view),
-      loadRunCard: (id) => this.projections.loadRunCard(id),
-      saveRunCard: (view) => this.projections.saveRunCard(view),
-      reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
-    });
-    this.workerCardDisplays = new SqliteWorkerCardDisplayStore(this.context, {
-      loadWorkerMainProjectionSource: (workerId, generation) => this.cardContexts.loadWorkerMainProjectionSource(workerId, generation),
-      loadWorkerMainView: (workerId, generation) => this.cardContexts.loadWorkerMainView(workerId, generation),
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
-    });
-    this.turnControls = new SqliteTurnControlStore(this.context, {
-      getBinding: (id) => this.bindings.getBinding(id),
-      getAgentInstance: (id) => this.instances.getAgentInstance(id),
-      countPendingPrompts: (id) => this.prompts.countPendingPrompts(id),
-      countPendingInstanceTurns: (id, generation) => this.workerTurns.countPendingInstanceTurns(id, generation),
-      insertRunCard: (view) => this.projections.insertRunCard(view),
-      saveWorkerTurnCard: (view) => this.workerTurns.saveWorkerTurnCard(view),
-      invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason),
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
-      getPrompt: (id) => this.prompts.getPrompt(id)
-    });
-    this.inboundProjects = new SqliteInboundProjectStore(this.context);
-    this.paneOperations = new SqlitePaneOperationStore(this.context, {
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
-    });
-    this.approvals = new SqliteApprovalStore(this.context);
-    this.leases = new SqliteLeaseStore(this.context);
+    this.graph = new SqliteCapabilityGraph(path);
+    this.database = this.graph.database;
+    this.migrations = this.graph.migrations;
+    this.bindings = this.graph.bindings;
+    this.operations = this.graph.operations;
+    this.sessionOperations = this.graph.sessionOperations;
+    this.projections = this.graph.projections;
+    this.outbox = this.graph.outbox;
+    this.bindingProjections = this.graph.bindingProjections;
+    this.prompts = this.graph.prompts;
+    this.workerTurns = this.graph.workerTurns;
+    this.instances = this.graph.instances;
+    this.cardContexts = this.graph.cardContexts;
+    this.turnControls = this.graph.turnControls;
+    this.inboundProjects = this.graph.inboundProjects;
+    this.paneOperations = this.graph.paneOperations;
   }
 
   /** Concrete capabilities that already satisfy a complete consumer port. */
@@ -167,30 +94,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     outbox: SqliteOutboxCapabilityStore;
     outboxAdmin: SqliteOutboxStore;
   } {
-    const instance = new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations);
-    return {
-      lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
-      approvals: this.approvals,
-      cardContext: this.cardContexts,
-      lease: this.leases,
-      health: new SqliteHealthStoreAdapter(this.operations, this.bindings),
-      integrity: this.operations,
-      inboundDispatch: this.inboundProjects,
-      operationsQuery: this.bindings,
-      retention: new SqliteRetentionStoreAdapter(this.outbox, this.inboundProjects, this.sessionOperations),
-      workerCardDisplay: this.workerCardDisplays,
-      commandIntents: new SqliteCommandIntentStoreAdapter(this.commandIntents, {
-        audit: (input) => this.operations.audit(input),
-        getBinding: (id) => this.bindings.getBinding(id)
-      }),
-      sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.getBinding(id)),
-      instance,
-      outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
-      outboxAdmin: this.outbox
-    };
+    return this.graph.capabilityModules();
   }
 
-  close(): void { this.context.close(); }
+  close(): void { this.graph.context.close(); }
 
   getAgentInstance(id: string): AgentInstance | null {
     return this.instances.getAgentInstance(id);
@@ -210,10 +117,6 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     return this.cardContexts.invalidateCardContexts(targets);
-  }
-
-  private loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {
-    return this.cardContexts.loadCardContextInvalidation(target);
   }
 
   loadWorkerMainProjectionSource(workerId: string, workerSessionGeneration: number): import("../domain/worker-main-selector.js").WorkerMainProjectionSource | null {
@@ -416,10 +319,6 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   /** Legacy test/setup escape hatch; workflows must use explicit ports below. */
   updateBinding(id: string, patch: Partial<Binding>): Binding { return this.bindings.updateBinding(id, patch); }
-
-  private persistBindingPatch(id: string, patch: Partial<Binding>): Binding {
-    return this.bindings.persistBindingPatch(id, patch);
-  }
 
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.bindings.updateBindingMetadata(id, patch); }
 

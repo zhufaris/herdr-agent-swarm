@@ -51,6 +51,7 @@ describe("application composition boundaries", () => {
     const ingressRecovery = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
     const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
+    const kernel = readFileSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url), "utf8");
     const composition = `${factory}\n${application}\n${bindingSession}\n${commandControl}\n${ingressRecovery}\n${primary}`;
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
@@ -71,6 +72,16 @@ describe("application composition boundaries", () => {
     expect(main).not.toContain("new SqliteBindingStore");
     expect(storeBundle).toContain("new SqliteStoreKernel");
     expect(storeBundle).toContain("const modules = store.capabilityModules()");
+    const capabilityGraph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    expect(kernel).toContain("new SqliteCapabilityGraph(path)");
+    expect(kernel).not.toContain("new SqliteContext");
+    expect(kernel).not.toContain("new SqliteMigrations");
+    expect(capabilityGraph).toContain("new SqliteContext(path)");
+    expect(capabilityGraph).toContain("this.migrations.run()");
+    expect(capabilityGraph.indexOf("this.migrations.run()")).toBeLessThan(capabilityGraph.indexOf("new SqliteBindingLifecycleStore"));
+    const bindingProjection = readFileSync(new URL("../src/store/sqlite/binding-projection-store.ts", import.meta.url), "utf8");
+    expect(bindingProjection).toContain('listRunCardsByPhases(input.bindingId, ["running", "blocked", "queued"])');
+    expect(bindingProjection).not.toContain("listRunCards(input.bindingId)");
     expect(storeBundle).toContain("lease: modules.lease");
     expect(storeBundle).toContain("lifecycle: modules.lifecycle");
     expect(storeBundle).toContain("health: modules.health");
@@ -94,7 +105,6 @@ describe("application composition boundaries", () => {
     const workflowPorts = readFileSync(new URL("../src/domain/ports/workflow.ts", import.meta.url), "utf8");
     const routingPort = workflowPorts.slice(workflowPorts.indexOf("export interface InboundRoutingStore"), workflowPorts.indexOf("export interface InboundMessageDispatchStore"));
     expect(routingPort).not.toMatch(/recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages/);
-    const kernel = readFileSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url), "utf8");
     expect(kernel).not.toMatch(/^  (?:recordInboundMessage|claimNextInboundMessage|markInboundMessageAccepted|releaseInboundMessage|recoverProcessingInboundMessages)\(/m);
     expect(kernel).not.toMatch(/^  (?:createAgentInstance|createWorkerAgentInstance|attachAgentInstanceRuntime|updateAgentInstanceLifecycle|acceptInstanceOperation|projectLegacyBindingAsAgentInstance)\(/m);
     expect(kernel).not.toMatch(/^  (?:enqueueOutboundReply|listPendingOutboundReplies|getOutboundReply|dismissSupersededAnswerStream|listOutboundLaneHeads|getNextOutboundLaneHeadAttemptAt|markOutboundReplyDelivered|checkpointOutboundReplyCard|markOutboundReplyFailed|markOutboundReplyDeadLetter|markOutboundReplyFailedWithQuarantine|recoverEligibleDeadLetters)\(/m);

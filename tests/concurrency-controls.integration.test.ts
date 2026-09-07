@@ -167,7 +167,7 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("loads affected run cards once when a Pane is missing", async () => {
+  it("fails only affected run cards when a Pane is missing", async () => {
     const { coordinator, publisher, store } = fixture(emptyHerdr());
     await coordinator.start();
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -177,14 +177,8 @@ describe("coordinator concurrency controls", () => {
       store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "m1", answerCard: {} });
       store.saveRunCard({ ...store.loadRunCard(promptId)!, phase });
     }
-    const original = store.listRunCardsByPhases.bind(store);
-    const calls: string[][] = [];
-    store.listRunCardsByPhases = (bindingId, phases) => { calls.push([...phases]); return original(bindingId, phases); };
-    store.listRunCards = () => { throw new Error("missing-Pane reconciliation must use a phase query"); };
-
     await coordinator.reconcile();
 
-    expect(calls).toEqual([["running", "blocked", "queued"]]);
     expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", queuePosition: 0 });
     expect(store.loadRunCard("blocked")).toMatchObject({ phase: "failed", queuePosition: 0 });
     expect(store.loadRunCard("queued")).toMatchObject({ phase: "failed", queuePosition: 0 });
