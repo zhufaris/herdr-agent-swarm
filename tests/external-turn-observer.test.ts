@@ -92,6 +92,31 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
+  it("waits for an in-flight detached-turn recovery before stopping", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    let releaseOpen!: (value: { mode: "typed"; cursor: { readDelta(): Promise<string> } }) => void;
+    const openAfterTurn = vi.fn(() => new Promise<{ mode: "typed"; cursor: { readDelta(): Promise<string> } }>((resolve) => { releaseOpen = resolve; }));
+    const observer = new ExternalTurnObserver({
+      store,
+      transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }), openAfterTurn },
+      bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}
+    });
+    const binding = store.getBinding("b1")!;
+    const recovery = observer.recoverAfterDetachedTurn(binding, { id: "old", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-08-31T10:00:00.000Z" } as never);
+    expect(openAfterTurn).toHaveBeenCalledOnce();
+
+    let stopSettled = false;
+    const stopping = observer.stop().then(() => { stopSettled = true; });
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(stopSettled).toBe(false);
+
+    releaseOpen({ mode: "typed", cursor: { async readDelta() { return ""; } } });
+    await Promise.all([recovery, stopping]);
+    store.close();
+  });
+
   it("fails an adopted external turn when TraeX records a human interruption and wakes the FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

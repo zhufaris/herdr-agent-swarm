@@ -45,9 +45,11 @@ export class ExternalTurnObserver {
   private readonly bindings = new Map<string, ObservedBinding>();
   private readonly handedOffBindings = new Map<string, { identity: string; state: TurnProjectionState }>();
   private readonly observations = new Map<string, Promise<void>>();
+  private readonly inFlight = new Set<Promise<unknown>>();
   private readonly idFactory: () => string;
   private timer: NodeJS.Timeout | null = null;
   private scan: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
   private stopping = false;
 
   constructor(private readonly options: ExternalTurnObserverOptions) {
@@ -60,24 +62,35 @@ export class ExternalTurnObserver {
     this.timer.unref();
   }
 
-  async observe(binding: Binding): Promise<void> {
-    return this.enqueueObservation(binding, false);
+  observe(binding: Binding): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    return this.track(() => this.enqueueObservation(binding, false));
   }
 
-  async handoff(bindingId: string): Promise<void> {
-    const binding = this.options.store.getBinding(bindingId);
-    if (!binding) return;
-    await this.enqueueObservation(binding, true);
+  handoff(bindingId: string): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    return this.track(async () => {
+      const binding = this.options.store.getBinding(bindingId);
+      if (binding) await this.enqueueObservation(binding, true);
+    });
   }
 
-  async observeByPane(paneIds: readonly string[]): Promise<void> {
-    await Promise.all([...new Set(paneIds)].map(async (paneId) => {
-      const binding = this.options.store.findBindingByPane(paneId);
-      if (binding?.state === "active") await this.observe(binding);
-    }));
+  observeByPane(paneIds: readonly string[]): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    return this.track(async () => {
+      await Promise.all([...new Set(paneIds)].map(async (paneId) => {
+        const binding = this.options.store.findBindingByPane(paneId);
+        if (binding?.state === "active") await this.observe(binding);
+      }));
+    });
   }
 
-  async observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
+  observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
+    if (this.stopping) return Promise.resolve("ignored");
+    return this.track(() => this.observeSupersedingTurnInLifecycle(binding, prompt, observation));
+  }
+
+  private async observeSupersedingTurnInLifecycle(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
     const session = transcriptSessionFor(binding);
     const identity = transcriptObserverIdentity(binding);
     if (!session || !identity || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return "ignored";
@@ -91,7 +104,12 @@ export class ExternalTurnObserver {
     return outcome;
   }
 
-  async recoverAfterDetachedTurn(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
+  recoverAfterDetachedTurn(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
+    if (this.stopping) return Promise.resolve({ outcome: "unavailable", reason: "observer_stopping" });
+    return this.track(() => this.recoverAfterDetachedTurnInLifecycle(binding, prompt));
+  }
+
+  private async recoverAfterDetachedTurnInLifecycle(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
     const session = transcriptSessionFor(binding);
     if (!session || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return { outcome: "unavailable", reason: "missing_exact_turn_identity" };
     if (!this.options.transcriptReader.openAfterTurn) return { outcome: "unavailable", reason: "recovery_cursor_unavailable" };
@@ -121,7 +139,7 @@ export class ExternalTurnObserver {
   async scanActiveBindings(): Promise<void> {
     if (this.stopping) return;
     if (this.scan) return this.scan;
-    const scan = Promise.all(this.options.store.listBindingsByState("active").map((binding) => this.observe(binding))).then(() => undefined);
+    const scan = this.track(() => Promise.all(this.options.store.listBindingsByState("active").map((binding) => this.observe(binding))).then(() => undefined));
     this.scan = scan;
     try { await scan; }
     catch (error) {
@@ -164,14 +182,23 @@ export class ExternalTurnObserver {
     }
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    if (this.scan) await this.scan;
-    await Promise.all(this.observations.values());
-    this.bindings.clear();
-    this.handedOffBindings.clear();
+    this.stopPromise = Promise.all([...this.inFlight]).then(() => {
+      this.bindings.clear();
+      this.handedOffBindings.clear();
+    });
+    return this.stopPromise;
+  }
+
+  private track<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = operation();
+    const tracked = pending.finally(() => { this.inFlight.delete(tracked); });
+    this.inFlight.add(tracked);
+    return tracked;
   }
 
   private async apply(binding: Binding, session: NonNullable<ReturnType<typeof transcriptSessionFor>>, observed: TurnProjectionState, observation: TraexTranscriptObservation, supersede?: ExternalTurnSupersessionFence): Promise<"ignored" | "pending" | "observing" | "completed"> {
