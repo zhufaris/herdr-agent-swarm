@@ -111,6 +111,10 @@ describe("application composition boundaries", () => {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
+    for (const capability of ["turnControl", "paneControl", "paneClose", "inboundRouting", "deliveryRecovery", "cardInteraction", "externalTurns", "modelSelection", "inboundMessages", "startupRecovery"]) {
+      expect(storeBundle).toContain(`${capability}: modules.${capability}`);
+      expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
+    }
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("listPendingCardContextInvalidations");
     const workflowPorts = readFileSync(new URL("../src/domain/ports/workflow.ts", import.meta.url), "utf8");

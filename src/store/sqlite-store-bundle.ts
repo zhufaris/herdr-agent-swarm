@@ -7,7 +7,7 @@ import type { PaneCloseStore, PaneControlStore } from "../domain/ports/pane-oper
 import type { PromptAcceptanceStore, PromptRunStore } from "../domain/ports/prompt.js";
 import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "../domain/ports/projection.js";
 import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
-import type { TurnControlStore } from "../domain/ports/turn-control.js";
+import type { TurnControlCapabilityStore } from "./sqlite/control-capability-store.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "../domain/ports/workflow.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
@@ -31,7 +31,7 @@ export interface SqliteStoreBundle {
   readonly instance: InstanceStore;
   readonly instanceLifecycle: InstanceLifecycleStore;
   readonly instanceTurns: InstanceTurnStore;
-  readonly turnControl: TurnControlStore & Pick<InstanceStore, "getBinding" | "getActiveOrdinaryPrompt" | "getAgentInstance" | "getActiveInstanceTurn" | "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "countPendingInstanceTurns"> & Pick<PromptAcceptanceStore, "acceptPrompt" | "countPendingPrompts">;
+  readonly turnControl: TurnControlCapabilityStore;
   readonly promptAcceptance: PromptAcceptanceStore;
   readonly promptRun: PromptRunStore;
   readonly outboundIntent: OutboundIntentStore;
@@ -68,15 +68,15 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
   const store = new SqliteStoreKernel(path);
   const modules = store.capabilityModules();
   return {
-    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: store,
+    lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: modules.turnControl,
     promptAcceptance: modules.promptAcceptance, promptRun: modules.promptRun, outboundIntent: modules.outbox, outbox: modules.outbox,
     answerPages: modules.answerPages, workerTurnCards: modules.workerTurnCards, mainCards: modules.mainCards, projection: modules.projection,
     queueFeedback: modules.queueFeedback, cardContext: modules.cardContext, bindingProvisioning: modules.bindingProvisioning,
-    runtimeReconciliation: modules.runtimeReconciliation, retiredPaneCleanup: modules.retiredPaneCleanup, paneControl: store,
-    paneClose: store, inboundRouting: store, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
-    deliveryRecovery: store, cardInteraction: store, externalTurns: store,
-    sessionOperations: modules.sessionOperations, modelSelection: store, sessionAdministration: modules.sessionAdministration,
-    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, inboundMessages: store,
-    startupRecovery: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
+    runtimeReconciliation: modules.runtimeReconciliation, retiredPaneCleanup: modules.retiredPaneCleanup, paneControl: modules.paneControl,
+    paneClose: modules.paneClose, inboundRouting: modules.inboundRouting, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
+    deliveryRecovery: modules.deliveryRecovery, cardInteraction: modules.cardInteraction, externalTurns: modules.externalTurns,
+    sessionOperations: modules.sessionOperations, modelSelection: modules.modelSelection, sessionAdministration: modules.sessionAdministration,
+    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, inboundMessages: modules.inboundMessages,
+    startupRecovery: modules.startupRecovery, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
   };
 }

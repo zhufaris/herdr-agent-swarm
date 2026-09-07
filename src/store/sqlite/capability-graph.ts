@@ -25,6 +25,8 @@ import { SqliteTurnControlStore } from "./turn-control-store.js";
 import { SqliteWorkerCardDisplayStore } from "./worker-card-display-store.js";
 import { SqliteWorkerTurnStore } from "./worker-turn-store.js";
 import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./workflow-stores.js";
+import { SqlitePaneControlCapabilityStore, SqliteTurnControlCapabilityStore } from "./control-capability-store.js";
+import { SqliteDeliveryRecoveryCapabilityStore, SqliteExternalTurnCapabilityStore, SqliteInboundRoutingCapabilityStore, SqliteIngressCapabilityStore } from "./recovery-capability-store.js";
 
 export class SqliteCapabilityGraph {
   readonly database: DatabaseSync;
@@ -140,6 +142,9 @@ export class SqliteCapabilityGraph {
   capabilityModules() {
     const prompt = new SqlitePromptCapabilityStore(this.prompts, this.bindings, this.bindingProjections, this.projections, this.outbox, this.operations, this.migrations);
     const bindingSession = new SqliteBindingSessionCapabilityStore(this.bindings, this.bindingProjections, this.prompts, this.projections, this.inboundProjects, this.paneOperations, this.operations);
+    const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.inboundProjects);
+    const ingress = new SqliteIngressCapabilityStore(routing, this.prompts, this.bindings, this.bindingProjections, this.projections, this.outbox, this.operations, this.migrations);
+    const paneControl = new SqlitePaneControlCapabilityStore(this.paneOperations, this.bindings, this.prompts, this.projections, this.sessionOperations, this.operations);
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       approvals: this.approvals,
@@ -168,6 +173,16 @@ export class SqliteCapabilityGraph {
       retiredPaneCleanup: bindingSession,
       sessionAdministration: bindingSession,
       paneRetention: bindingSession,
+      turnControl: new SqliteTurnControlCapabilityStore(this.turnControls, this.bindings, this.prompts, this.instances, this.workerTurns),
+      paneControl,
+      paneClose: paneControl,
+      modelSelection: paneControl,
+      cardInteraction: paneControl,
+      inboundRouting: routing,
+      inboundMessages: ingress,
+      startupRecovery: ingress,
+      deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.operations),
+      externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.bindings),
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox
