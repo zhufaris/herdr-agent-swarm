@@ -114,6 +114,7 @@ The production implementation uses the following modules and seams.
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` | FIFO turn execution and detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
+| `ProjectRouteIndex` | Canonical binding-to-project and visible space-name resolution, including fail-closed legacy workspace fallback | Pure immutable index over validated project configuration |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
@@ -542,12 +543,15 @@ canonical start time, a canonical `task_complete`, and a surviving TraeX process
 Dispatch time admits only the first fresh `task_started` ownership claim. Herdr
 `idle` or composer readiness alone cannot settle a detached turn.
 Legacy detached prompts without an exact persisted turn identity remain uncertain,
-cannot consume later pane turns, and are never replayed. If completion cannot be
-proven, the prompt remains explicitly uncertain. If its binding later becomes archived, closed,
+are not scheduled for automatic transcript observation, cannot consume later pane
+turns, and are never replayed. If completion cannot be proven, the prompt remains
+explicitly uncertain. If its binding later becomes archived, closed,
 failed, or orphaned, the durable work scan atomically fails both the detached
 prompt and its Run Card with an explicit no-replay notice; this retains audit
 history while preventing an unobservable turn from remaining operationally
-running forever. Detached turns on active, attached bindings remain observable.
+running forever. Detached turns on active, attached bindings remain automatically
+observable only when their exact transcript turn ID and canonical start time are
+persisted.
 Jobs that never started remain queued.
 
 Runtime Primary model selection is scoped to the exact binding generation and
