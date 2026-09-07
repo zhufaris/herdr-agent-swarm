@@ -6,7 +6,7 @@
 
 ## Architecture
 
-- [ ] Build a unified event integration layer with explicit reliability classes:
+- [x] Build a unified event integration layer with explicit reliability classes:
   durable inbound records, transactional lifecycle/outbox intent, best-effort
   in-process wake-up hints, and bounded Herdr socket hints. Keep SQLite and fresh
   Herdr reconciliation authoritative; do not collapse these channels into one

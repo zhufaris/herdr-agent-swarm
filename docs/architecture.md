@@ -37,6 +37,7 @@ creator and generation checks remain additional fences for stateful operations.
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
 | Process lifecycle | user systemd service | The standalone `npm run swarm:*` commands control the service; the application does not manage PID files. |
+| Runtime event integration | `RuntimeEventIntegration` with four explicit reliability classes | It composes lifecycle fan-out and wake-up channels without making them one delivery or replay contract. |
 | Herdr socket events | bounded wake-up hints | Events improve latency but do not create a second event log. |
 
 When these sources disagree, do not repair SQLite from a Lark card or infer a
@@ -147,8 +148,9 @@ responsibility is a business or application concern.
 | `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
 | prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, detached observation, `TurnSupervisor`, and prompt-specific shutdown behavior. |
 | `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
+| runtime event wiring | `RuntimeEventIntegration` | Composition owner for lifecycle fan-out, durable-work wake-ups, and the bounded Herdr hint connection; it exposes only reliability-specific interfaces. |
 | workflow wake-up bus | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
-| `BridgeEventBus` | `LifecycleEventPublisher` | Distributes lifecycle outcomes to projections. Before this rename, its inbound-message channel must be split into a separate ingress contract. |
+| `BridgeEventBus` | `LifecycleEventPublisher` | Distributes typed lifecycle outcomes to projections; durable inbound work uses a separate notifier and SQLite authority. |
 | `CardProjector` | `ConversationViewProjector` | Reduces lifecycle outcomes into topic and run-card read models, then records delivery intent. |
 | `LarkChannelPublisher` | `LarkOutboxDispatcher` | Drains durable outbox work to Lark with ordering, retries, and dead-letter handling. |
 | `BindingStorePort` | capability-focused stores | `PromptAcceptanceStore`, `PromptRunStore`, `ProjectionStore`, `OutboxStore`, `BindingProvisioningStore`, `RuntimeReconciliationStore`, `OperationsStore`, and `LeaseStore` expose consumer-specific capabilities implemented by one transactional SQLite store. |
@@ -291,9 +293,12 @@ or replay prompt work that orphaning already made terminal.
 
 ### Events and scheduling
 
-The design uses two different event *roles*. They may share small in-process
-publish/subscribe mechanics, but must remain separate contracts and must not
-be treated as two sources of persistent state.
+`RuntimeEventIntegration` owns composition-time wiring for four reliability
+classes: durable inbound records plus a hint, transactional lifecycle/outbox
+state plus process-local fan-out, best-effort work wake-ups, and bounded Herdr
+socket hints. It deliberately has no generic `publish(any)` interface. SQLite
+and fresh Herdr observation remain authoritative. The two process-local roles
+below remain separate contracts and are not sources of persistent state.
 
 | Role | Meaning | Consumer behavior | Reliability boundary |
 | --- | --- | --- | --- |
@@ -512,7 +517,8 @@ change during the target decomposition without changing these steps.
    For a confirmed missing pane, the binding, affected prompt
    jobs and run cards, desired TopicView, and applicable delivery intents are one
    transaction. Queued work is cancelled and running work is failed rather than
-   replayed. `BridgeEventBus` and the post-commit outbox wake-up are best-effort
+   replayed. `RuntimeEventIntegration` composes `BridgeEventBus` and the
+   post-commit outbox wake-up as distinct best-effort
    low-latency hints over durable SQLite state; the event bus is not a
    recovery record and full lifecycle-event replay is not required for these
    transitions.

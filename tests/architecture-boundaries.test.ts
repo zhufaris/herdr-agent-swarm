@@ -118,6 +118,21 @@ describe("application composition boundaries", () => {
     expect(factory).not.toContain("startHealthServer(");
   });
 
+  it("owns process-local event integration in one composition module", () => {
+    const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
+    const outbound = readFileSync(new URL("../src/composition/create-outbound-runtime.ts", import.meta.url), "utf8");
+    const integration = readFileSync(new URL("../src/composition/runtime-event-integration.ts", import.meta.url), "utf8");
+    expect(factory).toContain("new RuntimeEventIntegration(logger)");
+    expect(factory).not.toMatch(/new (?:BridgeEventBus|InProcessPromptWorkScheduler|InProcessInboundWorkNotifier|InProcessOutboundWorkNotifier|WorkWakeupHub)/);
+    expect(outbound).toContain("outboundWork: OutboundWorkNotifier");
+    expect(outbound).not.toContain("new InProcessOutboundWorkNotifier");
+    for (const implementation of ["BridgeEventBus", "InProcessInboundWorkNotifier", "InProcessOutboundWorkNotifier", "InProcessPromptWorkScheduler", "WorkWakeupHub"]) {
+      expect(integration).toContain(`new ${implementation}`);
+    }
+    expect(integration).not.toContain("publish(event: unknown");
+    expect(integration).not.toContain("publish(event: any");
+  });
+
   it("gives child composition factories consumer-specific SQLite capabilities", () => {
     for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
       const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");
