@@ -231,6 +231,20 @@ describe("application composition boundaries", () => {
     expect(runner).toContain("async stop()");
   });
 
+  it("keeps coordinator transcript cursor mechanics behind the exact-turn observer", () => {
+    const coordinator = new URL("../src/coordinator/", import.meta.url);
+    const sources = readdirSync(coordinator)
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => ({ file, source: readFileSync(new URL(file, coordinator), "utf8") }));
+    const directCursorReaders = sources
+      .filter(({ source }) => /\.readObservation\(|\.readDelta\(/.test(source))
+      .map(({ file }) => file);
+    expect(directCursorReaders).toEqual([]);
+    for (const file of ["transcript-observer.ts", "worker-turn-observer.ts", "external-turn-observer.ts"]) {
+      expect(sources.find((source) => source.file === file)?.source).toContain("ExactTurnObserver");
+    }
+  });
+
   it("keeps reconciliation metrics behind one runtime module", () => {
     const herdrReconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     const instanceReconciler = readFileSync(new URL("../src/coordinator/instance-runtime-reconciler.ts", import.meta.url), "utf8");

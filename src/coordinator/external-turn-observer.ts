@@ -5,12 +5,13 @@ import { formatPromptTitle } from "../domain/prompt-title.js";
 import { transcriptObserverIdentity, transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
-import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, ExternalTurnSupersessionFence, PromptJob } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { outputFingerprint } from "../runtime/output.js";
+import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 type ExternalTurnStore = ExternalTurnObservationStore;
@@ -35,7 +36,7 @@ interface TurnProjectionState {
 
 interface ObservedBinding extends TurnProjectionState {
   identity: string;
-  cursor: TraexTranscriptCursorPort;
+  cursor: ExactTurnCursor;
 }
 
 const MAX_DRAIN_OBSERVATIONS = 8;
@@ -47,6 +48,7 @@ export class ExternalTurnObserver {
   private readonly observations = new Map<string, Promise<void>>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly idFactory: () => string;
+  private readonly exactTurns: ExactTurnObserver;
   private timer: NodeJS.Timeout | null = null;
   private scan: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
@@ -54,6 +56,7 @@ export class ExternalTurnObserver {
 
   constructor(private readonly options: ExternalTurnObserverOptions) {
     this.idFactory = options.idFactory ?? randomUUID;
+    this.exactTurns = new ExactTurnObserver(options.transcriptReader);
   }
 
   start(intervalMs = this.options.pollIntervalMs ?? 2_000): void {
@@ -112,19 +115,20 @@ export class ExternalTurnObserver {
   private async recoverAfterDetachedTurnInLifecycle(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
     const session = transcriptSessionFor(binding);
     if (!session || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return { outcome: "unavailable", reason: "missing_exact_turn_identity" };
-    if (!this.options.transcriptReader.openAfterTurn) return { outcome: "unavailable", reason: "recovery_cursor_unavailable" };
-    const opened = await this.options.transcriptReader.openAfterTurn(session, prompt.transcriptTurnId, prompt.transcriptTurnStartedAt);
+    const opened = await this.exactTurns.open({
+      session,
+      boundary: { kind: "after", turnId: prompt.transcriptTurnId, startedAt: prompt.transcriptTurnStartedAt }
+    });
     if (opened.mode !== "typed") return { outcome: "unavailable", reason: opened.reason };
     const state: TurnProjectionState = { pendingStarts: new Map(), promptsByTurn: new Map() };
     let supersede: ExternalTurnSupersessionFence | undefined = { promptId: prompt.id, turnId: prompt.transcriptTurnId, startedAt: prompt.transcriptTurnStartedAt };
     const completedTurns = new Set<string>();
-    for (let count = 0; count < MAX_AWAKE_OBSERVATIONS; count += 1) {
-      const observation = opened.cursor.readObservation ? await opened.cursor.readObservation() : { answerDelta: await opened.cursor.readDelta() };
-      if (!hasObservation(observation)) break;
+    await opened.cursor.drain({ limit: MAX_AWAKE_OBSERVATIONS, onObservation: async (observation) => {
       const outcome = await this.apply(binding, session, state, observation, supersede);
       if (outcome === "observing" || outcome === "completed") supersede = undefined;
       if (outcome === "completed" && observation.turnId) completedTurns.add(observation.turnId);
-    }
+      return "continue" as const;
+    } });
     return completedTurns.size > 0 ? { outcome: "recovered", recoveredTurns: completedTurns.size } : { outcome: "none", reason: "no_complete_later_turn" };
   }
 
@@ -155,9 +159,12 @@ export class ExternalTurnObserver {
     let observed = this.bindings.get(binding.id);
     if (!observed || observed.identity !== identity) {
       const durable = this.options.store.getActiveExternalPrompt(binding.id, binding.generation);
-      const opened = durable?.transcriptTurnId && durable.transcriptTurnStartedAt && this.options.transcriptReader.openAtTurn
-        ? await this.options.transcriptReader.openAtTurn(session, durable.transcriptTurnId, durable.transcriptTurnStartedAt)
-        : await this.options.transcriptReader.open(session);
+      const opened = await this.exactTurns.open({
+        session,
+        boundary: durable?.transcriptTurnId && durable.transcriptTurnStartedAt
+          ? { kind: "at", turnId: durable.transcriptTurnId, startedAt: durable.transcriptTurnStartedAt }
+          : { kind: "latest" }
+      });
       if (opened.mode !== "typed") { this.bindings.delete(binding.id); return; }
       observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map() };
       if (durable?.transcriptTurnId && durable.transcriptTurnStartedAt) {
@@ -169,13 +176,10 @@ export class ExternalTurnObserver {
     }
     if (!force && this.options.isBindingBusy(binding.id) && observed.promptsByTurn.size === 0) return;
     try {
-      for (let count = 0; count < MAX_DRAIN_OBSERVATIONS; count += 1) {
-        const observation = observed.cursor.readObservation
-          ? await observed.cursor.readObservation()
-          : { answerDelta: await observed.cursor.readDelta() };
-        if (!hasObservation(observation)) break;
+      await observed.cursor.drain({ limit: MAX_DRAIN_OBSERVATIONS, onObservation: async (observation) => {
         await this.apply(binding, session, observed, observation);
-      }
+        return "continue" as const;
+      } });
     } catch (error) {
       this.bindings.delete(binding.id);
       this.options.logger.warn({ event: "external-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "deferred" }, "failed to observe external Herdr turn");
@@ -286,8 +290,4 @@ export class ExternalTurnObserver {
   private async publish<T extends Parameters<typeof createBridgeEvent>[1]>(bindingId: string, type: T, origin: EventOrigin, payload: Extract<ReturnType<typeof createBridgeEvent>, { type: T }>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
   }
-}
-
-function hasObservation(value: TraexTranscriptObservation): boolean {
-  return Boolean(value.freshTurnStart || value.requestText !== undefined || value.answerDelta || value.toolActivities?.length || value.mainStatus || value.turnLifecycle?.state === "completed" || value.turnLifecycle?.state === "aborted");
 }

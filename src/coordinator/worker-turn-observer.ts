@@ -2,6 +2,7 @@ import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
+import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 
 interface Options {
   store: InstanceLifecycleStore & InstanceTurnStore;
@@ -16,7 +17,8 @@ const FINAL_DRAIN_LIMIT = 8;
 
 export class WorkerTurnObserver {
   private readonly headlessChunks = new Map<string, string[]>();
-  constructor(private readonly options: Options) {}
+  private readonly exactTurns: ExactTurnObserver;
+  constructor(private readonly options: Options) { this.exactTurns = new ExactTurnObserver(options.transcriptReader); }
 
   async observe(turnId: string, observation: TraexTranscriptObservation): Promise<void> {
     let turn = this.options.store.getInstanceTurn(turnId);
@@ -76,7 +78,7 @@ export class WorkerTurnObserver {
     const instance = this.options.store.getAgentInstance(turn.instanceId);
     const session = sessionFor(instance, turn.instanceGeneration);
     if (!session) return null;
-    const opened = await this.options.transcriptReader.open(session);
+    const opened = await this.exactTurns.open({ session, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") return null;
     let stopping = false;
     let timer: NodeJS.Timeout | null = null;
@@ -84,8 +86,8 @@ export class WorkerTurnObserver {
     const poll = () => {
       active = active.then(async () => {
         if (stopping) return;
-        const observation = opened.cursor.readObservation ? await opened.cursor.readObservation() : { answerDelta: await opened.cursor.readDelta() };
-        if (hasObservation(observation)) await this.observe(turnId, observation);
+        const result = await opened.cursor.read();
+        if (result.kind === "accepted") await this.observe(turnId, result.observation);
       }).catch(() => undefined);
     };
     timer = setInterval(poll, this.options.pollIntervalMs ?? 250);
@@ -96,37 +98,24 @@ export class WorkerTurnObserver {
         if (timer) clearInterval(timer);
         timer = null;
         await active;
-        for (let count = 0; count < FINAL_DRAIN_LIMIT; count += 1) {
-          const observation = opened.cursor.readObservation ? await opened.cursor.readObservation() : { answerDelta: await opened.cursor.readDelta() };
-          if (!hasObservation(observation)) break;
-          await this.observe(turnId, observation);
-          const current = this.options.store.getInstanceTurn(turnId);
-          if (!current || ["completed", "failed", "cancelled"].includes(current.state)) break;
-        }
+        await this.drain(turnId, opened.cursor, FINAL_DRAIN_LIMIT);
       }
     };
   }
 
   async recover(turnId: string): Promise<void> {
     const turn = this.options.store.getInstanceTurn(turnId);
-    if (!turn?.runtimeTurnId || !turn.runtimeTurnStartedAt || !this.options.transcriptReader.openAfterTurn) return;
+    if (!turn?.runtimeTurnId || !turn.runtimeTurnStartedAt) return;
     const instance = this.options.store.getAgentInstance(turn.instanceId);
     const session = sessionFor(instance, turn.instanceGeneration);
     if (!session) return;
-    const opened = await this.options.transcriptReader.openAfterTurn(
+    const opened = await this.exactTurns.open({
       session,
-      turn.runtimeTurnId, turn.runtimeTurnStartedAt
-    );
+      boundary: { kind: "after", turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt },
+      expected: { turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt }
+    });
     if (opened.mode !== "typed") return;
-    for (let count = 0; count < 32; count += 1) {
-      const observation = opened.cursor.readObservation
-        ? await opened.cursor.readObservation()
-        : { answerDelta: await opened.cursor.readDelta() };
-      if (!hasObservation(observation)) break;
-      await this.observe(turnId, observation);
-      const current = this.options.store.getInstanceTurn(turnId);
-      if (!current || ["completed", "failed", "cancelled"].includes(current.state)) break;
-    }
+    await this.drain(turnId, opened.cursor, 32);
     const current = this.options.store.getInstanceTurn(turnId);
     const view = this.options.store.loadWorkerTurnCard(turnId);
     if (current && view && !["completed", "failed", "cancelled"].includes(current.state)) {
@@ -139,10 +128,14 @@ export class WorkerTurnObserver {
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(current.instanceId); }
     }
   }
+  private async drain(turnId: string, cursor: ExactTurnCursor, limit: number): Promise<void> {
+    await cursor.drain({ limit, onObservation: async (observation) => {
+      await this.observe(turnId, observation);
+      const current = this.options.store.getInstanceTurn(turnId);
+      return !current || ["completed", "failed", "cancelled"].includes(current.state) ? "stop" : "continue";
+    } });
+  }
   private safeOutput(value: string): string { return this.options.presentation.safeWorkerOutput(value); }
-}
-function hasObservation(observation: TraexTranscriptObservation): boolean {
-  return Boolean(observation.turnId || observation.freshTurnStart || observation.answerDelta || observation.toolActivities?.length || observation.mainStatus || observation.turnLifecycle);
 }
 function observedProgress(observation: TraexTranscriptObservation, occurredAt: string, safeOutput: (value: string) => string): RunProgressEvent[] {
   const tools = (observation.toolActivities ?? []).map((event) => ({ ...event, label: safeOutput(event.label), occurredAt }));

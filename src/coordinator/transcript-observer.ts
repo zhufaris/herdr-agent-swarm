@@ -1,13 +1,14 @@
 import type { Logger } from "pino";
-import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { Binding, PromptJob } from "../domain/types.js";
+import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 
 export type TurnOutputSource =
   | { mode: "unavailable"; reason: string }
-  | { mode: "typed"; cursor: TraexTranscriptCursorPort; emitted: boolean; chunks: string[]; lastObservationSignature: string; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
+  | { mode: "typed"; cursor: ExactTurnCursor; emitted: boolean; chunks: string[]; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
 
 interface TranscriptObserverOptions {
   store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn">;
@@ -28,10 +29,12 @@ const MAX_TRANSCRIPT_CONFLICT_TURNS_PER_PROMPT = 16;
 
 export class TranscriptObserver {
   private readonly conflictTurns = new Map<string, Set<string>>();
+  private readonly exactTurns: ExactTurnObserver | undefined;
   private readonly identityPollMs: number;
   private readonly attachedPollMs: number;
 
   constructor(private readonly options: TranscriptObserverOptions) {
+    this.exactTurns = options.reader ? new ExactTurnObserver(options.reader) : undefined;
     this.identityPollMs = options.identityPollMs ?? 50;
     this.attachedPollMs = options.attachedPollMs ?? 250;
   }
@@ -46,14 +49,14 @@ export class TranscriptObserver {
   }
 
   async open(binding: Binding): Promise<TurnOutputSource> {
-    if (!this.options.reader) return { mode: "unavailable", reason: "transcript_not_found" };
+    if (!this.exactTurns) return { mode: "unavailable", reason: "transcript_not_found" };
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
       : null;
     try {
-      const result = await this.options.reader.open(session);
+      const result = await this.exactTurns.open({ session, boundary: { kind: "latest" } });
       return result.mode === "typed"
-        ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [], lastObservationSignature: "" }
+        ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [] }
         : { mode: "unavailable", reason: result.reason };
     } catch (error) {
       this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, unavailableReason: "transcript_validation_failed", outcome: "structured_output_unavailable" }, "could not open typed TraeX transcript");
@@ -91,8 +94,8 @@ export class TranscriptObserver {
   async read(source: TurnOutputSource, binding: Binding, promptId: string): Promise<{ source: TurnOutputSource; observation: TraexTranscriptObservation }> {
     if (source.mode === "unavailable") return { source, observation: { answerDelta: "" } };
     try {
-      const observation = source.cursor.readObservation ? await source.cursor.readObservation() : { answerDelta: await source.cursor.readDelta() };
-      return { source, observation };
+      const result = await source.cursor.read();
+      return { source, observation: result.kind === "accepted" ? result.observation : { answerDelta: "" } };
     } catch (error) {
       const outcome = source.emitted ? "typed_output_preserved" : "structured_output_unavailable";
       this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId, paneId: binding.paneId, unavailableReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
@@ -107,12 +110,6 @@ export class TranscriptObserver {
       const typed = await this.read(source, input.binding, input.prompt.id);
       source = typed.source;
       input.updateSource(source);
-      const signature = JSON.stringify(typed.observation);
-      if (source.mode === "typed" && signature === source.lastObservationSignature) {
-        await abortableWait(this.attachedPollMs, input.signal).catch(() => undefined);
-        continue;
-      }
-      if (source.mode === "typed") source.lastObservationSignature = signature;
       if (typed.observation.freshTurnStart === true && typed.observation.turnLifecycle) input.confirmDispatched();
       const owned = this.own(input.binding, input.prompt, typed.observation);
       if (owned.owned) {
@@ -124,23 +121,23 @@ export class TranscriptObserver {
   }
 
   async drain(source: TurnOutputSource, binding: Binding, prompt: PromptJob, startedAt: number): Promise<TurnOutputSource> {
-    let current = source;
-    let previousSignature = current.mode === "typed" ? current.lastObservationSignature : "";
-    for (let iteration = 0; iteration < FINAL_TRANSCRIPT_DRAIN_LIMIT && current.mode === "typed"; iteration += 1) {
-      const typed = await this.read(current, binding, prompt.id);
-      current = typed.source;
-      const signature = JSON.stringify(typed.observation);
-      if (signature === previousSignature || signature === JSON.stringify({ answerDelta: "" })) break;
-      previousSignature = signature;
-      if (current.mode === "typed") current.lastObservationSignature = signature;
-      const owned = this.own(binding, prompt, typed.observation);
-      if (owned.owned) {
-        this.retain(current, owned.observation);
-        await this.publish(binding.id, prompt.id, owned.observation, startedAt);
-        if (owned.observation.turnLifecycle?.state === "completed") break;
-      }
+    if (source.mode !== "typed") return source;
+    try {
+      await source.cursor.drain({ limit: FINAL_TRANSCRIPT_DRAIN_LIMIT, onObservation: async (observation) => {
+        const owned = this.own(binding, prompt, observation);
+        if (owned.owned) {
+          this.retain(source, owned.observation);
+          await this.publish(binding.id, prompt.id, owned.observation, startedAt);
+          if (owned.observation.turnLifecycle?.state === "completed") return "stop";
+        }
+        return "continue";
+      } });
+    } catch (error) {
+      const outcome = source.emitted ? "typed_output_preserved" : "structured_output_unavailable";
+      this.options.logger.warn({ event: "traex-transcript-read-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId: binding.paneId, unavailableReason: "transcript_read_failed", outcome }, "typed TraeX transcript became unavailable");
+      return source.emitted ? source : { mode: "unavailable", reason: "transcript_read_failed" };
     }
-    return current;
+    return source;
   }
 
   own(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): { owned: boolean; prompt: PromptJob; observation: TraexTranscriptObservation } {
