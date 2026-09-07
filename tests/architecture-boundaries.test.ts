@@ -40,6 +40,11 @@ describe("application composition boundaries", () => {
     expect(lifecycle).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
     expect(main).not.toContain("new SqliteBindingStore");
     expect(storeBundle).toContain("new SqliteStoreKernel");
+    expect(storeBundle).toContain("const modules = store.capabilityModules()");
+    expect(storeBundle).toContain("lease: modules.lease");
+    expect(storeBundle).toContain("inboundDispatch: modules.inboundDispatch");
+    expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
+    expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");
     expect(storeBundle).not.toContain("SqliteBindingStore");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");

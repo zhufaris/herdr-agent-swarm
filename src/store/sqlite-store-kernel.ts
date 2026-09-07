@@ -174,6 +174,21 @@ export class SqliteStoreKernel implements TurnControlStore, WorkerCardDisplaySto
     this.leases = new SqliteLeaseStore(this.context);
   }
 
+  /** Concrete capabilities that already satisfy a complete consumer port. */
+  capabilityModules(): {
+    lease: SqliteLeaseStore;
+    inboundDispatch: SqliteInboundProjectStore;
+    operationsQuery: SqliteBindingLifecycleStore;
+    workerCardDisplay: SqliteWorkerCardDisplayStore;
+  } {
+    return {
+      lease: this.leases,
+      inboundDispatch: this.inboundProjects,
+      operationsQuery: this.bindings,
+      workerCardDisplay: this.workerCardDisplays
+    };
+  }
+
   close(): void { this.context.close(); }
 
   createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest {
