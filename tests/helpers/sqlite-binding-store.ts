@@ -1,12 +1,15 @@
 import type { HealthStore, LeaseStore } from "../../src/domain/ports/health.js";
 import type { InboundMessageDispatchStore } from "../../src/domain/ports/workflow.js";
 import type { WorkerCardDisplayStore } from "../../src/domain/ports/worker-card-display.js";
+import type { CommandIntentStore } from "../../src/domain/ports/swarm-command.js";
+import type { SessionOperationStore } from "../../src/domain/ports/workflow.js";
 import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
 import { SqliteStoreKernel } from "../../src/store/sqlite-store-kernel.js";
 
 export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & LeaseStore & HealthStore &
-  InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & {
+  InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & SessionOperationStore & {
     inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
+    getSessionOperation: ReturnType<SqliteStoreKernel["capabilityModules"]>["sessionOperations"]["getSessionOperation"];
   };
 
 type StoreConstructor = new (path: string) => SqliteBindingStore;
@@ -39,7 +42,13 @@ export const SqliteBindingStore: StoreConstructor = class {
       pruneDeliveredOutboundReplies: modules.retention.pruneDeliveredOutboundReplies.bind(modules.retention),
       pruneAcceptedInboundMessages: modules.retention.pruneAcceptedInboundMessages.bind(modules.retention),
       pruneTerminalSessionOperations: modules.retention.pruneTerminalSessionOperations.bind(modules.retention),
-      reserveWorkerCardDisplay: modules.workerCardDisplay.reserveWorkerCardDisplay.bind(modules.workerCardDisplay)
+      reserveWorkerCardDisplay: modules.workerCardDisplay.reserveWorkerCardDisplay.bind(modules.workerCardDisplay),
+      ...bindMethods(modules.commandIntents, ["acceptCommandIntent", "getCommandIntent", "claimNextCommandIntent", "finishCommandIntent", "listRecoverableCommandIntents", "recoverExecutingCommandIntents"]),
+      ...bindMethods(modules.sessionOperations, ["acceptSessionOperation", "claimNextSessionOperation", "finishSessionOperation", "getSessionOperation", "listRecoverableSessionOperations"])
     });
   }
 } as StoreConstructor;
+
+function bindMethods<T extends object, K extends keyof T>(target: T, keys: readonly K[]): Pick<T, K> {
+  return Object.fromEntries(keys.map((key) => [key, (target[key] as Function).bind(target)])) as Pick<T, K>;
+}

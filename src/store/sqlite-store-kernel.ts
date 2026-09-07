@@ -29,7 +29,7 @@ import type { CardContextInvalidation, CardContextTarget } from "../domain/card-
 import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
 import { sessionOperationRejection } from "../domain/session-operation-policy.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
-import type { AcceptCommandIntentInput, AcceptCommandIntentResult, CommandIntent, CommandIntentTerminalState } from "../domain/command-intent.js";
+import type { CommandIntent } from "../domain/command-intent.js";
 import { SqliteContext } from "./sqlite/context.js";
 import { SqliteApprovalStore } from "./sqlite/approval-store.js";
 import { SqliteLeaseStore } from "./sqlite/lease-store.js";
@@ -51,6 +51,7 @@ import { SqliteInstanceOperationStore } from "./sqlite/instance-operation-store.
 import { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
 import { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
 import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./sqlite/runtime-stores.js";
+import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./sqlite/workflow-stores.js";
 const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
@@ -184,6 +185,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     operationsQuery: SqliteBindingLifecycleStore;
     retention: SqliteRetentionStoreAdapter;
     workerCardDisplay: SqliteWorkerCardDisplayStore;
+    commandIntents: SqliteCommandIntentStoreAdapter;
+    sessionOperations: SqliteSessionOperationStoreAdapter;
   } {
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
@@ -193,7 +196,12 @@ export class SqliteStoreKernel implements TurnControlStore {
       inboundDispatch: this.inboundProjects,
       operationsQuery: this.bindings,
       retention: new SqliteRetentionStoreAdapter(this.outbox, this.inboundProjects, this.sessionOperations),
-      workerCardDisplay: this.workerCardDisplays
+      workerCardDisplay: this.workerCardDisplays,
+      commandIntents: new SqliteCommandIntentStoreAdapter(this.commandIntents, {
+        audit: (input) => this.operations.audit(input),
+        getBinding: (id) => this.bindings.getBinding(id)
+      }),
+      sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.getBinding(id))
     };
   }
 
@@ -477,40 +485,6 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   consumeCardInteraction(input: { id: string; actorOpenId: string; bindingId: string; bindingGeneration: number; now: string; resultCode: string }): { outcome: "consumed" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; interaction: CardInteraction | null } { return this.sessionOperations.consumeInteraction(input); }
-
-  acceptSessionOperation(input: { id: string; idempotencyKey: string; interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; expectedPaneId: string | null; expectedTerminalId: string | null; kind: SessionOperationKind; argument: string | null; now: string }): { outcome: "accepted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale"; operation: SessionOperation | null } { return this.sessionOperations.accept(input); }
-
-  getSessionOperation(id: string): SessionOperation | null { return this.sessionOperations.get(id); }
-
-  claimNextSessionOperation(bindingId?: string): SessionOperation | null { return this.sessionOperations.claimNext(bindingId); }
-
-  finishSessionOperation(id: string, state: Extract<SessionOperationState, "succeeded" | "rejected" | "failed" | "uncertain">, detail: string | null = null): SessionOperation | null { return this.sessionOperations.finish(id, state, detail); }
-
-  listRecoverableSessionOperations(): SessionOperation[] { return this.sessionOperations.listRecoverable(); }
-
-  acceptCommandIntent(input: AcceptCommandIntentInput): AcceptCommandIntentResult {
-    return this.commandIntents.accept(input);
-  }
-
-  getCommandIntent(id: string): CommandIntent | null {
-    return this.commandIntents.get(id);
-  }
-
-  claimNextCommandIntent(laneKey?: string): CommandIntent | null {
-    return this.commandIntents.claimNext(laneKey);
-  }
-
-  finishCommandIntent(id: string, state: CommandIntentTerminalState, outcome: CommandIntent["outcome"]): CommandIntent | null {
-    return this.commandIntents.finish(id, state, outcome);
-  }
-
-  listRecoverableCommandIntents(): CommandIntent[] {
-    return this.commandIntents.listRecoverable();
-  }
-
-  recoverExecutingCommandIntents(recoveredAt: string): number {
-    return this.commandIntents.recoverExecuting(recoveredAt);
-  }
 
   convertFailedSteeringToTurn(input: { interactionId: string; actorOpenId: string; bindingId: string; bindingGeneration: number; sourcePromptId: string; newPromptId: string; newLarkMessageId: string; now: string; view: RunCardView; rootMessageId: string; answerCardFor(view: RunCardView): object }): { outcome: "converted" | "duplicate" | "missing" | "unauthorized" | "stale"; prompt: PromptJob | null } {
     return this.prompts.convertFailedSteeringToTurn(input);

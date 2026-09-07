@@ -48,6 +48,8 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("inboundDispatch: modules.inboundDispatch");
     expect(storeBundle).toContain("operationsQuery: modules.operationsQuery");
     expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");
+    expect(storeBundle).toContain("commandIntents: modules.commandIntents");
+    expect(storeBundle).toContain("sessionOperations: modules.sessionOperations");
     expect(storeBundle).not.toContain("SqliteBindingStore");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");
