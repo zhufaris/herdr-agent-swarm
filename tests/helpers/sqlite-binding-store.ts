@@ -10,7 +10,7 @@ export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & Leas
   InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & SessionOperationStore & {
     inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
     getSessionOperation: ReturnType<SqliteStoreKernel["capabilityModules"]>["sessionOperations"]["getSessionOperation"];
-  };
+  } & ReturnType<SqliteStoreKernel["capabilityModules"]>["approvals"];
 
 type StoreConstructor = new (path: string) => SqliteBindingStore;
 
@@ -31,6 +31,7 @@ export const SqliteBindingStore: StoreConstructor = class {
       releaseInstanceLease: modules.lease.releaseInstanceLease.bind(modules.lease),
       getOperationalSummary: modules.health.getOperationalSummary.bind(modules.health),
       inspectIntegrity: modules.integrity.inspectIntegrity.bind(modules.integrity),
+      ...bindMethods(modules.approvals, ["createApprovalRequest", "resolveApprovalRequest", "consumeApprovalGrant"]),
       listBindings: modules.health.listBindings.bind(modules.health),
       recordInboundMessage: modules.inboundDispatch.recordInboundMessage.bind(modules.inboundDispatch),
       claimNextInboundMessage: modules.inboundDispatch.claimNextInboundMessage.bind(modules.inboundDispatch),

@@ -56,6 +56,7 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("workerCardDisplay: modules.workerCardDisplay");
     expect(storeBundle).toContain("commandIntents: modules.commandIntents");
     expect(storeBundle).toContain("sessionOperations: modules.sessionOperations");
+    expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(storeBundle).not.toContain("SqliteBindingStore");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");

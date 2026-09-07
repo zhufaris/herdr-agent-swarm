@@ -22,7 +22,6 @@ import { acceptModelSelection } from "../domain/model-selection.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
-import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../domain/approval-policy.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../domain/worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
@@ -178,6 +177,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   /** Concrete capabilities that already satisfy a complete consumer port. */
   capabilityModules(): {
     lifecycle: SqliteStoreLifecycleAdapter;
+    approvals: SqliteApprovalStore;
     lease: SqliteLeaseStore;
     health: SqliteHealthStoreAdapter;
     integrity: SqliteOperationsStore;
@@ -190,6 +190,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   } {
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
+      approvals: this.approvals,
       lease: this.leases,
       health: new SqliteHealthStoreAdapter(this.operations, this.bindings),
       integrity: this.operations,
@@ -206,18 +207,6 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   close(): void { this.context.close(); }
-
-  createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest {
-    return this.approvals.createApprovalRequest(input);
-  }
-
-  resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null } {
-    return this.approvals.resolveApprovalRequest(input);
-  }
-
-  consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch" {
-    return this.approvals.consumeApprovalGrant(input);
-  }
 
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
     return this.instances.createAgentInstance(input);

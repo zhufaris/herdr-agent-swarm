@@ -1,6 +1,5 @@
 import type { Binding, PromptJob } from "../types.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../agent-instance.js";
-import type { ApprovalGrant, ApprovalIdentity, ApprovalRequest } from "../approval-policy.js";
 import type { ControlActor } from "../commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "../instance-turn.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../types.js";
@@ -20,9 +19,6 @@ export interface AcceptInstanceTurnWithCardInput {
 export interface InstanceStore {
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   getBinding(id: string): Binding | null;
-  createApprovalRequest(input: ApprovalIdentity & { id: string; expiresAt: string }): ApprovalRequest;
-  resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null };
-  consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch";
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance;
   createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } | { outcome: "duplicate-name" };
   getAgentInstance(id: string): AgentInstance | null;
